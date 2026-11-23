@@ -120,6 +120,45 @@ class StatusTests(unittest.TestCase):
         self.assertIn("--no-stream", command)
         self.assertEqual(command[-1], self.info["Id"])
 
+    def test_dashboard_fast_sample_avoids_size_walks_and_preserves_saved_limits(self):
+        self.info["HostConfig"]["NanoCpus"] = 2_000_000_000
+        self.info["Config"]["Env"] = ["PRIVATE_VALUE=never-display-this"]
+        self.info["Mounts"] = [
+            {
+                "Type": "bind",
+                "Source": str(self.project),
+                "Destination": "/project",
+                "RW": True,
+                "Secret": "never-display-this",
+            }
+        ]
+        with patch.object(
+            status, "directory_bytes", side_effect=AssertionError("slow scan")
+        ):
+            report = status.collect_reports(
+                [(self.path, self.data)],
+                podman=self.podman,
+                session_state=box.session_state,
+                scan_storage=False,
+            )
+        item = report["workspaces"][0]
+        self.assertEqual(item["limits"]["cpu_cores"], 2)
+        self.assertEqual(item["effective_limits"]["cpu_cores"], 2)
+        self.assertEqual(item["configured_limits"]["cpu_cores"], "4")
+        self.assertIsNone(item["storage"]["project_bytes"])
+        self.assertEqual(item["mounts"][0]["destination"], "/project")
+        self.assertNotIn("never-display-this", json.dumps(report))
+        self.assertFalse(any("--size" in call for call in self.calls))
+
+    def test_missing_effective_fields_do_not_masquerade_as_observed_saved_values(self):
+        self.info["HostConfig"] = {}
+        item = self.collect()["workspaces"][0]
+        self.assertEqual(item["configured_limits"]["cpu_cores"], "4")
+        self.assertEqual(
+            item["effective_limits"],
+            {"cpu_cores": None, "memory_bytes": None, "pids": None},
+        )
+
     def test_stopped_container_has_storage_but_no_live_sample(self):
         self.info["State"].update(
             Running=False, Status="exited", ExitCode=137, OOMKilled=True
@@ -322,6 +361,57 @@ class StatusTests(unittest.TestCase):
             report["workspaces"][0]["metrics"]["memory_bytes"], 300 * 1024**2
         )
 
+    def test_status_table_uses_the_same_report_for_command_and_alias(self):
+        for arguments in (["status", "--table"], ["--status", "--table"]):
+            with (
+                self.subTest(arguments=arguments),
+                patch.object(box, "check_backend"),
+                patch.object(box, "podman", side_effect=self.podman),
+                patch.object(status, "directory_bytes", return_value=(4096, None)),
+                patch.object(box, "launch") as launch,
+                contextlib.redirect_stdout(io.StringIO()) as out,
+                contextlib.redirect_stderr(io.StringIO()),
+            ):
+                self.assertEqual(box.main(arguments), 0)
+                launch.assert_not_called()
+                text = out.getvalue()
+                self.assertIn("FIELD", text)
+                self.assertIn(self.data["id"], text)
+                self.assertRegex(text, r"metrics\.memory_bytes\s+314572800")
+                self.assertNotIn('"workspaces"', text)
+
+    def test_stopped_status_table_is_ascii_pipe_safe_and_omits_saved_option_values(
+        self,
+    ):
+        self.info["State"].update(Running=False, Status="exited")
+        self.data["image"] = "synthetic-café"
+        self.data["podman_args"] = [
+            "--env=SYNTHETIC_KEY=do-not-display",
+            "malformed-secret",
+        ]
+        box.atomic_json(self.path, self.data)
+        buffer = io.BytesIO()
+        with (
+            io.TextIOWrapper(buffer, encoding="ascii", errors="strict") as stdout,
+            patch.object(box, "check_backend"),
+            patch.object(box, "podman", side_effect=self.podman),
+            patch.object(status, "directory_bytes", return_value=(4096, None)),
+            contextlib.redirect_stdout(stdout),
+            contextlib.redirect_stderr(io.StringIO()),
+        ):
+            self.assertEqual(box.main(["status", "--table"]), 0)
+            stdout.flush()
+            text = buffer.getvalue().decode("ascii")
+        self.assertIn(r"synthetic-caf\xe9", text)
+        self.assertRegex(text, r"metrics\s+-")
+        self.assertIn("--env=[value omitted]", text)
+        self.assertIn("[option omitted]", text)
+        self.assertNotIn("do-not-display", text)
+        self.assertNotIn("malformed-secret", text)
+        self.assertEqual(
+            box.read_json(self.path)["podman_args"], self.data["podman_args"]
+        )
+
     def test_default_reports_all_workspaces_and_explicit_selector_limits_scope(self):
         project = self.root / "second"
         project.mkdir()
@@ -367,6 +457,9 @@ class StatusTests(unittest.TestCase):
             ["--status", "--distro", "ubuntu"],
             ["--status", "--all"],
             ["list", "--json"],
+            ["list", "--table"],
+            ["--table"],
+            ["start", "--table"],
         ):
             with (
                 self.subTest(arguments=arguments),

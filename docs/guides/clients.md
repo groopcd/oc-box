@@ -2,14 +2,6 @@
 
 [Documentation](../README.md) / Guides
 
-> **Stable basics and development features.** Only the first section below
-> describes the shared web/session-shell clients available in stable `master`.
-> The manager, mirrored web tabs and attachments require a development build;
-> their runtime is not included in stable `master`. Their references target
-> [`devel`](https://github.com/groopcd/oc-box/tree/devel), and source-launch or
-> fixture instructions require a `devel` checkout. Publishing this guide on the
-> default branch is not runtime promotion or new host acceptance.
-
 > **OpenCode 2.x clients.** Legacy 1.x terminal access is maintenance-only;
 > see [the legacy guide](../legacy/README.md#workspaces-and-terminal).
 
@@ -17,13 +9,15 @@ Open another view of a running V2 workspace, or inspect workspaces using the
 optional experimental dashboard without starting them.
 
 **Prerequisites:** a configured [installation](../installation.md). Shared V2
-web/session-shell clients are available in stable 1.6.94; the Textual dashboard,
-mirrored web tabs and browser attachments described here require the explicit
-1.7 development channel. The dashboard also needs the independent `tui` extra.
-An installation method is not a [release channel](https://github.com/groopcd/oc-box/blob/devel/docs/update-channels.md).
+web/session-shell clients are available in stable `1.6.94`; the initial `1.8`
+and `1.9` lines also include the Textual dashboard, mirrored web tabs and browser
+attachment adapter. Use a published release and native version that support the
+feature you need. The dashboard also needs the independent `tui` extra.
+An installation method is not a [release channel](../update-channels.md).
 
 **Contents:** [shared native clients](#open-a-shared-web-or-session-shell-client),
 [web tabs and attachments](#choose-a-web-session-and-add-browser-files),
+[Studio layout](#try-the-studio-layout),
 [dashboard setup](#enable-the-experimental-dashboard),
 [dashboard tasks](#browse-and-act-in-the-dashboard), and
 [validation limits](#know-the-dashboard-validation-limitations).
@@ -48,31 +42,72 @@ See the [V2 client guide](../opencode-2.md#concurrent-web-terminal-and-full-tui-
 Plain host `opencode --standalone` is not an oc-box flag: it uses normal host
 environment/auth and does not access the oc-box vault. oc-box continues to own a
 private foreground V2 service per active workspace. Original V1 host plugins are
-not automatically adapted; see the opt-in [host plugin migration tools](https://github.com/groopcd/oc-box/blob/devel/docs/host-plugins.md)
+not automatically adapted; see the opt-in [host plugin migration tools](../host-plugins.md)
 and [core concepts](../concepts.md). Those source-checkout tools are not installed
 oc-box commands; their optional compatibility profile and actual host sandbox
 enforcement have separate documented acceptance checks.
 
 ## Choose a web session and add browser files
 
-In experimental 1.7, the web shell shows all verified open TUI tabs, including
-idle conversations, around one unmodified native web view. On a normally prepared
-supported V2 owner, a fresh TUI report opens the current conversation and
-highlights its root tab; child conversations keep their exact route.
-Explicit selection wins:
+On supporting development releases, the web shell shows verified open TUI tabs,
+including idle conversations, around one unmodified native web view. Any canonical stable
+native `2.x.y` release, including `2.3.2`, is eligible. oc-box checks the native
+responses or saved state rather than treating the version number as proof of
+compatibility. A fresh verified TUI report opens the current conversation and
+highlights its root tab; a child conversation keeps its exact route. Explicit
+selection wins:
 
 ```sh
-oc-box web --project ~/devel/demo --session ses_example --attachments
+oc-box web --project ~/devel/demo --session ses_example
 ```
 
-`--attachments` adds browser-selected PNG/JPEG/GIF/WebP/PDF drops and a file chooser
-to that same view. Verify native thumbnails/cards before pressing native Send;
-the adapter never submits a prompt automatically. Browser/native history and
-provider retention still apply. Older running owners cannot acquire the reporting
-helper on attach: choose a displayed tab or use `--session` without restarting
-them. Missing, stale or ambiguous reports are not guessed from activity or tab
-order. Native browser tabs remain separate from mirrored TUI membership.
-See the [development web reference](https://github.com/groopcd/oc-box/blob/devel/docs/cli.md#web--browser-interface) for limits and privacy.
+Attach never installs the reporting helper. If there is no usable fresh report,
+compatible saved TUI tabs can still appear immediately without a restart; the
+shell never infers focus from saved order or activity. Choose a displayed tab,
+use `--session`, or follow **Open native OpenCode Home** if membership cannot be
+verified. Native browser tabs remain separate from mirrored TUI membership.
+
+On native **2.2.6 and 2.3.0 only**, `--attachments` adds browser-selected
+PNG/JPEG/GIF/WebP/PDF drops and a file chooser to that same view. Omit the flag
+on `2.3.2` and other versions outside that attachment allowlist. Verify native
+thumbnails/cards before pressing native Send; the adapter never submits a
+prompt automatically. Browser/native history and provider retention still apply.
+See the [web reference](../cli.md#web--browser-interface) for limits and privacy.
+
+## Try the Studio layout
+
+On a release that supports `--workspace-layout`, opt into the browser workspace
+layout from a host terminal:
+
+```sh
+oc-box web --project ~/devel/demo --workspace-layout
+```
+
+In the wide Studio layout, the left pane shows verified open TUI tabs or
+explicitly requested workspace history. The middle pane is one unmodified
+native OpenCode conversation. The right pane shows workspace-only session
+metadata, not host health, resources or privileged controls. The layout does
+not alter native one-use pairing or add browser attachments by itself.
+See the [web workspace reference](../web-shell.md) for the other layouts
+and data boundaries.
+
+### Switch to Dashboard
+
+Choose **Dashboard** in the browser workspace toolbar. It moves the workspace
+status cards above the session list and native conversation, without replacing
+or reloading the conversation. The status cards describe the private
+workspace's open TUI membership, not host health or resource usage.
+See the [Firefox screenshot and capture details](../assets/readme-web-interface.md).
+
+### Use the browser Workspace manager
+
+With the workspace layout enabled, choose **Workspace manager → Sessions** to
+browse verified open native TUI tabs, or explicitly request **Workspace
+history**. Choosing a session returns to the previous chat layout and opens
+that native conversation. The section bar matches the terminal dashboard's
+navigation, but it does not embed Textual or expose host-wide operations.
+**Status** and **Sessions** are available; the other sections report that they
+are unavailable in the browser manager.
 
 ## Enable the experimental dashboard
 
@@ -98,10 +133,10 @@ unlock a vault, change credentials or launch the dashboard.
 For a first installation, follow the [installation guide](../installation.md).
 An older channel-aware launcher must first upgrade normally to a supporting
 published release; genuinely pre-channel builds retain their exceptional
-[bootstrap route](https://github.com/groopcd/oc-box/blob/devel/docs/update-channels.md#bootstrap-and-older-installations).
+[bootstrap route](../update-channels.md#bootstrap-and-older-installations).
 Channel selection alone does not request a new extra. An explicit `--tui` request
 against stable refuses; an inherited preference survives a stable interval.
-See [extras and missing-dependency guidance](https://github.com/groopcd/oc-box/blob/devel/docs/update-channels.md#enable-the-dashboard-after-a-github-channel-switch).
+See [extras and missing-dependency guidance](../update-channels.md#enable-the-dashboard-after-a-github-channel-switch).
 
 ```sh
 oc-box tui
@@ -115,9 +150,8 @@ access or actions. Demo and offline checks are **not a new interactive/Podman
 host acceptance pass**.
 
 An ordinary installed launcher is appropriate for unrelated projects. To manage
-the **oc-box checkout itself**, run a non-editable isolated package from the root
-of a `devel` checkout, not stable `master`, instead of `--with-editable` launcher
-code in the mounted project:
+the **oc-box checkout itself**, run a non-editable isolated package from that
+checkout instead of `--with-editable` launcher code in the mounted project:
 
 ```sh
 uv run --no-project --with '.[tui]' python -I -m oc_box tui
@@ -145,14 +179,15 @@ navigation rail on narrow terminals. The workspace picker stays in the header.
   activity card shows only already-retained oc-box categories, not external
   output or agent/token/GPU telemetry. `Ctrl+L` opens Logs; search remains
   available while follow is paused.
-- **Settings last only for this session.** `s` or `F2` opens the Settings tab,
+- **Dashboard preferences last only for this session.** `s` or `F2` opens the Settings tab,
   not another window. Apply activates edits, Reset stages defaults, and
-  Revert/Escape discards drafts. Compact single-row switches retain ordinary
-  mouse/keyboard behavior. Preferences cannot weaken CLI `--read-only`.
+  Revert/Escape discards drafts. Narrow rounded switches show ON/OFF beside
+  their labels. The separate Host logging save action controls the private
+  directory and optional journald mirror; it is unavailable in read-only mode.
 - **Copy is explicit.** Visible text is drag-selectable, including logs, graphs
   and control labels; releasing the mouse immediately copies the selection
-  without activating the control. Graph bars use copyable text glyphs. There
-  are no Copy/Paste buttons: `Ctrl+Shift+C` repeats a selection copy,
+  without activating the control. Graph bars use copyable text glyphs. Logs
+  RAW can explicitly copy all matching retained entries. `Ctrl+Shift+C` repeats a selection copy,
   `Ctrl+Shift+Y` copies the visible screen, and `F1` explains shortcuts.
   **Paste copied** (`Ctrl+Shift+Insert`) uses only text copied inside this
   dashboard; use the terminal's ordinary paste for the desktop clipboard.
@@ -196,6 +231,6 @@ dashboard or every later development revision.
 
 ## Related
 
-- [Development CLI client reference](https://github.com/groopcd/oc-box/blob/devel/docs/cli.md) · [Development V2 compatibility](https://github.com/groopcd/oc-box/blob/devel/docs/opencode-2.md)
+- [CLI client reference](../cli.md) · [V2 compatibility](../opencode-2.md)
 - [Host files and image/PDF importing](host-files.md) · [Backups](backups.md)
-- [Development release status](../releases/1.7.md) · [Development security boundary](https://github.com/groopcd/oc-box/blob/devel/SECURITY.md)
+- [Development release status](../releases/1.7.md) · [Security](../../SECURITY.md)

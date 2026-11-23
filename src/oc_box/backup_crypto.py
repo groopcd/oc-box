@@ -40,9 +40,14 @@ COMPONENTS = {
     "home.age",
     "registry.age",
     "image.age",
+    "host.age",
+    "host-auth.age",
 }
 MAX_SMALL = 4 * 1024 * 1024
+# One bounded host payload, with room for the outer age header and frame tags.
+MAX_HOST_CIPHERTEXT = MAX_SMALL + 64 * 1024
 MAX_BACKUP = 16 * 1024**4
+PROGRESS_INTERVAL = 1.0
 
 
 class BackupError(Exception):
@@ -90,6 +95,10 @@ def memory_file(content=b""):
 
 
 def small(command, *, data=None, timeout=30, tty_errors=False, pass_fds=()):
+    if tty_errors and secret_prompt.operation_active():
+        raise BackupError(
+            "Private dashboard operation refused an unmanaged terminal prompt."
+        )
     terminal = None
     attributes = None
     if tty_errors:
@@ -128,6 +137,11 @@ def small_capture(command, *, data=None, timeout=30, tty_errors=False, pass_fds=
                 env=environment(),
                 timeout=timeout,
                 pass_fds=pass_fds,
+                **(
+                    {"start_new_session": True}
+                    if secret_prompt.operation_active()
+                    else {}
+                ),
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise BackupError(
@@ -144,12 +158,60 @@ def small_capture(command, *, data=None, timeout=30, tty_errors=False, pass_fds=
         return value
 
 
-def digest(path):
+class _ByteProgress:
+    """Best-effort, absolute bytes for one stage, never a success signal."""
+
+    def __init__(self, callback):
+        self.callback = callback
+        self.count = self.reported = 0
+        self.next_sample = time.monotonic() + PROGRESS_INTERVAL
+
+    def due(self, now):
+        if self.callback is None or now < self.next_sample:
+            return False
+        self.next_sample = now + PROGRESS_INTERVAL
+        return True
+
+    def report(self):
+        if self.callback is None or self.count <= self.reported:
+            return
+        try:
+            self.callback(self.count)
+        except Exception:
+            # Missing telemetry changes no backup result. An intentional
+            # KeyboardInterrupt (cancel/parent loss) still takes the cleanup path.
+            self.callback = None
+        else:
+            self.reported = self.count
+
+    def add(self, count):
+        if self.callback is not None:
+            self.count += count
+            if self.due(time.monotonic()):
+                self.report()
+
+    def sample(self, output):
+        if self.callback is None:
+            return
+        try:
+            self.count = os.fstat(output.fileno()).st_size
+        except OSError:
+            return
+        self.report()
+
+
+def digest(path, *, progress=None):
     checksum = hashlib.sha256()
+    meter = _ByteProgress(progress) if progress is not None else None
     with Path(path).open("rb") as stream:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             checksum.update(chunk)
-    return {"sha256": checksum.hexdigest(), "bytes": Path(path).stat().st_size}
+            if meter is not None:
+                meter.add(len(chunk))
+    result = {"sha256": checksum.hexdigest(), "bytes": Path(path).stat().st_size}
+    if meter is not None:
+        meter.report()
+    return result
 
 
 def validate_recipients(recipients):
@@ -183,6 +245,21 @@ def encrypt_passphrase(private, output, minimum):
         ) from exc
     except ValueError as exc:
         raise BackupError(str(exc)) from exc
+    with memory_file(private) as source:
+        _passphrase_tool(
+            ["age", "--encrypt", "--passphrase", "--output", str(output)],
+            phrase,
+            source=source,
+            prompts=(b"Enter passphrase", b"Confirm passphrase"),
+        )
+
+
+def _passphrase_tool(command, phrase, *, source=None, prompts=(b"Enter passphrase",)):
+    """Bounded native age prompt adapter, never a dashboard output parser.
+
+    Only age's fixed passphrase protocol is recognized. Its private terminal
+    output is bounded and discarded, never relayed to UI, logs or diagnostics.
+    """
     # age has no passphrase-fd option. Give it a private controlling PTY, with
     # echo disabled before exec, and answer its standard prompts there. Only
     # validated user input crosses this PTY; no secret enters argv/env or disk.
@@ -196,32 +273,29 @@ def encrypt_passphrase(private, output, minimum):
             "import fcntl,os,sys,termios; "
             "fcntl.ioctl(2,termios.TIOCSCTTY,0); os.execvp(sys.argv[1],sys.argv[1:])"
         )
-        with memory_file(private) as source:
+        with memory_file() as output:
             process = subprocess.Popen(
                 [
                     sys.executable,
                     "-B",
                     "-c",
                     child,
-                    "age",
-                    "--encrypt",
-                    "--passphrase",
-                    "--output",
-                    str(output),
+                    *command,
                 ],
-                stdin=source,
-                stdout=subprocess.DEVNULL,
+                stdin=source if source is not None else subprocess.DEVNULL,
+                stdout=output,
                 stderr=slave,
                 env=environment(),
                 start_new_session=True,
             )
             os.close(slave)
             slave = None
-            prompts = (b"Enter passphrase", b"Confirm passphrase")
             pending = bytearray()
             step = 0
             deadline = time.monotonic() + 30
             while process.poll() is None:
+                if os.fstat(output.fileno()).st_size > MAX_SMALL:
+                    raise BackupError("Unexpected oversized backup key response.")
                 if time.monotonic() >= deadline:
                     raise BackupError("Backup passphrase encryption timed out.")
                 if not select.select([master], [], [], 0.1)[0]:
@@ -248,6 +322,11 @@ def encrypt_passphrase(private, output, minimum):
                 raise BackupError(
                     "Backup passphrase encryption failed; private tool output was not logged."
                 )
+            output.seek(0)
+            result = output.read(MAX_SMALL + 1)
+            if len(result) > MAX_SMALL:
+                raise BackupError("Unexpected oversized backup key response.")
+            return result
     except (OSError, subprocess.SubprocessError) as exc:
         raise BackupError(
             "Backup passphrase tool failed; private tool output was not logged."
@@ -346,9 +425,20 @@ def load_key(path, identities):
             descriptors.append(memory.fileno())
             command.extend(["--identity", f"/proc/self/fd/{memory.fileno()}"])
         command.append(str(path))
-        private = small(
-            command, timeout=300, tty_errors=True, pass_fds=tuple(descriptors)
-        )
+        if not identities and secret_prompt.operation_active():
+            # Embedded mode still reads through the original controlling-TTY
+            # editor. No new-password minimum applies to an existing archive.
+            phrase = secret_prompt.read_secret(
+                "Backup passphrase: ", purpose="backup-unlock"
+            )
+            private = _passphrase_tool(command, phrase)
+        else:
+            private = small(
+                command,
+                timeout=300,
+                tty_errors=not secret_prompt.operation_active(),
+                pass_fds=tuple(descriptors),
+            )
     # The decrypted key envelope is untrusted archive input too. Do not feed
     # arbitrary identity/plugin lines from it to a subsequent age invocation.
     lines = [
@@ -461,9 +551,21 @@ def pipeline_error(processes, errors):
 
 
 def stream_pipeline(
-    first, second, *, source=None, destination=None, first_fds=(), timeout=3600.0
+    first,
+    second,
+    *,
+    source=None,
+    destination=None,
+    first_fds=(),
+    timeout=3600.0,
+    ciphertext_progress=None,
 ):
-    """Pipe bytes directly; stderr is anonymous memory and never echoed."""
+    """Pipe bytes directly; optionally measure the existing age stdout file."""
+    meter = (
+        _ByteProgress(ciphertext_progress)
+        if ciphertext_progress is not None and destination is not None
+        else None
+    )
     processes = []
     with memory_file() as producer_errors, memory_file() as consumer_errors:
         errors = (producer_errors, consumer_errors)
@@ -494,15 +596,20 @@ def stream_pipeline(
                 codes = [process.poll() for process in processes]
                 if all(code is not None for code in codes):
                     break
-                if time.monotonic() >= until:
+                now = time.monotonic()
+                if now >= until:
                     raise BackupError(
                         "Backup streaming operation timed out; partial data was not activated."
                     )
                 if any(code not in (None, 0) for code in codes):
                     raise pipeline_error(processes, errors)
+                if meter is not None and meter.due(now):
+                    meter.sample(destination)
                 time.sleep(0.02)
             if any(process.returncode for process in processes):
                 raise pipeline_error(processes, errors)
+            if meter is not None:
+                meter.sample(destination)
         except OSError as exc:
             raise BackupError(
                 "Cannot run backup tool; check age, Python, and Podman on the host."
@@ -524,11 +631,14 @@ def stream_pipeline(
                     process.wait()
 
 
-def encrypt_stream(producer, recipient, path):
+def encrypt_stream(producer, recipient, path, *, progress=None):
     with path.open("xb") as output:
         path.chmod(0o600)
         stream_pipeline(
-            producer, ["age", "--encrypt", "--recipient", recipient], destination=output
+            producer,
+            ["age", "--encrypt", "--recipient", recipient],
+            destination=output,
+            ciphertext_progress=progress,
         )
 
 
@@ -547,7 +657,22 @@ def decrypt_stream(path, private, consumer):
         )
 
 
-def pack(directory, output):
+class _ProgressWriter:
+    def __init__(self, output, meter):
+        self.output = output
+        self.meter = meter
+
+    def write(self, data):
+        count = self.output.write(data)
+        if count:
+            self.meter.add(count)
+        return count
+
+
+def pack(directory, output, *, progress=None):
+    meter = _ByteProgress(progress) if progress is not None else None
+    if meter is not None:
+        output = _ProgressWriter(output, meter)
     with tarfile.open(fileobj=output, mode="w|") as archive:
         for path in sorted(directory.iterdir()):
             if path.name not in COMPONENTS or not path.is_file():
@@ -556,24 +681,62 @@ def pack(directory, output):
             info.mode, info.size = 0o600, path.stat().st_size
             with path.open("rb") as stream:
                 archive.addfile(info, stream)
+    if meter is not None:
+        meter.report()
 
 
 @contextlib.contextmanager
-def opened(archive_path, identities):
+def reviewed_directory(path, expected=None):
+    """Pin a reviewed output/input directory without following its final link."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except OSError:
+        raise BackupError("Reviewed backup directory is no longer available.") from None
+    try:
+        if expected is not None:
+            info = os.fstat(fd)
+            if (info.st_dev, info.st_ino) != tuple(expected):
+                raise BackupError(
+                    "Reviewed backup directory changed; open a new review."
+                )
+        yield fd
+    finally:
+        os.close(fd)
+
+
+def _file_stamp(info):
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+
+@contextlib.contextmanager
+def opened(archive_path, identities, *, reviewed_parent=None, reviewed_file=None):
     tools()
     archive_path = Path(archive_path).expanduser().absolute()
     with contextlib.ExitStack() as stack:
         try:
+            parent = None
+            if reviewed_parent is not None:
+                parent = stack.enter_context(
+                    reviewed_directory(archive_path.parent, reviewed_parent)
+                )
             descriptor = os.open(
-                archive_path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK
+                archive_path if parent is None else archive_path.name,
+                os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK,
+                dir_fd=parent,
             )
         except OSError as exc:
             raise BackupError(
                 "Backup input must be a readable regular, non-symlink file."
             ) from exc
         source_file = stack.enter_context(os.fdopen(descriptor, "rb"))
-        if not stat.S_ISREG(os.fstat(source_file.fileno()).st_mode):
+        source_info = os.fstat(descriptor)
+        if not stat.S_ISREG(source_info.st_mode):
             raise BackupError("Backup input must be a regular, non-symlink file.")
+        if reviewed_file is not None and (
+            source_info.st_nlink != 1
+            or _file_stamp(source_info) != tuple(reviewed_file)
+        ):
+            raise BackupError("Reviewed backup file changed; open a new review.")
         temporary = stack.enter_context(
             tempfile.TemporaryDirectory(prefix="oc-box-encrypted-backup-")
         )
@@ -596,9 +759,14 @@ def opened(archive_path, identities):
                             "Invalid backup envelope entry (duplicates, links, or unexpected names are not accepted)."
                         )
                     total += member.size
+                    small_limit = {
+                        "key.age": MAX_SMALL,
+                        "manifest.age": MAX_SMALL,
+                        "host.age": MAX_HOST_CIPHERTEXT,
+                        "host-auth.age": MAX_HOST_CIPHERTEXT,
+                    }.get(member.name)
                     if total > MAX_BACKUP or (
-                        member.name in ("key.age", "manifest.age")
-                        and member.size > MAX_SMALL
+                        small_limit is not None and member.size > small_limit
                     ):
                         raise BackupError("Backup envelope exceeds its format bounds.")
                     source = archive.extractfile(member)
@@ -611,10 +779,11 @@ def opened(archive_path, identities):
                     seen.add(member.name)
         except (tarfile.TarError, EOFError, ValueError) as exc:
             raise BackupError("Invalid or truncated backup envelope.") from exc
-        if (
-            not {"key.age", "manifest.age", "project.age", "home.age", "registry.age"}
-            <= seen
+        if reviewed_file is not None and _file_stamp(os.fstat(descriptor)) != tuple(
+            reviewed_file
         ):
+            raise BackupError("Reviewed backup file changed; open a new review.")
+        if not {"key.age", "manifest.age"} <= seen:
             raise BackupError("Incomplete backup envelope.")
         private = load_key(directory / "key.age", identities)
         try:
@@ -625,13 +794,21 @@ def opened(archive_path, identities):
             not isinstance(manifest, dict)
             or manifest.get("format") != "oc-box-backup"
             or type(manifest.get("format_version")) is not int
-            or manifest["format_version"] != 1
-            or manifest.get("kind") not in ("full", "portable")
         ):
             raise BackupError("Unsupported backup format/version.")
-        expected = {"project.age", "home.age", "registry.age"} | (
-            {"image.age"} if manifest["kind"] == "full" else set()
-        )
+        version, kind = manifest["format_version"], manifest.get("kind")
+        if kind in ("full", "portable") and version in (1, 2):
+            expected = {"project.age", "home.age", "registry.age"}
+            if kind == "full":
+                expected.add("image.age")
+            if version == 2:
+                expected.add("host.age")
+        elif kind == "host" and version == 2:
+            expected = {"host.age"}
+        else:
+            raise BackupError("Unsupported backup format/version.")
+        if version == 2 and "host-auth.age" in seen:
+            expected.add("host-auth.age")
         if (
             not isinstance(manifest.get("components"), dict)
             or set(manifest["components"]) != expected

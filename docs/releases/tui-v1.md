@@ -1,16 +1,9 @@
 # 1.7 Textual manager — experimental development release notes
 
-> **Development release documentation on the default branch.** Stable `master`
-> does not contain this manager. Use a published development build or a
-> [`devel` source checkout](https://github.com/groopcd/oc-box/tree/devel); source
-> launches, harnesses and native fixtures require that checkout. These release
-> directions retain their development-source scope, not new authorization to
-> merge runtime into `master`, publish it or claim additional host acceptance.
-
 **Approved for experimental development publication with incomplete UI
 acceptance disclosed; not stable manager acceptance.** The owner selected the
 `devel` channel and `1.7.N.dev0` package line for the channel-ready successor of
-`5573965`. Stable 1.6.94/master runtime remains unchanged and does not include this manager.
+`5573965`. Stable 1.6.94/master remain unchanged and do not include this manager.
 This document records no new test run and does not declare the unfinished
 dashboard sequence passed.
 
@@ -20,6 +13,36 @@ Resources keep `.dev0+gHASH`, full commit and count. The release must identify i
 actual frozen successor, not reuse the earlier `1.7.110+g5573965` identity. These
 are the detailed manager notes for the combined
 [1.7 development release](1.7.md), including source-qualified sharing evidence.
+
+## Logs and controls after v1.7.249.dev0
+
+This is a later development update, not a revision of the earlier manager
+release or its acceptance record below.
+
+- **Structured and RAW logs:** sort the table by heading, hide optional metadata
+  columns or inspect a row. **RAW** shows matching retained records in source
+  order without table formatting. Both views use source, severity and literal
+  search filters. **Copy all** refuses a result over 1 MiB UTF-8 rather than
+  silently truncating it. It cannot retrieve discarded or pre-redaction input.
+- **Separate journal sources:** the private oc-box activity view includes
+  `debug`, even though the CLI defaults to `info`. The ordinary log buffer holds
+  up to 2,000 entries. **Load mirror** explicitly reads a separate snapshot of up
+  to 1,000 validated same-user system-journal records; it is not part of the
+  ordinary buffer or automatic follow. Podman output remains an explicit,
+  bounded, in-memory source with best-effort redaction.
+- **Save Host Logging:** change the host's private log directory and optional
+  journal mirror without moving or deleting existing journals. This
+  separate action preserves unrelated host configuration and is unavailable in
+  demo or read-only mode. Ordinary **Apply** still changes only this dashboard
+  session; searches are not persisted.
+- **Rounded, keyboard-operable controls:** compact switches show ON/OFF and
+  visible focus. Clipboard notices cover explicit actions such as RAW bulk copy
+  and completed user selections; redraws do not trigger clipboard writes.
+
+See the [current Settings](../tui.md#2-settings) and [Logs](../tui.md#5-logs)
+guides. Headless checks and injected journal responses do not establish new
+interactive manager, real system-journal or rootless-Podman acceptance. The
+historical restore-verifier refusal and unperformed checks below remain open.
 
 ## Development-channel interaction follow-ups
 
@@ -57,6 +80,9 @@ identity and unfinished UI qualification below; headless redesign tests do not
 relabel them.
 
 ## Manager highlights
+
+The following describes the earlier manager release. See the later logging and
+controls notes above for changes to Logs and the separate host logging save.
 
 The optional `oc-box tui` manager adds **Status, Settings, Sessions, Terminals,
 Logs, Storage and Backup/restore**. It is separate from OpenCode's native conversation TUI and does not
@@ -153,12 +179,11 @@ piped suffix is `sh -s -- --devel --with-vault --with-tui`. Extras remain isolat
 GitHub updates retain supported opt-ins. A current channel-aware CLI can select
 `oc-box upgrade --devel`, delegating package upgrades only to the verified owner.
 Older pre-channel 1.7 launchers require the bootstrap instead. See
-[update channels](https://github.com/groopcd/oc-box/blob/devel/docs/update-channels.md). Normal operation needs a regular-user
+[update channels](../update-channels.md). Normal operation needs a regular-user
 Linux host TTY.
 
 For unrelated projects, use the installed launcher. To manage oc-box's **own
-checkout**, run an isolated non-editable package from the root of a `devel`
-checkout, not stable `master`:
+checkout**, run an isolated non-editable package from that checkout instead:
 
 ```sh
 uv run --no-project --with '.[tui]' python -I -m oc_box tui
@@ -172,7 +197,7 @@ logs or native actions. It is not an acceptance test.
 
 Exact-source `5573965` has reviewed automation and scripted host history,
 recovery, vault, sharing and separate V1/V2 lifecycle acceptance; see the
-[evidence index](https://github.com/groopcd/oc-box/blob/devel/docs/testing.md#reviewed-5573965-candidate-evidence). The six-stage
+[evidence index](../testing.md#reviewed-5573965-candidate-evidence). The six-stage
 CLI lifecycle gate is **complete**, not invalidated by the separate incomplete
 UI sequence, and must not be replayed for publication paperwork.
 
@@ -222,7 +247,7 @@ versions, original report locations and actual operator observations privately.
 | Textual host observations | Use the fresh interactive fixture's `manager` mode for seven tabs, compact metrics/refresh/settings including staged defaults, static Sessions scrolling, visible connection progress/cancellation and failure notifications, source-specific actions/cascades, embedded PTY/focus/resize/detach, visible leases and independent native clients. This mode takes no background outer lease. |
 | Storage and encrypted backup UI | Guarded single-workspace removal, retained project/history, active-owner/exposure/read-only refusal, real masked foreground TTY handoff, full/portable restore to fresh directories, encrypted native session-history restore with fresh IDs, and deletion of only the reviewed owned backup file. |
 | Journal/log/self-checkout boundaries | Private bounded fixed-category journal and rotation, no synthetic secret/raw-text leakage, owned opt-in bounded memory-only Podman output, and a non-editable self-workspace launch without weakening validation. |
-| Temporary host-file sharing | Fresh checks on the same candidate for explicit disclosure consent, live read/image results, confinement, ordinary-container-path isolation, lease/termination/reload behavior, no automatic regrant, backup/source preservation and enforcing SELinux without source relabeling; see [sharing validation](https://github.com/groopcd/oc-box/blob/devel/docs/testing.md#experimental-temporary-host-file-tools). |
+| Temporary host-file sharing | Fresh checks on the same candidate for explicit disclosure consent, live read/image results, confinement, ordinary-container-path isolation, lease/termination/reload behavior, no automatic regrant, backup/source preservation and enforcing SELinux without source relabeling; see [sharing validation](../testing.md#experimental-temporary-host-file-tools). |
 
 Run live checks only from a normal unprivileged **external host**, with fresh
 private synthetic state and verified isolated rootless Podman storage. Never run
@@ -249,7 +274,7 @@ the then-current stable branch. These requirements do not schedule another host
 run or authorize replay of retained fixtures. A prerelease/manual dispatch is
 not a way to upload an unaccepted regular final `1.7.N` version.
 
-See the [manager guide](../tui.md), [test strategy](https://github.com/groopcd/oc-box/blob/devel/docs/testing.md#experimental-workspace-manager)
-and [publication checklist](https://github.com/groopcd/oc-box/blob/devel/CONTRIBUTING.md#release-gate-and-publication-checklist).
+See the [manager guide](../tui.md), [test strategy](../testing.md#experimental-workspace-manager)
+and [publication checklist](../../CONTRIBUTING.md#release-gate-and-publication-checklist).
 Retain GPL-3.0-or-later [LICENSE](../../LICENSE) and [NOTICE](../../NOTICE) in
 distributions.

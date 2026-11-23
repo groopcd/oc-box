@@ -1,4 +1,4 @@
-"""Upgrade CLI ownership and channel dispatch without downloads or installs."""
+"""Published-channel CLI routing; no real downloads, installs or workspaces."""
 
 import contextlib
 import io
@@ -17,43 +17,38 @@ class UpgradeCliTests(unittest.TestCase):
         stack.enter_context(patch.object(os, "geteuid", return_value=1000))
         self.upgrade = stack.enter_context(patch.object(updater, "upgrade"))
         self.settings = stack.enter_context(patch.object(updater, "update_settings"))
-        self.package = stack.enter_context(
+        self.packaged = stack.enter_context(
             patch.object(updater, "package_managed", return_value=False)
         )
         self.message = stack.enter_context(
             patch.object(
-                updater,
-                "package_upgrade_message",
-                return_value="Package manager guidance.",
+                updater, "package_upgrade_message", return_value="Owner guidance."
             )
         )
 
-    def assert_no_updates(self):
-        self.upgrade.assert_not_called()
-        self.settings.assert_not_called()
-
-    def test_selectors_default_to_none_and_are_mutually_exclusive(self):
+    def test_selectors_default_none_and_are_mutually_exclusive(self):
         self.assertIsNone(box.parser().parse_args(["upgrade"]).update_channel)
         for channel in ("stable", "devel"):
-            with self.subTest(channel=channel):
-                args = box.parser().parse_args(["upgrade", "--" + channel])
-                self.assertEqual(args.update_channel, channel)
+            self.assertEqual(
+                box.parser().parse_args(["upgrade", "--" + channel]).update_channel,
+                channel,
+            )
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
             box.main(["upgrade", "--stable", "--devel"])
-        self.assert_no_updates()
+        self.upgrade.assert_not_called()
 
-    def test_upgrade_dispatches_preview_and_selected_channel_for_each_owner(self):
+    def test_preview_and_channel_route_for_github_and_package_owners(self):
         for packaged in (False, True):
             for channel in (None, "stable", "devel"):
                 for check in (False, True):
                     with self.subTest(packaged=packaged, channel=channel, check=check):
-                        self.package.return_value = packaged
-                        arguments = ["upgrade"]
+                        self.packaged.return_value = packaged
+                        args = ["upgrade"]
                         if channel:
-                            arguments.append("--" + channel)
+                            args.append("--" + channel)
                         if check:
-                            arguments.append("--check")
-                        self.assertEqual(box.main(arguments), 0)
+                            args.append("--check")
+                        self.assertEqual(box.main(args), 0)
                         self.upgrade.assert_called_once_with(
                             box.APP,
                             check=check,
@@ -62,121 +57,107 @@ class UpgradeCliTests(unittest.TestCase):
                             with_tui=False,
                         )
                         self.upgrade.reset_mock()
-        self.message.assert_not_called()
         self.settings.assert_not_called()
+        self.message.assert_not_called()
 
-    def test_channel_selectors_are_rejected_outside_upgrade(self):
-        for channel in ("stable", "devel"):
-            for arguments in (
-                [],
-                ["start"],
-                ["stop"],
-                ["reset"],
-                ["status"],
-                ["--status"],
-                ["--version"],
-                ["--about"],
-            ):
-                with self.subTest(channel=channel, arguments=arguments):
+    def test_channel_flags_cannot_change_workspace_or_informational_commands(self):
+        for channel in ("--stable", "--devel"):
+            for args in ([], ["start"], ["stop"], ["reset"], ["status"], ["--version"]):
+                with self.subTest(args=args, channel=channel):
                     with self.assertRaisesRegex(box.BoxError, "only to upgrade"):
-                        box.main([*arguments, "--" + channel])
+                        box.main([*args, channel])
             with self.assertRaisesRegex(box.BoxError, "Credentials accepts only"):
-                box.main(["credentials", "--" + channel])
-            for command in (
-                "completion",
-                "doctor",
-                "backup",
-                "backup-info",
-                "restore",
-                "secrets",
-                "web",
-            ):
-                with self.subTest(channel=channel, command=command):
+                box.main(["credentials", channel])
+            for command in ("tui", "share", "web", "doctor", "backup", "restore"):
+                with self.subTest(command=command, channel=channel):
                     with (
                         contextlib.redirect_stderr(io.StringIO()),
                         self.assertRaises(SystemExit),
                     ):
-                        box.main([command, "--" + channel])
-        self.assert_no_updates()
+                        box.main([command, channel])
+        self.upgrade.assert_not_called()
+        self.settings.assert_not_called()
 
-    def test_automatic_update_settings_cannot_be_combined_with_selectors_or_check(self):
+    def test_autoupdate_options_cannot_be_combined_with_preview_or_channel(self):
         for value in ("on", "off"):
-            for extra in ("--stable", "--devel", "--check", "--vault", "--tui"):
-                with self.subTest(value=value, extra=extra):
-                    with self.assertRaisesRegex(box.BoxError, "cannot be combined"):
-                        box.main(["upgrade", "--auto-update", value, extra])
-        self.assert_no_updates()
-        self.package.assert_not_called()
-
-    def test_selectors_do_not_allow_unrelated_upgrade_options(self):
-        for options in (
-            ["--project", "/tmp/example-project"],
-            ["--workspace", "example-id"],
-            ["--new"],
-            ["--status"],
-            ["--no-vault"],
-            ["--maintenance"],
-        ):
-            for channel in ("stable", "devel"):
-                with self.subTest(options=options, channel=channel):
-                    with self.assertRaises(box.BoxError):
-                        box.main(["upgrade", "--" + channel, *options])
-        self.assert_no_updates()
-        self.package.assert_not_called()
-
-    def test_github_automatic_update_settings_keep_existing_dispatch(self):
-        for value in ("on", "off"):
-            with self.subTest(value=value):
-                self.assertEqual(box.main(["upgrade", "--auto-update", value]), 0)
-                self.settings.assert_called_once_with(value == "on")
-                self.settings.reset_mock()
+            for extra in ("--check", "--stable", "--devel", "--vault", "--tui"):
+                with self.assertRaisesRegex(box.BoxError, "cannot be combined"):
+                    box.main(["upgrade", "--auto-update", value, extra])
+        self.packaged.assert_not_called()
+        self.settings.assert_not_called()
         self.upgrade.assert_not_called()
 
-    def test_package_automatic_update_settings_never_change_github_config(self):
-        self.package.return_value = True
-        with self.assertRaisesRegex(box.BoxError, "cannot manage a Python-package"):
-            box.main(["upgrade", "--auto-update", "on"])
-        output = io.StringIO()
-        with contextlib.redirect_stdout(output):
-            self.assertEqual(box.main(["upgrade", "--auto-update", "off"]), 0)
-        self.assertEqual(output.getvalue(), "Package manager guidance.\n")
-        self.assert_no_updates()
+    def test_channel_selectors_refuse_unrelated_workspace_options(self):
+        for channel in ("--stable", "--devel"):
+            for options in (
+                ["--project", "/tmp/example-project"],
+                ["--workspace", "example-id"],
+                ["--new"],
+                ["--status"],
+                ["--no-vault"],
+                ["--maintenance"],
+            ):
+                with self.subTest(channel=channel, options=options):
+                    with self.assertRaises(box.BoxError):
+                        box.main(["upgrade", channel, *options])
+        self.packaged.assert_not_called()
+        self.settings.assert_not_called()
+        self.upgrade.assert_not_called()
 
-    def test_container_and_root_refuse_before_owner_detection_or_side_effects(self):
+    def test_ambiguous_package_owner_refusal_never_falls_back_to_github(self):
+        self.packaged.return_value = True
+        self.upgrade.side_effect = updater.UpdateError("Package owner is ambiguous.")
+        with self.assertRaisesRegex(box.BoxError, "Package owner is ambiguous"):
+            box.main(["upgrade", "--stable"])
+        self.upgrade.assert_called_once_with(
+            box.APP, check=False, channel="stable", with_vault=False, with_tui=False
+        )
+        self.settings.assert_not_called()
+        self.message.assert_not_called()
+
+    def test_root_and_container_refuse_before_owner_detection(self):
         for container, uid, message in (
             ("1", 1000, "on the host"),
             ("0", 0, "without sudo"),
         ):
-            for arguments in (
+            for args in (
                 ["upgrade"],
                 ["upgrade", "--devel"],
                 ["upgrade", "--check", "--stable"],
-                ["upgrade", "--auto-update", "on"],
                 ["upgrade", "--devel", "--vault", "--tui"],
                 ["upgrade", "--auto-update", "off"],
             ):
-                with self.subTest(container=container, uid=uid, arguments=arguments):
+                with self.subTest(container=container, uid=uid, args=args):
                     with (
                         patch.dict(os.environ, {"OC_BOX_CONTAINER": container}),
                         patch.object(os, "geteuid", return_value=uid),
                         self.assertRaisesRegex(box.BoxError, message),
                     ):
-                        box.main(arguments)
-        self.package.assert_not_called()
-        self.assert_no_updates()
-
-    def test_updater_refusals_including_editable_sources_are_not_bypassed(self):
-        self.package.return_value = True
-        for message in (
-            "Editable source installation: update the checkout.",
-            "Package owner is ambiguous; use your installation's manager.",
-        ):
-            with self.subTest(message=message):
-                self.upgrade.side_effect = updater.UpdateError(message)
-                with self.assertRaisesRegex(box.BoxError, message):
-                    box.main(["upgrade"])
+                        box.main(args)
+        self.packaged.assert_not_called()
         self.settings.assert_not_called()
-        self.message.assert_not_called()
+        self.upgrade.assert_not_called()
+
+    def test_package_autoupdate_does_not_change_github_preferences(self):
+        self.packaged.return_value = True
+        with self.assertRaisesRegex(box.BoxError, "cannot manage a Python-package"):
+            box.main(["upgrade", "--auto-update", "on"])
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(box.main(["upgrade", "--auto-update", "off"]), 0)
+        self.assertEqual(output.getvalue(), "Owner guidance.\n")
+        self.settings.assert_not_called()
+        self.upgrade.assert_not_called()
+
+    def test_github_autoupdate_still_routes_and_owner_refusals_propagate(self):
+        for value in ("on", "off"):
+            self.assertEqual(box.main(["upgrade", "--auto-update", value]), 0)
+            self.settings.assert_called_once_with(value == "on")
+            self.settings.reset_mock()
+        self.upgrade.side_effect = updater.UpdateError(
+            "Editable source: update checkout."
+        )
+        with self.assertRaisesRegex(box.BoxError, "Editable source"):
+            box.main(["upgrade", "--devel"])
 
 
 if __name__ == "__main__":

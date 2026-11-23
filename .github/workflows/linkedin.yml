@@ -3,12 +3,16 @@ name: LinkedIn release announcement
 on:
   workflow_call:
     inputs:
+      action:
+        description: Preview never posts; stable callers default to announce
+        type: string
+        default: announce
       release_tag:
         required: true
         type: string
     secrets:
       BUFFER_API_KEY:
-        required: true
+        required: false # Preview needs no Buffer credential.
   workflow_dispatch:
     inputs:
       action:
@@ -22,6 +26,14 @@ on:
         default: ''
       post_id:
         description: Existing Buffer post ID for read-only reconciliation only
+        type: string
+        default: ''
+      expected_text_sha256:
+        description: Reviewed linkedin-post.txt SHA-256 (required for a new devel post)
+        type: string
+        default: ''
+      expected_image_sha256:
+        description: Reviewed linkedin-card.png SHA-256 (required for a new devel post)
         type: string
         default: ''
 
@@ -92,28 +104,95 @@ jobs:
     if: >-
       github.repository == 'groopcd/oc-box' &&
       vars.LINKEDIN_ANNOUNCEMENTS == 'true' &&
-      (!inputs.action || inputs.action == 'announce' || inputs.action == 'reconcile')
+      (inputs.action == 'announce' || inputs.action == 'reconcile')
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
       contents: write # Add card + immutable claim/receipt assets; never change tags.
     steps:
-      - name: Validate tag before selecting source
+      - name: Validate tag and approval before selecting source
         env:
-          ACTION: ${{ inputs.action || 'announce' }}
+          ACTION: ${{ inputs.action }}
           RELEASE_TAG: ${{ inputs.release_tag }}
+          POST_ID: ${{ inputs.post_id }}
+          EXPECTED_TEXT_SHA256: ${{ inputs.expected_text_sha256 }}
+          EXPECTED_IMAGE_SHA256: ${{ inputs.expected_image_sha256 }}
         run: |
-          python - <<'PY'
+          python -I - <<'PY'
           import os, re
           action, tag = os.environ["ACTION"], os.environ["RELEASE_TAG"]
-          assert action in {"announce", "reconcile"}
-          assert re.fullmatch(r"v\d+\.\d+\.\d+(?:\.dev0)?", tag)
+          post = os.environ.get("POST_ID", "")
+          hashes = [os.environ.get(name, "") for name in
+                    ("EXPECTED_TEXT_SHA256", "EXPECTED_IMAGE_SHA256")]
+          valid = (
+              action in {"announce", "reconcile"}
+              and re.fullmatch(r"v\d+\.\d+\.\d+(?:\.dev0)?", tag)
+              and (bool(post) == (action == "reconcile"))
+              and (not post or re.fullmatch(r"[A-Za-z0-9_-]{1,128}", post))
+          )
+          if action == "announce" and (tag.endswith(".dev0") or any(hashes)):
+              valid = valid and all(re.fullmatch(r"[a-f0-9]{64}", v) for v in hashes)
+          elif any(hashes):
+              valid = False
+          if not valid:
+              raise SystemExit("Release announcement refused: invalid-input-or-approval")
           PY
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
           persist-credentials: false
-          ref: ${{ inputs.release_tag || github.ref }}
+          ref: refs/tags/${{ inputs.release_tag }}
+      - name: Verify selected devel tool approval fence without executing it
+        if: endsWith(inputs.release_tag, '.dev0')
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          python -I - <<'PY'
+          import ast, hashlib, os, re, subprocess
+          from pathlib import Path
+
+          def require(value):
+              if not value:
+                  raise ValueError
+
+          def git(*args):
+              return subprocess.run(
+                  ["git", *args], check=True, stdout=subprocess.PIPE,
+                  stderr=subprocess.DEVNULL, timeout=10,
+              ).stdout
+
+          try:
+              tag = os.environ["RELEASE_TAG"]
+              require(re.fullmatch(r"v\d+\.\d+\.\d+\.dev0", tag))
+              commit = git("rev-parse", "--verify", "refs/tags/" + tag + "^{commit}").strip()
+              require(re.fullmatch(rb"[0-9a-f]{40}", commit))
+              require(git("rev-parse", "HEAD").strip() == commit)
+              path = "tools/announce_release.py"
+              selector = commit.decode("ascii") + ":" + path
+              require(0 < int(git("cat-file", "-s", selector)) <= 128 * 1024)
+              canonical = git("show", selector)
+              checked = Path(path)
+              require(not checked.is_symlink() and checked.is_file())
+              require(checked.stat().st_size == len(canonical))
+              require(hashlib.sha256(checked.read_bytes()).digest()
+                      == hashlib.sha256(canonical).digest())
+              tree = ast.parse(canonical)
+              policy = "DEVEL_ANNOUNCEMENT_APPROVAL_POLICY"
+              stores = [node for node in ast.walk(tree)
+                        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store)
+                        and node.id == policy]
+              declarations = [node for node in tree.body
+                              if isinstance(node, ast.Assign) and len(node.targets) == 1
+                              and isinstance(node.targets[0], ast.Name)
+                              and node.targets[0].id == policy]
+              require(len(stores) == len(declarations) == 1)
+              value = declarations[0].value
+              require(isinstance(value, ast.Constant)
+                      and type(value.value) is int and value.value == 1)
+          except Exception:
+              raise SystemExit("Release announcement refused: unverified-devel-approval-tool") from None
+          print("Selected devel approval policy and canonical source bytes verified.")
+          PY
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: '3.13'
@@ -123,9 +202,11 @@ jobs:
           "$RUNNER_TEMP/linkedin-tools/bin/python" -m pip install 'Pillow>=13,<14'
       - name: Announce or reconcile the existing post
         env:
-          ACTION: ${{ inputs.action || 'announce' }}
+          ACTION: ${{ inputs.action }}
           RELEASE_TAG: ${{ inputs.release_tag }}
           POST_ID: ${{ inputs.post_id }}
+          EXPECTED_TEXT_SHA256: ${{ inputs.expected_text_sha256 }}
+          EXPECTED_IMAGE_SHA256: ${{ inputs.expected_image_sha256 }}
           BUFFER_API_KEY: ${{ secrets.BUFFER_API_KEY }}
           BUFFER_LINKEDIN_CHANNEL_ID: ${{ vars.BUFFER_LINKEDIN_CHANNEL_ID }}
           LINKEDIN_ANNOUNCEMENTS: ${{ vars.LINKEDIN_ANNOUNCEMENTS }}
@@ -134,4 +215,6 @@ jobs:
           args=("$ACTION")
           if [[ -n "$RELEASE_TAG" ]]; then args+=(--tag "$RELEASE_TAG"); fi
           if [[ -n "$POST_ID" ]]; then args+=(--post-id "$POST_ID"); fi
+          if [[ -n "$EXPECTED_TEXT_SHA256" ]]; then args+=(--expected-text-sha256 "$EXPECTED_TEXT_SHA256"); fi
+          if [[ -n "$EXPECTED_IMAGE_SHA256" ]]; then args+=(--expected-image-sha256 "$EXPECTED_IMAGE_SHA256"); fi
           "$RUNNER_TEMP/linkedin-tools/bin/python" -B tools/announce_release.py "${args[@]}"

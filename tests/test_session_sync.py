@@ -1,16 +1,24 @@
 """Multi-session discovery, archive isolation and source-deletion regressions."""
 
+import contextlib
 import copy
 import io
 import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
-from oc_box import oc_box as box, opencode_v2_io as v2, workspace_service
+from oc_box import (
+    lifecycle_output,
+    oc_box as box,
+    opencode_v2_io as v2,
+    workspace_service,
+)
 
 
 class SessionSyncTests(unittest.TestCase):
@@ -42,6 +50,312 @@ class SessionSyncTests(unittest.TestCase):
 
     def result(self, value):
         return subprocess.CompletedProcess([], 0, json.dumps(value), "")
+
+    def test_concise_outcome_waits_for_native_verification_source_and_final_stop(self):
+        cases = {
+            "live": ("start", "History synced.", None),
+            "live-omissions": (
+                "start",
+                "History synced. Native export omitted interrupted assistant messages.",
+                None,
+            ),
+            "manual-omissions": (
+                "sync",
+                "History synced. Native export omitted interrupted assistant messages.",
+                None,
+            ),
+            "empty": ("sync", "No history to sync.", None),
+            "partial": (
+                "sync",
+                "History partially synced: some sessions were still unsettled.",
+                box.HistoryPending,
+            ),
+            "unsettled": (
+                "sync",
+                "History not synced: some sessions were still unsettled.",
+                box.HistoryPending,
+            ),
+            "unverified": (
+                "sync",
+                "History not synced: verification did not finish.",
+                box.BoxError,
+            ),
+            "source-close": (
+                "sync",
+                "History sync cleanup could not be verified.",
+                box.BoxError,
+            ),
+            "owner-close": (
+                "start",
+                "History sync cleanup could not be verified.",
+                box.BoxError,
+            ),
+            "owner-exit": (
+                "start",
+                "History sync cleanup could not be verified.",
+                None,
+            ),
+            "final-stop": (
+                "start",
+                "History sync cleanup could not be verified.",
+                box.BoxError,
+            ),
+            "interrupt": (
+                "start",
+                "History not synced: the operation was interrupted.",
+                KeyboardInterrupt,
+            ),
+        }
+        matrix = [(case, False) for case in cases] + [
+            (case, True)
+            for case in ("live-omissions", "owner-close", "owner-exit", "final-stop")
+        ]
+        legacy_success = "Session history synced to your normal host OpenCode database."
+        for case, verbose in matrix:
+            command, message, error = cases[case]
+            with self.subTest(case=case, diagnostic=verbose):
+                events, host = [], {}
+                args = SimpleNamespace(
+                    command=command,
+                    import_session=None,
+                    _opencode_release="2.2.6",
+                    resume=True,
+                    new=False,
+                    model=None,
+                )
+                good = self.session(f"ses_good_{case.replace('-', '_')}_{int(verbose)}")
+                omitted = case.endswith("-omissions")
+                pending = self.session("ses_pending_private")
+                infos = [] if case == "empty" else [good]
+                if case == "partial":
+                    infos.insert(0, pending)
+                elif case == "unsettled":
+                    infos = [pending]
+                owner = SimpleNamespace(
+                    connection={"url": "http://127.0.0.1:7777"},
+                    publish=Mock(),
+                    wait_clients=Mock(),
+                    clients=0,
+                    child=SimpleNamespace(returncode=7 if case == "owner-exit" else 0),
+                )
+
+                @contextlib.contextmanager
+                def source(*_args, **_kwargs):
+                    token = workspace_service.CONNECTION.set(owner.connection)
+                    try:
+                        yield owner
+                    finally:
+                        workspace_service.CONNECTION.reset(token)
+                        events.append("lease closed")
+                        if case in ("source-close", "owner-close"):
+                            raise box.BoxError("private-lease-error")
+
+                def export(_data, ident):
+                    if ident == pending["id"]:
+                        raise box.HistoryPending("private-pending-error")
+                    result = {"info": copy.deepcopy(good), "messages": []}
+                    if omitted:
+                        result[v2.INTERRUPTED] = {"assistant": 2}
+                    return result
+
+                def host_run(argv, **_kwargs):
+                    if "import" in argv:
+                        archived = box.read_json(Path(argv[-2]))
+                        archived["info"]["location"] = {
+                            "directory": str(self.path.parent / "controller")
+                        }
+                        host[archived["info"]["id"]] = archived
+                        events.append("imported")
+                    elif "export" in argv:
+                        archived = copy.deepcopy(host[argv[-2]])
+                        if case == "unverified":
+                            archived["info"]["title"] = "private-verification-mismatch"
+                        events.append("host export checked")
+                        return self.result(archived)
+                    else:
+                        self.fail("Unexpected native command.")
+                    return self.result(None)
+
+                def stop(_data):
+                    events.append("final stop")
+                    self.assertIsNone(workspace_service.live_connection())
+                    self.assertFalse(stdout.getvalue().startswith("History synced."))
+                    self.assertNotIn(legacy_success, stdout.getvalue())
+                    if not verbose:
+                        self.assertEqual(stderr.getvalue(), "")
+                    if case == "final-stop":
+                        raise box.BoxError("private-stop-error")
+
+                def record(event, **details):
+                    if event == "history.result":
+                        events.append(event)
+                        self.assertEqual(events[-2], "final stop")
+
+                stdout, stderr = io.StringIO(), io.StringIO()
+                with (
+                    lifecycle_output.invocation(
+                        command, self.root / "state", verbose=verbose
+                    ),
+                    contextlib.redirect_stdout(stdout),
+                    contextlib.redirect_stderr(stderr),
+                    patch.object(
+                        lifecycle_output, "record", side_effect=record
+                    ) as journal,
+                    patch.object(
+                        box, "loading_stage", return_value=contextlib.nullcontext()
+                    ),
+                    patch.object(box, "check_private_output"),
+                    patch.object(box, "start_container"),
+                    patch.object(box, "prepare_runtime"),
+                    patch.object(box, "run_native_tui", return_value=0),
+                    patch.object(workspace_service, "Owner", side_effect=source),
+                    patch.object(workspace_service, "client_command", return_value=[]),
+                    patch.object(
+                        workspace_service, "history_source", side_effect=source
+                    ),
+                    patch.object(
+                        workspace_service,
+                        "wait_history",
+                        side_effect=KeyboardInterrupt if case == "interrupt" else None,
+                    ),
+                    patch.object(box, "list_container_sessions", return_value=infos),
+                    patch.object(box, "export_container_session", side_effect=export),
+                    patch.object(box, "run", side_effect=host_run),
+                    patch.object(box, "stop_container", side_effect=stop),
+                ):
+                    if error is None:
+                        self.assertEqual(
+                            box.launch_environment(self.path, self.data, args), 0
+                        )
+                    else:
+                        with self.assertRaises(error) as raised:
+                            box.launch_environment(self.path, self.data, args)
+                        self.assertEqual(
+                            getattr(
+                                raised.exception, "history_outcome_reported", False
+                            ),
+                            not verbose,
+                        )
+                if verbose:
+                    self.assertIn("oc-box: History sync summary:", stdout.getvalue())
+                    self.assertEqual(
+                        stdout.getvalue().splitlines().count(legacy_success),
+                        int(omitted),
+                    )
+                    if omitted:
+                        self.assertIn("omits from its export", stdout.getvalue())
+                else:
+                    lines = [
+                        line
+                        for line in stdout.getvalue().splitlines()
+                        if not line.startswith("oc-box: ")
+                    ] + stderr.getvalue().splitlines()
+                    self.assertEqual(len(lines), 1)
+                    self.assertTrue(lines[0].startswith(message), lines)
+                    self.assertNotIn("private-", lines[0])
+                    self.assertNotIn("Interrupted work may be incomplete", lines[0])
+                self.assertEqual(
+                    events[-3:], ["lease closed", "final stop", "history.result"]
+                )
+                self.assertEqual(events.count("history.result"), 1)
+                for sentinel in (
+                    "private-pending-error",
+                    "private-lease-error",
+                    "private-stop-error",
+                    "private-verification-mismatch",
+                    good["id"],
+                    pending["id"],
+                ):
+                    self.assertNotIn(sentinel, repr(journal.call_args_list))
+                passes = [
+                    call.kwargs
+                    for call in journal.call_args_list
+                    if call.args == ("history.pass",)
+                ]
+                if case == "interrupt":
+                    self.assertEqual(passes, [])
+                else:
+                    self.assertEqual(passes[0]["stage"], "private-endpoint")
+                    self.assertEqual(
+                        passes[0]["metrics"]["updated"],
+                        int(case not in ("empty", "unsettled", "unverified")),
+                    )
+                    state = box.session_state(self.path)
+                    self.assertEqual(
+                        good["id"] in state.get("synced", {}),
+                        bool(passes[0]["metrics"]["updated"]),
+                    )
+                    self.assertEqual(passes[0]["metrics"]["interrupted"], int(omitted))
+                    if omitted:
+                        ident = state["host_sessions"][good["id"]]
+                        annotation = host[ident]["info"]["metadata"]["oc-box.archive"]
+                        self.assertEqual(annotation["interrupted"], {"assistant": 2})
+
+    def test_pre_history_stop_failure_reports_shutdown_not_history(self):
+        args = SimpleNamespace(
+            command="start", _opencode_release="2.2.6", import_session=None
+        )
+        for stop_error, diagnostic in (
+            (None, False),
+            (box.BoxError("private-native-stop-error"), False),
+            (box.BoxError("native-stop-error"), True),
+            (KeyboardInterrupt(), False),
+            (SystemExit(7), False),
+        ):
+            startup_error = box.BoxError("actionable-startup-error")
+            output, errors = io.StringIO(), io.StringIO()
+            with (
+                self.subTest(stop_error=type(stop_error), diagnostic=diagnostic),
+                patch.object(
+                    sys,
+                    "argv",
+                    [
+                        "oc-box",
+                        "start",
+                        *(["--lifecycle-diagnostics"] if diagnostic else []),
+                    ],
+                ),
+                patch.object(
+                    box,
+                    "main",
+                    side_effect=lambda: box.launch_environment(
+                        self.path, self.data, args
+                    ),
+                ),
+                patch.object(box, "check_private_output"),
+                patch.object(box, "start_container"),
+                patch.object(box, "prepare_runtime", side_effect=startup_error),
+                patch.object(box, "stop_container", side_effect=stop_error) as stop,
+                patch.object(box, "sync_sessions") as sync,
+                contextlib.redirect_stdout(output),
+                contextlib.redirect_stderr(errors),
+            ):
+                if isinstance(stop_error, SystemExit):
+                    with self.assertRaises(SystemExit) as raised:
+                        box.entrypoint()
+                    self.assertIs(raised.exception, stop_error)
+                    self.assertEqual(raised.exception.code, 7)
+                else:
+                    self.assertEqual(
+                        box.entrypoint(),
+                        130 if isinstance(stop_error, KeyboardInterrupt) else 1,
+                    )
+            stop.assert_called_once_with(self.data)
+            sync.assert_not_called()
+            self.assertNotIn("History", output.getvalue() + errors.getvalue())
+            self.assertNotIn("oc-box sync", errors.getvalue())
+            if stop_error is None:
+                self.assertIn(str(startup_error), errors.getvalue())
+                self.assertNotIn("Workspace shutdown", errors.getvalue())
+            else:
+                notice = (
+                    "oc-box: Workspace shutdown could not be verified. "
+                    "Container data retained; inspect the workspace on the host."
+                )
+                self.assertEqual(errors.getvalue().count(notice), 1)
+                self.assertNotIn("private-native-stop-error", errors.getvalue())
+                if diagnostic:
+                    self.assertEqual(errors.getvalue().count("native-stop-error"), 1)
 
     def test_inventory_pages_include_children_and_archived_sessions(self):
         root = self.session("ses_root")
@@ -149,6 +463,31 @@ class SessionSyncTests(unittest.TestCase):
         self.assertEqual(state["missing"], [])
         self.assertEqual(state["last"], "ses_root")
 
+    def test_archived_roots_remain_in_sync_inventory_but_are_not_automatic_resume_targets(
+        self,
+    ):
+        archived = self.session("ses_archived", 100)
+        archived["time"]["archived"] = 101
+        available = self.session("ses_available", 2)
+        child = self.session("ses_child", 200, "ses_available")
+        with patch.object(
+            box, "run", return_value=self.result([archived, available, child])
+        ):
+            state = box.refresh_sessions(self.path, self.data)
+        self.assertEqual(state["last"], "ses_available")
+        self.assertEqual(
+            set(state["sessions"]), {"ses_archived", "ses_available", "ses_child"}
+        )
+        with patch.object(box, "run", return_value=self.result([archived])):
+            state = box.refresh_sessions(self.path, self.data)
+        self.assertIsNone(state["last"])
+        self.assertEqual(state["sessions"], ["ses_archived"])
+        archived["time"]["archived"] = 0
+        with patch.object(box, "run", return_value=self.result([archived])):
+            state = box.refresh_sessions(self.path, self.data)
+        self.assertIsNone(state["last"])
+        self.assertEqual(state["sessions"], ["ses_archived"])
+
     def test_invalid_or_failed_inventory_does_not_change_resume_or_archive_state(self):
         box.atomic_json(
             box.session_file(self.path), {"sessions": ["ses_root"], "last": "ses_root"}
@@ -213,15 +552,18 @@ class SessionSyncTests(unittest.TestCase):
                 host.pop(command[-2])
             return self.result(None)
 
+        output = io.StringIO()
         with (
-            patch.object(box, "list_container_sessions", return_value=infos),
+            patch.object(
+                box, "list_container_sessions", return_value=infos
+            ) as inventory,
             patch.object(
                 box,
                 "export_container_session",
                 side_effect=lambda _, ident: copy.deepcopy(exports[ident]),
             ) as export,
             patch.object(box, "run", side_effect=host_run) as run,
-            patch("sys.stdout", io.StringIO()),
+            patch("sys.stdout", output),
         ):
             box.sync_sessions(self.path, self.data)
             self.assertEqual(len(imports), 2)
@@ -229,6 +571,23 @@ class SessionSyncTests(unittest.TestCase):
             self.assertEqual(len(imports), 2)
             exports["ses_child"]["info"]["title"] = "Changed child"
             box.sync_sessions(self.path, self.data)
+        self.assertEqual(inventory.call_count, 3)
+        self.assertEqual(export.call_count, 6)
+        self.assertEqual(len(imports), 3)
+        summaries = [
+            line
+            for line in output.getvalue().splitlines()
+            if line.startswith("oc-box: History sync summary:")
+        ]
+        self.assertEqual(len(summaries), 3)
+        for summary, unchanged, updated in zip(summaries, (0, 2, 1), (2, 0, 1)):
+            self.assertRegex(
+                summary,
+                r"^oc-box: History sync summary: source=standalone, "
+                r"sessions=2, exported=2, "
+                rf"unchanged={unchanged}, updated={updated}, pending=0, "
+                r"elapsed=\d+\.\ds\.$",
+            )
         self.assertEqual(dead_archive.read_bytes(), before)
         self.assertNotIn(
             "ses_deleted", [call.args[1] for call in export.call_args_list]
@@ -676,6 +1035,65 @@ class SessionSyncTests(unittest.TestCase):
         with patch.object(box, "run", return_value=ok):
             self.assertIs(box.run_v2_history(self.data, "sessions"), ok)
 
+    def test_boxed_bridge_contract_refusals_never_authorize_generic_automatic_retry(
+        self,
+    ):
+        data = {**self.data, "opencode_version": "2.3.2"}
+        for streaming in (False, True):
+            for message in v2.FIXED_MESSAGES:
+                with self.subTest(streaming=streaming, message=message):
+                    result = subprocess.CompletedProcess([], 2, "", v2.MARKER + message)
+                    worker = Mock()
+                    worker.run.return_value = result
+                    token = box.history_reader.EXPORTS.set(
+                        worker if streaming else None
+                    )
+                    try:
+                        with patch.object(box, "run", return_value=result):
+                            with self.assertRaises(box.BoxError) as raised:
+                                box.run_v2_history(data, "sessions")
+                    finally:
+                        box.history_reader.EXPORTS.reset(token)
+                    self.assertEqual(str(raised.exception), message)
+                    self.assertEqual(
+                        box.history_recovery.exit_retry_eligible(
+                            box, data, raised.exception
+                        ),
+                        message in v2.PENDING_MESSAGES or message == v2.NOT_READY,
+                    )
+
+    def test_successful_bridge_output_rejected_by_host_validators_never_enables_retry(
+        self,
+    ):
+        data = {**self.data, "opencode_version": "2.3.2"}
+        cases = (
+            (
+                [self.session("ses_root", updated="private-invalid-time")],
+                lambda: box.list_container_sessions(data),
+            ),
+            (
+                {"info": self.session("ses_other"), "messages": []},
+                lambda: box.export_container_session(data, "ses_root"),
+            ),
+            (
+                {
+                    "info": self.session("ses_root"),
+                    "messages": ["private-invalid-message"],
+                },
+                lambda: box.export_container_session(data, "ses_root"),
+            ),
+        )
+        for value, validate in cases:
+            with (
+                self.subTest(value=value),
+                patch.object(box, "run", return_value=self.result(value)),
+            ):
+                with self.assertRaises(box.BoxError) as raised:
+                    validate()
+            self.assertFalse(
+                box.history_recovery.exit_retry_eligible(box, data, raised.exception)
+            )
+
     def test_pending_session_does_not_block_other_sessions_and_is_reported(self):
         infos = [
             self.session("ses_first"),
@@ -729,7 +1147,23 @@ class SessionSyncTests(unittest.TestCase):
         self.assertIn(v2.UNSETTLED, message)
         self.assertIn("other sessions were synchronized", message)
         self.assertNotIn("ses_stuck", message)
+        summaries = [
+            line
+            for line in output.getvalue().splitlines()
+            if line.startswith("oc-box: History sync summary:")
+        ]
+        self.assertEqual(len(summaries), 1)
+        self.assertRegex(
+            summaries[0],
+            r"^oc-box: History sync summary: source=standalone, "
+            r"sessions=3, exported=2, unchanged=0, updated=2, pending=1, "
+            r"elapsed=\d+\.\ds\.$",
+        )
         self.assertIn("1 session(s) contain interrupted", output.getvalue())
+        self.assertLess(
+            output.getvalue().index(summaries[0]),
+            output.getvalue().index("1 session(s) contain interrupted"),
+        )
         self.assertNotIn("Session history synced", output.getvalue())
         annotation = box.read_json(archive("ses_last"))["info"]["metadata"][
             "oc-box.archive"
@@ -757,6 +1191,12 @@ class SessionSyncTests(unittest.TestCase):
             box.sync_sessions(self.path, self.data)
         self.assertEqual(len(imports), 3)
         self.assertEqual(archive("ses_first").read_bytes(), before)
+        self.assertRegex(
+            output.getvalue(),
+            r"oc-box: History sync summary: source=standalone, "
+            r"sessions=3, exported=3, unchanged=2, updated=1, pending=0, "
+            r"elapsed=\d+\.\ds\.",
+        )
         self.assertIn("Session history synced", output.getvalue())
 
     def test_other_history_refusals_still_abort_and_interrupted_count_is_validated(

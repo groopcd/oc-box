@@ -14,16 +14,12 @@ as [legacy, with its own guide](docs/legacy/README.md).
 [Command reference](docs/cli.md) · [Security](SECURITY.md) ·
 [Contributing](CONTRIBUTING.md)
 
-> **Release channels:** stable is the default. Until the planned `1.8` stable
-> promotion, the dashboard and new browser workspace layout are development
-> features. Use a published development release that supports them; changes in
-> the source tree are not automatically available in installed packages.
+> **Release channels:** stable is the default. Stable `1.8` and development `1.9`
+> start with the same features, including the optional dashboard and browser
+> workspace layout. Older stable `1.6` releases do not include the dashboard.
+> Use a published release that supports the feature; branch HEAD is not an update.
 > [Choose a channel](docs/update-channels.md) ·
-> [Release plan](https://github.com/groopcd/oc-box/blob/devel/docs/plans/stable-1.8-devel-1.9.md)
-
-This is the default GitHub documentation. The code on `master` remains the stable
-line; these guides and previews do not promote development features into it.
-Use the [reference for your installed channel](docs/README.md#choose-the-command-reference-for-your-channel).
+> [Release plan](docs/plans/stable-1.8-devel-1.9.md)
 
 <!-- readme-hero -->
 ![oc-box OpenCode 2.x development dashboard with resource cards, workspace inventory and a selected-workspace inspector, using synthetic data](docs/assets/readme-hero.png)
@@ -37,7 +33,7 @@ read-only sample data. [Read the TUI guide](docs/tui.md#tui-guide).*
 
 *The Studio view in the offline browser redesign demo, with synthetic data.
 This is a design preview, not the live `oc-box web` interface.
-[Try the offline demo](https://github.com/groopcd/oc-box/blob/devel/docs/mockups/README.md) ·
+[Try the offline demo](docs/mockups/README.md) ·
 [See the live Dashboard capture](docs/assets/readme-web-interface.md).*
 
 ## Why oc-box?
@@ -74,58 +70,29 @@ networking and delegated CPU/memory/process cgroup controllers. Initial setup
 needs network access. See [installation and prerequisites](docs/installation.md)
 for all methods.
 
-**First installation — recommended GitHub path with vault and TUI:**
+**First installation — GitHub path with vault and TUI for a published stable 1.8 target:**
 
 ```sh
-curl -fsSL --proto '=https' --tlsv1.2 https://raw.githubusercontent.com/groopcd/oc-box/master/install.sh | sh -s -- --devel --with-vault --with-tui
-```
-
-**Alternative — install from [PyPI](https://pypi.org/project/oc-box/) with pipx or uv:**
-
-Stable with vault support (no dashboard):
-
-```sh
-pipx install 'oc-box[vault]'
-# Or:
-uv tool install 'oc-box[vault]'
-```
-
-Development prerelease with vault and TUI:
-
-```sh
-pipx install --pip-args='--pre' 'oc-box[vault,tui]'
-# Or:
-uv tool install --prerelease allow 'oc-box[vault,tui]'
-```
-
-To try oc-box without a persistent tool installation:
-
-```sh
-uvx oc-box --version
-uvx --prerelease allow --from 'oc-box[vault,tui]' oc-box tui --help
-```
-
-Choose one installation command. The GitHub one-liner explicitly selects a
-**published development release**, because stable does not yet include the
-dashboard. Dependencies stay private to the GitHub installation. The one-liner
-downloads and runs the public installer; review it first if preferred.
-These commands do not initialize or unlock a vault, change credential policy,
-launch the dashboard or start a workspace.
-
-After installing, check your launcher and host prerequisites:
-
-```sh
+curl -fsSL --proto '=https' --tlsv1.2 https://raw.githubusercontent.com/groopcd/oc-box/master/install.sh | sh -s -- --stable --with-vault --with-tui
 oc-box --version
 oc-box doctor
 ```
 
+While stable still selects `1.6`, omit `--with-tui` or choose a published
+development target that supports the dashboard. Dependencies stay private to
+the GitHub installation. This does not initialize or unlock a vault, change credential
+policy, launch the dashboard or start a workspace. The command downloads and
+runs the public installer; review it first if preferred. Only the verified fresh
+development bootstrap enrolls the
+[Ctrl-click host opening default](docs/cli.md#experimental-ctrl-click-host-file-opening).
+
 **Already installed?** Use the existing installation, without rerunning curl:
 
 ```sh
-oc-box upgrade --devel --vault --tui  # Add both extras and select development
+oc-box upgrade --vault --tui  # Add both extras on the saved channel
 # Or request either extra independently:
-oc-box upgrade --devel --vault
-oc-box upgrade --devel --tui
+oc-box upgrade --vault
+oc-box upgrade --tui
 ```
 
 These upgrade flags require a launcher release that supports them and a
@@ -136,7 +103,7 @@ removed, the same release can gain extras, and repeating a satisfied request is
 a no-op. The command uses the verified existing installation owner; it does not
 create a second copy.
 
-For pip in a dedicated environment or other options, see the
+Prefer a minimal install without the dashboard, or a Python tool manager? See the
 [installation alternatives](docs/installation.md). Do not install a second copy
 just to enable optional features. Genuinely pre-channel launchers have a separate
 [bootstrap compatibility route](docs/update-channels.md#bootstrap-and-older-installations).
@@ -184,6 +151,11 @@ same command to return. Processes do not survive a stop.
 
 ## Everyday use
 
+Use `oc-box --help` for a grouped command index and `oc-box COMMAND --help`
+for a command's options. For example, `oc-box start --help` covers startup
+options even when you normally omit `start`, while `oc-box logs --help` covers
+reading activity logs. Help does not need or change a workspace.
+
 | I want to… | Command or guide |
 | --- | --- |
 | Resume the current project | `oc-box` |
@@ -217,13 +189,17 @@ all included in stable installations.
 | Card-based workspace dashboard, sessions, logs and encrypted backups | [Dashboard and concurrent clients](docs/guides/clients.md) |
 | Native TUI, browser and persistent session shell together | [Client workflows](docs/guides/clients.md) |
 | Native TUI image/PDF imports, explicit image broker or live host-file tools | [Choose a host-file workflow](docs/guides/host-files.md) |
-| Shared web tabs and optional browser-selected attachments | [Development web clients](docs/guides/clients.md#choose-a-web-session-and-add-browser-files) |
+| Shared web tabs and optional browser-selected attachments | [Web interface reference](docs/cli.md#web--browser-interface) |
 | Guarded history synchronization and recovery | [Workspace history](docs/guides/workspaces.md) |
 
 > **Disclosure matters:** on supported development TUI clients, host importing is
 > enabled by default. A qualifying path paste authorizes an image/PDF copy
 > without per-file confirmation; disable it with the saved host-drop preference
-> if that is not wanted. Sharing, importing and attachments can disclose data to
+> if that is not wanted. Clipboard imports are separately off by default:
+> `--host-clipboard` saves the Ctrl+Y shortcut enabled for future workspace TUI
+> clients; `--no-host-clipboard` or `preferences --host-clipboard off` saves disabled.
+> Existing clients do not live-toggle, and only the shortcut reads the clipboard.
+> Sharing, importing and attachments can disclose data to
 > model providers or history. [Compare the workflows and consent rules](docs/guides/host-files.md).
 
 <a id="integrations-and-permissions"></a>

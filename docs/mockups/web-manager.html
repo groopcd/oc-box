@@ -1,0 +1,1951 @@
+<!doctype html>
+<html lang="en" data-layout="studio">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; base-uri 'none'; form-action 'none'">
+  <meta name="color-scheme" content="dark">
+  <title>oc-box · Browser workspace concepts</title>
+  <style>
+    :root {
+      --bg:#0a111b; --panel:#0e1824; --surface:#122131; --line:#243447;
+      --text:#e5edf5; --muted:#a1b3c7; --accent:#78e0e6; --select:#17323f;
+      --green:#91e3b3; --gold:#f5c880; --sans:system-ui,sans-serif;
+      --mono:ui-monospace,"Liberation Mono",monospace;
+    }
+    * { box-sizing:border-box }
+    body { margin:0; color:var(--text); background:var(--bg); font:14px/1.5 var(--sans) }
+    button,input,textarea,select { font:inherit; color:inherit }
+    button { cursor:pointer; border:0; background:none }
+    button:focus-visible,input:focus-visible,textarea:focus-visible,select:focus-visible,summary:focus-visible,[role=tabpanel]:focus-visible {
+      outline:2px solid var(--accent); outline-offset:3px
+    }
+    [hidden] { display:none !important }
+    h1,h2,h3,p { margin:0 }
+    h2 { font-size:18px; letter-spacing:-.025em }
+    h3 { font-size:14px }
+    small { font-size:12px }
+    code,time,.mono,.eyebrow { font-family:var(--mono) }
+    .muted { color:var(--muted) }
+    .eyebrow { color:var(--muted); font-size:11px; letter-spacing:.09em; text-transform:uppercase }
+    .icon { width:17px; height:17px; vertical-align:middle; fill:none; stroke:currentColor;
+      stroke-width:1.65; stroke-linecap:round; stroke-linejoin:round; flex:none }
+    .dot { display:inline-block; width:7px; height:7px; margin-right:6px; border-radius:50%; background:var(--green) }
+    .tag { display:inline-flex; align-items:center; border:1px solid var(--line); border-radius:6px;
+      padding:3px 7px; white-space:nowrap; font:11px/1.45 var(--mono); color:var(--muted) }
+    .tag.accent { color:var(--accent); background:#113039; border-color:#21535b }
+    .action { display:inline-flex; align-items:center; justify-content:center; gap:6px; border:1px solid var(--line);
+      border-radius:7px; padding:6px 9px; white-space:nowrap }
+    .action:hover,.nav button:hover,.session:hover,.picker button:hover { background:var(--surface) }
+    .top { display:flex; align-items:center; gap:20px; padding:12px 22px; min-height:62px; border-bottom:1px solid var(--line); background:#0c1520 }
+    .brand { display:flex; align-items:center; gap:8px; font:800 20px var(--mono); letter-spacing:-.08em; color:var(--accent); white-space:nowrap }
+    .brand .icon { width:26px; height:26px; padding:4px; background:var(--select); border-radius:6px }
+    .project { padding:3px 0 3px 20px; border-left:1px solid var(--line); font-weight:650 }
+    .project .eyebrow { display:block; font-weight:400 }
+    .top-end { margin-left:auto; display:flex; align-items:center; gap:12px }
+    .demo { color:var(--gold); background:#292214; border-color:#504126 }
+    .login-stage { min-height:calc(100dvh - 70px); display:grid; place-items:center; padding:28px 14px;
+      background:radial-gradient(ellipse at 50% 35%,#142535 0,transparent 56%),var(--bg) }
+    body[data-login] > :is(.review,.shell,.tui-mode),body[data-login] #preview-password { display:none }
+    .login-card { width:min(100%,430px); padding:clamp(18px,4vw,29px); border:1px solid #315367; border-radius:13px;
+      background:var(--panel); box-shadow:0 25px 70px #0007 }
+    .login-card h1 { font-size:25px; letter-spacing:-.04em; margin:4px 0 }
+    .login-card .icon-box { display:grid; place-items:center; width:38px; height:38px; margin-bottom:15px;
+      color:var(--accent); background:var(--select); border:1px solid #315367; border-radius:8px }
+    .login-card .login-form { display:grid; gap:10px; margin-top:16px }
+    .login-card .send { margin:0; padding:9px 13px }
+    .login-card .eyebrow { color:var(--accent) }
+    .login-footer { display:grid; gap:8px; margin-top:18px; padding-top:13px; border-top:1px solid var(--line) }
+    .tls-guide .toolbar { align-items:center }
+    .tls-guide code { overflow-wrap:anywhere }
+    .login-error { min-height:1.5em; color:#ffb1b1; font-size:12px }
+    .login-secret { display:flex; align-items:center; gap:8px; min-width:0 }
+    .login-secret input { flex:1 1 auto }
+    .web-account { position:relative; z-index:3; min-width:0 }
+    .web-account > summary { display:flex; align-items:center; gap:6px; cursor:pointer; list-style:none;
+      color:var(--accent); padding:5px 7px; border:1px solid var(--line); border-radius:7px }
+    .web-account > summary::-webkit-details-marker { display:none }
+    .web-account > summary .mono { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:12px }
+    .account-menu { position:absolute; top:calc(100% + 5px); left:0; min-width:175px; padding:9px; background:var(--panel);
+      border:1px solid var(--line); border-radius:8px; box-shadow:0 10px 28px #0008 }
+    .account-menu button { width:100%; margin-top:6px; text-align:left; font-size:13px; padding:5px 0 }
+    .logout-link { display:grid; gap:10px; margin-top:16px }
+    #preview-password { white-space:normal }
+    .review { display:flex; align-items:center; justify-content:space-between; gap:16px; padding:10px 22px;
+      background:#0f1b28; border-bottom:1px solid var(--line) }
+    .review p { color:var(--muted); font-size:13px }
+    .review p strong { color:var(--text) }
+    .picker { display:flex; flex-wrap:wrap; gap:3px; padding:3px; border:1px solid var(--line); border-radius:8px; flex:none; background:var(--bg) }
+    .picker button { display:flex; align-items:center; gap:6px; white-space:nowrap; border-radius:5px; padding:5px 9px; color:var(--muted); font-size:12px }
+    .picker button[aria-pressed=true] { color:var(--accent); background:var(--select) }
+    .picker b { font:11px var(--mono); opacity:.85 }
+    .shell { --divider:10px; display:grid;
+      grid-template-columns:var(--left-track,0px) var(--left-gap,0px) minmax(0,1fr) var(--right-gap,0px) var(--right-track,0px);
+      min-height:calc(100dvh - 118px) }
+    .shell[data-left] { --left-track:var(--left-size,248px); --left-gap:var(--divider) }
+    .shell[data-right] { --right-track:var(--right-size,278px); --right-gap:var(--divider) }
+    .library,.inspector { min-width:0; background:var(--panel); padding:17px 14px }
+    .library { grid-area:1 / 1; border-right:1px solid var(--line) }
+    .inspector { grid-area:1 / 5; border-left:1px solid var(--line) }
+    .splitter { position:relative; z-index:1; background:var(--bg); color:var(--muted); outline-offset:-2px;
+      cursor:col-resize; touch-action:none; user-select:none }
+    .splitter[data-split=left] { grid-area:1 / 2 }
+    .splitter[data-split=right] { grid-area:1 / 4 }
+    .splitter::before,.splitter::after { content:""; position:absolute; left:50%; transform:translateX(-50%); border-radius:3px }
+    .splitter::before { width:1px; height:100%; background:var(--line) }
+    .splitter::after { width:4px; height:36px; top:min(120px,25%); background:currentColor }
+    .splitter:hover,.splitter:focus-visible,.splitter[data-dragging] { color:var(--accent); background:var(--select) }
+    .splitter:focus-visible { outline:2px solid var(--accent) }
+    body[data-resizing],body[data-resizing] * { cursor:col-resize !important; user-select:none !important }
+    .rail-head { display:flex; justify-content:space-between; align-items:center; gap:8px; margin:0 1px 12px }
+    .search { display:flex; align-items:center; gap:7px; border:1px solid var(--line); border-radius:7px; padding:7px 9px; margin-bottom:12px; color:var(--muted) }
+    .search:focus-within { border-color:var(--accent) }
+    .search input { width:100%; min-width:0; outline:none; border:0; background:none }
+    .search input::placeholder,textarea::placeholder { color:var(--muted) }
+    .scopes { margin-bottom:14px; width:max-content; max-width:100% }
+    .scopes button { padding:5px 6px }
+    .group { margin:0 0 9px }
+    .group .eyebrow { margin:0 4px 5px }
+    .session { display:grid; grid-template-columns:auto minmax(0,1fr) auto; gap:8px; width:100%; align-items:start;
+      text-align:left; border:1px solid transparent; border-radius:7px; padding:6px 8px; margin-bottom:2px }
+    .session[aria-current=true] { background:var(--select); border-color:#315a65 }
+    .session .icon { color:var(--muted); margin-top:2px }
+    .session[aria-current=true] .icon { color:var(--accent) }
+    .session-title { display:block; line-height:1.35; overflow-wrap:anywhere }
+    .session small { display:block; color:var(--muted); margin-top:3px; line-height:1.25 }
+    .session .age { color:var(--muted); font:10px var(--mono) }
+    .session.child { padding-inline-start:20px }
+    .nav { border-top:1px solid var(--line); margin-top:12px; padding-top:12px }
+    .nav p { margin:0 4px 6px }
+    .nav button { display:flex; align-items:center; gap:9px; width:100%; padding:7px 8px; text-align:left; border-radius:6px; color:var(--muted) }
+    .nav button[aria-pressed=true] { background:var(--select); color:var(--accent) }
+    .rail-note { color:var(--muted); font-size:11px; margin:10px 4px 0; max-width:28ch }
+    main { min-width:0 }
+    .shell > main { grid-area:1 / 3 }
+    .chat-head { display:flex; flex-wrap:wrap; justify-content:space-between; align-items:center; gap:12px; padding:14px 21px;
+      border-bottom:1px solid var(--line); background:var(--panel) }
+    .chat-head .eyebrow { margin-bottom:4px }
+    .heading-tags { display:flex; align-items:center; gap:8px }
+    #sessions-toggle { display:none }
+    .chat-body { display:flex; flex-direction:column; min-height:max(455px,calc(100dvh - 190px)); width:min(100%,760px); margin:auto; padding:22px 24px 16px }
+    .transcript { flex:1 }
+    .message { margin-bottom:22px }
+    .message p { max-width:66ch; overflow-wrap:anywhere; white-space:pre-wrap }
+    .by { display:flex; align-items:center; gap:8px; font-size:12px; margin-bottom:6px }
+    .avatar { width:24px; height:24px; display:grid; place-items:center; border-radius:6px; color:var(--accent);
+      background:var(--select); font:700 12px var(--mono) }
+    .message.you p { padding:11px 13px; border:1px solid var(--line); background:var(--surface); border-radius:8px }
+    details.tool { border:1px solid var(--line); border-radius:7px; margin:5px 0 15px; background:var(--panel) }
+    details.tool summary { display:flex; align-items:center; gap:8px; cursor:pointer; padding:8px 11px }
+    details.tool summary::before { content:"▸"; color:var(--muted) }
+    details[open].tool summary::before { content:"▾" }
+    details.tool p { padding:0 12px 10px; color:var(--muted) }
+    .tool .done { margin-left:auto; color:var(--green); font-size:12px }
+    .file { display:inline-flex; align-items:center; gap:7px; background:var(--panel); border:1px solid var(--line);
+      color:var(--accent); padding:5px 9px; margin-top:10px; border-radius:6px; font:12px var(--mono) }
+    .compose { border:1px solid #36576a; background:var(--panel); border-radius:9px; padding:8px 10px }
+    .compose:focus-within { border-color:var(--accent) }
+    textarea { width:100%; min-height:54px; padding:6px; outline:none; border:0; background:none; resize:vertical }
+    .compose-foot { display:flex; align-items:center; flex-wrap:wrap; gap:6px }
+    .send { margin-left:auto; color:#09212a; background:var(--accent); border:1px solid var(--accent); border-radius:6px; padding:5px 10px; font-weight:750 }
+    .send:hover { background:#b3f4f0 }
+    .composition-note { font-size:11px; margin-top:7px; color:var(--muted) }
+    .readonly { display:flex; align-items:center; flex-wrap:wrap; gap:10px; padding:10px 12px; color:var(--gold);
+      border:1px solid #504126; background:#241e15; border-radius:7px }
+    .inspector-head { display:flex; align-items:flex-start; justify-content:space-between; gap:8px; margin-bottom:12px }
+    .inspector-head .eyebrow { margin-bottom:4px }
+    .card { min-width:0; border:1px solid var(--line); border-radius:8px; padding:11px; background:#111e2b }
+    .card + .card { margin-top:9px }
+    .card p { margin-top:6px }
+    .card .large { font:700 20px/1.3 var(--mono); color:var(--text); margin:6px 0 }
+    .metric { display:grid; grid-template-columns:1fr auto; gap:3px 6px; margin-top:10px; font-size:12px }
+    progress { grid-column:1/-1; width:100%; height:6px; accent-color:var(--accent); border:0; background:var(--line); border-radius:5px }
+    progress::-webkit-progress-bar { background:var(--line); border-radius:5px }
+    progress::-webkit-progress-value { background:var(--accent); border-radius:5px }
+    .event { display:flex; align-items:baseline; justify-content:space-between; gap:7px; margin-top:8px; font-size:12px }
+    .event time { color:var(--muted); font-size:10px; flex:none }
+    .overview { display:none; padding:19px 21px 17px; border-bottom:1px solid var(--line); background:#0d1723 }
+    .overview-head { display:flex; flex-wrap:wrap; justify-content:space-between; align-items:end; gap:12px; margin-bottom:11px }
+    .overview h1 { font-size:25px; letter-spacing:-.04em }
+    .tiles { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,145px),1fr)); gap:9px }
+    .tiles .card { margin:0 }
+    [data-layout=dashboard] .overview { display:block }
+    [data-layout=dashboard] .chat-body { min-height:max(420px,calc(100dvh - 374px)) }
+    [data-layout=focus] .library:not([data-open]) { display:none }
+    [data-layout=focus] .chat-head { padding-inline:max(21px,calc((100% - 714px) / 2)) }
+    [data-layout=focus] #sessions-toggle { display:inline-flex }
+    [data-layout=focus] .inspector:not([hidden]) { position:fixed; z-index:3; right:0; top:0; bottom:0;
+      width:min(310px,95vw); overflow:auto; box-shadow:0 0 0 100vmax #050a11b0 }
+    [data-layout=focus] .chat-body { min-height:calc(100dvh - 200px) }
+    .layout-manager { border-left:1px solid var(--line) }
+    .tui-mode { padding:22px; max-width:1580px; margin:auto }
+    .tui-head,.view-head,.toolbar { display:flex; justify-content:space-between; align-items:start; flex-wrap:wrap; gap:12px }
+    .tui-head h1 { font-size:28px; letter-spacing:-.04em; margin:3px 0 }
+    .tui-tabs { display:flex; flex-wrap:wrap; gap:4px; margin:18px 0 20px; padding:4px 0 0; border-bottom:1px solid var(--line) }
+    .tui-tabs button { display:flex; align-items:center; gap:7px; padding:9px 11px; border-radius:6px 6px 0 0; color:var(--muted) }
+    .tui-tabs button:hover { background:var(--surface) }
+    .tui-tabs [aria-selected=true] { color:var(--accent); background:var(--select); box-shadow:inset 0 -2px var(--accent) }
+    .tui-tabs b { font:11px var(--mono) }
+    .view-head { margin-bottom:13px }
+    .view-head p { margin-top:3px }
+    .manager-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,220px),1fr)); gap:10px; margin-bottom:12px }
+    .manager-split { display:grid; grid-template-columns:minmax(0,2fr) minmax(0,1fr); gap:12px; margin-bottom:12px }
+    .manager-grid .card,.manager-split .card { margin:0; }
+    .manager-grid .card,.manager-split .card,.manager-panel { padding:14px }
+    .manager-panel + .manager-panel { margin-top:12px }
+    .manager-stat .large { font-size:23px }
+    .table-scroll { overflow:auto; margin-top:10px }
+    .manager-table { border-collapse:collapse; width:100%; min-width:430px; text-align:left }
+    .manager-table th,.manager-table td { padding:9px 8px; border-bottom:1px solid var(--line); vertical-align:top }
+    .tui-mode[data-compact] .manager-table :is(th,td) { padding-block:5px }
+    .manager-table th { color:var(--muted); font-size:12px }
+    .manager-table tbody tr:last-child td { border-bottom:0 }
+    .manager-table tr.is-selected { background:var(--select) }
+    .text-action { text-align:left; color:var(--accent); padding:0; text-decoration:underline; text-underline-offset:3px }
+    .entry-state { color:var(--green) }
+    .entry-state.stopped { color:var(--muted) }
+    .manager-fields { display:grid; gap:10px; margin-top:10px }
+    .toolbar { justify-content:start; align-items:end; margin-top:10px }
+    .toolbar .push { margin-left:auto; align-self:center }
+    .manager-field { display:grid; gap:4px; color:var(--muted); min-width:0 }
+    .manager-field input:not([type=checkbox]),.manager-field select {
+      min-width:0; width:100%; padding:7px 9px; border:1px solid var(--line); border-radius:6px;
+      color:var(--text); background:var(--bg)
+    }
+    .manager-field input::placeholder { color:var(--muted) }
+    .manager-check { display:flex; align-items:center; gap:6px; color:var(--muted); min-height:35px }
+    .manager-check input { accent-color:var(--accent) }
+    .manager-split details { margin-top:11px }
+    .manager-panel .action:disabled,.manager-split .action:disabled { opacity:.55; cursor:not-allowed; background:none }
+    .manager-table .child-name { padding-inline-start:24px }
+    .terminal-window { display:grid; grid-template-rows:auto minmax(0,1fr); height:100dvh; min-height:245px; padding:12px }
+    .terminal-window-title { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:8px; margin-bottom:10px }
+    .terminal-window-title h1 { font-size:18px }
+    .terminal-window .terminal-card { display:flex; flex-direction:column; min-height:0; min-width:0 }
+    .terminal-window .terminal-viewport { flex:1 1 0; width:100%; height:auto; min-height:0; max-height:none }
+    .terminal-window .terminal-screen { padding:13px }
+    .terminal-window .terminal-card > :not(.terminal-viewport) { flex:none }
+    @media (max-width:540px) {
+      .terminal-window { padding:8px }
+      .terminal-window .terminal-card { padding:9px }
+      .terminal-window .toolbar { gap:5px }
+      .terminal-window .toolbar .push { margin-left:0 }
+      .terminal-window .terminal-card > .muted { display:none }
+    }
+    .terminal-heading { display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px }
+    .terminal-grid { display:flex; align-items:center; flex-wrap:wrap; gap:8px; margin-top:10px }
+    .terminal-viewport { position:relative; width:100%; max-width:100%; min-width:min(100%,180px); height:280px;
+      min-height:130px; max-height:max(130px,65dvh); margin-top:11px; background:var(--bg);
+      border:1px solid var(--line); border-radius:6px }
+    .terminal-screen { width:100%; height:100%; margin:0; padding:13px 28px 22px 13px; overflow:auto;
+      scrollbar-width:none; white-space:pre-wrap; overflow-wrap:anywhere; color:var(--muted); font:13px/1.6 var(--mono) }
+    .terminal-screen::-webkit-scrollbar { display:none }
+    .terminal-screen:focus-visible { outline:2px solid var(--accent); outline-offset:-2px }
+    .terminal-resize { position:absolute; right:0; bottom:0; width:32px; height:32px;
+      border-radius:6px 0 5px 0; color:var(--accent); background:var(--select); cursor:nwse-resize;
+      touch-action:none; user-select:none }
+    .terminal-resize::before { content:""; position:absolute; inset:8px; background:
+      linear-gradient(135deg,transparent 46%,currentColor 46% 52%,transparent 52% 66%,currentColor 66% 72%,transparent 72%) }
+    .terminal-resize:hover,.terminal-resize[data-dragging] { color:var(--bg); background:var(--accent) }
+    body[data-terminal-resizing],body[data-terminal-resizing] * { cursor:nwse-resize !important; user-select:none !important }
+    .terminal-card[data-attached] .terminal-screen { color:var(--text) }
+    .terminal-window-notice { margin-top:10px }
+    .log-search-head { display:flex; align-items:center; flex-wrap:wrap; gap:8px; margin-bottom:14px }
+    .log-search-head .search { flex:1 1 260px; margin:0; padding:9px 11px; background:var(--bg) }
+    .log-search-head .search input { min-height:23px }
+    .log-raw { overflow:auto; white-space:pre; padding:12px; border:1px solid var(--line); border-radius:6px; background:var(--bg) }
+    .session-source-bar .manager-field { flex:1 1 240px }
+    .session-catalog-search { margin:12px 0 0 }
+    .session-catalog-scroll { max-height:48dvh; }
+    .session-catalog-scroll thead { position:sticky; top:0; background:#111e2b }
+    .session-actions { margin-top:12px; padding-top:11px; border-top:1px solid var(--line); overflow-wrap:anywhere }
+    .session-actions p { margin-top:3px }
+    .session-actions .toolbar { align-items:center }
+    .action.danger { color:#ffb1b1; border-color:#64404a }
+    .session-review { color:var(--text); background:var(--panel); border:1px solid var(--line);
+      border-radius:10px; width:min(540px,calc(100% - 24px)); max-height:85dvh; padding:16px; overflow:auto }
+    .session-review::backdrop { background:#050a11bd }
+    .session-review p,.session-review label { margin-top:10px }
+    .session-review input { padding:7px; border:1px solid var(--line); border-radius:6px; background:var(--bg) }
+    .backup-section { margin-top:13px; padding-top:11px; border-top:1px solid var(--line) }
+    .backup-switches { display:grid; gap:3px; margin:10px 0 }
+    .backup-switches .manager-check { min-height:27px; align-items:start }
+    .backup-switches input { margin-top:4px }
+    .backup-switches label:has(input:disabled) { opacity:.65 }
+    .review-plan { margin:10px 0; padding-inline-start:20px }
+    .review-plan li + li { margin-top:5px }
+    .review-plan li { overflow-wrap:anywhere }
+    @media (max-width:850px) { .manager-split { grid-template-columns:minmax(0,1fr) } }
+    @media (max-width:1000px) {
+      .inspector:not([hidden]) { position:fixed; z-index:3; top:0; bottom:0; right:0;
+        width:min(300px,95vw); overflow:auto; box-shadow:0 0 0 100vmax #050a11b0 }
+    }
+    @media (max-width:680px) {
+      .top { padding:9px 12px; gap:10px; min-height:54px }
+      .project { padding-left:10px }
+      .top-end { gap:5px }
+      .top-end .connection { display:none }
+      #preview-password { font-size:11px; padding:4px 6px }
+      .top:has(.web-account:not([hidden])) .project { display:none }
+      .web-account > summary .mono { max-width:112px }
+      .review { align-items:flex-start; flex-direction:column; gap:7px; padding:8px 12px }
+      .review .picker { max-width:100% }
+      .shell { display:block }
+      .library:not([data-open]) { display:none }
+      .library[data-open] { border-right:0; border-bottom:1px solid var(--line) }
+      #sessions-toggle { display:inline-flex }
+      .chat-head { flex-wrap:wrap; padding:11px 13px }
+      .chat-body,.overview { padding:14px 13px }
+      .chat-body { min-height:410px }
+      .tiles { grid-template-columns:1fr }
+      .tui-mode { padding:12px }
+      .tui-tabs button { padding:7px 8px }
+    }
+  </style>
+</head>
+<body>
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true">
+    <symbol id="i-box" viewBox="0 0 24 24"><path d="m12 2 9 5v10l-9 5-9-5V7zM3 7l9 5 9-5m-9 5v10m-4.5-17.5 9 5"/></symbol>
+    <symbol id="i-user" viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path d="M4 21v-2a5 5 0 0 1 5-5h6a5 5 0 0 1 5 5v2"/></symbol>
+    <symbol id="i-chat" viewBox="0 0 24 24"><path d="M4 4h16v13H9l-5 4zM8 9h8m-8 4h5"/></symbol>
+    <symbol id="i-search" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6"/><path d="m15 15 5 5"/></symbol>
+    <symbol id="i-grid" viewBox="0 0 24 24"><path d="M3 4h18v16H3zm7 0v16m0-10h11"/></symbol>
+    <symbol id="i-activity" viewBox="0 0 24 24"><path d="M2 12h5l3-7 4 14 3-7h5"/></symbol>
+    <symbol id="i-terminal" viewBox="0 0 24 24"><path d="M3 4h18v16H3zm4 5 3 3-3 3m6 0h4"/></symbol>
+    <symbol id="i-archive" viewBox="0 0 24 24"><path d="M3 4h18v5H3zm2 5v11h14V9m-9 4h4"/></symbol>
+    <symbol id="i-child" viewBox="0 0 24 24"><path d="M5 4v12h14m-4-4 4 4-4 4"/></symbol>
+    <symbol id="i-file" viewBox="0 0 24 24"><path d="M6 3h8l4 4v14H6zm8 0v5h4"/></symbol>
+    <symbol id="i-send" viewBox="0 0 24 24"><path d="M12 20V4m-6 6 6-6 6 6"/></symbol>
+  </svg>
+
+  <header class="top">
+    <div class="brand"><svg class="icon" aria-hidden="true"><use href="#i-box"/></svg>oc-box</div>
+    <div class="project"><span class="eyebrow">Workspace</span> orbit-web</div>
+    <details class="web-account" id="web-account" hidden>
+      <summary id="web-account-toggle"><svg class="icon" aria-hidden="true"><use href="#i-user"/></svg><span class="mono" id="web-account-name"></span><span aria-hidden="true">▾</span></summary>
+      <div class="account-menu">
+        <p class="muted" id="web-account-method"></p>
+        <p class="muted" id="web-account-reach"><small>Localhost only</small></p>
+        <button type="button" class="text-action" id="web-logout">Log out</button>
+      </div>
+    </details>
+    <div class="top-end">
+      <span class="tag connection"><span class="dot"></span> Private workspace</span>
+      <button type="button" class="action" id="preview-password">Preview sign-in</button>
+      <span class="tag demo">Synthetic demo</span>
+    </div>
+  </header>
+
+  <div class="review">
+    <p id="layout-note"></p>
+    <div class="picker" role="group" aria-label="Compare layouts">
+      <button type="button" data-layout-option="studio"><b>A</b> Studio</button>
+      <button type="button" data-layout-option="dashboard"><b>B</b> Dashboard</button>
+      <button type="button" data-layout-option="focus"><b>C</b> Chat focus</button>
+      <button type="button" class="layout-manager" data-layout-option="tui" aria-controls="tui-mode"><svg class="icon" aria-hidden="true"><use href="#i-terminal"/></svg> Full TUI</button>
+    </div>
+  </div>
+
+  <div class="shell" id="workspace-shell">
+    <aside id="library" class="library" aria-label="Workspace sessions and views">
+      <div class="rail-head"><h2>Sessions</h2><button type="button" class="action" id="new-session">+ New</button></div>
+      <label class="search"><svg class="icon" aria-hidden="true"><use href="#i-search"/></svg><input type="search" id="search" aria-label="Search session titles" placeholder="Search session titles"></label>
+      <div class="picker scopes" role="group" aria-label="Session source filter">
+        <button type="button" data-scope="all">All</button>
+        <button type="button" data-scope="open">TUI tabs</button>
+        <button type="button" data-scope="archive">Archived</button>
+      </div>
+      <div id="session-list"></div>
+      <nav class="nav" aria-label="Workspace manager views">
+        <p class="eyebrow">Workspace manager</p>
+        <button type="button" data-panel="status"><svg class="icon" aria-hidden="true"><use href="#i-grid"/></svg> Status</button>
+        <button type="button" data-panel="activity"><svg class="icon" aria-hidden="true"><use href="#i-activity"/></svg> Activity</button>
+        <button type="button" data-panel="terminals"><svg class="icon" aria-hidden="true"><use href="#i-terminal"/></svg> Terminals</button>
+        <button type="button" data-panel="storage"><svg class="icon" aria-hidden="true"><use href="#i-archive"/></svg> Storage</button>
+      </nav>
+      <p class="rail-note">This demo shows one workspace, not the host’s sessions or archives.</p>
+    </aside>
+
+    <div class="splitter" data-split="left" role="separator" aria-orientation="vertical"
+      aria-label="Resize sessions pane" aria-controls="library"
+      title="Drag or use Left/Right; double-click or press Enter to reset" tabindex="0" hidden></div>
+    <main>
+      <section class="overview" aria-labelledby="overview-title">
+        <div class="overview-head">
+          <div><p class="eyebrow">Workspace manager / Status</p><h1 id="overview-title">Workspace overview</h1></div>
+          <span class="tag">Read-only metrics</span>
+        </div>
+        <div class="tiles">
+          <div class="card"><h3 class="eyebrow">Workspace CPU</h3><p class="large">18%</p><small class="muted">of a 4-core quota</small></div>
+          <div class="card"><h3 class="eyebrow">Workspace memory</h3><p class="large">1.8 GiB</p><small class="muted">of an 8 GiB limit</small></div>
+          <div class="card"><h3 class="eyebrow">Open TUI tabs</h3><p class="large">2 roots</p><small class="muted">Separate from history</small></div>
+        </div>
+      </section>
+      <section aria-labelledby="chat-title">
+        <header class="chat-head">
+          <div><p class="eyebrow" id="chat-source"></p><h2 id="chat-title"></h2></div>
+          <div class="heading-tags">
+            <button type="button" class="action" id="sessions-toggle" aria-controls="library">Sessions</button>
+            <button type="button" class="action" id="inspector-toggle" aria-controls="inspector"><svg class="icon" aria-hidden="true"><use href="#i-grid"/></svg> Inspector</button>
+          </div>
+        </header>
+        <div class="chat-body">
+          <div class="transcript" id="transcript" role="log" aria-label="Example conversation"></div>
+          <form class="compose" id="composer">
+            <textarea id="draft" aria-label="Demo message" placeholder="Ask about the workspace…"></textarea>
+            <div class="compose-foot">
+              <span class="tag accent">Build</span><span class="tag">Example model</span>
+              <button class="send" type="submit"><svg class="icon" aria-hidden="true"><use href="#i-send"/></svg> Send demo</button>
+            </div>
+          </form>
+          <div id="readonly" class="readonly" hidden>
+            <span id="readonly-note"></span>
+            <button type="button" class="action" id="open-parent" hidden>Open parent</button>
+          </div>
+          <p class="composition-note">Chat is simulated. Drafts stay in memory until this page closes or reloads.</p>
+        </div>
+      </section>
+    </main>
+
+    <div class="splitter" data-split="right" role="separator" aria-orientation="vertical"
+      aria-label="Resize workspace inspector" aria-controls="inspector"
+      title="Drag or use Left/Right; double-click or press Enter to reset" tabindex="0" hidden></div>
+    <aside id="inspector" class="inspector" aria-label="Workspace inspector">
+      <div class="inspector-head">
+        <div><p class="eyebrow">Workspace inspector</p><h2 id="panel-title"></h2></div>
+        <button type="button" class="action" id="inspector-close" aria-label="Close inspector">×</button>
+      </div>
+      <div id="panel-content"></div>
+    </aside>
+  </div>
+
+  <main id="tui-mode" class="tui-mode" aria-labelledby="tui-title" hidden>
+    <header class="tui-head">
+      <div>
+        <p class="eyebrow">oc-box / Manager</p>
+        <h1 id="tui-title">Workspace manager</h1>
+        <p class="muted">The same seven sections as the TUI, adapted for the browser.</p>
+      </div>
+      <div class="toolbar">
+        <label class="manager-field">Workspace context<select id="manager-workspace-context"></select></label>
+        <button type="button" class="action" id="manager-refresh-view">Refresh</button>
+        <span class="tag demo push">Synthetic data · No live operations</span>
+      </div>
+    </header>
+    <div class="tui-tabs" role="tablist" aria-label="Workspace manager sections">
+      <button type="button" role="tab" id="tab-status" data-tui-view="status" aria-controls="manager-status"><b>1</b> Status</button>
+      <button type="button" role="tab" id="tab-settings" data-tui-view="settings" aria-controls="manager-settings"><b>2</b> Settings</button>
+      <button type="button" role="tab" id="tab-sessions" data-tui-view="sessions" aria-controls="manager-sessions"><b>3</b> Sessions</button>
+      <button type="button" role="tab" id="tab-terminals" data-tui-view="terminals" aria-controls="manager-terminals"><b>4</b> Terminals</button>
+      <button type="button" role="tab" id="tab-logs" data-tui-view="logs" aria-controls="manager-logs"><b>5</b> Logs</button>
+      <button type="button" role="tab" id="tab-storage" data-tui-view="storage" aria-controls="manager-storage"><b>6</b> Storage</button>
+      <button type="button" role="tab" id="tab-backups" data-tui-view="backups" aria-controls="manager-backups"><b>7</b> Backup/restore</button>
+    </div>
+    <p class="muted" id="manager-refresh-notice" role="status"></p>
+    <section role="tabpanel" id="manager-status" aria-labelledby="tab-status" tabindex="0">
+      <div class="view-head">
+        <div><h2>Overview</h2><p class="muted">Host resources, registered workspaces, and the selected workspace.</p></div>
+        <span class="tag"><span class="dot"></span> Example snapshot</span>
+      </div>
+      <div class="manager-grid" id="host-metrics"></div>
+      <div class="manager-split">
+        <div class="card"><h3>Workspaces</h3><p class="muted">Select a workspace to inspect its resources.</p>
+          <div class="table-scroll" id="manager-workspaces"></div>
+        </div>
+        <div class="card" id="manager-workspace"></div>
+      </div>
+      <div class="card manager-panel"><h3>Retained activity</h3><p class="muted">Fixed-category events. No transcripts or terminal output.</p>
+        <div class="table-scroll" id="manager-activity"></div>
+      </div>
+    </section>
+    <section role="tabpanel" id="manager-settings" aria-labelledby="tab-settings" tabindex="0" hidden>
+      <div class="view-head">
+        <div><h2>Settings</h2><p class="muted">Preview manager preferences. Changes stay on this page and do not change host configuration.</p></div>
+      </div>
+      <div class="manager-grid">
+        <div class="card"><h3>Monitoring</h3><div class="manager-fields">
+          <label class="manager-check"><input type="checkbox" id="manager-auto-refresh" checked> Automatic refresh</label>
+          <label class="manager-field">Refresh interval (seconds)<input type="number" id="manager-refresh-seconds" value="1" min="1" max="60" step="1"></label>
+        </div></div>
+        <div class="card"><h3>Display</h3><div class="manager-fields">
+          <label class="manager-field">Density<select id="manager-density"><option>Comfortable</option><option>Compact</option></select></label>
+          <label class="manager-check"><input type="checkbox" id="manager-expand-details"> Expand workspace details</label>
+        </div></div>
+        <div class="card"><h3>Sessions</h3><div class="manager-fields">
+          <label class="manager-field">Browse scope<select id="settings-scope"><option value="workspace">Selected workspace</option><option value="host" selected>Host · all projects</option><option value="host-project">Host · selected project</option></select></label>
+          <label class="manager-field">Session filter<input type="search" id="settings-session-filter" placeholder="Title, ID or directory"></label>
+          <p class="muted">Changing scope does not connect to a service.</p>
+        </div></div>
+        <div class="card"><h3>Logs</h3><div class="manager-fields">
+          <label class="manager-field">Minimum severity<select id="settings-severity"><option value="all">All severities</option><option value="info">Info and above</option><option value="warning">Warning and above</option></select></label>
+          <label class="manager-field">Visible source<select id="settings-log-source"><option value="all">All sources</option><option value="oc-box">Private activity</option><option value="podman">Sample Podman output</option><option value="mirror">System journal mirror</option></select></label>
+          <label class="manager-check"><input type="checkbox" id="settings-log-follow" checked> Follow retained activity</label>
+        </div></div>
+        <div class="card"><h3>Host logging</h3><div class="manager-fields">
+          <label class="manager-field">Private log directory<input type="text" value="Default · private state directory" disabled></label>
+          <label class="manager-check"><input type="checkbox" disabled> Mirror to journald</label>
+          <button type="button" class="action" disabled>Save Host Logging</button>
+          <small class="muted">Separate host setting; not connected in this preview.</small>
+        </div></div>
+        <div class="card"><h3>Resources</h3><p class="muted">Observed values are shown in Status. No CPU, memory, or storage limit editing.</p></div>
+        <div class="card"><h3>Safety and terminals</h3><p class="muted">Synthetic mode. Live terminal control would require explicit attachment. No setting here grants host access.</p></div>
+        <div class="card"><h3>Clipboard</h3><p class="muted">Host clipboard and terminal copy preferences stay in the terminal manager.</p><p><span class="tag">Not connected</span></p></div>
+      </div>
+      <div class="toolbar">
+        <button type="button" class="action" id="settings-apply">Apply</button>
+        <button type="button" class="action" id="settings-defaults">Reset to defaults</button>
+        <button type="button" class="action" id="settings-revert">Revert</button>
+        <span class="tag" id="settings-monitor-status"></span>
+        <p id="settings-notice" class="muted" role="status"></p>
+      </div>
+    </section>
+    <section role="tabpanel" id="manager-sessions" aria-labelledby="tab-sessions" tabindex="0" hidden>
+      <div class="view-head"><div><h2>Sessions</h2><p class="muted">Browse session metadata, including children and archives. There’s no conversation pane in this view.</p></div><span class="tag">Example catalog</span></div>
+      <div class="card manager-panel">
+        <div class="toolbar session-source-bar">
+          <label class="manager-field">Source<select id="manager-session-source"><option value="workspace">Selected workspace</option><option value="host">Host · all projects</option><option value="host-project">Host · selected project</option></select></label>
+          <button type="button" class="action" id="manager-session-connect">Connect / refresh</button>
+          <button type="button" class="action" id="manager-session-disconnect" disabled>Disconnect</button>
+        </div>
+        <div class="log-search-head session-catalog-search">
+          <label class="search"><svg class="icon" aria-hidden="true"><use href="#i-search"/></svg><input type="search" id="manager-session-search" aria-label="Search sessions" placeholder="Search title, ID or native directory…" autocomplete="off"></label>
+          <button type="button" class="action" id="manager-session-clear" disabled>Clear search</button>
+          <label class="manager-check"><input type="checkbox" id="manager-include-archives" checked> Include archived</label>
+          <span class="tag" id="manager-session-count" aria-live="polite"></span>
+        </div>
+        <div class="table-scroll session-catalog-scroll" id="manager-session-list"></div>
+        <div class="session-actions">
+          <p id="manager-session-detail" class="muted">Select a session after connecting to a sample source.</p>
+          <div class="toolbar">
+            <button type="button" class="action" id="manager-session-favorite">Favorite</button>
+            <button type="button" class="action" id="manager-session-archive">Archive / restore</button>
+            <button type="button" class="action danger" id="manager-session-delete">Delete…</button>
+          </div>
+          <p id="manager-session-notice" class="muted" role="status"></p>
+        </div>
+      </div>
+    </section>
+      <dialog class="session-review" id="session-review" aria-labelledby="session-review-title">
+        <h2 id="session-review-title">Review simulated deletion</h2>
+        <p id="session-review-source" class="muted"></p>
+        <ul id="session-review-list" class="review-plan"></ul>
+        <p class="muted" id="session-review-note"></p>
+        <div id="session-review-phrase">
+          <label class="manager-field" for="session-review-confirm">Type DELETE to confirm</label>
+          <input id="session-review-confirm" autocomplete="off" aria-describedby="session-review-source">
+        </div>
+        <div class="toolbar">
+          <button type="button" class="action" id="session-review-cancel" autofocus>Cancel</button>
+          <button type="button" class="action danger" id="session-review-delete" disabled>Delete sample session</button>
+        </div>
+      </dialog>
+    <section role="tabpanel" id="manager-terminals" aria-labelledby="tab-terminals" tabindex="0" hidden>
+      <div class="view-head"><div><h2>Terminals</h2><p class="muted">A dedicated view for existing native session terminals.</p></div><span class="tag demo">Simulated connection</span></div>
+      <div id="terminal-dock">
+      <div class="card manager-panel terminal-card" id="terminal-card">
+        <div class="terminal-heading"><h3>Session terminal</h3><span class="tag" id="terminal-state" role="status"></span></div>
+        <div class="toolbar">
+          <label class="manager-field">Session<select id="terminal-session"><option value="sync">Improve history sync</option><option value="tabs">Polish session tabs</option></select></label>
+          <button type="button" class="action" id="terminal-attach" aria-controls="terminal-screen"></button>
+          <button type="button" class="action push" id="terminal-popout" aria-describedby="terminal-window-notice">Open in new window</button>
+        </div>
+        <div class="terminal-viewport" id="terminal-viewport">
+          <pre class="terminal-screen" id="terminal-screen" aria-label="Simulated terminal viewport" tabindex="0"></pre>
+          <button type="button" class="terminal-resize" id="terminal-resize" aria-label="Resize terminal"
+            aria-controls="terminal-viewport" title="Drag to resize; use arrow keys when focused"></button>
+        </div>
+        <div class="terminal-grid">
+          <output id="terminal-size" class="tag" aria-live="off"></output>
+          <button type="button" class="action" id="terminal-reset">Reset size</button>
+        </div>
+        <p class="muted"><small><span id="terminal-dock-hint">Drag the corner grip to resize, or focus it and use the arrow keys. </span><span id="terminal-window-hint" hidden>Resize this window to fit the terminal. </span>Ctrl+] detaches the sample session without ending it. No live shell.</small></p>
+      </div>
+      </div>
+      <div id="terminal-window-panel" class="card manager-panel" hidden>
+        <h3>Terminal in a separate window</h3>
+        <p class="muted">The terminal window has the attach, detach and size controls.</p>
+        <div class="toolbar">
+          <button type="button" class="action" id="terminal-focus-window">Focus terminal window</button>
+          <button type="button" class="action" id="terminal-return-window">Return to manager</button>
+        </div>
+      </div>
+      <p class="terminal-window-notice muted" id="terminal-window-notice" role="status"></p>
+    </section>
+    <section role="tabpanel" id="manager-logs" aria-labelledby="tab-logs" tabindex="0" hidden>
+      <div class="view-head"><div><h2>Logs</h2><p class="muted">Filter retained activity by severity or message.</p></div><span class="tag">Private activity · Demo</span></div>
+      <div class="card manager-panel">
+        <div class="log-search-head">
+          <label class="search"><svg class="icon" aria-hidden="true"><use href="#i-search"/></svg><input type="search" id="manager-log-search" aria-label="Search logs" placeholder="Search retained logs…" autocomplete="off"></label>
+          <button type="button" class="action" id="manager-log-clear" disabled>Clear search</button>
+          <span class="tag" id="manager-log-count" aria-live="polite"></span>
+        </div>
+        <div class="toolbar">
+          <label class="manager-field">Source<select id="manager-log-source"><option value="all">All sources</option><option value="oc-box">Private activity</option><option value="podman">Sample Podman output</option><option value="mirror">System journal mirror</option></select></label>
+          <label class="manager-field">Severity<select id="manager-log-severity"><option value="all">All severities</option><option value="info">Info and above</option><option value="warning">Warning and above</option></select></label>
+          <label class="manager-check"><input type="checkbox" id="manager-log-follow" checked> Follow</label>
+        </div>
+        <div class="toolbar">
+          <button type="button" class="action" id="manager-log-raw" aria-pressed="false">RAW</button>
+          <button type="button" class="action" id="manager-log-columns" aria-expanded="false" aria-controls="manager-log-column-options">Columns…</button>
+          <button type="button" class="action" id="manager-log-details" disabled>Details…</button>
+          <button type="button" class="action" id="manager-log-podman">Load sample Podman…</button>
+          <button type="button" class="action" id="manager-log-mirror">Load sample mirror</button>
+        </div>
+        <div id="manager-log-column-options" class="toolbar" hidden>
+          <label class="manager-check"><input class="manager-log-column" type="checkbox" value="0" checked> Time</label>
+          <label class="manager-check"><input class="manager-log-column" type="checkbox" value="1" checked> Source</label>
+          <label class="manager-check"><input class="manager-log-column" type="checkbox" value="2" checked> Severity</label>
+        </div>
+        <div class="table-scroll" id="manager-log-list"></div>
+        <pre class="log-raw" id="manager-log-raw-output" tabindex="0" hidden></pre>
+        <p class="muted" id="manager-log-info" role="status"></p>
+      </div>
+    </section>
+    <section role="tabpanel" id="manager-storage" aria-labelledby="tab-storage" tabindex="0" hidden>
+      <div class="view-head"><div><h2>Storage</h2><p class="muted">Inspect storage by scope. Unknown sizes are shown separately from measured sizes.</p></div><span class="tag">Example inventory</span></div>
+      <div class="card manager-panel"><h3>Storage inventory</h3>
+        <div class="toolbar">
+          <label class="manager-field">Scope<select id="manager-storage-scope"><option value="all">All registered workspaces</option><option value="selected">Selected workspace</option><option value="host">Host OpenCode · individual sessions</option></select></label>
+          <button type="button" class="action" id="manager-storage-refresh">Refresh list</button>
+          <button type="button" class="action" id="manager-storage-scan">Scan sample sizes</button>
+        </div>
+        <div class="table-scroll" id="manager-storage-list"></div>
+        <p class="muted" id="manager-storage-detail"></p>
+        <div class="toolbar">
+          <button type="button" class="action danger" id="manager-storage-remove">Review workspace storage removal…</button>
+          <button type="button" class="action danger" id="manager-storage-delete" hidden>Review selected session deletion…</button>
+        </div>
+        <p class="muted" id="manager-storage-notice" role="status"></p>
+      </div>
+    </section>
+    <section role="tabpanel" id="manager-backups" aria-labelledby="tab-backups" tabindex="0" hidden>
+      <div class="view-head"><div><h2>Backup and restore</h2><p class="muted">Choose an operation and review what would be included before proceeding.</p></div><span class="tag">No archive access</span></div>
+      <div class="manager-split">
+        <div class="card">
+          <h3>Operation</h3>
+          <div class="manager-fields">
+            <label class="manager-field">Action<select id="manager-backup-action"><option value="backup">Create backup</option><option value="restore">Restore backup</option></select></label>
+          </div>
+          <div id="backup-create" class="backup-section">
+            <h3>Create options</h3>
+            <div class="manager-fields">
+              <label class="manager-field" id="backup-source-field">Source scope<select id="backup-source"><option value="workspace">Selected workspace</option><option value="all">All registered workspaces · choose one</option><option value="host">Host OpenCode · individual sessions</option></select></label>
+              <label class="manager-field" id="backup-kind-field">Archive type<select id="manager-backup-kind"><option value="workspace">Workspace / host settings (.ocbox)</option><option value="sessions">Session tree · history (.ocsession)</option></select></label>
+              <p class="muted" id="backup-host-kind" hidden>Host OpenCode source: session tree history (.ocsession).</p>
+              <label class="manager-field" id="backup-workspace-field">Workspace<select id="backup-workspace"></select></label>
+              <label class="manager-field" id="backup-root-field" hidden>Session tree<select id="backup-root"></select></label>
+              <label class="manager-field">Sample output path<input id="backup-output" readonly></label>
+            </div>
+            <div class="backup-switches" id="backup-create-switches">
+              <label class="manager-check"><input type="checkbox" id="backup-include-workspace" checked> Include workspace data</label>
+              <label class="manager-check"><input type="checkbox" id="backup-portable"> Portable backup (omit OS image)</label>
+              <label class="manager-check"><input type="checkbox" id="backup-include-host"> Include host settings and encrypted vault</label>
+              <label class="manager-check"><input type="checkbox" id="backup-include-export"> Include native credential export</label>
+              <label class="manager-field" id="backup-export-field" hidden>Existing private export file · sample path<input value="/example/migration/opencode-auth-export.json" readonly></label>
+            </div>
+            <p class="muted"><small>For host-only backup, turn off workspace data and turn on host settings. Native credentials require an existing private export; the manager doesn’t create one.</small></p>
+          </div>
+          <div id="backup-restore" class="backup-section" hidden>
+            <h3>Restore options</h3>
+            <div class="manager-fields">
+              <label class="manager-field">Sample encrypted archive<select id="backup-sample"><option value="combined">workspace-and-host.ocbox</option><option value="host">host-settings.ocbox</option><option value="workspace">workspace-only.ocbox</option><option value="sessions">session-tree.ocsession</option></select></label>
+              <div><button type="button" class="action" id="backup-inspect">Inspect sample archive</button></div>
+              <p id="backup-layout" class="muted" role="status"></p>
+              <label class="manager-field" id="backup-destination-field" hidden>New destination · sample path<input value="/example/projects/orbit-web-restored" readonly></label>
+            </div>
+            <div class="backup-switches">
+              <label class="manager-check"><input type="checkbox" id="backup-restore-workspace"> Restore workspace</label>
+              <label class="manager-check"><input type="checkbox" id="backup-restore-host"> Restore host settings and vault</label>
+              <label class="manager-check"><input type="checkbox" id="backup-restore-native"> Restore native OpenCode config, plugins and saved credentials</label>
+            </div>
+            <p class="muted"><small>Changing the sample archive clears component choices. Native restoration requires a separate review and the <code>restore-opencode</code> confirmation in the real workflow.</small></p>
+          </div>
+          <details class="backup-section">
+            <summary>Advanced · age recipients / identity files</summary>
+            <div class="manager-fields">
+              <label class="manager-field" id="backup-age-recipient-field">Encrypt to public age recipient<select id="backup-age-recipient"><option value="">None · use private password prompt</option><option value="migration">Migration key · sample public recipient</option></select></label>
+              <label class="manager-field" id="backup-age-identity-field" hidden>Existing private identity-file path<select id="backup-age-identity"><option value="">None · use private password prompt</option><option value="migration">/example/migration/age-identity.txt</option></select></label>
+              <p class="muted">No password, credential contents or real key material can be entered in this demo.</p>
+            </div>
+          </details>
+        </div>
+        <div class="card"><h3>Plan preview</h3><p id="manager-backup-summary" class="muted" aria-live="polite"></p><ul id="backup-plan" class="review-plan"></ul><p><button type="button" class="action" disabled>No live operation</button></p></div>
+      </div>
+    </section>
+  </main>
+
+  <main class="login-stage" id="login-stage" aria-labelledby="login-title" hidden>
+    <section class="login-card">
+      <span class="icon-box"><svg class="icon" aria-hidden="true"><use href="#i-box"/></svg></span>
+      <p class="eyebrow">oc-box / Web sign-in</p>
+      <h1 id="login-title">Sign in to orbit-web</h1>
+      <p class="muted" id="login-description">Use the dedicated web password for this workspace.</p>
+      <p class="muted" id="login-reach"><small id="login-reach-label"></small></p>
+      <form id="login-form" class="login-form" autocomplete="off">
+        <label class="manager-field">Web username
+          <input type="text" id="login-user" required autocomplete="off" autocapitalize="none" spellcheck="false" maxlength="64" aria-describedby="login-help login-error">
+        </label>
+        <div class="manager-field">
+          <label for="login-password">Web password</label>
+          <div class="login-secret">
+            <input type="password" id="login-password" required autocomplete="off" autocapitalize="none" spellcheck="false" maxlength="128" aria-describedby="login-help login-error">
+            <button type="button" class="action" id="login-show" aria-controls="login-password" aria-pressed="false">Show</button>
+          </div>
+        </div>
+        <p class="login-error" id="login-error" role="status"></p>
+        <button type="submit" class="send">Sign in</button>
+      </form>
+      <div class="login-footer">
+        <p class="muted" id="login-help"><span class="tag demo">Demo only</span> Try <code>workspace-demo</code> / <code>oc-box-demo</code> or <code>review-demo</code> / <code>oc-box-review</code>. Nothing is sent to a server. Do not enter real credentials.</p>
+        <div><button type="button" class="text-action" id="preview-tls">Preview HTTPS setup</button></div>
+        <div><button type="button" class="text-action" id="login-skip">Back to one-use link preview</button></div>
+      </div>
+      <div class="logout-link" id="logout-link" hidden>
+        <p class="muted">Request a fresh one-use link from the host before reconnecting.</p>
+        <button type="button" class="action" id="demo-new-link">Simulate a new link</button>
+      </div>
+    </section>
+  </main>
+  <dialog class="session-review tls-guide" id="tls-guide" aria-labelledby="tls-guide-title">
+    <p class="eyebrow">Host setup · Design preview</p>
+    <h2 id="tls-guide-title">Set up HTTPS for named users</h2>
+    <p class="muted">One certificate per web origin, not per user. Real setup uses the host’s <code>oc-box web</code> commands. This preview does not install trust or change any files.</p>
+    <div class="picker toolbar" role="group" aria-label="Certificate setup options">
+      <button type="button" data-tls-mode="local" aria-pressed="true">Localhost</button>
+      <button type="button" data-tls-mode="lan" aria-pressed="false">Private LAN</button>
+      <button type="button" data-tls-mode="public" aria-pressed="false">Publicly trusted</button>
+    </div>
+    <div id="tls-local">
+      <p><code>oc-box web tls setup localhost</code> <small class="muted">(proposed)</small></p>
+      <p class="muted">Use an existing trusted certificate or create one with mkcert. Stay loopback-only. Any trust-store change must be approved on the host.</p>
+      <div class="toolbar">
+        <button type="button" class="action" id="tls-local-check">Check localhost HTTPS</button>
+        <button type="button" class="action" id="tls-local-setup">Set up localhost HTTPS</button>
+      </div>
+      <div id="tls-local-check-result" hidden>
+        <p><code>oc-box doctor --feature web-tls-local</code><br><code>oc-box web tls check localhost</code> <small class="muted">(proposed)</small></p>
+        <p class="muted" role="status">Example only: mkcert found · certificate not configured · browser trust unverified. This check installs nothing.</p>
+      </div>
+      <div id="tls-local-review" hidden>
+        <p class="muted">Review which trust store would change, then verify the result in your browser. Nothing is installed by this demo.</p>
+        <div class="toolbar"><button type="button" class="action" id="tls-local-confirm">Simulate approval</button></div>
+      </div>
+      <p class="muted" id="tls-local-status" role="status"></p>
+    </div>
+    <div id="tls-lan" hidden>
+      <p class="muted"><strong>Private CA:</strong> supply a chain and key for the private hostname or IP. Client devices trust the CA’s public certificate; its private key is never distributed.</p>
+      <p class="muted"><strong>Let’s Encrypt:</strong> use DNS-01 for a hostname under a domain you control. LAN DNS can point that hostname to a private IP. No inbound internet port is required, and clients open the certified hostname.</p>
+    </div>
+    <div id="tls-public" hidden>
+      <p class="muted">Use a hostname you control and an existing public certificate, or provision one with an ACME tool such as Certbot or Caddy. A DNS challenge can work even for a LAN-only service.</p>
+    </div>
+    <div class="toolbar"><button type="button" class="action" id="tls-guide-close" autofocus>Close preview</button></div>
+  </dialog>
+
+  <script>
+    const byId = (id) => document.getElementById(id);
+    const all = (selector) => [...document.querySelectorAll(selector)];
+    const icon = (name) => `<svg class="icon" aria-hidden="true"><use href="#i-${name}"/></svg>`;
+    const layouts = {
+      studio: ["Studio", "Sessions, chat and workspace context. Drag the dividers, or focus one and use the arrow keys."],
+      dashboard: ["Dashboard", "Manager cards first, with the selected conversation underneath."],
+      focus: ["Chat focus", "More room for the conversation; open sessions or the inspector on demand."],
+      tui: ["Full TUI", "The TUI’s manager views reworked for the browser, without chat."],
+    };
+    const groups = {
+      open: "Open TUI tabs", history: "Workspace history", archive: "Archived in workspace",
+    };
+    const sessions = [
+      { id:"sync", title:"Improve history sync", group:"open", detail:"Idle · Root session", time:"2m",
+        prompt:"Can we make history sync faster without changing which sessions get archived?",
+        reply:"Yes. The first place I’d look is how often we start the private source service. We can reuse it within a guarded sync pass while keeping verification for each session.",
+        tool:"Inspect sync flow", result:"Demo result: repeated source service startup dominates this synthetic run.", file:"history_reader.py" },
+      { id:"check", title:"Check export rules", group:"open", parent:"sync", detail:"Child of open tab · Read-only", time:"4m",
+        prompt:"Check which verification steps must stay in place.",
+        reply:"A child can report its findings here. Continue any follow-up in the parent conversation." },
+      { id:"tabs", title:"Polish session tabs", group:"open", detail:"Idle · Root session", time:"18m",
+        prompt:"How should the session list distinguish open tabs from history?",
+        reply:"Give the mirrored tabs their own group. A browser selection shouldn’t silently make a session look open in the TUI." },
+      { id:"fixtures", title:"Add offline fixtures", group:"history", detail:"Not open in the TUI", time:"1h",
+        prompt:"Can we test switching sessions without a running service?",
+        reply:"Use a stable fixture with two open roots, one child, and a history-only session. Check that drafts stay with the session where they were typed." },
+      { id:"docs", title:"Write restore guide", group:"history", detail:"Not open in the TUI", time:"1d",
+        prompt:"What should the restore guide explain first?",
+        reply:"Start with what the archive preserves and what it doesn’t, then show how to verify the destination." },
+      { id:"old", title:"Workspace bootstrap", group:"archive", detail:"Archived · Preview only", time:"2d",
+        prompt:"Set up a workspace for the example project.",
+        reply:"The example workspace is ready. This conversation is shown here as an archived preview." },
+    ];
+    const activity = `<div class="card"><h3>Recent workspace activity</h3>
+      <div class="event"><span>Session opened</span><time>14:26</time></div>
+      <div class="event"><span>History sync finished</span><time>14:18</time></div>
+      <div class="event"><span>Web client attached</span><time>14:02</time></div></div>`;
+    const panels = {
+      status: ["Status", `<div class="card"><h3><span class="dot"></span>orbit-web</h3><p class="muted">Running · Debian · 1 web client</p>
+        <div class="metric"><span>CPU quota</span><span class="mono">18%</span><progress aria-label="Workspace CPU quota used" max="100" value="18"></progress></div>
+        <div class="metric"><span>Memory limit</span><span class="mono">1.8 / 8 GiB</span><progress aria-label="Workspace memory limit used" max="8" value="1.8"></progress></div>
+        <p><small class="muted">Example readings · no live polling</small></p></div>${activity}
+        <div class="card"><h3>Session source</h3><p class="muted">TUI membership and workspace history are separate. Opening a history item here doesn’t add a TUI tab.</p></div>`],
+      activity: ["Activity", `${activity}<div class="card"><p class="muted">Fixed-category events only in this concept. No transcript or terminal output goes into activity.</p></div>`],
+      terminals: ["Terminals", `<div class="card"><h3>Session terminal</h3><p class="muted">A place to show an existing native terminal connection. Attaching or typing in a real terminal isn’t part of this demo.</p></div>`],
+      storage: ["Storage", `<div class="card"><h3>Workspace private home</h3><p class="large">2.0 GiB</p><p class="muted">Example scan result. Host storage, backups and destructive actions aren’t connected.</p></div>`],
+    };
+
+    const managerTabs = all("[data-tui-view]");
+    const workspaceRows = [
+      { name:"orbit-web", os:"Debian", cpu:"73.4%", ram:"1.8 GiB", home:"2.0 GiB", quota:18, memory:22 },
+      { name:"atlas-api", os:"Fedora", cpu:"124%", ram:"3.1 GiB", home:"2.8 GiB", quota:31, memory:39 },
+      { name:"docs-site", os:"Ubuntu", home:"3.6 GiB" },
+      { name:"data-pipeline", os:"Debian", cpu:"38.2%", ram:"1.2 GiB", home:"4.4 GiB", quota:19, memory:30 },
+      { name:"cli-tools", os:"Alpine", home:"5.2 GiB" },
+      { name:"research-notes", os:"Debian" },
+    ];
+    const workspaceCatalog = sessions.map((s) => [s.title, s.parent ? "Child" : "Root", s.group === "archive" ? "Archived" : s.group === "open" ? (s.parent ? "Child of open tab" : "Open TUI tab") : "History"]);
+    const otherCatalogs = { "atlas-api":[["Review API response shapes","Root","History"]] };
+    const hostCatalog = [["Review dashboard navigation","Root","History"],["Verify metadata filters","Child","History"],["Old staging notes","Root","Archived"]];
+    const sampleCatalogs = new Map(
+      Object.entries({ host:hostCatalog, "orbit-web":workspaceCatalog, ...otherCatalogs }).map(([store, rows]) => [
+        store, rows.map(([title, kind, state], index) => ({
+          id:`ses_demo_${store.replaceAll("-","_")}_${String(index + 1).padStart(3,"0")}`,
+          title, kind, state, archived:state === "Archived", favorite:false,
+          project:store === "host" ? (index < 2 ? "orbit-web" : "atlas-api") : store,
+          directory:store === "host" ? (index < 2 ? "/example/projects/orbit-web" : "/example/projects/atlas-api") : `/workspace/${store}`,
+          parent:kind === "Child" ? 0 : null, index,
+        })),
+      ])
+    );
+    const retainedEvents = [
+      ["14:26","info","Session opened"], ["14:18","info","History sync finished"],
+      ["14:02","info","Web client attached"], ["13:51","warning","Storage size unavailable"],
+      ["13:38","debug","Workspace metadata read"],
+    ];
+    const drafts = new Map(), messages = new Map();
+    let selected = sessions[0], scope = "all", panel = "status", created = 0, inspectorReturn, activeDrag;
+    let panePriority = "left", managerView = "status", managerWorkspace = workspaceRows[0];
+    let managerSessionConnection = null, managerSelectedSession = null, pendingSessionDeletion = null;
+    const sampleLogSources = {
+      podman:[["13:48","podman","info","Example container health check completed"]],
+      mirror:[["14:18","mirror","info","Example mirrored history sync finished"]],
+    };
+    const loadedLogSources = new Set();
+    let logRaw = false, selectedLog = null, visibleLogs = [], logSort = { index:0, descending:true };
+    const settingsDefaults = { "manager-auto-refresh":true, "manager-refresh-seconds":"1", "manager-density":"Comfortable",
+      "manager-expand-details":false, "settings-scope":"host", "settings-session-filter":"",
+      "settings-severity":"all", "settings-log-source":"all", "settings-log-follow":true };
+    let activeSettings = { ...settingsDefaults }, storageSelection = null;
+    const sampleStorageSizes = new Map();
+    const shell = byId("workspace-shell"), tui = byId("tui-mode");
+    const loginStage = byId("login-stage"), loginUser = byId("login-user"), loginPassword = byId("login-password"), loginShow = byId("login-show");
+    const demoWebUsers = new Map([["workspace-demo","oc-box-demo"],["review-demo","oc-box-review"]]);
+    const previewQuery = new URLSearchParams(location.search);
+    const passwordEntrance = previewQuery.get("auth") === "password";
+    const loggedOutLink = previewQuery.get("auth") === "link-ended";
+    const networkEntrance = passwordEntrance && previewQuery.get("bind") === "all";
+    let signedInUser = null;
+    const terminalCard = byId("terminal-card");
+    const terminalElement = (id) => terminalCard.querySelector(`#${id}`);
+    const terminalScreen = terminalElement("terminal-screen");
+    const terminalViewport = terminalElement("terminal-viewport"), terminalGrip = terminalElement("terminal-resize");
+    const sampleTerminals = {
+      sync: "$ git status --short\n M src/history_reader.py\n$ pytest tests/test_history.py -q\n8 passed\n$ ",
+      tabs: "$ git status --short\n M src/web_sessions.js\n$ pytest tests/test_web_sessions.py -q\n6 passed\n$ ",
+    };
+    const seenTerminals = new Set();
+    let terminalAttached = false, terminalWindow = null, dockedTerminalSize = null, terminalDrag, inspectedArchive = null;
+    const draft = byId("draft"), library = byId("library"), inspector = byId("inspector");
+    const narrow = matchMedia("(max-width: 680px)"), overlay = matchMedia("(max-width: 1000px)");
+    const background = all(".top, .review, .library, .splitter, .shell > main");
+    const splitters = all("[data-split]");
+    const panes = {
+      left: { min:192, initial:() => overlay.matches ? 216 : 248 },
+      right: { min:212, initial:() => 278 },
+    };
+    const layout = () => document.documentElement.dataset.layout;
+    const overlayMode = () => overlay.matches || layout() === "focus";
+    const dividerWidth = 10;
+
+    function resetLoginField() {
+      loginPassword.value = "";
+      loginPassword.type = "password";
+      loginPassword.removeAttribute("aria-invalid");
+      loginShow.textContent = "Show";
+      loginShow.setAttribute("aria-pressed", "false");
+      byId("login-error").textContent = "";
+    }
+
+    function showLogin(open, ended = false) {
+      if (open) {
+        byId("session-review").close();
+        if (terminalWindow) dockTerminal(terminalWindow, { close:true });
+      }
+      resetLoginField();
+      loginUser.value = "";
+      document.body.toggleAttribute("data-login", open);
+      loginStage.hidden = !open;
+      byId("login-title").textContent = ended ? "You’re logged out" : "Sign in to orbit-web";
+      byId("login-description").textContent = ended ? "The one-use link has already been used." : "Use the dedicated web password for this workspace.";
+      byId("login-reach").hidden = ended;
+      byId("login-reach-label").textContent = networkEntrance ? "Network-accessible sign-in preview · HTTPS required" : "Localhost sign-in preview · HTTPS required";
+      byId("login-form").hidden = ended;
+      byId("login-help").parentElement.hidden = ended;
+      byId("logout-link").hidden = !ended;
+      byId("login-skip").hidden = passwordEntrance;
+      byId("web-account").open = false;
+      byId("web-account").hidden = open;
+      byId("web-account-name").textContent = signedInUser ?? "Workspace guest";
+      byId("web-account-method").textContent = signedInUser ? "Password sign-in" : "One-use link";
+      byId("web-account-reach").firstElementChild.textContent = signedInUser ?
+        (networkEntrance ? "Network access · HTTPS" : "Localhost · HTTPS") : "Localhost only";
+      byId("preview-password").hidden = !!signedInUser;
+      if (open) (ended ? byId("demo-new-link") : loginUser).focus();
+      else byId(signedInUser ? "web-account-toggle" : "preview-password").focus();
+    }
+    const clamp = (value, min, max) => Math.max(min, Math.min(value, max));
+
+    function endDrag() {
+      if (!activeDrag) return;
+      const { handle, pointerId } = activeDrag;
+      activeDrag = null;
+      handle.removeAttribute("data-dragging");
+      document.body.removeAttribute("data-resizing");
+      if (handle.hasPointerCapture(pointerId)) handle.releasePointerCapture(pointerId);
+    }
+
+    function syncSplitters() {
+      const shown = {
+        left: !shell.hidden && !narrow.matches && (layout() !== "focus" || library.hasAttribute("data-open")),
+        right: !shell.hidden && !inspector.hidden && !overlayMode(),
+      };
+      const available = shell.clientWidth - 320 - dividerWidth * Object.values(shown).filter(Boolean).length;
+      const widths = { left:0, right:0 };
+      const order = panePriority === "right" ? ["right","left"] : ["left","right"];
+      const choose = (side, reserve) => {
+        const pane = panes[side];
+        return shown[side] ? clamp(pane.preferred ?? pane.initial(), pane.min, available - reserve) : 0;
+      };
+      const [first, second] = order;
+      widths[first] = choose(first, shown[second] ? panes[second].min : 0);
+      widths[second] = choose(second, widths[first]);
+      for (const handle of splitters) {
+        const side = handle.dataset.split, opposite = side === "left" ? "right" : "left";
+        const pane = panes[side];
+        if (!shown[side] && activeDrag?.handle === handle) endDrag();
+        pane.width = widths[side];
+        pane.max = Math.max(pane.min, available - (shown[opposite] ? panes[opposite].min : 0));
+        shell.toggleAttribute(`data-${side}`, shown[side]);
+        shell.style.setProperty(`--${side}-size`, `${pane.width}px`);
+        handle.hidden = !shown[side];
+        handle.setAttribute("aria-valuemin", pane.min);
+        handle.setAttribute("aria-valuemax", pane.max);
+        handle.setAttribute("aria-valuenow", pane.width);
+        handle.setAttribute("aria-valuetext", `${pane.width} pixels`);
+      }
+    }
+
+    function resizePane(side, width) {
+      const pane = panes[side];
+      panePriority = side;
+      pane.preferred = clamp(Math.round(width), pane.min, pane.max);
+      syncSplitters();
+    }
+
+    function resetPane(side) {
+      delete panes[side].preferred;
+      panePriority = side;
+      syncSplitters();
+    }
+
+    function showLibrary(open) {
+      library.toggleAttribute("data-open", open);
+      byId("sessions-toggle").setAttribute("aria-expanded", open);
+      syncSplitters();
+    }
+
+    function showInspector(open, focus = false) {
+      const modal = open && overlayMode();
+      if (open && focus && !inspector.contains(document.activeElement)) inspectorReturn = document.activeElement;
+      inspector.hidden = !open;
+      byId("inspector-toggle").setAttribute("aria-expanded", open);
+      for (const button of all("[data-panel]")) button.setAttribute("aria-pressed", open && button.dataset.panel === panel);
+      for (const node of background) node.inert = modal;
+      if (modal) {
+        inspector.setAttribute("role", "dialog");
+        inspector.setAttribute("aria-modal", "true");
+      } else {
+        inspector.removeAttribute("role");
+        inspector.removeAttribute("aria-modal");
+      }
+      if (open && (focus || modal)) byId("inspector-close").focus();
+      if (!open && focus) (inspectorReturn?.getClientRects().length ? inspectorReturn : byId("inspector-toggle")).focus();
+      if (!open) inspectorReturn = null;
+      syncSplitters();
+    }
+
+    function showTuiView(name, focus = false) {
+      checkTerminalWindow();
+      if (name !== "sessions") byId("session-review").close();
+      managerView = name;
+      for (const tab of managerTabs) {
+        const current = tab.dataset.tuiView === name;
+        tab.setAttribute("aria-selected", current);
+        tab.tabIndex = current ? 0 : -1;
+        byId(tab.getAttribute("aria-controls")).hidden = !current;
+        if (current && focus) tab.focus();
+      }
+    }
+
+    function table(headers, rows, empty = "No rows to show.") {
+      if (!rows.length) return `<p class="muted">${empty}</p>`;
+      return `<table class="manager-table"><thead><tr>${headers.map((h) => `<th scope="col">${h}</th>`).join("")}</tr></thead><tbody>
+        ${rows.map(({ cells, current=false }) => `<tr${current ? ' class="is-selected"' : ""}>${cells.map((cell) => `<td>${cell}</td>`).join("")}</tr>`).join("")}
+        </tbody></table>`;
+    }
+
+    function resourceMeter(label, value, amount) {
+      return `<div class="metric"><span>${label}</span><span class="mono">${value}</span>
+        <progress aria-label="${label}" max="100" value="${amount}"></progress></div>`;
+    }
+
+    function renderManagerStatus() {
+      const current = managerWorkspace;
+      byId("manager-workspaces").innerHTML = table(["Project","State","CPU","Memory","Private home"], workspaceRows.map((w) => ({
+        current:w === current, cells:[
+          `<button type="button" class="text-action" data-inspect="${w.name}" aria-pressed="${w === current}">${w.name}</button>`,
+          w.cpu ? '<span class="entry-state">Running</span>' : '<span class="entry-state stopped">Stopped</span>',
+          w.cpu ?? "—", w.ram ?? "—", w.home ?? "Not scanned",
+        ],
+      })));
+      byId("manager-workspace").innerHTML = `<h3>Selected workspace</h3><p><strong>${current.name}</strong> <span class="muted">· ${current.os}</span></p>
+        ${current.cpu ? resourceMeter("CPU usage · quota scale", current.cpu, current.quota) +
+          resourceMeter("Memory usage · limit scale", current.ram, current.memory) : '<p class="muted">Stopped · No live readings</p>'}
+        <p class="muted">Private home: ${current.home ?? "not scanned"}</p>
+        <details${activeSettings["manager-expand-details"] ? " open" : ""}><summary>Workspace details</summary>
+        <p class="muted">Workspace ID: ws_demo_${current.name.replaceAll("-","_")}</p>
+        <p class="muted">Project mount: /workspace/${current.name} · read/write</p>
+        <p class="muted">Session source: ${managerSessionConnection?.store === current.name ? "sample workspace connection" : "not connected to this workspace"}</p></details>`;
+    }
+
+    function managerSessionSource() {
+      const scope = byId("manager-session-source").value;
+      const store = scope === "workspace" ? managerWorkspace.name : "host";
+      const project = scope === "host-project" ? managerWorkspace.name : null;
+      const label = project ? `Host · ${project}` : scope === "host" ? "Host · all projects" : `Workspace · ${store}`;
+      return { store, project, label };
+    }
+
+    function setManagerSessionConnection(connected) {
+      byId("session-review").close();
+      managerSessionConnection = connected ? managerSessionSource() : null;
+      managerSelectedSession = null;
+      byId("manager-session-notice").textContent = "";
+      renderManagerSessions();
+      renderManagerStatus();
+      renderManagerStorage();
+    }
+
+    function managerSessionRows() {
+      if (!managerSessionConnection) return [];
+      const { store, project } = managerSessionConnection;
+      return (sampleCatalogs.get(store) ?? []).filter((row) => !project || row.project === project);
+    }
+
+    function renderManagerSessions() {
+      const field = byId("manager-session-search");
+      const query = field.value.trim().toLowerCase();
+      const archive = byId("manager-include-archives").checked;
+      const matches = managerSessionRows().filter((row) =>
+        [row.title, row.id, row.directory].some((item) => item.toLowerCase().includes(query)) && (archive || !row.archived));
+      if (!matches.includes(managerSelectedSession)) managerSelectedSession = null;
+      byId("manager-session-count").textContent = managerSessionConnection ?
+        `${matches.length} ${matches.length === 1 ? "session" : "sessions"} · ${managerSessionConnection.label}` : "Not connected";
+      byId("manager-session-disconnect").disabled = !managerSessionConnection;
+      byId("manager-session-clear").disabled = !field.value;
+      byId("manager-session-list").innerHTML = table(["Favorite","Title","ID","Kind","Native directory","State"], matches.map((row) => ({
+        current:row === managerSelectedSession,
+        cells:[row.favorite ? "★" : "—",
+          `<button type="button" class="text-action${row.kind === "Child" ? " child-name" : ""}" data-session-id="${row.id}" aria-pressed="${row === managerSelectedSession}">${row.title}</button>`,
+          `<code>${row.id}</code>`, row.kind, `<code>${row.directory}</code>`,
+          row.archived ? "Archived" : row.state === "Archived" ? "History" : row.state],
+      })), managerSessionConnection ? "No matching sessions." : "Connect to a sample source to browse its session metadata.");
+      const row = managerSelectedSession;
+      byId("manager-session-detail").textContent = row ? `${managerSessionConnection.label} · ${row.id} · ${row.directory}` :
+        "Select a row to preview actions for that session.";
+      byId("manager-session-favorite").setAttribute("aria-pressed", !!row?.favorite);
+      byId("manager-session-archive").textContent = row ? (row.archived ? "Restore from archive" : "Archive session") : "Archive / restore";
+      for (const id of ["manager-session-favorite","manager-session-archive","manager-session-delete"]) byId(id).disabled = !row;
+    }
+
+    function reviewManagerSessionAction(action) {
+      const selected = managerSelectedSession;
+      if (!selected || !managerSessionConnection) return;
+      const { store, label } = managerSessionConnection;
+      const affected = [selected];
+      for (let i = 0; action === "delete" && i < affected.length; i++) {
+        affected.push(...sampleCatalogs.get(store).filter((row) => row.parent === affected[i].index));
+      }
+      pendingSessionDeletion = { store, affected, action };
+      const deletion = action === "delete";
+      byId("session-review-title").textContent = deletion ? "Review simulated deletion" : selected.archived ? "Restore sample session from archive?" : "Archive sample session?";
+      byId("session-review-note").textContent = deletion ?
+        "Only the listed fixture rows are removed. Real deletion also checks ownership and activity, and refuses cascades over 50 sessions." :
+        "Changes only the selected sample session. It does not archive its children, close a shell, or change an independent host copy.";
+      byId("session-review-phrase").hidden = !deletion;
+      byId("session-review-source").textContent = `Source: ${label}. Includes ${affected.length} sample ${affected.length === 1 ? "session" : "sessions"}.`;
+      byId("session-review-list").replaceChildren(...affected.map((row) => Object.assign(document.createElement("li"), {
+        textContent:`${row.title} · ${row.id} · ${row.directory}`,
+      })));
+      byId("session-review-confirm").value = "";
+      byId("session-review-delete").textContent = deletion ? "Delete sample session" : selected.archived ? "Restore sample session" : "Archive sample session";
+      byId("session-review-delete").classList.toggle("danger", deletion);
+      byId("session-review-delete").disabled = deletion;
+      byId("session-review").showModal();
+    }
+
+    function renderManagerLogs() {
+      const query = byId("manager-log-search").value.trim().toLowerCase();
+      byId("manager-log-clear").disabled = !byId("manager-log-search").value;
+      const severity = byId("manager-log-severity").value;
+      const source = byId("manager-log-source").value;
+      const order = { debug:0, info:1, warning:2 };
+      const rows = retainedEvents.map(([time, level, message]) => [time,"oc-box",level,message]);
+      for (const name of loadedLogSources) rows.push(...sampleLogSources[name]);
+      visibleLogs = rows.filter((row) => (source === "all" ? row[1] !== "mirror" : row[1] === source) &&
+        row.join(" ").toLowerCase().includes(query) && order[row[2]] >= (order[severity] ?? 0));
+      selectedLog = null;
+      byId("manager-log-details").disabled = true;
+      const noun = query ? (visibleLogs.length === 1 ? "match" : "matches") : (visibleLogs.length === 1 ? "entry" : "entries");
+      byId("manager-log-count").textContent = `${visibleLogs.length} log ${noun}`;
+      const cols = all(".manager-log-column:checked").map((input) => Number(input.value));
+      const headers = ["Time","Source","Severity"];
+      byId("manager-log-list").hidden = logRaw;
+      const sorted = visibleLogs.map((row, index) => ({ row, index })).sort((a, b) => {
+        const i = logSort.index;
+        const comparison = i === 2 ? order[a.row[i]] - order[b.row[i]] : a.row[i].localeCompare(b.row[i]);
+        return logSort.descending ? -comparison : comparison;
+      });
+      const sortButton = (name, index) => `<button type="button" class="text-action" data-log-sort="${index}">${name}${logSort.index === index ? (logSort.descending ? " ↓" : " ↑") : ""}</button>`;
+      byId("manager-log-list").innerHTML = table([...cols.map((i) => sortButton(headers[i],i)),sortButton("Event",3)], sorted.map(({ row, index }) => ({
+        cells:[...cols.map((n) => row[n]),`<button type="button" class="text-action" data-log-row="${index}">${row[3]}</button>`],
+      })), "No matching events.");
+      const raw = byId("manager-log-raw-output");
+      raw.hidden = !logRaw;
+      raw.textContent = visibleLogs.length ? visibleLogs.map((row) => row.join(" · ")).join("\n") : "No matching events.";
+    }
+
+    function renderManagerStorage() {
+      const mode = byId("manager-storage-scope").value;
+      const host = mode === "host";
+      const current = mode === "all" ? storageSelection ?? managerWorkspace : managerWorkspace;
+      const rows = host ? [] : (mode === "all" ? workspaceRows : [managerWorkspace]);
+      const size = (w) => sampleStorageSizes.get(w.name) ?? w.home ?? "Not scanned";
+      byId("manager-storage-list").innerHTML = table(["Workspace","OS","Private home"], rows.map((w) => ({
+        current:w === current,
+        cells:[`<button type="button" class="text-action" data-storage-target="${w.name}" aria-pressed="${w === current}">${w.name}</button>`,w.os,size(w)],
+      })), "Use Sessions to connect to the host and select one session tree. No whole-database operations.");
+      byId("manager-storage-detail").textContent = host ?
+        (managerSessionConnection?.store === "host" && managerSelectedSession ? `Selected host session: ${managerSelectedSession.title}` : "") :
+        `Selected target: ${current.name} · ws_demo_${current.name.replaceAll("-","_")} · ${size(current)} private home. Estimates are not exclusive disk usage.`;
+      byId("manager-storage-scan").hidden = host;
+      byId("manager-storage-remove").hidden = host;
+      byId("manager-storage-delete").hidden = !host;
+      byId("manager-storage-delete").disabled = managerSessionConnection?.store !== "host" || !managerSelectedSession;
+    }
+
+    function fillSettings(vals) {
+      for (const [id, value] of Object.entries(vals)) {
+        const field = byId(id);
+        if (typeof value === "boolean") field.checked = value;
+        else field.value = value;
+      }
+    }
+
+    function applySettings() {
+      const draft = Object.fromEntries(Object.entries(settingsDefaults).map(([id, value]) => {
+        const field = byId(id);
+        return [id, typeof value === "boolean" ? field.checked : field.value];
+      }));
+      const seconds = Number(draft["manager-refresh-seconds"]);
+      if (!Number.isInteger(seconds) || seconds < 1 || seconds > 60) {
+        byId("settings-notice").textContent = "Enter a whole number from 1 to 60 seconds. Nothing was applied.";
+        return;
+      }
+      activeSettings = draft;
+      tui.toggleAttribute("data-compact", draft["manager-density"] === "Compact");
+      byId("manager-workspace").querySelector("details").open = draft["manager-expand-details"];
+      if (byId("manager-session-source").value !== draft["settings-scope"]) {
+        byId("manager-session-source").value = draft["settings-scope"];
+        setManagerSessionConnection(false);
+      }
+      for (const [control, key] of [["manager-session-search","settings-session-filter"],["manager-log-source","settings-log-source"],
+        ["manager-log-severity","settings-severity"]]) byId(control).value = draft[key];
+      byId("manager-log-follow").checked = draft["settings-log-follow"];
+      byId("settings-monitor-status").textContent = `${draft["manager-auto-refresh"] ? "Auto" : "Paused"} · ${seconds}s · simulation`;
+      renderManagerSessions();
+      renderManagerLogs();
+      byId("settings-notice").textContent = "Applied for this page only. No live polling or host changes.";
+    }
+
+    function renderTerminal() {
+      const selector = terminalElement("terminal-session"), id = selector.value, retained = seenTerminals.has(id);
+      terminalElement("terminal-state").textContent = terminalAttached ? "Attached · Simulation" : retained ? "Detached · Session retained" : "Not attached";
+      terminalElement("terminal-attach").textContent = terminalAttached ? "Detach session" : retained ? "Reattach session" : "Attach session";
+      selector.disabled = terminalAttached;
+      terminalCard.toggleAttribute("data-attached", terminalAttached);
+      terminalScreen.textContent = terminalAttached ?
+        `Simulated native terminal · ${selector.selectedOptions[0].textContent}\n\n${sampleTerminals[id]}` :
+        retained ? "Viewer detached. Reattach to see this session’s sample output again." :
+          "No terminal attached. Choose a session and select Attach session to see sample output.";
+    }
+
+    function toggleTerminalAttachment() {
+      terminalAttached = !terminalAttached;
+      if (terminalAttached) seenTerminals.add(terminalElement("terminal-session").value);
+      renderTerminal();
+    }
+
+    function syncTerminalSize() {
+      if (!terminalViewport.getClientRects().length) return;
+      const { width, height } = terminalViewport.getBoundingClientRect();
+      terminalElement("terminal-size").value = `${Math.round(width)} × ${Math.round(height)} px`;
+    }
+
+    function resizeTerminal(width, height) {
+      const view = terminalViewport.ownerDocument.defaultView;
+      const cardStyle = view.getComputedStyle(terminalCard);
+      const available = terminalCard.clientWidth - parseFloat(cardStyle.paddingLeft) - parseFloat(cardStyle.paddingRight);
+      const maxHeight = parseFloat(view.getComputedStyle(terminalViewport).maxHeight);
+      terminalViewport.style.width = `${Math.round(clamp(width, Math.min(180, available), available))}px`;
+      terminalViewport.style.height = `${Math.round(clamp(height, 130, maxHeight))}px`;
+      syncTerminalSize();
+    }
+
+    function finishTerminalDrag() {
+      if (!terminalDrag) return;
+      const { pointerId, body } = terminalDrag;
+      terminalDrag = null;
+      body.removeAttribute("data-terminal-resizing");
+      terminalGrip.removeAttribute("data-dragging");
+      if (terminalGrip.hasPointerCapture(pointerId)) terminalGrip.releasePointerCapture(pointerId);
+    }
+
+    function setTerminalResizeContext(poppedOut) {
+      terminalGrip.hidden = poppedOut;
+      terminalElement("terminal-reset").hidden = poppedOut;
+      terminalElement("terminal-dock-hint").hidden = poppedOut;
+      terminalElement("terminal-window-hint").hidden = !poppedOut;
+    }
+
+    function dockTerminal(popup, { close = false, focus = false } = {}) {
+      if (popup !== terminalWindow) return;
+      finishTerminalDrag();
+      terminalWindow = null;
+      byId("terminal-dock").append(terminalCard);
+      terminalViewport.style.width = dockedTerminalSize.width;
+      terminalViewport.style.height = dockedTerminalSize.height;
+      dockedTerminalSize = null;
+      setTerminalResizeContext(false);
+      terminalElement("terminal-popout").textContent = "Open in new window";
+      terminalElement("terminal-popout").setAttribute("aria-describedby", "terminal-window-notice");
+      byId("terminal-window-panel").hidden = true;
+      byId("terminal-window-notice").textContent = "Terminal returned to the manager.";
+      if (close && !popup.closed) popup.close();
+      if (focus && layout() === "tui") {
+        showTuiView("terminals");
+        window.focus();
+        terminalElement("terminal-popout").focus();
+      }
+      syncTerminalSize();
+    }
+
+    function openTerminalWindow() {
+      const notice = byId("terminal-window-notice");
+      const popup = window.open("about:blank", "_blank", "popup=yes,width=950,height=690,resizable=yes,scrollbars=yes");
+      if (!popup || popup.closed) {
+        notice.textContent = "The browser blocked the terminal window. Allow pop-ups or keep using the docked terminal.";
+        return;
+      }
+      try {
+        const doc = popup.document;
+        doc.documentElement.lang = "en";
+        doc.title = "oc-box · Session terminal";
+        const viewport = doc.createElement("meta");
+        viewport.name = "viewport";
+        viewport.content = "width=device-width, initial-scale=1";
+        const scheme = doc.createElement("meta");
+        scheme.name = "color-scheme";
+        scheme.content = "dark";
+        doc.head.append(viewport, scheme, document.querySelector("style").cloneNode(true));
+        doc.body.className = "terminal-window";
+        const header = doc.createElement("header");
+        header.className = "terminal-window-title";
+        const title = doc.createElement("h1");
+        title.textContent = "oc-box · Session terminal";
+        const badge = doc.createElement("span");
+        badge.className = "tag demo";
+        badge.textContent = "Synthetic demo";
+        header.append(title, badge);
+        doc.body.replaceChildren(header);
+        popup.opener = null;
+        dockedTerminalSize = { width:terminalViewport.style.width, height:terminalViewport.style.height };
+        terminalWindow = popup;
+        popup.addEventListener("pagehide", () => dockTerminal(popup));
+        popup.addEventListener("resize", syncTerminalSize);
+        doc.body.append(terminalCard);
+        terminalViewport.style.removeProperty("width");
+        terminalViewport.style.removeProperty("height");
+        setTerminalResizeContext(true);
+        terminalElement("terminal-popout").textContent = "Return to manager";
+        terminalElement("terminal-popout").removeAttribute("aria-describedby");
+        byId("terminal-window-panel").hidden = false;
+        notice.textContent = "";
+        popup.focus();
+        terminalElement("terminal-attach").focus();
+        syncTerminalSize();
+      } catch {
+        if (terminalWindow === popup) dockTerminal(popup, { close:true });
+        else popup.close();
+        notice.textContent = "The terminal window could not be opened. The docked terminal is still available.";
+      }
+    }
+
+    function checkTerminalWindow() {
+      if (terminalWindow?.closed) dockTerminal(terminalWindow);
+    }
+
+    function renderManagerBackups() {
+      const restoring = byId("manager-backup-action").value === "restore";
+      byId("backup-create").hidden = restoring;
+      byId("backup-restore").hidden = !restoring;
+      byId("backup-age-recipient-field").hidden = restoring;
+      byId("backup-age-identity-field").hidden = !restoring;
+      const plan = [];
+      let title;
+      if (restoring) {
+        const workspace = byId("backup-restore-workspace"), host = byId("backup-restore-host"), native = byId("backup-restore-native");
+        workspace.disabled = !["combined","workspace"].includes(inspectedArchive);
+        host.disabled = !["combined","host"].includes(inspectedArchive);
+        if (workspace.disabled) workspace.checked = false;
+        if (host.disabled) host.checked = false;
+        native.disabled = !host.checked;
+        if (native.disabled) native.checked = false;
+        byId("backup-destination-field").hidden = !workspace.checked;
+        const layoutNotes = { combined:"Workspace and host settings", host:"Host settings only", workspace:"Workspace only", sessions:"Session tree only" };
+        byId("backup-layout").textContent = inspectedArchive ? `Sample layout: ${layoutNotes[inspectedArchive]}. No archive was read.` :
+          "Inspect the sample to reveal available components.";
+        title = inspectedArchive ? "Restore · example scope" : "Restore · inspect the sample first";
+        if (workspace.checked) plan.push("Workspace data → a new destination, with fresh IDs. Does not start it.");
+        if (host.checked) plan.push("Host settings and encrypted vault. Existing host files are not overwritten.");
+        if (native.checked) plan.push("Native OpenCode config, plugins and credentials. Requires an additional authenticated review and explicit consent.");
+        if (inspectedArchive === "sessions") plan.push("Session tree → the connected Sessions source in a live workflow. Restores with fresh IDs.");
+        if (!plan.length) plan.push("No restore components selected.");
+        plan.push(byId("backup-age-identity").value ? "Unlock method: example age identity file." : "Unlock method: private password prompt in the live workflow.");
+      } else {
+        const kind = byId("manager-backup-kind"), source = byId("backup-source").value;
+        const workspace = byId("backup-include-workspace"), host = byId("backup-include-host");
+        const portable = byId("backup-portable"), native = byId("backup-include-export");
+        kind.disabled = source === "host";
+        byId("backup-kind-field").hidden = kind.disabled;
+        byId("backup-host-kind").hidden = !kind.disabled;
+        const sessionTree = kind.disabled || kind.value === "sessions";
+        byId("backup-create-switches").hidden = sessionTree;
+        portable.disabled = !workspace.checked;
+        if (portable.disabled) portable.checked = false;
+        native.disabled = !host.checked;
+        if (native.disabled) native.checked = false;
+        byId("backup-export-field").hidden = !native.checked;
+        byId("backup-workspace-field").hidden = sessionTree || (!workspace.checked && host.checked) || source !== "all";
+        byId("backup-root-field").hidden = !sessionTree;
+        const root = byId("backup-root");
+        const sourceCatalog = source === "host" ? hostCatalog : source === "all" ? [...workspaceCatalog,...otherCatalogs["atlas-api"]] :
+          managerWorkspace.name === "orbit-web" ? workspaceCatalog : otherCatalogs[managerWorkspace.name] ?? [];
+        const rootChoices = sourceCatalog.filter((row) => row[1] === "Root").map((row) => row[0]);
+        const previous = root.value;
+        if (Array.from(root.options, (option) => option.value).join("\n") !== rootChoices.join("\n")) {
+          root.replaceChildren(...rootChoices.map((name) => new Option(name, name)));
+          if (rootChoices.includes(previous)) root.value = previous;
+        }
+        const workspaceName = source === "all" ? byId("backup-workspace").value : managerWorkspace.name;
+        const target = sessionTree ? "session-tree.ocsession" : workspace.checked ? `${workspaceName}.ocbox` : "host-settings.ocbox";
+        byId("backup-output").value = `/example/archives/${target}`;
+        title = sessionTree ? "Create · session tree" : workspace.checked ? (portable.checked ? "Create · portable workspace" : "Create · full workspace") :
+          host.checked ? "Create · host-only backup" : "Create · choose what to include";
+        if (sessionTree) plan.push(root.value ? `One native session tree: ${root.value}. Includes history, not running state.` : "No sample session tree is available for this workspace.");
+        else {
+          if (workspace.checked) plan.push(`Workspace: ${workspaceName}. ${portable.checked ? "Container OS image omitted." : "Container OS image included."}`);
+          if (host.checked) plan.push("Host settings and the encrypted vault. Does not include the host database.");
+          if (native.checked) plan.push("Include the existing sample private credential export; do not generate an export.");
+        }
+        if (!plan.length) plan.push("No backup components selected.");
+        plan.push(byId("backup-age-recipient").value ? "Encryption: Migration key (sample public age recipient)." : "Encryption: password (default).");
+      }
+      byId("manager-backup-summary").textContent = title;
+      byId("backup-plan").replaceChildren(...plan.map((line) => Object.assign(document.createElement("li"), { textContent:line })));
+    }
+
+    function setLayout(name) {
+      if (!Object.hasOwn(layouts, name)) name = "studio";
+      endDrag();
+      document.documentElement.dataset.layout = name;
+      shell.hidden = name === "tui";
+      tui.hidden = !shell.hidden;
+      if (tui.hidden) byId("session-review").close();
+      if (!tui.hidden) showTuiView(managerView);
+      byId("layout-note").replaceChildren(Object.assign(document.createElement("strong"), { textContent: layouts[name][0] + ". " }), layouts[name][1]);
+      for (const button of all("[data-layout-option]")) button.setAttribute("aria-pressed", button.dataset.layoutOption === name);
+      showLibrary(false);
+      showInspector(name === "studio" && !overlay.matches);
+    }
+
+    function renderSessions(focusId) {
+      const list = byId("session-list");
+      const query = byId("search").value.trim().toLowerCase();
+      list.replaceChildren();
+      for (const button of all("[data-scope]")) button.setAttribute("aria-pressed", button.dataset.scope === scope);
+      for (const [group, label] of Object.entries(groups)) {
+        if (scope !== "all" && group !== scope) continue;
+        const rows = sessions.filter((s) =>
+          s.group === group && !(scope === "open" && s.parent) && s.title.toLowerCase().includes(query));
+        if (!rows.length) continue;
+        const section = document.createElement("section");
+        section.className = "group";
+        const heading = document.createElement("h3");
+        heading.className = "eyebrow";
+        heading.textContent = label;
+        section.append(heading);
+        for (const s of rows) {
+          const button = document.createElement("button");
+          button.type = "button";
+          button.className = `session${s.parent ? " child" : ""}`;
+          button.setAttribute("aria-current", s === selected);
+          button.innerHTML = `${icon(s.parent ? "child" : group === "archive" ? "archive" : "chat")}<span><span class="session-title"></span><small></small></span><span class="age"></span>`;
+          button.querySelector(".session-title").textContent = s.title;
+          button.querySelector("small").textContent = s.detail;
+          button.querySelector(".age").textContent = s.time;
+          button.addEventListener("click", () => selectSession(s, true));
+          section.append(button);
+          if (s.id === focusId) requestAnimationFrame(() => button.focus());
+        }
+        list.append(section);
+      }
+      if (!list.childElementCount) list.append(Object.assign(document.createElement("p"), { className:"muted", textContent:"No matching sessions." }));
+    }
+
+    function message(author, text) {
+      const entry = document.createElement("article");
+      entry.className = `message${author === "You" ? " you" : ""}`;
+      const label = document.createElement("div");
+      label.className = "by";
+      const badge = Object.assign(document.createElement("span"), { className:"avatar", textContent:author[0] });
+      badge.setAttribute("aria-hidden", "true");
+      label.append(badge, Object.assign(document.createElement("strong"), { textContent:author }));
+      entry.append(label, Object.assign(document.createElement("p"), { textContent:text }));
+      return entry;
+    }
+
+    function renderChat() {
+      const s = selected, log = byId("transcript");
+      byId("chat-title").textContent = s.title;
+      const source = s.parent ? "Child of open TUI tab" :
+        s.group === "open" ? "Open TUI tab" :
+        s.group === "archive" ? "Archived in workspace" :
+        s.id.startsWith("demo-") ? "Browser demo · Not a TUI tab" : "Workspace history · Not a TUI tab";
+      byId("chat-source").textContent = `OpenCode / ${source}`;
+      log.replaceChildren();
+      if (s.prompt) {
+        log.append(message("You", s.prompt));
+        const answer = message("OpenCode", s.reply);
+        if (s.tool) {
+          const tool = document.createElement("details");
+          tool.className = "tool";
+          tool.innerHTML = "<summary><strong></strong><span class=\"done\">Complete</span></summary><p></p>";
+          tool.querySelector("strong").textContent = s.tool;
+          tool.querySelector("p").textContent = s.result;
+          answer.append(tool);
+          const file = document.createElement("span");
+          file.className = "file";
+          file.innerHTML = icon("file");
+          file.append(s.file);
+          answer.append(file);
+        }
+        log.append(answer);
+      }
+      for (const text of messages.get(s.id) ?? []) {
+        log.append(message("You", text), message("OpenCode", "This is a local preview response. No message was sent to OpenCode or a model."));
+      }
+      if (!log.childElementCount) log.append(Object.assign(document.createElement("p"), { className:"muted", textContent:"Start a conversation to try the local composer." }));
+      const restriction = s.parent ? "Read-only child session." :
+        s.group === "archive" ? "Archived session preview. Editing isn’t part of this demo." : "";
+      byId("composer").hidden = !!restriction;
+      byId("readonly").hidden = !restriction;
+      byId("readonly-note").textContent = restriction;
+      byId("open-parent").hidden = !s.parent;
+      draft.value = drafts.get(s.id) ?? "";
+    }
+
+    function selectSession(session, fromList = false) {
+      selected = session;
+      if (fromList && narrow.matches) showLibrary(false);
+      renderSessions(fromList && !narrow.matches ? session.id : null);
+      renderChat();
+      if (fromList && narrow.matches) byId("sessions-toggle").focus();
+    }
+
+    function setPanel(name, focus = false) {
+      panel = name;
+      byId("panel-title").textContent = panels[name][0];
+      byId("panel-content").innerHTML = panels[name][1];
+      showInspector(true, focus);
+    }
+
+    for (const handle of splitters) {
+      const side = handle.dataset.split, pane = panes[side], direction = side === "left" ? 1 : -1;
+      handle.addEventListener("pointerdown", (event) => {
+        if (!event.isPrimary || event.button !== 0 || activeDrag) return;
+        event.preventDefault();
+        handle.focus({ preventScroll:true });
+        handle.setPointerCapture(event.pointerId);
+        activeDrag = { handle, start:event.clientX, width:pane.width, pointerId:event.pointerId };
+        handle.setAttribute("data-dragging", "");
+        document.body.setAttribute("data-resizing", "");
+      });
+      handle.addEventListener("pointermove", (event) => {
+        if (activeDrag?.pointerId === event.pointerId && activeDrag.handle === handle) {
+          resizePane(side, activeDrag.width + (event.clientX - activeDrag.start) * direction);
+        }
+      });
+      for (const type of ["pointerup","pointercancel","lostpointercapture"]) handle.addEventListener(type, (event) => {
+        if (activeDrag?.pointerId === event.pointerId && activeDrag.handle === handle) endDrag();
+      });
+      handle.addEventListener("dblclick", () => resetPane(side));
+      handle.addEventListener("keydown", (event) => {
+        const step = event.shiftKey ? 32 : 12;
+        const value = { ArrowLeft:pane.width - step * direction, ArrowRight:pane.width + step * direction, Home:pane.min, End:pane.max };
+        if (event.key === "Enter") resetPane(side);
+        else if (Object.hasOwn(value, event.key)) resizePane(side, value[event.key]);
+        else return;
+        event.preventDefault();
+      });
+    }
+    window.addEventListener("resize", () => endDrag());
+    let observedWidth;
+    new ResizeObserver(([entry]) => {
+      if (entry.contentRect.width === observedWidth) return;
+      observedWidth = entry.contentRect.width;
+      syncSplitters();
+    }).observe(shell);
+    for (const button of all("[data-layout-option]")) button.addEventListener("click", () => {
+      const name = button.dataset.layoutOption;
+      location.hash = name;
+      setLayout(name);
+    });
+    window.addEventListener("hashchange", () => {
+      const name = location.hash.slice(1);
+      if (layout() !== name) setLayout(name);
+    });
+    managerTabs.forEach((tab, index) => {
+      tab.addEventListener("click", () => showTuiView(tab.dataset.tuiView));
+      tab.addEventListener("keydown", (event) => {
+        const max = managerTabs.length - 1;
+        const target = { ArrowLeft:index ? index - 1 : max, ArrowRight:index === max ? 0 : index + 1, Home:0, End:max };
+        if (!Object.hasOwn(target, event.key)) return;
+        event.preventDefault();
+        showTuiView(managerTabs[target[event.key]].dataset.tuiView, true);
+      });
+    });
+    function selectManagerWorkspace(name) {
+      const workspace = workspaceRows.find((row) => row.name === name);
+      if (!workspace) return false;
+      managerWorkspace = workspace;
+      byId("manager-workspace-context").value = name;
+      renderManagerStatus();
+      if (byId("manager-session-source").value !== "host") setManagerSessionConnection(false);
+      renderManagerStorage();
+      renderManagerBackups();
+      return true;
+    }
+    byId("manager-workspaces").addEventListener("click", (event) => {
+      if (selectManagerWorkspace(event.target.closest("[data-inspect]")?.dataset.inspect)) {
+        byId("manager-workspaces").querySelector("[aria-pressed=true]").focus();
+      }
+    });
+    byId("manager-workspace-context").addEventListener("change", (event) => selectManagerWorkspace(event.target.value));
+    byId("manager-refresh-view").addEventListener("click", () => {
+      const refresh = { status:renderManagerStatus, sessions:renderManagerSessions, logs:renderManagerLogs, storage:renderManagerStorage };
+      refresh[managerView]?.();
+      byId("manager-refresh-notice").textContent = "Preview refreshed. No connection or host read was started.";
+    });
+    byId("settings-apply").addEventListener("click", applySettings);
+    byId("settings-defaults").addEventListener("click", () => {
+      fillSettings(settingsDefaults);
+      byId("settings-notice").textContent = "Defaults staged. Apply to use them.";
+    });
+    byId("settings-revert").addEventListener("click", () => {
+      fillSettings(activeSettings);
+      byId("settings-notice").textContent = "Draft reverted.";
+    });
+    byId("manager-session-source").addEventListener("change", () => setManagerSessionConnection(false));
+    byId("manager-session-connect").addEventListener("click", () => setManagerSessionConnection(true));
+    byId("manager-session-disconnect").addEventListener("click", () => setManagerSessionConnection(false));
+    for (const id of ["manager-session-search","manager-include-archives"]) byId(id).addEventListener("input", renderManagerSessions);
+    byId("manager-session-clear").addEventListener("click", () => {
+      byId("manager-session-search").value = "";
+      renderManagerSessions();
+      byId("manager-session-search").focus();
+    });
+    byId("manager-session-list").addEventListener("click", (event) => {
+      const id = event.target.closest("[data-session-id]")?.dataset.sessionId;
+      const row = managerSessionRows().find((entry) => entry.id === id);
+      if (!row) return;
+      managerSelectedSession = row;
+      byId("manager-session-notice").textContent = "";
+      renderManagerSessions();
+      renderManagerStorage();
+      byId("manager-session-list").querySelector("[aria-pressed=true]").focus({ preventScroll:true });
+    });
+    byId("manager-session-favorite").addEventListener("click", () => {
+      if (!managerSelectedSession) return;
+      managerSelectedSession.favorite = !managerSelectedSession.favorite;
+      renderManagerSessions();
+      byId("manager-session-notice").textContent = managerSelectedSession.favorite ? "Sample favorite added." : "Sample favorite removed.";
+    });
+    byId("manager-session-archive").addEventListener("click", () => reviewManagerSessionAction("archive"));
+    byId("manager-session-delete").addEventListener("click", () => reviewManagerSessionAction("delete"));
+    byId("session-review-confirm").addEventListener("input", (event) => {
+      byId("session-review-delete").disabled = event.target.value !== "DELETE";
+    });
+    byId("session-review-cancel").addEventListener("click", () => byId("session-review").close());
+    byId("session-review").addEventListener("close", () => { pendingSessionDeletion = null; });
+    byId("session-review-delete").addEventListener("click", () => {
+      if (!pendingSessionDeletion) return;
+      const { store, affected, action } = pendingSessionDeletion;
+      if (action === "delete" && byId("session-review-confirm").value !== "DELETE") return;
+      if (store !== managerSessionConnection?.store) return;
+      const selectedRow = affected[0];
+      let notice;
+      if (action === "delete") {
+        sampleCatalogs.set(store, sampleCatalogs.get(store).filter((row) => !affected.includes(row)));
+        managerSelectedSession = null;
+        notice = `Removed ${affected.length} sample ${affected.length === 1 ? "session" : "sessions"} from this catalog.`;
+      } else {
+        selectedRow.archived = !selectedRow.archived;
+        notice = selectedRow.archived ? "Sample session archived." : "Sample session restored from archive.";
+      }
+      pendingSessionDeletion = null;
+      byId("session-review").close();
+      renderManagerSessions();
+      renderManagerStorage();
+      byId("manager-session-notice").textContent = notice;
+      byId("manager-storage-notice").textContent = notice;
+      if (managerView === "sessions" && action === "delete") byId("manager-session-connect").focus();
+    });
+    for (const id of ["manager-log-search","manager-log-severity"]) byId(id).addEventListener("input", renderManagerLogs);
+    byId("manager-log-source").addEventListener("change", () => {
+      byId("manager-log-info").textContent = "";
+      renderManagerLogs();
+    });
+    byId("manager-log-follow").addEventListener("change", (event) => {
+      byId("manager-log-info").textContent = event.target.checked ? "Follow enabled for this preview. No background reads." : "Follow paused. Retained entries remain searchable.";
+    });
+    byId("manager-log-raw").addEventListener("click", (event) => {
+      logRaw = !logRaw;
+      event.currentTarget.setAttribute("aria-pressed", logRaw);
+      renderManagerLogs();
+    });
+    byId("manager-log-columns").addEventListener("click", (event) => {
+      const options = byId("manager-log-column-options");
+      options.hidden = !options.hidden;
+      event.currentTarget.setAttribute("aria-expanded", !options.hidden);
+    });
+    for (const control of all(".manager-log-column")) control.addEventListener("change", renderManagerLogs);
+    for (const name of ["podman","mirror"]) byId(`manager-log-${name}`).addEventListener("click", () => {
+      loadedLogSources.add(name);
+      byId("manager-log-source").value = name;
+      renderManagerLogs();
+      byId("manager-log-info").textContent = "Loaded synthetic entries only; no external source was read.";
+    });
+    byId("manager-log-list").addEventListener("click", (event) => {
+      const sorter = event.target.closest("[data-log-sort]");
+      if (sorter) {
+        const index = Number(sorter.dataset.logSort);
+        logSort = { index, descending:logSort.index === index && !logSort.descending };
+        renderManagerLogs();
+        byId("manager-log-list").querySelector(`[data-log-sort="${index}"]`).focus();
+        return;
+      }
+      const button = event.target.closest("[data-log-row]");
+      if (!button) return;
+      for (const old of byId("manager-log-list").querySelectorAll(".is-selected")) old.classList.remove("is-selected");
+      button.closest("tr").classList.add("is-selected");
+      selectedLog = visibleLogs[Number(button.dataset.logRow)];
+      byId("manager-log-details").disabled = !selectedLog;
+    });
+    byId("manager-log-details").addEventListener("click", () => {
+      if (selectedLog) byId("manager-log-info").textContent = selectedLog.join(" · ");
+    });
+    byId("manager-log-clear").addEventListener("click", () => {
+      const input = byId("manager-log-search");
+      input.value = "";
+      renderManagerLogs();
+      input.focus();
+    });
+    byId("manager-storage-scope").addEventListener("change", renderManagerStorage);
+    byId("manager-storage-list").addEventListener("click", (event) => {
+      const name = event.target.closest("[data-storage-target]")?.dataset.storageTarget;
+      const target = workspaceRows.find((row) => row.name === name);
+      if (!target || byId("manager-storage-scope").value !== "all") return;
+      storageSelection = target;
+      renderManagerStorage();
+      byId("manager-storage-list").querySelector("[aria-pressed=true]").focus();
+    });
+    byId("manager-storage-refresh").addEventListener("click", () => {
+      renderManagerStorage();
+      byId("manager-storage-notice").textContent = "Sample list refreshed. No host files were read.";
+    });
+    const storageTarget = () => byId("manager-storage-scope").value === "all" ? storageSelection ?? managerWorkspace : managerWorkspace;
+    byId("manager-storage-scan").addEventListener("click", () => {
+      const target = storageTarget();
+      sampleStorageSizes.set(target.name, target.home ?? "1.4 GiB · sample estimate");
+      renderManagerStorage();
+      byId("manager-storage-notice").textContent = `Shown an example estimate for ${target.name}. No scan was run.`;
+    });
+    byId("manager-storage-remove").addEventListener("click", () => {
+      const target = storageTarget();
+      byId("manager-storage-notice").textContent =
+        `Removal review only: ${target.name} (${`ws_demo_${target.name.replaceAll("-","_")}`}). A live removal preserves project files, host history and recovery provenance, and requires the owner and clients to exit.`;
+    });
+    byId("manager-storage-delete").addEventListener("click", () => reviewManagerSessionAction("delete"));
+    terminalElement("terminal-attach").addEventListener("click", toggleTerminalAttachment);
+    terminalElement("terminal-session").addEventListener("change", renderTerminal);
+    terminalElement("terminal-popout").addEventListener("click", () => {
+      if (terminalWindow) dockTerminal(terminalWindow, { close:true, focus:true });
+      else openTerminalWindow();
+    });
+    byId("terminal-focus-window").addEventListener("click", () => {
+      checkTerminalWindow();
+      terminalWindow?.focus();
+    });
+    byId("terminal-return-window").addEventListener("click", () => {
+      if (terminalWindow) dockTerminal(terminalWindow, { close:true, focus:true });
+    });
+    terminalCard.addEventListener("keydown", (event) => {
+      if (terminalAttached && event.ctrlKey && !event.altKey && !event.metaKey && event.code === "BracketRight") {
+        toggleTerminalAttachment();
+        event.preventDefault();
+      }
+    });
+    terminalGrip.addEventListener("pointerdown", (event) => {
+      if (terminalDrag || event.button !== 0 || !event.isPrimary) return;
+      event.preventDefault();
+      terminalGrip.setPointerCapture(event.pointerId);
+      const { width, height } = terminalViewport.getBoundingClientRect();
+      const body = terminalGrip.ownerDocument.body;
+      terminalDrag = { pointerId:event.pointerId, body, width, height, x:event.clientX, y:event.clientY };
+      body.setAttribute("data-terminal-resizing", "");
+      terminalGrip.setAttribute("data-dragging", "");
+    });
+    terminalGrip.addEventListener("pointermove", (event) => {
+      if (event.pointerId !== terminalDrag?.pointerId) return;
+      resizeTerminal(terminalDrag.width + event.clientX - terminalDrag.x, terminalDrag.height + event.clientY - terminalDrag.y);
+    });
+    for (const type of ["pointerup","pointercancel","lostpointercapture"]) terminalGrip.addEventListener(type, (event) => {
+      if (event.pointerId === terminalDrag?.pointerId) finishTerminalDrag();
+    });
+    terminalGrip.addEventListener("keydown", (event) => {
+      const steps = { ArrowLeft:[-1,0], ArrowRight:[1,0], ArrowUp:[0,-1], ArrowDown:[0,1] };
+      if (!Object.hasOwn(steps, event.key)) return;
+      event.preventDefault();
+      const [x,y] = steps[event.key], step = event.shiftKey ? 32 : 12;
+      const { width, height } = terminalViewport.getBoundingClientRect();
+      resizeTerminal(width + x * step, height + y * step);
+    });
+    window.addEventListener("focus", checkTerminalWindow);
+    window.addEventListener("pagehide", () => {
+      if (terminalWindow) dockTerminal(terminalWindow, { close:true });
+    });
+    terminalElement("terminal-reset").addEventListener("click", () => {
+      terminalViewport.style.removeProperty("width");
+      terminalViewport.style.removeProperty("height");
+      syncTerminalSize();
+    });
+    new ResizeObserver(syncTerminalSize).observe(terminalViewport);
+    byId("manager-backups").addEventListener("change", (event) => {
+      if (event.target.id === "backup-sample") {
+        inspectedArchive = null;
+        for (const id of ["backup-restore-workspace","backup-restore-host","backup-restore-native"]) byId(id).checked = false;
+      }
+      renderManagerBackups();
+    });
+    byId("backup-inspect").addEventListener("click", () => {
+      const sample = byId("backup-sample").value;
+      if (sample !== inspectedArchive) {
+        inspectedArchive = sample;
+        byId("backup-restore-workspace").checked = sample === "workspace" || sample === "combined";
+      }
+      renderManagerBackups();
+    });
+    overlay.addEventListener("change", () => showInspector(!overlay.matches && layout() === "studio", inspector.contains(document.activeElement)));
+    narrow.addEventListener("change", () => showLibrary(false));
+    for (const button of all("[data-scope]")) button.addEventListener("click", () => {
+      scope = button.dataset.scope;
+      renderSessions();
+    });
+    for (const button of all("[data-panel]")) button.addEventListener("click", () => setPanel(button.dataset.panel, true));
+    byId("search").addEventListener("input", () => renderSessions());
+    byId("sessions-toggle").addEventListener("click", () => {
+      const open = !library.hasAttribute("data-open");
+      showLibrary(open);
+      if (open) byId("search").focus();
+    });
+    byId("inspector-toggle").addEventListener("click", () => showInspector(inspector.hidden, true));
+    byId("inspector-close").addEventListener("click", () => showInspector(false, true));
+    byId("open-parent").addEventListener("click", () => {
+      const parent = sessions.find((s) => s.id === selected.parent);
+      if (parent) {
+        selectSession(parent);
+        draft.focus();
+      }
+    });
+    document.addEventListener("keydown", (event) => {
+      if (!loginStage.hidden) return;
+      if (layout() === "tui") {
+        if (managerView === "settings" && event.key === "Escape") byId("settings-revert").click();
+        if (!event.altKey && !event.ctrlKey && !event.metaKey && !event.isComposing &&
+            event.target.closest("[role=tablist]") && /^[1-7]$/.test(event.key)) {
+          showTuiView(managerTabs[Number(event.key) - 1].dataset.tuiView, true);
+          event.preventDefault();
+        }
+        return;
+      }
+      if (event.key === "Escape" && activeDrag) { endDrag(); return; }
+      if (event.key === "Tab" && !inspector.hidden && overlayMode()) {
+        event.preventDefault();
+        byId("inspector-close").focus();
+      }
+      if (event.key !== "Escape") return;
+      if (!inspector.hidden && overlayMode()) showInspector(false, true);
+      else if (library.hasAttribute("data-open")) {
+        showLibrary(false);
+        byId("sessions-toggle").focus();
+      }
+    });
+    byId("new-session").addEventListener("click", () => {
+      created += 1;
+      const s = { id:`demo-${created}`, title:`New conversation ${created}`, group:"history", detail:"Browser demo · Not a TUI tab", time:"now" };
+      sessions.splice(sessions.findIndex((row) => row.group === "history"), 0, s);
+      byId("search").value = "";
+      scope = "all";
+      if (narrow.matches) showLibrary(false);
+      selectSession(s);
+      draft.focus();
+    });
+    draft.addEventListener("input", () => drafts.set(selected.id, draft.value));
+    byId("composer").addEventListener("submit", (event) => {
+      event.preventDefault();
+      const text = draft.value.trim();
+      if (!text || byId("composer").hidden) return;
+      messages.set(selected.id, [...(messages.get(selected.id) ?? []), text]);
+      drafts.delete(selected.id);
+      renderChat();
+      draft.focus();
+    });
+
+    byId("panel-title").textContent = panels.status[0];
+    byId("panel-content").innerHTML = panels.status[1];
+    byId("host-metrics").innerHTML = [
+      ["Host CPU","18%","Overall utilization",18],
+      ["Host memory","9.0 / 32 GiB","28% used",28],
+      ["Host home file system","124 / 512 GiB","24% used",24],
+      ["Workspaces","3 / 6","Running / registered",null],
+    ].map(([title,value,note,amount]) => `<div class="card manager-stat"><h3 class="eyebrow">${title}</h3><p class="large">${value}</p>
+      <small class="muted">${note}</small>${amount === null ? "" : `<div class="metric"><progress aria-label="${title} used" max="100" value="${amount}"></progress></div>`}</div>`).join("");
+    byId("manager-activity").innerHTML = table(["Time","Severity","Event"], retainedEvents.slice(0,3).map((cells) => ({ cells })));
+    byId("manager-workspace-context").replaceChildren(...workspaceRows.map((w) => new Option(w.name, w.name)));
+    renderManagerStatus();
+    byId("manager-session-source").value = settingsDefaults["settings-scope"];
+    renderManagerSessions();
+    renderManagerLogs();
+    renderManagerStorage();
+    byId("backup-workspace").replaceChildren(...workspaceRows.map((w) => new Option(w.name, w.name)));
+    renderManagerBackups();
+    renderTerminal();
+    byId("settings-monitor-status").textContent = "Auto · 1s · simulation";
+    setLayout(location.hash.slice(1));
+    selectSession(selected);
+    byId("preview-password").addEventListener("click", () => showLogin(true));
+    byId("preview-tls").addEventListener("click", () => {
+      resetLoginField();
+      byId("tls-guide").showModal();
+    });
+    for (const button of all("[data-tls-mode]")) button.addEventListener("click", () => {
+      for (const choice of all("[data-tls-mode]")) {
+        const current = choice === button;
+        choice.setAttribute("aria-pressed", current);
+        byId(`tls-${choice.dataset.tlsMode}`).hidden = !current;
+      }
+    });
+    byId("tls-local-setup").addEventListener("click", () => {
+      byId("tls-local-review").hidden = false;
+      byId("tls-local-confirm").focus();
+    });
+    byId("tls-local-check").addEventListener("click", () => {
+      byId("tls-local-check-result").hidden = false;
+    });
+    byId("tls-local-confirm").addEventListener("click", () => {
+      byId("tls-local-status").textContent = "Approval previewed. The live setup would still need browser verification.";
+    });
+    byId("tls-guide-close").addEventListener("click", () => byId("tls-guide").close());
+    byId("login-skip").addEventListener("click", () => showLogin(false));
+    byId("web-logout").addEventListener("click", () => {
+      const url = new URL(location.href);
+      url.searchParams.set("auth", signedInUser ? "password" : "link-ended");
+      if (!signedInUser || !networkEntrance) url.searchParams.delete("bind");
+      location.replace(url.href);
+    });
+    byId("demo-new-link").addEventListener("click", () => {
+      const url = new URL(location.href);
+      url.searchParams.delete("auth");
+      url.searchParams.delete("bind");
+      location.replace(url.href);
+    });
+    document.addEventListener("click", (event) => {
+      const account = byId("web-account");
+      if (!account.contains(event.target)) account.open = false;
+    });
+    byId("web-account").addEventListener("keydown", (event) => {
+      if (event.key !== "Escape" || !byId("web-account").open) return;
+      byId("web-account").open = false;
+      byId("web-account-toggle").focus();
+      event.preventDefault();
+      event.stopPropagation();
+    });
+    loginShow.addEventListener("click", () => {
+      const show = loginPassword.type === "password";
+      loginPassword.type = show ? "text" : "password";
+      loginShow.textContent = show ? "Hide" : "Show";
+      loginShow.setAttribute("aria-pressed", show);
+      loginPassword.focus();
+    });
+    byId("login-form").addEventListener("submit", (event) => {
+      event.preventDefault();
+      const username = loginUser.value.trim();
+      const accepted = demoWebUsers.get(username) === loginPassword.value;
+      resetLoginField();
+      if (accepted) {
+        signedInUser = username;
+        showLogin(false);
+      }
+      else {
+        byId("login-error").textContent = "Incorrect demo username or password.";
+        loginPassword.setAttribute("aria-invalid", "true");
+        loginPassword.focus();
+      }
+    });
+    if (passwordEntrance || loggedOutLink) showLogin(true, loggedOutLink);
+    else {
+      byId("web-account").hidden = false;
+      byId("web-account-name").textContent = "Workspace guest";
+      byId("web-account-method").textContent = "One-use link";
+    }
+  </script>
+</body>
+</html>

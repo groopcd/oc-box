@@ -23,6 +23,28 @@ else:
     from check_release import source_identity
 
 
+_WEB_RUNTIME_FILES = (
+    "web_sessions.py",
+    "web_sessions.js",
+    "web_sessions.css",
+    "web_history.py",
+    "web_tls.py",
+    "web_local_origins.py",
+    "web_accounts.py",
+    "web_admission.py",
+    "web_handoff.py",
+    "web_native_pair.py",
+    "web_named_local.py",
+    "web_named_headers.py",
+    "web_bootstrap.py",
+    "web_account_ingress.py",
+    "web_app_ingress.py",
+    "web_pake_flow.py",
+    "web_pake_profile.py",
+    "web_pake_worker.py",
+)
+
+
 def check_build_identity(build, source, version):
     """Prove public/channel/source provenance, including sdist rebuild identity."""
     series, channel, baseline = source_identity(source)
@@ -63,11 +85,23 @@ def check_archives(directory):
         assert metadata["Requires-Python"] == ">=3.10"
         assert metadata["License-Expression"] == "GPL-3.0-or-later"
         requirements = metadata.get_all("Requires-Dist") or []
-        assert (
-            len(requirements) == 1
-            and requirements[0].startswith("cryptography>=44")
-            and 'extra == "vault"' in requirements[0]
+        assert len(requirements) == 3, requirements
+        assert any(
+            r.startswith("cryptography>=44") and 'extra == "vault"' in r
+            for r in requirements
         ), requirements
+        for dependency, lower, upper in (
+            ("textual", ">=8.2.8", "<9"),
+            ("pyte", ">=0.8.2", "<0.9"),
+        ):
+            assert any(
+                r.startswith(dependency)
+                and lower in r
+                and upper in r
+                and 'extra == "tui"' in r
+                for r in requirements
+            ), requirements
+        assert all("extra ==" in r for r in requirements), requirements
         for name in (
             "oc_box.py",
             "dependencies.py",
@@ -75,10 +109,33 @@ def check_archives(directory):
             "opencode_compat.py",
             "opencode_v2_io.py",
             "workspace_service.py",
+            "web_attachments.py",
+            "web_attachments.js",
+            *_WEB_RUNTIME_FILES,
+            "oc-box-mark.png",
             "workspace_control.py",
             "history_reader.py",
             "history_recovery.py",
+            "native_tabs.py",
+            "ui_state.py",
+            "ui_state_server.js",
+            "ui_state_tui.js",
+            "ui_state_rpc.js",
+            "ui_state_memory.js",
+            "file_preview.py",
+            "file_preview_io.py",
+            "file_preview_tui.tsx",
+            "file_preview_png.py",
+            "file_preview_host.py",
+            "file_open_formats.py",
             "session_terminal.py",
+            "sharing.py",
+            "attachments.py",
+            "attachment_io.py",
+            "host_drop.py",
+            "host_drop_io.py",
+            "host_drop_input.py",
+            "workspace_preferences.py",
             "plugin_compat.py",
             "plugin_bridge.js",
             "backups.py",
@@ -91,7 +148,27 @@ def check_archives(directory):
             "bootstrap.py",
             "sync_config.py",
             "terminal_ui.py",
+            "cli_help.py",
             "status_report.py",
+            "activity_log.py",
+            "journal_output.py",
+            "log_config.py",
+            "lifecycle_output.py",
+            "logs_cli.py",
+            "tui.py",
+            "tui_app.py",
+            "tui_clipboard.py",
+            "tui_backend.py",
+            "tui_status.py",
+            "tui_settings.py",
+            "tui_logs.py",
+            "tui_sessions.py",
+            "tui_terminal.py",
+            "tui_storage.py",
+            "tui_operations.py",
+            "tui_management.py",
+            "tui_notifications.py",
+            "session_backups.py",
             "updater.py",
             "update_channels.py",
             "package_updates.py",
@@ -106,13 +183,23 @@ def check_archives(directory):
             "docs/oc-box.info",
             "docs/opencode-2.md",
             "docs/host-plugins.md",
+            "docs/tui.md",
             "docs/update-channels.md",
+            "docs/web-shell.md",
             "completions/oc-box",
             "build-info.json",
             "distribution.json",
         ):
             assert "oc_box/" + name in names, name
         assert "oc_box/setup.py" not in names
+        assert "oc_box/web_tls_cli.py" not in names
+        assert "oc_box/web_tls_setup.py" not in names
+        assert not any(name.endswith(".wasm") for name in names), (
+            "unapproved web verifier"
+        )
+        web_runtime = {
+            name: wheel.read("oc_box/" + name) for name in _WEB_RUNTIME_FILES
+        }
         assert not any(
             "/tests/" in name
             or name.endswith(".pyc")
@@ -146,6 +233,8 @@ def check_archives(directory):
             "setup.py",
             "install.py",
             "src/_oc_box_build.py",
+            "src/oc_box/oc-box-mark.svg",
+            "src/oc_box/oc-box-mark.png",
             "tests/test_updater.py",
             "tests/test_update_channels.py",
             "tests/test_channel_updater.py",
@@ -156,15 +245,77 @@ def check_archives(directory):
             "src/oc_box/update_channels.py",
             "src/oc_box/package_updates.py",
             "tests/test_session_terminal.py",
+            "tests/test_web_attachments.py",
+            "tests/web_attachments_browser.mjs",
+            "tests/web_attachments_shell_dom.mjs",
+            "tests/smoke_web_attachments_v2.py",
+            "tests/test_sharing.py",
+            "tests/test_attachments.py",
+            "tests/test_attachment_io.py",
+            "tests/test_host_drop.py",
+            "tests/test_host_drop_io.py",
+            "tests/test_host_drop_input.py",
+            "tests/test_workspace_preferences.py",
+            "tests/test_logs_cli.py",
+            "tests/test_journal_output.py",
+            "tests/test_log_config.py",
+            "tests/test_cli_help.py",
+            "tests/test_lifecycle_output.py",
+            "tests/test_host_drop_preferences.py",
+            "tests/smoke_host_drop_v2.py",
+            "tests/smoke_attachments_v2.py",
+            "tests/test_sharing_transport.py",
+            "tests/smoke_sharing_v2.py",
+            "tests/smoke_sharing_host_helpers.py",
+            "tests/test_sharing_host_fixture.py",
+            "tests/test_sharing_host_oracles.py",
+            "tests/test_sharing_owner_control.py",
+            "tests/test_sharing_archive_scan.py",
+            "tests/test_sharing_pax_metadata.py",
+            "tests/test_sharing_pax_reason.py",
+            "tests/test_sharing_backup_probe.py",
+            "tests/test_sharing_backup_diagnostic.py",
+            "tests/test_sharing_fixture_provider.py",
+            "tests/test_sharing_session_payload.py",
             "tests/test_session_sync.py",
+            "tests/test_native_tabs.py",
+            "tests/test_native_tab_routing.py",
+            "tests/test_web_sessions.py",
+            "tests/web_sessions_dom.mjs",
+            "tests/smoke_web_sessions_v2.py",
+            "tests/test_web_layout_runtime.mjs",
+            "tests/smoke_web_layout_browser.py",
+            "docs/mockups/web-manager.html",
+            "tests/smoke_native_tabs_v2.py",
+            "tests/smoke_native_preferences_v2.py",
+            "tests/smoke_image_preview_preferences_v2.py",
+            "tests/test_sync_config_preferences.py",
+            "tests/test_history_source_lease.py",
+            "tests/test_release_announcement_workflows.py",
             "tests/test_workspace_control.py",
             "tests/test_history_reader.py",
             "tests/test_history_recovery.py",
             "tests/smoke_history_recovery_v2.py",
+            "tests/smoke_history_subagent_recovery_v2.py",
             "tests/test_private_memory.py",
             "tests/test_private_output.py",
             "tests/test_ci_ubuntu_apt.py",
             "tests/smoke_session_sync_v2.py",
+            "tests/smoke_tui_v2.py",
+            "tests/smoke_session_backups_v2.py",
+            "tests/smoke_session_backup_transport_v2.py",
+            "tests/test_tui_management.py",
+            "tests/test_tui_loading.py",
+            "tests/test_tui_delete_notifications.py",
+            "tests/test_tui_notifications.py",
+            "tests/test_tui_operation_results.py",
+            "tests/test_tui_operations.py",
+            "tests/test_tui_storage.py",
+            "tests/test_session_backups.py",
+            "tests/test_interactive_host_service_port.py",
+            "tests/test_tui_app.py",
+            "tests/test_tui_sessions.py",
+            "tests/test_activity_log.py",
             "tests/smoke_v2.py",
             "tests/plugin_bridge_fixture.mjs",
             "tests/copied_plugin_bytes.mjs",
@@ -172,16 +323,23 @@ def check_archives(directory):
             "tools/check_release.py",
             "tools/check_release_artifacts.py",
             "tests/test_release_artifacts.py",
-            "tests/test_native_smoke_profiles.py",
             "tests/test_native_host_profile.py",
             "tests/test_native_recovery_process.py",
+            "tests/test_native_smoke_profiles.py",
             "tests/test_v2_only_host_fixture.py",
-            "tools/test_v2_lifecycle_podman.py",
-            "tools/test_v2_lifecycle_native.py",
             "tools/native_host_profile.py",
+            "tools/test_v2_lifecycle_native.py",
+            "tools/test_v2_lifecycle_podman.py",
             "tests/test_release_channels.py",
             "tools/ci_ubuntu_apt.py",
             "tools/test_v2_podman.py",
+            "tools/test_sharing_podman.py",
+            "tools/sharing_archive_scan.py",
+            "tools/sharing_archive_scan_original.py",
+            "tools/sharing_backup_probe.py",
+            "tools/sharing_fixture_provider.py",
+            "tools/sharing_pax_reason.py",
+            "tools/diagnose_sharing_backup.py",
             "tools/migrate_host_plugins.py",
             "tools/port_host_plugins.py",
             "tools/native_plugins/output-clamp/index.js",
@@ -196,18 +354,63 @@ def check_archives(directory):
             "src/oc_box/opencode_compat.py",
             "src/oc_box/opencode_v2_io.py",
             "src/oc_box/workspace_service.py",
+            "src/oc_box/ui_state.py",
+            "src/oc_box/ui_state_memory.js",
+            "src/oc_box/ui_state_rpc.js",
+            "src/oc_box/ui_state_server.js",
+            "src/oc_box/ui_state_tui.js",
+            "src/oc_box/file_preview.py",
+            "src/oc_box/file_preview_io.py",
+            "src/oc_box/file_preview_tui.tsx",
+            "src/oc_box/file_preview_png.py",
+            "src/oc_box/file_preview_host.py",
+            "src/oc_box/file_open_formats.py",
+            "tests/test_file_preview.py",
+            "tests/test_file_preview_io.py",
+            "tests/test_file_preview_png.py",
+            "tests/test_file_preview_host.py",
+            "tests/test_file_open_formats.py",
+            "tests/test_file_open_relay.py",
+            "tests/smoke_file_preview_v2.py",
+            "tests/test_ui_state.py",
+            "tests/ui_state_fixture.mjs",
+            "tests/smoke_ui_state_v2.py",
+            "docs/ui-state.md",
             "src/oc_box/session_terminal.py",
+            "src/oc_box/sharing.py",
+            "src/oc_box/attachments.py",
+            "src/oc_box/attachment_io.py",
+            "src/oc_box/host_drop.py",
+            "src/oc_box/host_drop_io.py",
+            "src/oc_box/host_drop_input.py",
+            "src/oc_box/workspace_preferences.py",
+            "src/oc_box/lifecycle_output.py",
+            "src/oc_box/logs_cli.py",
+            "src/oc_box/journal_output.py",
+            "src/oc_box/log_config.py",
+            "src/oc_box/cli_help.py",
             "src/oc_box/plugin_compat.py",
             "src/oc_box/plugin_bridge.js",
             "src/oc_box/paths.py",
             "src/oc_box/version_info.py",
             "docs/oc-box.info",
+            "docs/web-shell.md",
             "docs/opencode-2.md",
+            "docs/sharing-host-acceptance.md",
+            "docs/sharing-handoff.md",
             "completions/oc-box",
             "LICENSE",
             "NOTICE",
         ):
             assert root + "/" + name in source.getnames(), name
+        for name, content in web_runtime.items():
+            relative = "src/oc_box/" + name
+            assert root + "/" + relative in source.getnames(), relative
+            module = source.extractfile(root + "/" + relative)
+            assert module is not None and module.read() == content, relative
+        assert not any(name.endswith(".wasm") for name in source.getnames()), (
+            "unapproved web verifier"
+        )
         version_file = source.extractfile(root + "/src/oc_box/version_info.py")
         assert version_file is not None
         sdist_version_source = version_file.read().decode()
@@ -220,7 +423,7 @@ def check_archives(directory):
     return wheels[0], build
 
 
-def check(directory, *, with_vault=False):
+def check(directory, *, with_vault=False, with_tui=False):
     wheel, build = check_archives(directory)
     version = build["distribution_version"]
     with tempfile.TemporaryDirectory(prefix="oc-box-wheel-check-") as temporary:
@@ -267,6 +470,65 @@ def check(directory, *, with_vault=False):
         )
         cli = environment / "bin/oc-box"
         assert run(cli, "--version").strip() == "oc-box " + build["version"]
+        overview = run(cli, "--help")
+        assert "COMMAND --help" in overview
+        assert "--image-preview" not in overview and "--delete-sessions" not in overview
+        web_help = run(cli, "web", "--help")
+        assert "--workspace-layout" in web_help and "native one-use link" in web_help
+        assert all(word not in web_help for word in ("--auth", "--bind", "web tls"))
+        assert "web-tls-local" not in run(cli, "doctor", "--help")
+        tls = subprocess.run(
+            [cli, "web", "tls", "setup", "localhost"],
+            cwd=work,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert tls.returncode == 2 and "unrecognized arguments" in tls.stderr
+        log_help = run(cli, "logs", "--help")
+        for option in (
+            "--level",
+            "--verbose",
+            "--table",
+            "--limit",
+            "--follow",
+            "--json",
+            "--journald",
+            "--path",
+            "--log-dir",
+        ):
+            assert option in log_help, option
+        begin_help = run(cli, "start", "--help")
+        assert "--image-preview" in begin_help and "--delete-sessions" not in begin_help
+        assert "--host-file-open" in begin_help and "--no-host-file-open" in begin_help
+        run(
+            python,
+            "-I",
+            "-c",
+            "from oc_box import oc_box as box; "
+            "assert not box.effective_host_file_open(box.parser().parse_args([]), {})",
+        )
+        for option in (
+            "--journald",
+            "--no-journald",
+            "--log-dir",
+            "--lifecycle-diagnostics",
+            "--verbose",
+        ):
+            assert option in begin_help, option
+        sync_help = run(cli, "sync", "--help")
+        assert (
+            "--lifecycle-diagnostics" in sync_help
+            and "--verbose" in sync_help
+            and "--image-preview" not in sync_help
+        )
+        logdir = work / "one-invocation-log"
+        assert run(cli, "logs", "--log-dir", str(logdir), "--path").strip() == str(
+            logdir / "activity.jsonl"
+        )
+        assert not run(cli, "logs", "--log-dir", str(logdir), "--verbose=ALL", "--json")
+        assert not logdir.exists()
         assert (
             run(python, "-m", "oc_box", "--version").strip()
             == "oc-box " + build["version"]
@@ -275,9 +537,9 @@ def check(directory, *, with_vault=False):
         assert "WORKSPACE ID" in run(cli, "list")
         assert "tumbleweed" in run(cli, "distros")
         assert json.loads(run(cli, "--status", "--json"))["workspaces"] == []
-        # Ownership detection is offline. Explicit upgrade now delegates to the
-        # verified package manager, so do not mutate/query public release state
-        # merely to validate an artifact (and root CLI upgrades are refused).
+        assert "No oc-box workspaces registered." in run(cli, "status", "--table")
+        # Ownership detection is offline. Explicit upgrade delegates to the
+        # verified package manager; artifact checks must not query or mutate it.
         assert "Python-package managed" in run(
             python,
             "-c",
@@ -285,9 +547,9 @@ def check(directory, *, with_vault=False):
             "assert updater.package_managed(oc_box.APP); "
             "print(updater.package_upgrade_message())",
         )
-        assert "--devel" in run(cli, "--help")
-        assert "--stable" in run(cli, "--help")
-        assert "--import-session" in run(cli, "--help")
+        upgrade_help = run(cli, "upgrade", "--help")
+        assert "--devel" in upgrade_help and "--stable" in upgrade_help
+        assert "--import-session" in begin_help
         completion = environment / "share/bash-completion/completions/oc-box"
         assert completion.is_file()
         assert run(cli, "completion", "bash") == completion.read_text()
@@ -321,12 +583,25 @@ def check(directory, *, with_vault=False):
             "os.write(fd,b'synthetic-package-check'); os.lseek(fd,0,0); "
             "assert os.read(fd,64)==b'synthetic-package-check'; os.close(fd)",
         )
-        assert "secrets" in run(cli, "--help")
-        assert "--recipient" in run(cli, "backup", "--help")
+        assert "secrets" in overview
+        backup_help = run(cli, "backup", "--help")
+        assert all(
+            flag in backup_help
+            for flag in ("--recipient", "--host", "--opencode-auth-export")
+        )
         assert "--no-open" in run(cli, "web", "--help")
-        assert "--maintenance" in run(cli, "--help")
-        assert "--min-passphrase-length" in run(cli, "backup", "--help")
-        assert "--identity" in run(cli, "restore", "--help")
+        assert "--read-only" in run(cli, "tui", "--help")
+        assert "--acknowledge-risk" in run(cli, "share", "--help")
+        assert "textual" not in run(
+            python, "-c", "import sys,oc_box.tui; print(' '.join(sys.modules))"
+        )
+        assert "--maintenance" in run(cli, "terminal", "--help")
+        assert "--min-passphrase-length" in backup_help
+        restore_help = run(cli, "restore", "--help")
+        assert all(
+            flag in restore_help
+            for flag in ("--identity", "--host", "--include-opencode")
+        )
         assert "--identity" in run(cli, "backup-info", "--help")
         assert "init" in run(cli, "secrets", "--help")
         assert "--min-passphrase-length" in run(cli, "secrets", "--help")
@@ -474,6 +749,36 @@ assert 'EXAMPLE_TOKEN' not in os.environ
 print('PASS: installed vault extra encrypts, unlocks, and selects without exposing values to os.environ or disk.')
 """
             print(run(python, "-c", exercise).strip())
+        if with_tui:
+            run(
+                python,
+                "-m",
+                "pip",
+                "install",
+                "--index-url",
+                "https://pypi.org/simple",
+                "--only-binary=:all:",
+                str(wheel.resolve()) + "[tui]",
+            )
+            exercise = """import asyncio
+from oc_box.tui import DemoBackend
+from oc_box.tui_app import DashboardApp
+from textual.widgets import Input
+async def check():
+    app=DashboardApp(DemoBackend(), read_only=True, demo=True)
+    async with app.run_test(size=(80,24)) as pilot:
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        assert len(app.report['workspaces'])==1
+        assert len(app.logs.search('ready'))==1
+        app.action_settings()
+        await pilot.pause()
+        assert app.screen.query_one('#pref-interval', Input).value=='1'
+        await pilot.press('escape')
+asyncio.run(check())
+print('PASS: installed TUI extra renders the synthetic dashboard without Podman or user state.')
+"""
+            print(run(python, "-c", exercise).strip())
     print(
         f"PASS: oc-box {version} wheel/sdist metadata, packaged resources/manuals, isolated CLI, workspace/status tools, and safe package-manager upgrades."
     )
@@ -488,5 +793,14 @@ if __name__ == "__main__":
         action="store_true",
         help="also resolve/test the optional crypto extra inside the temporary venv",
     )
+    parser.add_argument(
+        "--with-tui",
+        action="store_true",
+        help="also resolve/test the optional TUI extra in the temporary venv",
+    )
     arguments = parser.parse_args()
-    check(arguments.distribution_dir, with_vault=arguments.with_vault)
+    check(
+        arguments.distribution_dir,
+        with_vault=arguments.with_vault,
+        with_tui=arguments.with_tui,
+    )

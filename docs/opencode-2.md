@@ -1,18 +1,30 @@
-# OpenCode 2.x compatibility — stable
+# OpenCode 2.x compatibility
 
 <a id="opencode-1x-and-2x-compatibility"></a>
 
-[Documentation hub](README.md) · [Legacy 1.x guide](legacy/README.md) ·
-[Development compatibility](https://github.com/groopcd/oc-box/blob/devel/docs/opencode-2.md)
+> **Primary documentation: OpenCode 2.x.** For operating a 1.x installation,
+> use the [legacy guide](legacy/README.md). References to 1.x below are retained
+> for capability comparisons, copied-plugin compatibility, migration, downgrade
+> and source-scoped validation—not as the default setup path.
 
-**Stable-source scope (`master`).** This reference preserves stable runtime and
-validation behavior. OpenCode 2.x is the primary reader path; 1.x remains supported
-as legacy. Development-only integrations and newer recovery profiles belong to
-the linked `devel` reference, not this stable contract.
+[Documentation hub](README.md) · [Getting started](getting-started.md) ·
+[Credential guide](guides/credentials.md) · [Client guide](guides/clients.md)
 
-**On this page:** [Service and credentials](#environment-and-service-plan) ·
-[Compatibility map](#compatibility-map) · [History/downgrade](#history-and-downgrade-strategy) ·
-[Verification](#verification)
+**On this page**
+
+| Question | Start here |
+| --- | --- |
+| How do services, clients and credentials interact? | [Environment and service plan](#environment-and-service-plan) · [Concurrent clients](#concurrent-web-terminal-and-full-tui-clients) · [Global vault-first](#global-vault-first-from-the-first-project-launch) |
+| How do overrides and permissions differ? | [Workspace overrides](#intentional-workspace-overrides-and-one-off-opt-out) · [Plain host OpenCode](#plain-host-opencode-2x) · [Build defaults versus native autoapproval](#permissions-container-build-default-versus-native-autoapproval) |
+| Which capabilities differ between versions? | [Compatibility map](#compatibility-map) |
+| What happens to history during a downgrade? | [History and downgrade strategy](#history-and-downgrade-strategy) |
+| What was verified, and how are host checks scoped? | [Verification](#verification) · [Global-vault and Build host validation](#isolated-global-vault-and-build-approval-host-validation) · [Repeatable host validation](#repeatable-host-validation) |
+| Where are upstream details? | [Upstream references](#upstream-references) |
+
+Verification and host reports below retain their individual source identities
+and limitations; they are not a blanket acceptance claim for later builds.
+
+---
 
 Available since oc-box 1.5.x, with retained OpenCode 1.x support in 1.6. Validation uses
 unmodified OpenCode 1.19.5 and 2.2.6, plus accepted disposable Linux host/rootless
@@ -175,6 +187,12 @@ relevant server/session environment. Non-secret localhost endpoints become
 changing vault values/names; attach or native config reload does not replace the
 service environment. Changes to host config are copied at the next owning
 launch, while native V2 reload operates on the existing container copy.
+
+OpenCode's `opencode service set env` and `opencode service restart` manage the
+normal shared background service. They are not required for oc-box, including
+with OpenCode 2.3.0 and 2.4.0. oc-box starts its own private foreground service
+with the selected variables in its process environment. It does not persist
+vault values in native `service.json`.
 
 ### Intentional workspace overrides and one-off opt-out
 
@@ -399,7 +417,7 @@ Replacement refuses observed native host children and re-exports imports to
 verify messages and metadata, since CLI success can represent an import conflict.
 
 After client leases close, normal owner shutdown bounds its native activity wait
-to 30 seconds. An activity-wait refusal skips the entire final sync attempt.
+to 30 seconds. An activity-wait refusal skips the live-owner sync attempt.
 Timeout diagnostics separately report the query/poll phase and the last complete
 validated foreground/job counts, or `unavailable` if no complete pair was observed;
 counts are capped at `9999+`. They contain no native identifiers, commands or
@@ -411,8 +429,12 @@ explicit sync is not evidence that the row cleared: that path checks native
 exports without the original owner's activity wait. Retained jobs remain blocking
 in the live owner; neither diagnostics nor snapshots repair native job cleanup.
 
-The development candidate adds one bounded post-stop snapshot for supported
-2.2.6/2.2.7 shell-only timeouts. Its last validated pairs are routing hints, not
+Eligible timeouts can trigger one bounded post-stop snapshot: native 2.2.6/2.2.7
+uses the shell-only profile, and canonical stable 2.3.x uses the guarded
+shell/subagent profile. Host and container binaries must match the captured exact
+patch; a shared series does not waive contract/schema checks or certify untested
+future native behavior. Unsupported identities and incompatible contracts refuse.
+The last validated pairs are routing hints, not
 quiescence proof. The original owner must close normally with no attached clients;
 the actual old-producer boundary is a verified whole-container stop, not the exit
 of its host-side Podman wrapper. Stop intent can suppress the same-ID history-only
@@ -422,15 +444,22 @@ is performed by recovery.
 
 One non-executing private reader then supplies every inventory/export operation;
 no controller or managed-service recovery is published. Source and host destination
-guards refuse any native schedule row, unknown scheduler schemas and nonempty
+guards refuse any native scheduler row, unknown scheduler schemas and nonempty
 system configuration before service construction. Scheduler flags alone do not
 disable native pending-input rewakes. Isolated configuration, provider/tool/plugin
 denials and disabled warming supplement those guards. Foreground activity remains
 a before/after refusal tripwire. Existing projection/export checks and verified
 archive import remain unchanged. The reader may maintain native metadata; it is
-not a byte-read-only backup. Final cleanup stops the container, and even successful
-snapshots retain the original nonzero result and interrupted-work warning. This
-path has native/offline coverage only until the new focused host gates pass.
+not a byte-read-only backup. Final cleanup stops the container. A raw client exit
+of `0` may return `0` after a live timeout only after complete checked archival,
+native verification, successful recovery cleanup and a verified final stop.
+Interruption/unconfirmed-completion warnings remain. Raw failures, cancellation,
+unknown status, partial history and failed/uncertain cleanup stay nonzero and
+retain retry-sync guidance. This does not declare native jobs completed.
+Reviewed scripted host acceptance covers native 2.2.6 on the recorded runtime;
+native 2.2.7 reader coverage is offline-only. See the
+[test strategy](testing.md#reviewed-focused-recovery-host-acceptance) for exact
+identities, scope and integrated-release validation requirements.
 
 Once activity readiness passes, projected-history checks also reject messages
 omitted by native export while a direct user shell or compaction is running, or
@@ -740,7 +769,7 @@ auth cases remain separate. See [the edge workflow and limits](testing.md).
 
 ### Repeatable host validation
 
-Versions now use **1.6.N**, preserving the original commit-count patch baseline and
+Versions now use **1.7.N**, preserving the original commit-count patch baseline and
 upgrade ordering. Repeat relevant host validation before lifecycle/credential
 releases, using only isolated disposable resources.
 

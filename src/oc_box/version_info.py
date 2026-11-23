@@ -9,7 +9,7 @@ if __package__:
 else:
     from paths import source_root
 
-VERSION_SERIES = "1.6"
+VERSION_SERIES = "1.8"
 # A source-controlled identity, never an environment/build-time override.
 RELEASE_CHANNEL = "stable"
 # Retain the original stable patch-count baseline across minor-series changes.

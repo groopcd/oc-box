@@ -362,7 +362,7 @@ def scan_storage(root, sensitive):
             )
 
 
-def main(binary):
+def main(binary, expected_version="2.2.6"):
     sys.path.insert(0, str(APP))
     sys.path.insert(0, str(APP / "src"))
     from oc_box import (
@@ -426,7 +426,10 @@ def main(binary):
             version = opencode_compat.version(
                 bounded([binary, "--version"], host, root, sensitive, timeout=30)
             )
-            require(version == "2.2.6", "fixture requires unmodified OpenCode 2.2.6")
+            require(
+                version == expected_version,
+                "fixture OpenCode executable does not match the requested release",
+            )
             settings = Path(host["XDG_CONFIG_HOME"]) / "oc-box/config.json"
             box.atomic_json(settings, {"pass_env": [CUSTOM]})
             target = vault.vault_path()
@@ -518,7 +521,7 @@ def main(binary):
                             "project": str(project),
                             "home": str(root / label / "home"),
                             "container": "oc-box-synthetic-" + label,
-                            "opencode_version": "2.2.6",
+                            "opencode_version": version,
                         }
                         if policy is not None:
                             data["credentials"] = policy
@@ -528,7 +531,7 @@ def main(binary):
                     box.atomic_json(registry, data)
                     oracle = url + "/check/" + label
                     config = {
-                        **box.container_build_config("2.2.6"),
+                        **box.container_build_config(version),
                         "snapshots": False,
                         "formatter": False,
                         "update": "disable",
@@ -593,6 +596,14 @@ def main(binary):
                     }
                     config_path = (
                         Path(data["home"]) / ".config/opencode/oc-box-profile.json"
+                    )
+                    build = config_path.parent / "plugins/oc-box-build-permissions"
+                    build.mkdir(parents=True, exist_ok=True)
+                    (build / "package.json").write_text(
+                        '{"type":"module","main":"index.js"}', encoding="utf-8"
+                    )
+                    (build / "index.js").write_text(
+                        box.container_build_plugin(version), encoding="utf-8"
                     )
                     box.atomic_json(config_path, config)
                     value = {
@@ -962,6 +973,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--opencode")
     parser.add_argument(
+        "--expected-version", choices=("2.2.6", "2.3.0", "2.4.0"), default="2.2.6"
+    )
+    parser.add_argument(
         "--fixture-service", choices=("shell", "mcp"), help=argparse.SUPPRESS
     )
     parser.add_argument("--oracle", help=argparse.SUPPRESS)
@@ -975,7 +989,7 @@ if __name__ == "__main__":
             fixture_service(arguments.fixture_service, arguments.oracle)
         else:
             require(arguments.opencode is not None, "--opencode is required")
-            main(arguments.opencode)
+            main(arguments.opencode, arguments.expected_version)
     except FixtureFailure as error:
         print("FAIL: " + str(error), file=sys.stderr)
         sys.exit(1)

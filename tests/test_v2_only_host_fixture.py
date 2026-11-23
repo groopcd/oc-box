@@ -58,7 +58,7 @@ class V2OnlyHostFixtureTests(unittest.TestCase):
         ):
             with self.subTest(major=major, version=version):
                 with patch.object(box, "run") as run, self.assertRaises(ValueError):
-                    legacy.check_native_version(
+                    fixture.profiles.check_native_version(
                         Path("/example"), Path("/native"), major, expected=version
                     )
                 run.assert_not_called()
@@ -69,7 +69,9 @@ class V2OnlyHostFixtureTests(unittest.TestCase):
             root = Path(temporary)
             binary = self.fake_native(root)
             self.assertEqual(
-                legacy.check_native_version(root, binary, "2", expected="2.3.0"),
+                fixture.profiles.check_native_version(
+                    root, binary, "2", expected="2.3.0"
+                ),
                 "2.3.0",
             )
             with self.assertRaisesRegex(ValueError, "expected 2.2.6"):
@@ -885,8 +887,13 @@ class V2OnlyHostFixtureTests(unittest.TestCase):
             del good["store"]["configFile"]
             with self.assertRaises(safety.FixtureError):
                 fixture.validate_store_info(root, good, root / "temporary")
-            good["version"]["Version"] = "6.1.4"
-            fixture.validate_store_info(root, good, root / "temporary")
+            for version in ("6.1.4", "6.2.0"):
+                with self.subTest(version=version):
+                    good["version"]["Version"] = version
+                    fixture.validate_store_info(root, good, root / "temporary")
+            good["version"]["Version"] = "6.2.1"
+            with self.assertRaisesRegex(safety.FixtureError, "store-info-shape"):
+                fixture.validate_store_info(root, good, root / "temporary")
 
     def test_stale_missing_invalid_boot_marker_refuses_all_retained_engine_commands(
         self,

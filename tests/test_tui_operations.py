@@ -1,0 +1,1404 @@
+"""Explicit action reviews and secret-free foreground handoff, without lifecycle I/O."""
+
+from dataclasses import replace
+import io
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tarfile
+import tempfile
+from types import SimpleNamespace
+import unittest
+from unittest.mock import ANY, Mock, patch
+
+from oc_box import (
+    oc_box as box,
+    tui_operations as operations,
+    tui_storage,
+    workspace_service,
+)
+
+
+class OperationTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        self.state = self.root / "state"
+        environment = patch.dict(os.environ, {"OC_BOX_STATE_HOME": str(self.state)})
+        environment.start()
+        self.addCleanup(environment.stop)
+        self.project = self.root / "project"
+        self.project.mkdir()
+        self.record, self.data = box.create_workspace(self.project, "debian")
+        self.ident = self.data["id"]
+        self.output = self.root / "backup.ocbox"
+        self.controller = operations.OperationController(box)
+        self.forbidden = {}
+        for name in ("main", "podman", "run", "launch_credentials"):
+            replacement = patch.object(
+                box, name, side_effect=AssertionError("unexpected execution")
+            )
+            self.forbidden[name] = replacement.start()
+            self.addCleanup(replacement.stop)
+
+    def archive(self, path=None, names=None):
+        path = self.output if path is None else path
+        names = names or (
+            "key.age",
+            "manifest.age",
+            "project.age",
+            "home.age",
+            "registry.age",
+        )
+        with tarfile.open(path, "w") as archive:
+            for name in names:
+                value = b"SYNTHETIC_CIPHERTEXT"
+                info = tarfile.TarInfo(name)
+                info.size = len(value)
+                archive.addfile(info, io.BytesIO(value))
+        path.chmod(0o600)
+        return path
+
+    def plan(self, action="workspace-backup", **kwargs):
+        return self.controller.prepare(action, backup=self.output, **kwargs)
+
+    def refusal(self, reason, operation, *args, **kwargs):
+        with self.assertRaises(operations.OperationError) as caught:
+            operation(*args, **kwargs)
+        self.assertEqual(caught.exception.reason, reason)
+
+    def test_read_only_and_demo_write_refusal_precedes_file_access(self):
+        for demo, readonly, reason in (
+            (True, False, "demo"),
+            (False, True, "read-only"),
+        ):
+            controller = operations.OperationController(
+                box, demo=demo, read_only=readonly
+            )
+            for action in operations.ACTIONS - operations.READ_ACTIONS:
+                options = {
+                    "workspace-backup": {
+                        "host": True,
+                        "auth_export": self.root / "export",
+                    },
+                    "workspace-restore": {"host": True, "include_opencode": True},
+                }.get(action, {})
+                with (
+                    self.subTest(demo=demo, action=action),
+                    patch.object(operations, "real_path") as access,
+                    patch.object(box, "state_root") as state,
+                    patch.object(tui_storage, "read_workspace_action") as registry,
+                ):
+                    self.refusal(reason, controller.prepare, action, **options)
+                access.assert_not_called()
+                state.assert_not_called()
+                registry.assert_not_called()
+
+    def test_confirm_read_only_and_demo_refusals_precede_registration_access(self):
+        for flag, reason in (("read_only", "read-only"), ("demo", "demo")):
+            with self.subTest(flag=flag):
+                controller = operations.OperationController(box)
+                plan = controller.prepare(
+                    "workspace-backup", backup=self.output, workspace=self.ident
+                )
+                setattr(controller, flag, True)
+                with (
+                    patch.object(box, "state_root") as state,
+                    patch.object(tui_storage, "read_workspace_action") as registry,
+                ):
+                    self.refusal(reason, controller.confirm, plan, "")
+                state.assert_not_called()
+                registry.assert_not_called()
+
+    def test_false_duplicate_id_cannot_change_review_or_canonical_cli_dispatch(self):
+        from oc_box import backups
+
+        other_project = self.root / "misleading-project"
+        other_project.mkdir()
+        false_record = self.state / "workspaces" / ("0" * 32) / "workspace.json"
+        box.atomic_json(false_record, {**self.data, "project": str(other_project)})
+        self.data["private_fixture"] = "PRIVATE_REGISTRATION_VALUE"
+        box.atomic_json(self.record, self.data)
+        with (
+            patch.object(
+                box, "workspace_paths", side_effect=AssertionError("scan")
+            ) as scan,
+            patch.object(
+                box, "read_json", side_effect=AssertionError("raw read")
+            ) as raw,
+        ):
+            plan = self.plan(workspace=self.ident)
+            self.assertEqual(plan.request["project"], str(self.project))
+            self.assertNotIn(str(other_project), plan.review)
+            self.assertNotIn("PRIVATE_REGISTRATION_VALUE", repr(plan))
+            request = self.controller.confirm(plan, "")
+            self.assertNotIn("PRIVATE_REGISTRATION_VALUE", json.dumps(request))
+
+            def production_selector(runtime, argv, *, interaction, reviewed_workspace):
+                self.assertIs(runtime, box)
+                self.assertIsNone(interaction)
+                self.assertEqual(
+                    argv,
+                    ["backup", "--workspace", self.ident, "--output", str(self.output)],
+                )
+                self.assertEqual(reviewed_workspace(), (self.record, self.data))
+                return 0
+
+            with patch.object(backups, "cli", side_effect=production_selector) as cli:
+                self.assertEqual(operations.execute(box, request), 0)
+        scan.assert_not_called()
+        raw.assert_not_called()
+        cli.assert_called_once()
+        for operation in self.forbidden.values():
+            operation.assert_not_called()
+
+    def test_selected_directory_with_another_json_id_refuses_before_execution(self):
+        box.atomic_json(self.record, {**self.data, "id": "f" * 32})
+        self.refusal("workspace-validation", self.plan, workspace=self.ident)
+        self.refusal(
+            "workspace-validation",
+            operations._OperationBackend(box).selected,
+            self.ident,
+        )
+        for operation in self.forbidden.values():
+            operation.assert_not_called()
+
+    def test_targeted_actions_ignore_unrelated_fifo_without_scanning_registry(self):
+        unrelated = self.state / "workspaces" / ("0" * 32) / "workspace.json"
+        unrelated.parent.mkdir(mode=0o700)
+        os.mkfifo(unrelated, 0o600)
+        with (
+            patch.object(
+                box, "workspace_paths", side_effect=AssertionError("scan")
+            ) as scan,
+            patch.object(
+                box, "read_json", side_effect=AssertionError("raw read")
+            ) as raw,
+        ):
+            request = self.controller.confirm(self.plan(workspace=self.ident), "")
+            backend = operations._OperationBackend(box, request=request)
+            path, data = backend.selected(self.ident)
+        scan.assert_not_called()
+        raw.assert_not_called()
+        self.assertEqual(path, self.record)
+        self.assertEqual(data["project"], str(self.project))
+        for operation in self.forbidden.values():
+            operation.assert_not_called()
+
+    def test_selected_fifo_is_opened_nonblocking_then_refused_as_nonregular(self):
+        self.record.unlink()
+        os.mkfifo(self.record, 0o600)
+        original_open = os.open
+        flags_seen = []
+
+        def guarded_open(path, flags, *args, **kwargs):
+            if path == "workspace.json":
+                self.assertTrue(flags & os.O_NONBLOCK)
+                self.assertTrue(flags & os.O_NOFOLLOW)
+                flags_seen.append(flags)
+            return original_open(path, flags, *args, **kwargs)
+
+        with (
+            patch.object(operations.os, "open", side_effect=guarded_open),
+            patch.object(
+                box, "read_json", side_effect=AssertionError("raw read")
+            ) as raw,
+            patch.object(
+                box, "workspace_paths", side_effect=AssertionError("scan")
+            ) as scan,
+        ):
+            self.refusal("workspace-validation", self.plan, workspace=self.ident)
+        self.assertTrue(flags_seen)
+        raw.assert_not_called()
+        scan.assert_not_called()
+        for operation in self.forbidden.values():
+            operation.assert_not_called()
+
+    def test_selected_unsafe_metadata_matrix_refuses_and_inventory_skips(self):
+        original = self.record.read_bytes()
+        for kind in (
+            "oversized",
+            "symlink",
+            "hardlink",
+            "group-writable",
+            "wrong-container",
+            "wrong-volume",
+        ):
+            with self.subTest(kind=kind):
+                self.record.unlink()
+                self.record.write_bytes(original)
+                self.record.chmod(0o600)
+                alias = self.root / (kind + ".json")
+                if kind == "oversized":
+                    self.record.write_bytes(b" " * (tui_storage.MAX_RECORD_BYTES + 1))
+                elif kind == "symlink":
+                    alias.write_bytes(original)
+                    self.record.unlink()
+                    self.record.symlink_to(alias)
+                elif kind == "hardlink":
+                    os.link(self.record, alias)
+                elif kind == "group-writable":
+                    self.record.chmod(0o620)
+                elif kind == "wrong-container":
+                    box.atomic_json(self.record, {**self.data, "container": "foreign"})
+                else:
+                    box.atomic_json(
+                        self.record, {**self.data, "home_volume": "foreign"}
+                    )
+                with patch.object(
+                    box, "read_json", side_effect=AssertionError("raw read")
+                ) as raw:
+                    self.refusal(
+                        "workspace-validation", self.plan, workspace=self.ident
+                    )
+                    backend = operations._OperationBackend(box)
+                    self.refusal("workspace-validation", backend.selected, self.ident)
+                    self.assertEqual(backend.inventory(), [])
+                    self.assertEqual(backend.inventory_skipped, 1)
+                raw.assert_not_called()
+        for operation in self.forbidden.values():
+            operation.assert_not_called()
+
+    def test_host_association_inventory_skips_unrelated_unsafe_metadata_matrix(self):
+        original_open = os.open
+
+        def guarded_open(path, flags, *args, **kwargs):
+            if path == "workspace.json":
+                self.assertTrue(flags & os.O_NONBLOCK)
+                self.assertTrue(flags & os.O_NOFOLLOW)
+            return original_open(path, flags, *args, **kwargs)
+
+        other_id = "0" * 32
+        path = self.state / "workspaces" / other_id / "workspace.json"
+        data = {
+            **self.data,
+            "id": other_id,
+            "container": "oc-box-" + other_id,
+            "home_volume": "oc-box-home-" + other_id,
+        }
+        self.data["private_fixture"] = "PRIVATE_REGISTRATION_VALUE"
+        box.atomic_json(self.record, self.data)
+        for kind in (
+            "fifo",
+            "oversized",
+            "symlink",
+            "hardlink",
+            "group-writable",
+            "false-duplicate",
+            "wrong-resource",
+        ):
+            with self.subTest(kind=kind):
+                path.unlink(missing_ok=True)
+                box.atomic_json(path, data)
+                alias = self.root / ("unrelated-" + kind)
+                if kind == "fifo":
+                    path.unlink()
+                    os.mkfifo(path, 0o600)
+                elif kind == "oversized":
+                    path.write_bytes(b" " * (tui_storage.MAX_RECORD_BYTES + 1))
+                elif kind == "symlink":
+                    alias.write_text(json.dumps(data))
+                    path.unlink()
+                    path.symlink_to(alias)
+                elif kind == "hardlink":
+                    os.link(path, alias)
+                elif kind == "group-writable":
+                    path.chmod(0o620)
+                elif kind == "false-duplicate":
+                    box.atomic_json(path, self.data)
+                else:
+                    box.atomic_json(path, {**data, "container": "foreign"})
+                backend = operations._OperationBackend(box)
+                with (
+                    patch.object(operations.os, "open", side_effect=guarded_open),
+                    patch.object(
+                        box, "read_json", side_effect=AssertionError("raw read")
+                    ) as raw,
+                    patch.object(
+                        box, "validate_project", side_effect=AssertionError("project")
+                    ) as project,
+                ):
+                    self.assertEqual(
+                        backend.inventory(),
+                        [
+                            (
+                                self.record,
+                                {"id": self.ident, "project": str(self.project)},
+                            )
+                        ],
+                    )
+                    self.assertEqual(backend.inventory_skipped, 1)
+                    self.assertEqual(backend.associations("/synthetic/native.db"), [])
+                raw.assert_not_called()
+                project.assert_not_called()
+        for operation in self.forbidden.values():
+            operation.assert_not_called()
+
+    def test_operation_inventory_accepts_owned_legacy_0644_and_0755(self):
+        self.record.chmod(0o644)
+        for path in (self.record.parent, self.state / "workspaces", self.state):
+            path.chmod(0o755)
+        backend = operations._OperationBackend(box)
+        self.assertEqual(
+            backend.inventory(),
+            [(self.record, {"id": self.ident, "project": str(self.project)})],
+        )
+        self.assertEqual(backend.inventory_skipped, 0)
+        self.controller.confirm(self.plan(workspace=self.ident), "")
+
+    def test_parent_confirmation_and_child_execution_bind_registry_directory_identity(
+        self,
+    ):
+        plan = self.plan(workspace=self.ident)
+        request = self.controller.confirm(plan, "")
+        pending = self.plan(workspace=self.ident)
+        before = tui_storage.read_workspace_action(box, self.ident)
+        old = self.root / "old-state"
+        self.state.rename(old)
+        self.state.mkdir(mode=0o700)
+        (old / "workspaces").rename(self.state / "workspaces")
+        after = tui_storage.read_workspace_action(box, self.ident)
+        self.assertEqual(before.identity, after.identity)
+        self.assertEqual(before.fingerprint, after.fingerprint)
+        self.assertNotEqual(before.registry_identity, after.registry_identity)
+        self.refusal("selection-changed", self.controller.confirm, pending, "")
+        self.refusal("selection-changed", operations.execute, box, request)
+        backend = operations._OperationBackend(box, request=request)
+        self.refusal("selection-changed", backend.selected, self.ident)
+        for operation in self.forbidden.values():
+            operation.assert_not_called()
+
+    def test_backup_engine_handoff_rechecks_registration_after_child_validation(self):
+        from oc_box import backups
+
+        for change in ("record", "registry"):
+            with self.subTest(change=change):
+                request = self.controller.confirm(
+                    self.plan(workspace=self.ident, host=change == "registry"), ""
+                )
+                old = self.root / "old-registry"
+
+                def engine(_runtime, _argv, *, reviewed_workspace, **_options):
+                    self.assertEqual(reviewed_workspace(), (self.record, self.data))
+                    if change == "record":
+                        box.atomic_json(self.record, {**self.data, "distro": "ubuntu"})
+                    else:
+                        self.state.rename(old)
+                        self.state.mkdir(mode=0o700)
+                        (old / "workspaces").rename(self.state / "workspaces")
+                    reviewed_workspace()
+                    self.fail("execution was allowed to use a changed registration")
+
+                interaction = Mock() if change == "registry" else None
+                with patch.object(backups, "cli", side_effect=engine) as cli:
+                    self.refusal(
+                        "selection-changed",
+                        operations.execute,
+                        box,
+                        request,
+                        interaction=interaction,
+                    )
+                cli.assert_called_once()
+                if change == "record":
+                    box.atomic_json(self.record, self.data)
+        for operation in self.forbidden.values():
+            operation.assert_not_called()
+
+    def test_child_workspace_connection_uses_canonical_target_and_review_bindings(self):
+        self.data["opencode_version"] = "2.2.6"
+        box.atomic_json(self.record, self.data)
+        wrong = self.state / "workspaces" / ("0" * 32) / "workspace.json"
+        box.atomic_json(wrong, {**self.data, "project": str(self.root / "wrong")})
+        request = self.controller.confirm(self.plan(workspace=self.ident), "")
+        backend = operations._OperationBackend(box, request=request)
+        lease = Mock()
+        lease.__enter__ = Mock(return_value={})
+        lease.__exit__ = Mock(return_value=False)
+        with (
+            patch.object(
+                box, "read_json", side_effect=AssertionError("raw read")
+            ) as raw,
+            patch.object(
+                box, "workspace_paths", side_effect=AssertionError("scan")
+            ) as scan,
+            patch.object(workspace_service, "attach", return_value=lease) as attach,
+            patch.object(
+                workspace_service, "api", return_value={"version": "2.2.6", "pid": 42}
+            ),
+        ):
+            connection = backend.session_connection(self.ident)
+            self.assertEqual(connection.store, self.ident)
+            connection.close()
+        raw.assert_not_called()
+        scan.assert_not_called()
+        self.assertEqual(attach.call_args.args[1], self.record)
+        self.assertEqual(attach.call_args.args[2]["project"], str(self.project))
+        lease.__exit__.assert_called_once()
+        box.atomic_json(self.record, {**self.data, "distro": "ubuntu"})
+        with patch.object(workspace_service, "attach") as attach:
+            self.refusal("selection-changed", backend.session_connection, self.ident)
+        attach.assert_not_called()
+
+    def test_exposure_refusal_remains_fixed_before_prepare_confirm_and_child(self):
+        with patch.object(box, "APP", self.project):
+            self.refusal("trusted-path-exposure", self.plan, workspace=self.ident)
+        plan = self.plan(workspace=self.ident)
+        with patch.object(box, "APP", self.project):
+            self.refusal("trusted-path-exposure", self.controller.confirm, plan, "")
+        plan = self.plan(workspace=self.ident)
+        request = self.controller.confirm(plan, "")
+        for operation, args in (
+            (operations.execute, (box, request)),
+            (
+                operations._OperationBackend(box, request=request).selected,
+                (self.ident,),
+            ),
+        ):
+            with (
+                self.subTest(operation=operation.__name__),
+                patch.object(box, "APP", self.project),
+            ):
+                self.refusal("trusted-path-exposure", operation, *args)
+        for operation in self.forbidden.values():
+            operation.assert_not_called()
+
+    def test_workspace_backup_review_is_single_use_and_has_no_execution(self):
+        plan = self.plan(workspace=self.ident)
+        self.assertIn(self.ident, plan.review)
+        self.assertIn("global vault", plan.review)
+        self.assertIn("a new backup password (no public recipients)", plan.review)
+        self.assertEqual(plan.confirmation, "")
+        request = self.controller.confirm(plan, "")
+        self.assertEqual(request["workspace"], self.ident)
+        self.assertEqual(request["action"], "workspace-backup")
+        for flag in ("host", "include_opencode", "auth_export"):
+            self.assertNotIn(flag, request)
+        self.refusal("invalid-confirmation", self.controller.confirm, plan, "")
+        for call in self.forbidden.values():
+            call.assert_not_called()
+
+    def test_host_backup_without_workspace_selection_does_not_read_registry(self):
+        self.refusal(
+            "workspace-selection-required", self.plan, host=True, portable=True
+        )
+        with patch.object(tui_storage, "read_workspace_action") as registry:
+            plan = self.plan(host=True)
+            self.assertIn("Create encrypted host configuration backup", plan.review)
+            self.assertIn("No workspace or Podman resources", plan.review)
+            self.assertNotIn("leaves it stopped", plan.review)
+            self.assertEqual(plan.confirmation, "")
+            request = self.controller.confirm(plan, "")
+            self.forbidden["main"].side_effect = None
+            self.forbidden["main"].return_value = 0
+            self.assertEqual(operations.execute(box, request), 0)
+        registry.assert_not_called()
+        self.forbidden["main"].assert_called_once_with(
+            ["backup", "--output", str(self.output), "--host"]
+        )
+        for name in ("podman", "run", "launch_credentials"):
+            self.forbidden[name].assert_not_called()
+
+    def test_host_backup_review_names_every_selected_age_recipient(self):
+        recipients = ["age1" + (char * 58) for char in "ab"]
+        for workspace in (None, self.ident):
+            with self.subTest(workspace=workspace):
+                plan = self.plan(host=True, workspace=workspace, recipients=recipients)
+                self.assertIn("age public recipients (no password)", plan.review)
+                for recipient in recipients:
+                    self.assertIn(recipient, plan.review)
+                self.assertNotIn("a new backup password", plan.review)
+                self.assertEqual(
+                    self.controller.confirm(plan, "")["recipients"], recipients
+                )
+
+    def test_combined_portable_backup_passes_explicit_host_and_workspace_flags(self):
+        from oc_box import backups
+
+        plan = self.plan(workspace=self.ident, portable=True, host=True)
+        self.assertIn("workspace and host configuration", plan.review)
+        self.assertIn("Portable", plan.review)
+        self.assertIn(self.ident, plan.review)
+        self.assertIn("No native V2 credential export is included", plan.review)
+        request = self.controller.confirm(plan, "")
+        interaction = Mock()
+        with patch.object(backups, "cli", return_value=0) as cli:
+            self.assertEqual(
+                operations.execute(box, request, interaction=interaction), 0
+            )
+        cli.assert_called_once_with(
+            box,
+            [
+                "backup",
+                "--workspace",
+                self.ident,
+                "--output",
+                str(self.output),
+                "--portable",
+                "--host",
+            ],
+            interaction=interaction,
+            reviewed_workspace=ANY,
+            reviewed_paths={
+                "backup_parent": request["bindings"]["backup_parent"],
+                "backup_file": None,
+            },
+        )
+        self.assertEqual(
+            cli.call_args.kwargs["reviewed_workspace"](), (self.record, self.data)
+        )
+        self.forbidden["main"].assert_not_called()
+
+    def test_host_options_are_typed_and_action_bound_before_path_access(self):
+        export = self.root / "no-export"
+        for action, options, reason in (
+            ("workspace-backup", {"host": 1}, "invalid-backup-kind"),
+            ("workspace-restore", {"include_opencode": "true"}, "invalid-backup-kind"),
+            ("workspace-inspect", {"host": True}, "unsupported-action"),
+            ("session-backup", {"host": True}, "unsupported-action"),
+            ("backup-delete", {"host": True}, "backup-delete-disabled"),
+            (
+                "workspace-backup",
+                {"host": True, "include_opencode": True},
+                "unsupported-action",
+            ),
+            ("workspace-restore", {"include_opencode": True}, "unsupported-action"),
+            ("workspace-backup", {"auth_export": export}, "unsupported-action"),
+            (
+                "workspace-restore",
+                {"host": True, "auth_export": export},
+                "unsupported-action",
+            ),
+        ):
+            with self.subTest(action=action, options=options):
+                with patch.object(operations, "real_path") as path:
+                    self.refusal(reason, self.plan, action, **options)
+                path.assert_not_called()
+
+        request = self.controller.confirm(self.plan(host=True), "")
+        self.refusal(
+            "invalid-backup-kind", operations.execute, box, {**request, "host": 1}
+        )
+        self.refusal(
+            "unsupported-action",
+            operations.execute,
+            box,
+            {**request, "include_opencode": True},
+        )
+        self.forbidden["main"].assert_not_called()
+
+    def test_native_credential_export_must_be_absolute_bounded_and_private(self):
+        from oc_box.host_backup_auth import MAX_EXPORT
+
+        for invalid in ("-", "", "relative.json", Path("relative.json"), True):
+            with self.subTest(invalid=invalid):
+                self.refusal(
+                    "invalid-auth-export", self.plan, host=True, auth_export=invalid
+                )
+        export = self.root / "native-export.json"
+        export.write_bytes(b"[]")
+        export.chmod(0o644)
+        self.refusal(
+            "private-owned-file-required", self.plan, host=True, auth_export=export
+        )
+        export.chmod(0o600)
+        alias = self.root / "export-alias"
+        alias.symlink_to(export)
+        self.refusal("symlink-path", self.plan, host=True, auth_export=alias)
+        alias.unlink()
+        os.link(export, alias)
+        self.refusal("regular-file-required", self.plan, host=True, auth_export=export)
+        alias.unlink()
+        for size in (0, MAX_EXPORT + 1):
+            with self.subTest(size=size):
+                os.truncate(export, size)
+                self.refusal(
+                    "invalid-auth-export", self.plan, host=True, auth_export=export
+                )
+
+    def test_native_credential_export_review_and_dispatch_use_metadata_only(self):
+        from oc_box import backups
+
+        export = self.root / "native-export.json"
+        content = b"PRIVATE_NATIVE_EXPORT_SENTINEL"
+        export.write_bytes(content)
+        export.chmod(0o600)
+        plan = self.plan(host=True, auth_export=export)
+        self.assertIn(str(export), plan.review)
+        self.assertEqual(plan.request["auth_export"], str(export))
+        stamp = operations.file_identity(export, private=True)
+        self.assertEqual(plan.request["bindings"]["auth_export"], stamp)
+        self.assertNotIn(content.decode("ascii"), repr(plan))
+        request = self.controller.confirm(plan, "")
+        for interaction in (None, Mock()):
+            with self.subTest(embedded=interaction is not None):
+                with patch.object(backups, "cli", return_value=0) as cli:
+                    self.assertEqual(
+                        operations.execute(box, request, interaction=interaction), 0
+                    )
+                cli.assert_called_once_with(
+                    box,
+                    [
+                        "backup",
+                        "--output",
+                        str(self.output),
+                        "--host",
+                        "--opencode-auth-export",
+                        str(export),
+                    ],
+                    interaction=interaction,
+                    reviewed_auth_export=stamp,
+                    **(
+                        {
+                            "reviewed_paths": {
+                                "backup_parent": request["bindings"]["backup_parent"],
+                                "backup_file": None,
+                            }
+                        }
+                        if interaction is not None
+                        else {}
+                    ),
+                )
+        self.assertEqual(export.read_bytes(), content)
+        self.forbidden["main"].assert_not_called()
+
+    def test_native_credential_export_replacement_refuses_confirmation_and_dispatch(
+        self,
+    ):
+        from oc_box import backups
+
+        export = self.root / "native-export.json"
+        export.write_bytes(b"[]")
+        export.chmod(0o600)
+        request = self.controller.confirm(self.plan(host=True, auth_export=export), "")
+        plan = self.plan(host=True, auth_export=export)
+        replacement = self.root / "replacement"
+        replacement.write_bytes(b"[]")
+        replacement.chmod(0o600)
+        replacement.replace(export)
+        self.refusal("selection-changed", self.controller.confirm, plan, "")
+        with patch.object(backups, "cli") as cli:
+            self.refusal(
+                "selection-changed",
+                operations.execute,
+                box,
+                request,
+                interaction=Mock(),
+            )
+        cli.assert_not_called()
+        self.forbidden["main"].assert_not_called()
+
+    def test_backup_reviews_use_single_use_button_approval_matrix(self):
+        for action in sorted(operations.ACTIONS):
+            with self.subTest(action=action):
+                archive = self.root / (action + ".ocbox")
+                options = {}
+                if action not in {"workspace-backup", "session-backup"}:
+                    self.archive(archive)
+                if action == "workspace-backup":
+                    options["workspace"] = self.ident
+                if action in {"workspace-restore", "session-restore"}:
+                    options["destination"] = (
+                        self.root / "new-target"
+                        if action == "workspace-restore"
+                        else self.project
+                    )
+                if action in {"session-backup", "session-restore"}:
+                    options.update(origin="host", store="/synthetic/native.db")
+                if action == "session-backup":
+                    options["session"] = {
+                        "id": "ses_synthetic",
+                        "projectID": "global",
+                        "location": {"directory": str(self.project)},
+                        "title": "Synthetic session",
+                        "time": {"created": 1, "updated": 2},
+                    }
+                plan = self.controller.prepare(action, backup=archive, **options)
+                self.assertEqual(plan.confirmation, "")
+                self.assertIn("leaves it stopped", plan.review)
+                self.assertEqual(self.controller.confirm(plan, ""), plan.request)
+                self.refusal("invalid-confirmation", self.controller.confirm, plan, "")
+        for call in self.forbidden.values():
+            call.assert_not_called()
+
+    def test_empty_phrase_does_not_authorize_an_unreviewed_or_disabled_action(self):
+        plan = self.plan(workspace=self.ident)
+        self.refusal("invalid-confirmation", self.controller.confirm, plan, None)
+        self.refusal("invalid-confirmation", self.controller.confirm, plan, "")
+        self.archive()
+        self.refusal("backup-delete-disabled", self.plan, "backup-delete")
+        self.assertTrue(self.output.exists())
+        self.forbidden["main"].assert_not_called()
+
+    def test_wrong_phrase_and_forged_review_consume_tokens(self):
+        plan = self.plan(workspace=self.ident)
+        self.refusal("invalid-confirmation", self.controller.confirm, plan, "wrong")
+        self.refusal("invalid-confirmation", self.controller.confirm, plan, "")
+        plan = self.plan(workspace=self.ident)
+        self.refusal(
+            "invalid-confirmation",
+            self.controller.confirm,
+            replace(plan, review="different"),
+            "",
+        )
+
+    def test_mutated_request_cannot_change_reviewed_target(self):
+        plan = self.plan(workspace=self.ident)
+        plan.request["backup"] = str(self.root / "other.ocbox")
+        self.refusal("invalid-confirmation", self.controller.confirm, plan, "")
+
+    def test_output_must_remain_absent_and_outside_project_and_state(self):
+        for parent in (self.project, self.state):
+            with self.subTest(parent=parent):
+                self.refusal(
+                    "protected-output-path",
+                    self.controller.prepare,
+                    "workspace-backup",
+                    workspace=self.ident,
+                    backup=parent / "out.ocbox",
+                )
+        plan = self.plan(workspace=self.ident)
+        self.output.write_bytes(b"new file")
+        self.refusal("output-exists", self.controller.confirm, plan, "")
+
+    def test_registry_replacement_and_root_switch_refuse_confirmation(self):
+        plan = self.plan(workspace=self.ident)
+        box.atomic_json(self.record, {**self.data, "distro": "ubuntu"})
+        self.refusal("selection-changed", self.controller.confirm, plan, "")
+        plan = self.plan(workspace=self.ident)
+        other = self.root / "other-state"
+        with patch.dict(os.environ, {"OC_BOX_STATE_HOME": str(other)}):
+            self.refusal("workspace-validation", self.controller.confirm, plan, "")
+
+    def test_restore_requires_new_directory_and_never_uses_force(self):
+        self.archive()
+        self.refusal("destination-required", self.plan, "workspace-restore")
+        self.refusal(
+            "destination-exists",
+            self.plan,
+            "workspace-restore",
+            destination=self.project,
+        )
+        plan = self.plan("workspace-restore", destination=self.root / "restored")
+        self.assertEqual(plan.confirmation, "")
+        request = self.controller.confirm(plan, "")
+        self.forbidden["main"].side_effect = None
+        self.forbidden["main"].return_value = 0
+        self.assertEqual(operations.execute(box, request), 0)
+        self.forbidden["main"].assert_called_once_with(
+            ["restore", str(self.output), "--project", str(self.root / "restored")]
+        )
+
+    def test_host_restore_options_do_not_imply_destination_or_native_profile(self):
+        from oc_box import backups
+
+        core = ("key.age", "manifest.age", "host.age")
+        combined = (*core, "project.age", "home.age", "registry.age")
+        target = self.root / "restored"
+        for names, destination, host, native, expected_options, review in (
+            (core, None, True, False, ["--host"], "will not be restored"),
+            (
+                combined,
+                None,
+                True,
+                True,
+                ["--host", "--include-opencode"],
+                "separate trust approval",
+            ),
+            (
+                combined,
+                target,
+                True,
+                True,
+                ["--project", str(target), "--host", "--include-opencode"],
+                "not one transaction",
+            ),
+            (
+                combined,
+                target,
+                False,
+                False,
+                ["--project", str(target)],
+                "Host settings will not be restored",
+            ),
+        ):
+            with self.subTest(destination=destination, host=host, native=native):
+                self.archive(names=names)
+                plan = self.plan(
+                    "workspace-restore",
+                    destination=destination,
+                    host=host,
+                    include_opencode=native,
+                )
+                self.assertIn(review, plan.review)
+                if destination is None:
+                    self.assertIn("No workspace or Podman resources", plan.review)
+                    self.assertNotIn("destination_parent", plan.request["bindings"])
+                request = self.controller.confirm(plan, "")
+                interaction = Mock()
+                with patch.object(backups, "cli", return_value=0) as cli:
+                    self.assertEqual(
+                        operations.execute(box, request, interaction=interaction), 0
+                    )
+                cli.assert_called_once_with(
+                    box,
+                    ["restore", str(self.output), *expected_options],
+                    interaction=interaction,
+                    reviewed_paths={
+                        name: request["bindings"][name]
+                        for name in (
+                            "backup_parent",
+                            "backup_file",
+                            "destination_parent",
+                        )
+                        if name in request["bindings"]
+                    },
+                )
+
+    def test_input_replaced_after_review_is_refused_before_cli(self):
+        self.archive()
+        plan = self.plan("workspace-inspect")
+        self.output.unlink()
+        self.archive()
+        self.refusal("selection-changed", self.controller.confirm, plan, "")
+        self.forbidden["main"].assert_not_called()
+
+    def test_readonly_can_inspect_but_cannot_be_weakened_after_prepare(self):
+        self.archive()
+        controller = operations.OperationController(box, read_only=True)
+        plan = controller.prepare("workspace-inspect", backup=self.output)
+        self.assertEqual(controller.confirm(plan, "")["action"], "workspace-inspect")
+        controller.read_only = False
+        self.output.unlink()
+        plan = controller.prepare(
+            "workspace-backup", workspace=self.ident, backup=self.output
+        )
+        controller.read_only = True
+        self.refusal("read-only", controller.confirm, plan, "")
+
+    def test_session_source_and_native_selection_are_explicit(self):
+        self.refusal("source-selection-required", self.plan, "session-backup")
+        self.refusal(
+            "source-changed",
+            self.plan,
+            "session-backup",
+            origin="workspace",
+            store="other",
+            workspace=self.ident,
+        )
+        self.refusal(
+            "session-selection-required",
+            self.plan,
+            "session-backup",
+            origin="host",
+            store="/synthetic/native.db",
+        )
+        session = {
+            "id": "ses_synthetic",
+            "projectID": "global",
+            "location": {"directory": str(self.project)},
+            "title": "SYNTHETIC",
+            "time": {"created": 1, "updated": 2},
+        }
+        plan = self.plan(
+            "session-backup",
+            origin="host",
+            store="/synthetic/native.db",
+            session=session,
+        )
+        self.assertEqual(plan.request["session"], session)
+        self.assertIn("including native children", plan.review)
+
+    def test_archive_routing_uses_envelope_not_suffix_and_rechecks_open_file_identity(
+        self,
+    ):
+        core = ("key.age", "manifest.age")
+        workspace = (*core, "project.age", "home.age", "registry.age")
+        for names, kind in (
+            ((*core, "sessions.age"), "session"),
+            (workspace, "workspace"),
+            ((*workspace, "image.age"), "workspace"),
+            ((*core, "host.age"), "host"),
+            ((*core, "host.age", "host-auth.age"), "host"),
+            ((*workspace, "host.age"), "workspace-host"),
+            ((*workspace, "host.age", "image.age"), "workspace-host"),
+            ((*workspace, "host.age", "host-auth.age"), "workspace-host"),
+            ((*workspace, "host.age", "host-auth.age", "image.age"), "workspace-host"),
+        ):
+            with self.subTest(names=names, kind=kind):
+                self.archive(names=names)
+                identity = operations.file_identity(self.output)
+                self.assertEqual(
+                    operations.archive_kind(self.output, expected=identity), kind
+                )
+                self.output.write_bytes(b"replaced")
+                with self.assertRaises(operations.OperationError):
+                    operations.archive_kind(self.output, expected=identity)
+
+    def test_archive_routing_rejects_host_auth_without_a_supported_host_component(self):
+        core = ("key.age", "manifest.age")
+        workspace = (*core, "project.age", "home.age", "registry.age")
+        for names in (
+            (*core, "host-auth.age"),
+            (*workspace, "host-auth.age"),
+            (*core, "sessions.age", "host.age"),
+            (*core, "sessions.age", "host.age", "host-auth.age"),
+            (*core, "host.age", "image.age"),
+        ):
+            with self.subTest(names=names):
+                self.archive(names=names)
+                self.refusal(
+                    "unsupported-backup-file", operations.archive_kind, self.output
+                )
+
+    def test_backup_delete_does_not_offer_reviews_for_any_archive_kind(self):
+        core = ("key.age", "manifest.age")
+        for names in (
+            (*core, "project.age", "home.age", "registry.age"),
+            (*core, "sessions.age"),
+            (*core, "host.age"),
+            (
+                *core,
+                "project.age",
+                "home.age",
+                "registry.age",
+                "host.age",
+                "host-auth.age",
+            ),
+        ):
+            with self.subTest(names=names):
+                self.archive(names=names)
+                before = self.output.read_bytes()
+                with patch.object(operations, "real_path") as path:
+                    self.refusal("backup-delete-disabled", self.plan, "backup-delete")
+                path.assert_not_called()
+                self.assertEqual(self.output.read_bytes(), before)
+
+    def test_backup_delete_cannot_mutate_archive_or_neighbors_after_legacy_review(self):
+        for change in ("unchanged", "file-swap", "parent-swap"):
+            with self.subTest(change=change):
+                parent = self.root / change
+                parent.mkdir()
+                archive = self.archive(parent / "backup.ocbox")
+                original = archive.read_bytes()
+                sibling = self.archive(parent / "neighbor.ocbox")
+                # Construct the bindings made by an older review before the
+                # target is swapped, including its validated routing envelope.
+                plan = self.controller.prepare("workspace-inspect", backup=archive)
+                request = self.controller.confirm(plan, "")
+                operations.archive_kind(
+                    archive, expected=request["bindings"]["backup_file"]
+                )
+                request["action"] = "backup-delete"
+
+                retained = archive
+                if change == "file-swap":
+                    retained = archive.rename(parent / "retained.ocbox")
+                    archive.write_bytes(b"unreviewed replacement")
+                elif change == "parent-swap":
+                    old_parent = parent.rename(self.root / "renamed-parent")
+                    retained = old_parent / archive.name
+                    parent.mkdir()
+                    archive.write_bytes(b"unreviewed replacement")
+                    sibling.write_bytes(b"unreviewed neighbor")
+                observed = {
+                    folder: {path.name: path.read_bytes() for path in folder.iterdir()}
+                    for folder in {archive.parent, retained.parent}
+                }
+                progress = Mock()
+                with patch.object(operations.OperationController, "prepare") as review:
+                    self.refusal(
+                        "backup-delete-disabled",
+                        operations.execute,
+                        box,
+                        request,
+                        progress=progress,
+                    )
+                review.assert_not_called()
+                progress.assert_called_once_with(operation="backup-file-delete")
+                self.assertEqual(retained.read_bytes(), original)
+                for folder, entries in observed.items():
+                    self.assertEqual(
+                        {path.name: path.read_bytes() for path in folder.iterdir()},
+                        entries,
+                    )
+                self.assertTrue(self.project.exists())
+                self.assertTrue(self.record.exists())
+        self.forbidden["main"].assert_not_called()
+
+    def test_archive_routing_rejects_duplicate_and_foreign_members(self):
+        for names in (
+            ("key.age", "manifest.age", "sessions.age", "sessions.age"),
+            ("key.age", "manifest.age", "../foreign"),
+        ):
+            with self.subTest(names=names):
+                self.archive(names=names)
+                with self.assertRaises(operations.OperationError):
+                    operations.archive_kind(self.output)
+
+    def test_symlink_and_hardlink_inputs_are_refused(self):
+        self.archive()
+        alias = self.root / "alias"
+        alias.symlink_to(self.output)
+        self.refusal(
+            "symlink-path", self.controller.prepare, "workspace-inspect", backup=alias
+        )
+        alias.unlink()
+        os.link(self.output, alias)
+        self.refusal("regular-file-required", self.plan, "workspace-inspect")
+
+    def test_handoff_pins_runtime_state_and_keeps_request_out_of_argv_and_environment(
+        self,
+    ):
+        self.archive()
+        request = self.controller.confirm(self.plan("workspace-inspect"), "")
+        seen = []
+
+        def child(command, **kwargs):
+            seen.append(
+                json.loads(os.pread(kwargs["pass_fds"][0], operations.MAX_REQUEST, 0))
+            )
+            self.assertEqual(command[:3], [sys.executable, "-I", "-B"])
+            self.assertEqual(command[3], str(box.PACKAGE / "tui_operations.py"))
+            self.assertNotIn(str(self.output), command)
+            self.assertNotIn("PRIVATE_SECRET_SENTINEL", json.dumps(kwargs["env"]))
+            self.assertEqual(kwargs["env"]["OC_BOX_STATE_HOME"], str(self.state))
+            self.assertNotIn("stdout", kwargs)
+            self.assertNotIn("stderr", kwargs)
+            return 0
+
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "ACCEPTANCE_API_KEY": "PRIVATE_SECRET_SENTINEL",
+                    "PYTHONPATH": "PRIVATE_SECRET_SENTINEL",
+                },
+            ),
+            patch.object(operations.subprocess, "call", side_effect=child),
+        ):
+            self.assertEqual(operations.handoff(box, request), 0)
+        self.assertEqual(seen, [request])
+
+    def test_purge_handoff_has_no_project_or_history_deletion_flags(self):
+        plan = tui_storage.prepare_workspace_purge(box, self.ident)
+        request = operations.purge_request(box, plan, plan.phrase)
+        self.forbidden["main"].side_effect = None
+        self.forbidden["main"].return_value = 0
+        self.assertEqual(operations.execute(box, request), 0)
+        self.forbidden["main"].assert_called_once_with(
+            ["purge", "--workspace", self.ident, "--yes"]
+        )
+
+    def test_purge_handoff_checks_child_registry_binding(self):
+        plan = tui_storage.prepare_workspace_purge(box, self.ident)
+        request = operations.purge_request(box, plan, plan.phrase)
+        box.atomic_json(self.record, {**self.data, "distro": "ubuntu"})
+        self.refusal("selection-changed", operations.execute, box, request)
+        self.forbidden["main"].assert_not_called()
+
+    def test_invalid_operation_cannot_invoke_arbitrary_cli(self):
+        for value in (None, {}, {"version": 1, "action": "reset"}):
+            self.refusal("invalid-request", operations.execute, box, value)
+        self.forbidden["main"].assert_not_called()
+
+    def import_payload(self, *, large=False):
+        location = {"directory": str(self.project)}
+        return {
+            "info": {"id": "ses_restored", "location": location},
+            "location": location,
+            "messages": [
+                {
+                    "id": "msg_restored",
+                    "type": "user",
+                    "text": "PRIVATE_TRANSCRIPT_SENTINEL"
+                    + ("x" * (4 * 1024 * 1024) if large else ""),
+                }
+            ],
+        }
+
+    def test_large_host_import_streams_history_without_argv_or_auth_changes(self):
+        payload = self.import_payload(large=True)
+        imports = []
+
+        def native(command, **kwargs):
+            if command == ["opencode", "--version"]:
+                return SimpleNamespace(stdout="opencode v2.2.6\n")
+            if command == ["opencode", "api", "get", "/api/info"]:
+                return SimpleNamespace(stdout='{"data":{"pid":42,"version":"2.2.6"}}')
+            self.assertEqual(
+                command,
+                [
+                    "opencode",
+                    "session",
+                    "import",
+                    "/proc/self/fd/0",
+                    "--directory",
+                    str(self.project),
+                ],
+            )
+            self.assertNotIn("PRIVATE_TRANSCRIPT_SENTINEL", json.dumps(command))
+            self.assertNotIn("PRIVATE_TRANSCRIPT_SENTINEL", json.dumps(kwargs["env"]))
+            self.assertEqual(json.loads(kwargs["input"]), payload)
+            self.assertGreater(len(kwargs["input"]), 4 * 1024 * 1024)
+            self.assertTrue(kwargs["private"])
+            imports.append(command)
+            return SimpleNamespace(stdout="Imported session: ses_restored\n")
+
+        self.forbidden["run"].side_effect = native
+        self.assertIsNone(
+            operations._OperationBackend(box).host_request(
+                "POST", "/api/experimental/session/import", payload
+            )
+        )
+        self.assertEqual(len(imports), 1)
+        self.assertEqual(self.forbidden["run"].call_count, 4)
+
+    def test_import_identity_or_directory_mismatch_refuses_before_native_command(self):
+        payload = self.import_payload()
+        payload["info"]["location"] = {"directory": "/foreign"}
+        self.refusal(
+            "import-directory-mismatch",
+            operations._OperationBackend(box).host_request,
+            "POST",
+            "/api/experimental/session/import",
+            payload,
+        )
+        self.forbidden["run"].assert_not_called()
+
+    def test_host_import_refuses_changed_service_pid_without_retrying_import(self):
+        self.forbidden["run"].side_effect = [
+            SimpleNamespace(stdout='{"data":{"pid":42,"version":"2.2.6"}}'),
+            SimpleNamespace(stdout="opencode v2.2.6\n"),
+            SimpleNamespace(stdout="Imported session: ses_restored\n"),
+            SimpleNamespace(stdout='{"data":{"pid":43,"version":"2.2.6"}}'),
+        ]
+        self.refusal(
+            "source-changed",
+            operations._OperationBackend(box).host_request,
+            "POST",
+            "/api/experimental/session/import",
+            self.import_payload(),
+        )
+        self.assertEqual(self.forbidden["run"].call_count, 4)
+
+    def test_import_success_exit_without_verified_acknowledgement_is_uncertain(self):
+        self.forbidden["run"].side_effect = [
+            SimpleNamespace(stdout='{"data":{"pid":42,"version":"2.2.6"}}'),
+            SimpleNamespace(stdout="opencode v2.2.6\n"),
+            SimpleNamespace(stdout="SYNTHETIC_CONFLICT_OR_MALFORMED_REPLY"),
+        ]
+        self.refusal(
+            "import-acknowledgement-unverified",
+            operations._OperationBackend(box).host_request,
+            "POST",
+            "/api/experimental/session/import",
+            self.import_payload(),
+        )
+        self.assertEqual(self.forbidden["run"].call_count, 3)
+
+    def test_host_import_version_mismatch_refuses_before_import_or_service_replacement(
+        self,
+    ):
+        self.forbidden["run"].side_effect = [
+            SimpleNamespace(stdout='{"data":{"pid":42,"version":"2.3.0"}}'),
+            SimpleNamespace(stdout="opencode v2.2.6\n"),
+        ]
+        self.refusal(
+            "native-version-mismatch",
+            operations._OperationBackend(box).host_request,
+            "POST",
+            "/api/experimental/session/import",
+            self.import_payload(),
+        )
+        self.assertEqual(self.forbidden["run"].call_count, 2)
+        self.assertEqual(
+            self.forbidden["run"].call_args.args[0], ["opencode", "--version"]
+        )
+
+    def test_malformed_native_version_is_not_echoed_or_imported(self):
+        self.forbidden["run"].side_effect = [
+            SimpleNamespace(stdout='{"data":{"pid":42,"version":"2.2.6"}}'),
+            SimpleNamespace(stdout="PRIVATE_NATIVE_VERSION_SENTINEL"),
+        ]
+        self.refusal(
+            "native-version-unverified",
+            operations._OperationBackend(box).host_request,
+            "POST",
+            "/api/experimental/session/import",
+            self.import_payload(),
+        )
+        self.assertEqual(self.forbidden["run"].call_count, 2)
+
+    def test_cancelled_operation_review_is_not_reusable(self):
+        plan = self.plan(workspace=self.ident)
+        self.controller.cancel(plan)
+        self.refusal("invalid-confirmation", self.controller.confirm, plan, "")
+        self.forbidden["main"].assert_not_called()
+
+    def test_large_workspace_import_uses_existing_interactive_exec_and_private_owner(
+        self,
+    ):
+        connection = {
+            "url": "http://127.0.0.1:12345",
+            "password": "PRIVATE_CONTROL_SENTINEL",
+        }
+        payload = self.import_payload(large=True)
+        self.forbidden["run"].return_value = SimpleNamespace(
+            stdout="Imported session: ses_restored\n"
+        )
+        self.forbidden["run"].side_effect = None
+        result = operations._OperationBackend(box)._workspace_connection_request(
+            self.data, connection, "POST", "/api/experimental/session/import", payload
+        )
+        self.assertIsNone(result)
+        args, kwargs = self.forbidden["run"].call_args
+        command = args[0]
+        self.assertEqual(command[:3], ["podman", "exec", "-i"])
+        self.assertNotIn("-t", command)
+        self.assertEqual(
+            command[-8:],
+            [
+                box.CONTAINER_OPENCODE,
+                "session",
+                "import",
+                "/proc/self/fd/0",
+                "--directory",
+                str(self.project),
+                "--server",
+                connection["url"],
+            ],
+        )
+        self.assertNotIn("PRIVATE_CONTROL_SENTINEL", json.dumps(command))
+        self.assertNotIn("PRIVATE_TRANSCRIPT_SENTINEL", json.dumps(command))
+        self.assertEqual(
+            command.environment["OPENCODE_PASSWORD"], connection["password"]
+        )
+        self.assertEqual(json.loads(kwargs["input"]), payload)
+        self.assertTrue(kwargs["private"])
+
+    def test_non_import_workspace_requests_keep_existing_native_api_transport(self):
+        backend = operations._OperationBackend(box)
+        with patch.object(workspace_service, "api", return_value=None) as request:
+            self.assertIsNone(
+                backend._workspace_connection_request(
+                    self.data, {}, "DELETE", "/api/session/ses_existing"
+                )
+            )
+        request.assert_called_once_with(
+            box, self.data, {}, "DELETE", "/api/session/ses_existing", None, timeout=30
+        )
+
+    def test_session_restore_uses_same_child_review_plan_and_closes_it(self):
+        from oc_box import session_backups
+
+        self.archive(names=("key.age", "manifest.age", "sessions.age"))
+        for phrase, imported in (("RESTORE", True), ("wrong", False)):
+            with self.subTest(phrase=phrase):
+                plan = self.plan(
+                    "session-restore",
+                    origin="host",
+                    store="/synthetic/native.db",
+                    destination=self.project,
+                )
+                request = self.controller.confirm(plan, "")
+                connection = SimpleNamespace(
+                    origin="host",
+                    store="/synthetic/native.db",
+                    close=Mock(),
+                    ownership=Mock(),
+                    request=lambda *args: {"data": [], "cursor": {"next": None}},
+                )
+                backend = SimpleNamespace(
+                    session_connection=Mock(return_value=connection),
+                    associations=Mock(return_value=[]),
+                )
+                restore_plan = SimpleNamespace(
+                    review={"session_count": 1}, close=Mock()
+                )
+                with (
+                    patch.object(operations, "_OperationBackend", return_value=backend),
+                    patch.object(
+                        session_backups, "prepare_restore", return_value=restore_plan
+                    ) as prepare,
+                    patch.object(session_backups, "restore") as restore,
+                    patch("builtins.input", return_value=phrase),
+                    patch("sys.stdout", new_callable=io.StringIO),
+                ):
+                    self.assertEqual(
+                        operations.execute(box, request), 0 if imported else 1
+                    )
+                self.assertEqual(restore.call_count, int(imported))
+                if imported:
+                    self.assertIs(restore.call_args.args[1], restore_plan)
+                self.assertEqual(
+                    prepare.call_args.args[1:], (str(self.output), str(self.project))
+                )
+                restore_plan.close.assert_called_once()
+                connection.close.assert_called_once()
+
+    def test_partial_session_restore_reports_only_fresh_recovery_ids(self):
+        from oc_box import session_backups
+
+        self.archive(names=("key.age", "manifest.age", "sessions.age"))
+        plan = self.plan(
+            "session-restore",
+            origin="host",
+            store="/synthetic/native.db",
+            destination=self.project,
+        )
+        request = self.controller.confirm(plan, "")
+        connection = SimpleNamespace(
+            origin="host",
+            store="/synthetic/native.db",
+            close=Mock(),
+            ownership=Mock(),
+            request=lambda *args: {"data": [], "cursor": {"next": None}},
+        )
+        backend = SimpleNamespace(
+            session_connection=Mock(return_value=connection),
+            associations=Mock(return_value=[]),
+        )
+        restore_plan = SimpleNamespace(review={"session_count": 1}, close=Mock())
+        ident = "ses_" + "a" * 32
+        failure = session_backups.SessionBackupError(
+            "import-verification-failed", created_ids=(ident,), attempted_ids=(ident,)
+        )
+        with (
+            patch.object(operations, "_OperationBackend", return_value=backend),
+            patch.object(session_backups, "prepare_restore", return_value=restore_plan),
+            patch.object(session_backups, "restore", side_effect=failure),
+            patch("builtins.input", return_value="RESTORE"),
+            patch("sys.stdout", new_callable=io.StringIO) as output,
+        ):
+            with self.assertRaises(session_backups.SessionBackupError):
+                operations.execute(box, request)
+        self.assertIn(ident, output.getvalue())
+        self.assertIn('"automatic_rollback": false', output.getvalue())
+        restore_plan.close.assert_called_once()
+        connection.close.assert_called_once()
+
+    def test_isolated_script_uses_its_own_flat_runtime_without_optional_ui_dependencies(
+        self,
+    ):
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-I",
+                "-B",
+                str(box.PACKAGE / "tui_operations.py"),
+                "--invalid",
+            ],
+            env={"PATH": os.defpath},
+            capture_output=True,
+            timeout=15,
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(b"refused", result.stdout)
+        self.assertNotIn(b"Traceback", result.stderr)
+
+
+if __name__ == "__main__":
+    unittest.main()

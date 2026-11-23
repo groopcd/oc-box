@@ -1,0 +1,51 @@
+# Browser workspace design preview
+
+Open [`web-manager.html`](web-manager.html) as a local file. There are no
+companion files, dependencies, network requests or live service connections.
+It opens directly by default. Use **Preview sign-in** or append
+`?auth=password` to the file URL to open the password-mode preview. Use
+`workspace-demo` / `oc-box-demo` or `review-demo` / `oc-box-review`. Never
+enter real credentials. The top-left account menu shows the signed-in name or
+**Workspace guest** for the one-use-link preview, with **Log out** inside.
+Use `?auth=password&bind=all` to preview the explicit network sign-in variant.
+The HTML never opens a listener.
+See the [web sign-in design](web-sign-in.md) for the proposed launcher modes.
+
+- **Studio** keeps chat, sessions and the inspector side by side. Drag a
+  divider, or focus it and use Left/Right (Shift for larger steps, Home/End for
+  bounds). Double-click or press Enter on a divider to restore its default.
+  Pane widths are remembered in memory while comparing views. Either pane can
+  take the space up to the other pane and chat’s minimum widths; if needed,
+  the other pane temporarily gives up space.
+- **Dashboard** puts workspace cards first. **Chat focus** hides surrounding
+  panes until requested. On smaller screens, overlays and stacked panels do not
+  have splitters.
+- **Full TUI** is a browser adaptation of the seven manager views: Status,
+  Settings, Sessions, Terminals, Logs, Storage and Backup/restore. It has a
+  single top tab bar and no chat pane or terminal-style navigation sidebar.
+  Use the tabs, or focus the tab bar and use arrow keys or 1–7.
+  - **Sessions:** Connect to a sample source, search by title, ID or
+    directory, and select a row to preview Favorite, Archive/restore and
+    reviewed deletion. Changes apply to that fixture catalog only.
+  - **Logs:** Use the dedicated Search logs bar and the severity filter. Clear
+    search independently of severity.
+  - **Terminals:** In the manager, drag the corner grip or focus it and use
+    the arrow keys. In a separate window, the terminal automatically fills
+    the space available when the browser window is resized. There are no
+    resize sliders or visible scrollback bars. Attach, detach (`Ctrl+]`
+    while focused), and reattach in either context. Returning to the manager
+    or closing the pop-out keeps the simulated session state. If the browser
+    blocks the pop-up, the docked controls remain available.
+  - **Backup/restore:** Includes full/portable workspaces, host settings and
+    encrypted vault, a separate native OpenCode export/restore choice, session
+    trees, and Advanced age recipient/identity controls. Inspect a sample
+    archive layout to enable eligible restore options. All paths are fixtures;
+    there are no real file pickers, credential fields, or archive operations.
+
+A live browser manager would need separate authorization for host operations.
+A workspace OpenCode pairing does not grant access to host catalogs,
+terminals, configuration, or backups. This prototype does not implement or
+validate that live integration.
+
+See the [Textual parity checklist](manager-parity.md) for what is represented
+and what still needs design, implementation or validation.

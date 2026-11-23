@@ -35,10 +35,15 @@ class SessionHistoryHostFixtureTests(unittest.TestCase):
         self.source.mkdir()
         self.commit = "b" * 40
 
-    def source_files(self):
+    def source_files(self, version_source=None):
         self.ignored = b""
         self.files = {name: b"# audited helper\n" for name in runner.DONORS}
         self.files["src/oc_box/oc_box.py"] = b"# audited runtime\n"
+        self.files["src/oc_box/version_info.py"] = (
+            b'VERSION_SERIES = "1.7"\nVERSION_BASE_COMMIT_COUNT = 29\n'
+            if version_source is None
+            else version_source
+        )
         for name, value in self.files.items():
             path = self.source / name
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -129,18 +134,104 @@ class SessionHistoryHostFixtureTests(unittest.TestCase):
             source.assert_not_called()
 
     def test_source_snapshot_hashes_git_owned_runtime_and_donors(self):
-        self.source_files()
+        for series, channel, suffix in (
+            ("1.6", None, ""),
+            ("1.7", "devel", ""),
+            ("1.8", "stable", ""),
+            ("1.9", "devel", ".dev0"),
+        ):
+            declarations = f'VERSION_SERIES = "{series}"\nVERSION_BASE_COMMIT_COUNT = 29\n'
+            if channel:
+                declarations += f'RELEASE_CHANNEL = "{channel}"\n'
+            self.source_files(declarations.encode())
+            with (
+                self.subTest(series=series),
+                patch.object(runner, "git", side_effect=self.git),
+                patch.object(runner.importlib, "import_module") as imports,
+            ):
+                identity = runner.source_snapshot(self.source, self.commit)
+                self.assertEqual(
+                    identity["version"], series + ".51" + suffix + "+g" + self.commit[:7]
+                )
+                self.assertEqual(identity["commit_count"], 80)
+                self.assertEqual(identity["commit"], self.commit)
+                self.assertFalse(identity["dirty"])
+                self.assertEqual(
+                    identity["sha256"],
+                    {
+                        name: hashlib.sha256(value).hexdigest()
+                        for name, value in self.files.items()
+                    },
+                )
+            imports.assert_not_called()
+
+    def test_source_version_declaration_matrix_refuses_before_import(self):
+        series = b'VERSION_SERIES = "1.7"\n'
+        baseline = b"VERSION_BASE_COMMIT_COUNT = 29\n"
+        cases = {
+            "missing series": baseline,
+            "missing baseline": series,
+            "unknown series": b'VERSION_SERIES = "1.10"\nRELEASE_CHANNEL = "stable"\n' + baseline,
+            "missing channel for new series": b'VERSION_SERIES = "1.8"\n' + baseline,
+            "stable channel for odd minor": b'VERSION_SERIES = "1.9"\nRELEASE_CHANNEL = "stable"\n' + baseline,
+            "dynamic channel for new series": b'VERSION_SERIES = "1.9"\nRELEASE_CHANNEL = str("devel")\n' + baseline,
+            "duplicate channel for new series": b'VERSION_SERIES = "1.9"\nRELEASE_CHANNEL = "devel"\nRELEASE_CHANNEL = "devel"\n' + baseline,
+            "legacy series": b'VERSION_SERIES = "1.5"\n' + baseline,
+            "patch in series": b'VERSION_SERIES = "1.7.0"\n' + baseline,
+            "numeric series": b"VERSION_SERIES = 1.7\n" + baseline,
+            "dynamic series": b'VERSION_SERIES = str("1.7")\n' + baseline,
+            "duplicate series": series + series + baseline,
+            "conditional series": series
+            + b'if True:\n VERSION_SERIES = "1.6"\n'
+            + baseline,
+            "changed baseline": series + b"VERSION_BASE_COMMIT_COUNT = 30\n",
+            "boolean baseline": series + b"VERSION_BASE_COMMIT_COUNT = True\n",
+            "float baseline": series + b"VERSION_BASE_COMMIT_COUNT = 29.0\n",
+            "dynamic baseline": series + b'VERSION_BASE_COMMIT_COUNT = int("29")\n',
+            "duplicate baseline": series + baseline + baseline,
+            "syntax error": b"VERSION_SERIES =\n",
+        }
+        for name, content in cases.items():
+            self.source_files(content)
+            with (
+                self.subTest(name=name),
+                patch.object(runner, "git", side_effect=self.git),
+                patch.object(runner.importlib, "import_module") as imports,
+                self.assertRaisesRegex(runner.Refusal, "clean-source-required"),
+            ):
+                runner.load_source(self.source, self.commit)
+            imports.assert_not_called()
+
+    def test_source_version_declarations_are_parsed_without_executing_module(self):
+        self.source_files(
+            b'VERSION_SERIES = "1.7"\nVERSION_BASE_COMMIT_COUNT = 29\n'
+            b'raise RuntimeError("must not execute source snapshot")\n'
+        )
         with patch.object(runner, "git", side_effect=self.git):
             identity = runner.source_snapshot(self.source, self.commit)
-        self.assertEqual(identity["version"], "1.6.51+g" + self.commit[:7])
-        self.assertFalse(identity["dirty"])
-        self.assertEqual(
-            identity["sha256"],
-            {
-                name: hashlib.sha256(value).hexdigest()
-                for name, value in self.files.items()
-            },
+        self.assertEqual(identity["version"], "1.7.51+g" + self.commit[:7])
+
+    def test_source_version_file_must_be_git_verified_and_present(self):
+        self.source_files()
+        path = self.source / "src/oc_box/version_info.py"
+        path.write_bytes(
+            self.files["src/oc_box/version_info.py"].replace(b"1.7", b"1.6")
         )
+        with (
+            patch.object(runner, "git", side_effect=self.git),
+            self.assertRaisesRegex(runner.Refusal, "source-changed"),
+        ):
+            runner.source_snapshot(self.source, self.commit)
+        self.stage = b"\0".join(
+            record
+            for record in self.stage.split(b"\0")
+            if not record.endswith(b"\tsrc/oc_box/version_info.py")
+        )
+        with (
+            patch.object(runner, "git", side_effect=self.git),
+            self.assertRaisesRegex(runner.Refusal, "clean-source-required"),
+        ):
+            runner.source_snapshot(self.source, self.commit)
 
     def test_source_metadata_matrix_refuses_before_import(self):
         self.source_files()
@@ -156,6 +247,11 @@ class SessionHistoryHostFixtureTests(unittest.TestCase):
                 b"?? helper",
             ),
             "incomplete history": (("rev-list", "--count", "HEAD"), b"29"),
+            "empty count": (("rev-list", "--count", "HEAD"), b""),
+            "negative count": (("rev-list", "--count", "HEAD"), b"-80"),
+            "float count": (("rev-list", "--count", "HEAD"), b"80.0"),
+            "non-count": (("rev-list", "--count", "HEAD"), b"private-sentinel"),
+            "noncanonical count": (("rev-list", "--count", "HEAD"), b"080"),
             "nested source": (
                 ("rev-parse", "--show-toplevel"),
                 str(self.parent).encode(),
@@ -173,6 +269,25 @@ class SessionHistoryHostFixtureTests(unittest.TestCase):
                 self.assertRaisesRegex(runner.Refusal, "clean-source-required"),
             ):
                 runner.load_source(self.source, self.commit)
+            imports.assert_not_called()
+
+    def test_source_expected_commit_matrix_refuses_before_git_or_import(self):
+        for name, commit in (
+            ("missing", None),
+            ("non-string", 80),
+            ("short", "b" * 7),
+            ("long", "b" * 41),
+            ("uppercase", "B" * 40),
+            ("non-hex", "z" * 40),
+        ):
+            with (
+                self.subTest(name=name),
+                patch.object(runner, "git") as git,
+                patch.object(runner.importlib, "import_module") as imports,
+                self.assertRaisesRegex(runner.Refusal, "clean-source-required"),
+            ):
+                runner.load_source(self.source, commit)
+            git.assert_not_called()
             imports.assert_not_called()
 
     def test_source_file_change_ignored_by_status_still_refuses(self):
@@ -311,6 +426,7 @@ class SessionHistoryHostFixtureTests(unittest.TestCase):
         native.write_bytes(b"synthetic-native")
         harness = runner.Harness(loaded, self.parent, native, runner.file_hash(SCRIPT))
         harness.validate_native_config = Mock()
+        harness.resume_sources = set()
         return harness
 
     def test_validate_refusals_never_reach_engine_or_resource_inspection(self):
@@ -375,6 +491,13 @@ class SessionHistoryHostFixtureTests(unittest.TestCase):
             with self.assertRaisesRegex(runner.Refusal, "native-changed"):
                 harness.same_identity()
             harness.native["sha256"] = runner.file_hash(harness.binary)
+            moved = self.parent / "moved-native"
+            moved.write_bytes(harness.binary.read_bytes())
+            with (
+                patch.object(harness, "binary", moved),
+                self.assertRaisesRegex(runner.Refusal, "native-changed"),
+            ):
+                harness.same_identity()
             harness.runner = "wrong"
             with self.assertRaisesRegex(runner.Refusal, "source-changed"):
                 harness.same_identity()
@@ -403,18 +526,30 @@ class SessionHistoryHostFixtureTests(unittest.TestCase):
             identity,
             digest,
             native,
-            exits=(0, 0, 0, 1, 0),
+            exits=runner.EXPECTED_EXITS,
             stage="complete",
         )
         self.assertEqual(report["status"], "PASS")
         self.assertEqual(report["launcher_stages"], list(runner.LAUNCH_STAGES))
-        self.assertEqual(report["expected_launcher_exit_codes"], [0, 0, 0, 1, 0])
+        self.assertEqual(
+            report["expected_launcher_exit_codes"], list(runner.EXPECTED_EXITS)
+        )
+        self.assertEqual(len(report["checks"]), 42)
+        for missing in runner.CHECKS:
+            incomplete = runner.result(
+                dict.fromkeys(runner.CHECKS - {missing}, True),
+                identity,
+                digest,
+                native,
+                exits=runner.EXPECTED_EXITS,
+                stage="complete",
+            )
+            self.assertEqual(incomplete["status"], "FAIL", missing)
         for exits, stage in (
-            ((), "complete"),
-            ((0, 0, 0, 1), "complete"),
-            ((0, 0, 0, 0, 0), "complete"),
-            ((0, 1, 0, 0, 0), "complete"),
-            (runner.EXPECTED_EXITS, "recovery-sync"),
+            ((0, 0, 0, 1, 0), "complete"),
+            (runner.EXPECTED_EXITS[:-1], "complete"),
+            ((0,) * 8, "complete"),
+            (runner.EXPECTED_EXITS, "unarchived_restart"),
         ):
             with self.subTest(exits=exits, stage=stage):
                 incomplete = runner.result(
@@ -437,7 +572,7 @@ class SessionHistoryHostFixtureTests(unittest.TestCase):
             ({}, "private-sentinel", (), ()),
             ({}, None, ("private-sentinel",), ()),
             ({}, None, (), (True,)),
-            ({}, None, (), (0,) * 6),
+            ({}, None, (), (0,) * 9),
         ):
             with (
                 self.subTest(checks=checks, primary=primary),
@@ -454,13 +589,71 @@ class SessionHistoryHostFixtureTests(unittest.TestCase):
                 self.assertRaisesRegex(runner.Refusal, "report-schema"),
             ):
                 runner.result({}, bad, digest, native)
-        with self.assertRaisesRegex(runner.Refusal, "report-schema"):
-            runner.result(
-                {},
-                {**identity, "version": "1.7.51+g" + self.commit[:7]},
-                digest,
-                native,
-            )
+
+    def test_report_source_series_matrix_preserves_exact_count_and_commit(self):
+        identity = {
+            "commit": self.commit,
+            "commit_count": 80,
+            "dirty": False,
+            "sha256": {"src/oc_box/version_info.py": "c" * 64},
+        }
+        for series, suffix in (("1.6", ""), ("1.7", ""), ("1.8", ""), ("1.9", ".dev0")):
+            identity["version"] = series + ".51" + suffix + "+g" + self.commit[:7]
+            with self.subTest(series=series):
+                report = runner.result(
+                    dict.fromkeys(runner.CHECKS, True),
+                    identity,
+                    "d" * 64,
+                    {"version": "2.2.6", "sha256": "e" * 64},
+                    exits=runner.EXPECTED_EXITS,
+                    stage="complete",
+                )
+                self.assertEqual(report["status"], "PASS")
+                self.assertEqual(report["source_identity"], identity)
+
+    def test_report_source_identity_refusal_matrix_is_strict(self):
+        for series, suffix in (("1.6", ""), ("1.7", ""), ("1.8", ""), ("1.9", ".dev0")):
+            identity = {
+                "commit": self.commit,
+                "commit_count": 80,
+                "version": series + ".51" + suffix + "+g" + self.commit[:7],
+                "dirty": False,
+                "sha256": {"src/oc_box/version_info.py": "c" * 64},
+            }
+            cases = {
+                "unknown series": {"version": "1.10.51+g" + self.commit[:7]},
+                "legacy series": {"version": "1.5.51+g" + self.commit[:7]},
+                "missing version": {"version": None},
+                "wrong patch": {"version": series + ".50" + suffix + "+g" + self.commit[:7]},
+                "padded patch": {"version": series + ".051" + suffix + "+g" + self.commit[:7]},
+                "wrong short hash": {"version": series + ".51" + suffix + "+g" + "a" * 7},
+                "wrong channel suffix": {
+                    "version": series + ".51" + ("" if suffix else ".dev0") + "+g" + self.commit[:7],
+                },
+                "dirty suffix": {"version": identity["version"] + ".dirty"},
+                "short commit": {"commit": self.commit[:7]},
+                "non-hex commit": {"commit": "z" * 40},
+                "uppercase commit": {"commit": "B" * 40},
+                "wrong count": {"commit_count": 81},
+                "baseline count": {"commit_count": 29},
+                "boolean count": {"commit_count": True},
+                "float count": {"commit_count": 80.0},
+                "dirty source": {"dirty": True},
+                "malformed audit hash": {
+                    "sha256": {"src/oc_box/version_info.py": "z" * 64}
+                },
+            }
+            for name, change in cases.items():
+                with (
+                    self.subTest(series=series, name=name),
+                    self.assertRaisesRegex(runner.Refusal, "report-schema"),
+                ):
+                    runner.result(
+                        {},
+                        {**identity, **change},
+                        "d" * 64,
+                        {"version": "2.2.6", "sha256": "e" * 64},
+                    )
 
     def test_error_categories_never_include_native_exception_contents(self):
         for error, expected in (
@@ -528,6 +721,605 @@ class SessionHistoryHostFixtureTests(unittest.TestCase):
         with self.assertRaises(runner.Refusal):
             harness.sync()
         harness.box.sync_sessions.assert_not_called()
+
+    def resume_harness(self):
+        """Private synthetic oracle inputs, not a native/runtime implementation."""
+        harness = self.harness()
+        harness.path, harness.data = self.parent / "workspace.json", {"id": "fixture"}
+        project = "/synthetic/source-a"
+        harness.box.container_project = Mock(return_value=project)
+        harness.box.valid_session_id = lambda ident: (
+            isinstance(ident, str) and ident.startswith("ses_") and ident.isascii()
+        )
+        harness.box.read_json = lambda path: json.loads(path.read_text())
+        harness.box.verify_host_archive = Mock()
+        harness.box.session_file = lambda _path: self.parent / "sessions.json"
+        harness.archive_id = lambda ident, prefix="ses": prefix + "_copy_" + ident
+        harness.provider = SimpleNamespace(requests=4, errors=0)
+        harness.resume_requests = (4, 0)
+        active, target = "ses_history_active", "ses_history_archived"
+        child, archived_child = "ses_history_child", "ses_history_archived_child"
+        deleted = "ses_history_deleted"
+        sources = {
+            ident: harness.seed_value(ident, project, parent=parent, archived=archived)
+            for ident, parent, archived in (
+                (active, None, False),
+                (target, None, True),
+                (child, active, False),
+                (archived_child, target, True),
+            )
+        }
+        # Native export omits the import envelope's location member.
+        for value in sources.values():
+            value.pop("location")
+        harness.resume_sources = set(sources)
+        harness.resume_missing = {deleted}
+        state = {
+            "sessions": [],
+            "missing": [deleted],
+            "synced": {},
+            "host_sessions": {},
+        }
+        harness.box.session_state = Mock(return_value=state)
+        history = self.parent / "history"
+        history.mkdir(exist_ok=True)
+        copies, calls = {}, []
+
+        def copy_source(ident, source):
+            value = copy.deepcopy(source)
+            info = value["info"]
+            info["id"] = harness.archive_id(ident)
+            info["title"] = "[oc-box source-a] " + info.get("title", "Session")
+            if info.get("parentID"):
+                info["metadata"]["oc-box.archive"] = {
+                    "version": 1,
+                    "parentID": harness.archive_id(info["parentID"]),
+                }
+            for field in ("permissions", "parentID", "fork", "revert"):
+                info.pop(field, None)
+            for message in value["messages"]:
+                message["id"] = harness.archive_id(message["id"], "msg")
+            path = harness.archive_path(ident)
+            path.write_text(json.dumps(value, sort_keys=True))
+            copies[harness.archive_id(ident)] = value
+            state["synced"][ident] = runner.file_hash(path)
+            state["host_sessions"][ident] = harness.archive_id(ident)
+
+        def inventory():
+            return [copy.deepcopy(value["info"]) for value in sources.values()]
+
+        harness.box.list_container_sessions = Mock(
+            side_effect=lambda _data: inventory()
+        )
+        harness.export = Mock(
+            side_effect=lambda ident, host=False: copy.deepcopy(
+                copies[ident] if host else sources[ident]
+            )
+        )
+        harness.host = Mock(
+            side_effect=lambda method, route: {
+                "data": [copy.deepcopy(value["info"]) for value in copies.values()]
+            }
+        )
+        tick = 100
+
+        def request(method, route, value=None):
+            nonlocal tick
+            self.assertEqual(method, "PATCH")
+            ident = route.removeprefix("/api/session/")
+            self.assertIn(ident, sources)
+            calls.append((method, ident, copy.deepcopy(value)))
+            info = sources[ident]["info"]
+            tick += 1
+            info["time"]["updated"] = tick
+            if value["archived"]:
+                info["time"]["archived"] = tick
+            else:
+                info["time"].pop("archived", None)
+            if "title" in value:
+                info["title"] = value["title"]
+            return None
+
+        harness.request = Mock(side_effect=request)
+        harness.batch = Mock(
+            side_effect=lambda operations: [
+                request(*operation) for operation in operations
+            ]
+        )
+
+        def sync():
+            calls.append("sync")
+            state["sessions"] = list(sources)
+            roots = [
+                info
+                for info in inventory()
+                if not info.get("parentID") and info["time"].get("archived") is None
+            ]
+            state["last"] = (
+                max(roots, key=lambda info: info["time"]["updated"])["id"]
+                if roots
+                else None
+            )
+            for ident, source in sources.items():
+                copy_source(ident, source)
+            harness.box.session_file(harness.path).write_text(json.dumps(state))
+
+        harness.sync = Mock(side_effect=sync)
+        deleted_source = harness.seed_value(deleted, project)
+        deleted_source.pop("location")
+        copy_source(deleted, deleted_source)
+        sync()
+        calls.clear()
+        return harness, sources, copies, state, calls
+
+    def test_resume_stages_preserve_all_sources_children_deleted_and_host_copies(self):
+        harness, sources, _copies, state, calls = self.resume_harness()
+        original = copy.deepcopy(sources)
+        old_ids = set(sources)
+        self.assertEqual(harness.archive_roots("ses_history_active"), 0)
+        self.assertIsNone(state["last"])
+        self.assertEqual(set(state["sessions"]), old_ids)
+        self.assertEqual(
+            [item[1] for item in calls if isinstance(item, tuple)],
+            ["ses_history_active", "ses_history_archived"],
+        )
+        for ident in ("ses_history_child", "ses_history_archived_child"):
+            self.assertEqual(sources[ident], original[ident])
+        self.assertTrue(
+            all(
+                source["messages"] == original[ident]["messages"]
+                for ident, source in sources.items()
+            )
+        )
+        new = "ses_history_new"
+        sources[new] = harness.seed_value(new, "/synthetic/source-a")
+        sources[new].pop("location")
+        sources[new]["info"]["time"]["updated"] = 100
+        self.assertEqual(harness.archived_restart(new), 0)
+        self.assertEqual(state["last"], "ses_history_archived")
+        self.assertEqual(set(state["sessions"]), old_ids | {new})
+        self.assertEqual(harness.unarchived_restart("ses_history_archived"), 0)
+        self.assertEqual(
+            set(harness.checks),
+            {
+                "archived_roots_inventory",
+                "archived_roots_retention",
+                "all_archived_no_resume",
+                "archived_next_start_new_root",
+                "archived_restart_retention",
+                "unarchived_root_eligible",
+                "unarchived_next_start_resume",
+                "unarchived_history_retention",
+            },
+        )
+        self.assertEqual(harness.provider.requests, 4)
+        harness.box.verify_host_archive.assert_any_call(
+            harness.path, harness.data, harness.box.read_json(harness.archive_path(new))
+        )
+
+    def test_resume_inventory_refuses_incomplete_invalid_or_ineligible_selection(self):
+        mutations = {
+            "omitted archived root": lambda rows: rows.pop(1),
+            "duplicate": lambda rows: rows.append(copy.deepcopy(rows[0])),
+            "foreign": lambda rows: rows[0]["location"].update(directory="/foreign"),
+            "nested": lambda rows: rows[0]["location"].update(
+                directory="/synthetic/source-a/nested"
+            ),
+            "invalid id": lambda rows: rows[0].update(id=None),
+            "invalid parent": lambda rows: rows[0].update(parentID=7),
+            "missing time": lambda rows: rows[0].pop("time"),
+            "invalid updated": lambda rows: rows[0]["time"].update(updated=True),
+            "nan updated": lambda rows: rows[0]["time"].update(updated=float("nan")),
+            "invalid archived": lambda rows: rows[1]["time"].update(archived="private"),
+            "non-record": lambda rows: rows.append(None),
+        }
+        for name, mutate in mutations.items():
+            harness, _sources, _copies, _state, _calls = self.resume_harness()
+            rows = harness.box.list_container_sessions(harness.data)
+            mutate(rows)
+            harness.box.list_container_sessions.side_effect = None
+            harness.box.list_container_sessions.return_value = rows
+            with self.subTest(defect=name), self.assertRaises(runner.Refusal):
+                harness.archive_roots("ses_history_active")
+            harness.batch.assert_not_called()
+            self.assertEqual(harness.checks, {})
+        harness, _sources, _copies, _state, _calls = self.resume_harness()
+        for ident in (
+            "ses_history_archived",
+            "ses_history_child",
+            "ses_history_archived_child",
+            "ses_foreign",
+        ):
+            with self.subTest(selected=ident), self.assertRaises(runner.Refusal):
+                harness.resume_inventory(harness.resume_sources, selected=ident)
+
+    def test_existing_graph_checkpoints_both_refuse_an_archived_root_as_last(self):
+        # Execute the old graph's two selection assertions with synthetic
+        # transports. This catches regression to root-only (not archive-aware)
+        # selection without replacing any assertion in the host runner.
+        for failing_sync in (1, 3):
+            harness = self.harness()
+            harness.path, harness.data = self.parent / "workspace.json", {}
+            project = "/synthetic/source-a"
+            harness.box.container_project = lambda _data: project
+            harness.container_python = Mock()
+            harness.archive_id = lambda ident: "ses_copy_" + ident
+            harness.verify_archive = Mock()
+            harness.snapshot = lambda _ident: {
+                "private": b"old",
+                "host": {},
+                "synced": "old",
+            }
+            source = {"ses_initial": harness.seed_value("ses_initial", project)}
+            archives = set()
+            state = {}
+            count = 0
+
+            def inventory(_data):
+                return [
+                    value["info"]
+                    for value in source.values()
+                    if value["info"]["location"]["directory"] == project
+                ]
+
+            def request(method, route, value=None):
+                if route == "/api/experimental/session/import":
+                    source[value["info"]["id"]] = copy.deepcopy(value)
+                elif route.endswith("/fork"):
+                    source["ses_fork"] = harness.seed_value("ses_fork", project)
+                    return {"data": {"id": "ses_fork"}}
+                elif route.endswith("/revert/stage"):
+                    source["ses_history_a"]["info"]["revert"] = value
+                elif route.startswith("/api/session?"):
+                    return {"data": inventory(None)[:100], "cursor": {"next": "next"}}
+                elif method == "PATCH":
+                    source[route.rsplit("/", 1)[-1]]["info"].update(value)
+                elif method == "DELETE":
+                    ident = route.rsplit("/", 1)[-1]
+                    for removed in (
+                        {ident, "ses_history_c", "ses_history_d"}
+                        if ident == "ses_history_a"
+                        else {ident}
+                    ):
+                        source.pop(removed)
+                return None
+
+            def sync():
+                nonlocal count
+                count += 1
+                ids = {item["id"] for item in inventory(None)}
+                state.update(
+                    sessions=list(ids),
+                    missing=["ses_history_a", "ses_history_c", "ses_history_d"]
+                    if count >= 3
+                    else [],
+                )
+                state["last"] = (
+                    "ses_history_archived" if count == failing_sync else "ses_history_b"
+                )
+                state["host_sessions"] = {
+                    ident: harness.archive_id(ident) for ident in ids
+                }
+                archives.update(harness.archive_id(ident) for ident in ids)
+
+            harness.request = request
+            harness.batch = lambda operations: [
+                request(*operation) for operation in operations
+            ]
+            harness.export = lambda ident: {
+                key: copy.deepcopy(source[ident][key]) for key in ("info", "messages")
+            }
+            harness.box.list_container_sessions = inventory
+            harness.box.session_state = lambda _path: state
+            harness.sync = sync
+            harness.host = lambda *_args: {
+                "data": [{"id": ident} for ident in archives]
+            }
+
+            # Only file names are observed before the second selection check.
+            def history_glob(path, pattern):
+                self.assertEqual(pattern, "*.json")
+                return [path / (ident + ".json") for ident in archives]
+
+            with (
+                self.subTest(checkpoint=failing_sync),
+                patch.object(Path, "glob", history_glob),
+                self.assertRaises(runner.Refusal),
+            ):
+                harness.graph("ses_initial")
+            self.assertEqual(count, failing_sync)
+            self.assertNotIn("deleted_source_retention", harness.checks)
+            self.assertEqual("scoped_graph" in harness.checks, failing_sync == 3)
+
+    def test_next_start_cannot_reuse_old_archived_child_missing_or_foreign_session(
+        self,
+    ):
+        for defect in (
+            "old root",
+            "child",
+            "deleted",
+            "foreign",
+            "archived new",
+            "new child",
+            "extra new",
+        ):
+            harness, sources, _copies, _state, _calls = self.resume_harness()
+            harness.archive_roots("ses_history_active")
+            selected = {
+                "old root": "ses_history_archived",
+                "child": "ses_history_child",
+                "deleted": "ses_history_deleted",
+            }.get(defect, "ses_history_new")
+            if selected not in harness.resume_sources | harness.resume_missing:
+                sources[selected] = harness.seed_value(selected, "/synthetic/source-a")
+                sources[selected].pop("location")
+                info = sources[selected]["info"]
+                if defect == "foreign":
+                    info["location"]["directory"] = "/synthetic/foreign"
+                elif defect == "archived new":
+                    info["time"]["archived"] = 1
+                elif defect == "new child":
+                    info["parentID"] = "ses_history_archived"
+                elif defect == "extra new":
+                    sources["ses_extra"] = harness.seed_value(
+                        "ses_extra", "/synthetic/source-a"
+                    )
+            with self.subTest(defect=defect), self.assertRaises(runner.Refusal):
+                harness.archived_restart(selected)
+            self.assertNotIn("archived_next_start_new_root", harness.checks)
+
+    def test_resume_retention_refuses_lost_history_parent_links_archives_or_host_copy(
+        self,
+    ):
+        for defect in (
+            "source removed",
+            "source messages",
+            "source parent",
+            "inventory parent",
+            "state source",
+            "state missing",
+            "state association",
+            "deleted association",
+            "state checkpoint",
+            "private copy",
+            "host copy",
+            "deleted copy",
+        ):
+            harness, sources, copies, state, _calls = self.resume_harness()
+            harness.archive_roots("ses_history_active")
+            child, active = "ses_history_child", "ses_history_active"
+            if defect == "source removed":
+                sources.pop(child)
+            elif defect == "source messages":
+                sources[child]["messages"] = []
+            elif defect == "source parent":
+                sources[child]["info"]["parentID"] = "ses_other"
+            elif defect == "inventory parent":
+                rows = harness.box.list_container_sessions(harness.data)
+                next(row for row in rows if row["id"] == child)["parentID"] = (
+                    "ses_other"
+                )
+                harness.box.list_container_sessions = Mock(return_value=rows)
+            elif defect == "state source":
+                state["sessions"].remove(child)
+            elif defect == "state missing":
+                state["missing"] = []
+            elif defect == "state association":
+                state["host_sessions"][child] = harness.archive_id(active)
+            elif defect == "deleted association":
+                state["host_sessions"]["ses_history_deleted"] = harness.archive_id(
+                    active
+                )
+            elif defect == "state checkpoint":
+                state["synced"][child] = "old"
+            elif defect == "private copy":
+                harness.archive_path(child).write_text("{}")
+            elif defect == "host copy":
+                copies[harness.archive_id(child)]["messages"] = []
+            else:
+                copies[harness.archive_id("ses_history_deleted")]["messages"] = []
+            with self.subTest(defect=defect), self.assertRaises(runner.Refusal):
+                harness.verify_resume_retention(harness.resume_sources)
+
+    def test_unarchived_next_start_requires_actual_target_not_only_last_metadata(self):
+        harness, sources, _copies, state, _calls = self.resume_harness()
+        harness.archive_roots("ses_history_active")
+        new = "ses_history_new"
+        sources[new] = harness.seed_value(new, "/synthetic/source-a")
+        sources[new].pop("location")
+        harness.archived_restart(new)
+        self.assertEqual(state["last"], harness.resume_target)
+        for selected in (
+            new,
+            "ses_history_child",
+            "ses_history_archived_child",
+            "ses_other",
+        ):
+            with self.subTest(selected=selected), self.assertRaises(runner.Refusal):
+                harness.unarchived_restart(selected)
+            self.assertNotIn("unarchived_next_start_resume", harness.checks)
+        harness.provider.requests += 1
+        with self.assertRaisesRegex(runner.Refusal, "provider-contract"):
+            harness.unarchived_restart(harness.resume_target)
+        self.assertNotIn("resume_no_inference", harness.checks)
+
+    def test_unarchive_requires_strictly_newest_native_metadata_with_bounded_wait(self):
+        harness, sources, _copies, _state, _calls = self.resume_harness()
+        harness.archive_roots("ses_history_active")
+        new = "ses_history_new"
+        sources[new] = harness.seed_value(new, "/synthetic/source-a")
+        sources[new].pop("location")
+        # A future-dated eligible root must not produce a metadata-only pass.
+        sources[new]["info"]["time"]["updated"] = 10000
+        with (
+            patch.object(runner.time, "monotonic", side_effect=(0, 6)),
+            self.assertRaisesRegex(runner.Refusal, "gate-timeout"),
+        ):
+            harness.archived_restart(new)
+        harness.request.assert_called_once_with(
+            "PATCH",
+            "/api/session/ses_history_archived",
+            {"archived": False, "title": "SYNTHETIC_UNARCHIVED_RESUME_ROOT"},
+        )
+        self.assertNotIn("unarchived_root_eligible", harness.checks)
+
+    def test_archive_roots_requires_real_no_content_mutations_and_empty_resume_choice(
+        self,
+    ):
+        for defect in (
+            "json success",
+            "root unchanged",
+            "child changed",
+            "source history",
+            "last still set",
+        ):
+            harness, sources, _copies, state, _calls = self.resume_harness()
+            batch, sync = harness.batch.side_effect, harness.sync.side_effect
+
+            def mutate(operations):
+                result = batch(operations)
+                if defect == "json success":
+                    return [{"success": True}] * len(operations)
+                if defect == "root unchanged":
+                    sources["ses_history_active"]["info"]["time"].pop("archived")
+                elif defect == "child changed":
+                    sources["ses_history_child"]["info"]["time"]["archived"] = 1
+                elif defect == "source history":
+                    sources["ses_history_active"]["messages"] = []
+                return result
+
+            def wrong_last():
+                sync()
+                state["last"] = "ses_history_archived"
+
+            harness.batch.side_effect = mutate
+            if defect == "last still set":
+                harness.sync.side_effect = wrong_last
+            with self.subTest(defect=defect), self.assertRaises(runner.Refusal):
+                harness.archive_roots("ses_history_active")
+            self.assertNotIn("all_archived_no_resume", harness.checks)
+
+    def test_launch_uses_ordinary_no_vault_start_and_observes_its_selected_session(
+        self,
+    ):
+        harness = self.harness()
+        selected = "ses_native_selection"
+        harness.validate = Mock()
+        harness.stopped = Mock()
+        harness.bind = Mock(return_value=selected)
+        harness.f.no_vault_probe = contextlib.nullcontext
+        harness.service.Owner = SimpleNamespace(publish=Mock(), wait_clients=Mock())
+        harness.service.api = Mock(return_value={"native": True})
+
+        @contextlib.contextmanager
+        def attach(_box, _path, _data):
+            yield {"session": selected}
+
+        harness.service.attach = attach
+        harness.box.run_tui = Mock()
+        harness.box.main = Mock(
+            side_effect=lambda arguments: harness.box.run_tui(["native-client"])
+        )
+        harness.path, harness.data = self.parent / "workspace.json", {}
+        observed = []
+
+        def archived_restart(ident):
+            observed.append(ident)
+            return 0
+
+        harness.launch(archived_restart)
+        harness.box.main.assert_called_once_with(
+            [
+                "start",
+                "--project",
+                str(self.parent / "source-a"),
+                "--no-vault",
+            ]
+        )
+        harness.bind.assert_called_once_with(["native-client"])
+        self.assertEqual(observed, [selected])
+        self.assertEqual(harness.exits, [0])
+        harness.stopped.assert_called_once()
+
+    def resume_run_harness(self):
+        harness, _sources, _copies, _state, _calls = self.resume_harness()
+        harness.validate = Mock()
+        harness.stopped = Mock()
+        harness.same_identity = Mock()
+        harness.f.prepare_native_cli = Mock()
+        harness.box.main = Mock(return_value=0)
+        harness.box.sync_sessions = Mock()
+        harness.lease = SimpleNamespace(join=Mock())
+        harness.shell_id = "ses_history_active"
+        harness.box.read_json = Mock(
+            return_value={
+                "messages": [{"type": "shell", "status": "exited", "exit": 0}]
+            }
+        )
+        return harness
+
+    def test_run_preserves_old_launch_sequence_then_three_final_ordinary_starts(self):
+        harness = self.resume_run_harness()
+        stages = []
+
+        def launch(callback, *, expected=0, **_options):
+            stages.append(callback.__name__)
+            harness.exits.append(expected)
+
+        harness.launch = launch
+        harness.run()
+        self.assertEqual(
+            stages,
+            [
+                "graph",
+                "readiness",
+                "background",
+                "shell",
+                "archive_roots",
+                "archived_restart",
+                "unarchived_restart",
+            ],
+        )
+        self.assertEqual(tuple(harness.exits), (0, 0, 0, 1, 0, 0, 0, 0))
+        self.assertEqual(tuple(harness.exits), runner.EXPECTED_EXITS)
+        self.assertEqual(
+            runner.LAUNCH_STAGES, tuple(stages[:4] + ["recovery-sync"] + stages[4:])
+        )
+        harness.box.main.assert_called_once_with(["sync", "--workspace", "fixture"])
+        harness.lease.join.assert_called_once_with(5)
+        self.assertEqual(harness.stage, "complete")
+        self.assertIn("resume_no_inference", harness.checks)
+        harness.f.prepare_native_cli.assert_called_once_with(
+            harness.root, harness.binary, native_version="2.2.6"
+        )
+
+    def test_resume_no_inference_covers_startup_and_post_callback_shutdown(self):
+        for boundary in ("startup", "shutdown"):
+            for counter in ("requests", "errors"):
+                with self.subTest(boundary=boundary, counter=counter):
+                    harness = self.resume_run_harness()
+
+                    def launch(callback, *, expected=0, **_options):
+                        if (
+                            boundary == "startup"
+                            and callback.__name__ == "archive_roots"
+                        ) or (
+                            boundary == "shutdown"
+                            and callback.__name__ == "unarchived_restart"
+                        ):
+                            setattr(
+                                harness.provider,
+                                counter,
+                                getattr(harness.provider, counter) + 1,
+                            )
+                        harness.exits.append(expected)
+
+                    harness.launch = launch
+                    with self.assertRaises(runner.Refusal) as caught:
+                        harness.run()
+                    self.assertEqual(str(caught.exception), "provider-contract")
+                    self.assertNotIn("resume_no_inference", harness.checks)
+                    self.assertNotEqual(harness.stage, "complete")
 
     def pending_harness(self):
         """Synthetic observer inputs, never a production-runtime replacement."""
@@ -1018,6 +1810,7 @@ class SessionHistoryHostFixtureTests(unittest.TestCase):
                 "auto_update": False,
             },
             "executables.json": {"2": str(harness.binary)},
+            "native-profile.json": dict(harness.native),
         }
         harness.f.private_json = lambda root, name: mapping[name]
         harness.validate_native_config()
@@ -1032,6 +1825,15 @@ class SessionHistoryHostFixtureTests(unittest.TestCase):
         with self.assertRaisesRegex(runner.Refusal, "native-changed"):
             harness.validate_native_config()
         wrapper.write_text(harness.f.native_wrapper_source())
+        harness.validate_native_config(initial=True)
+        for name in ("executables.json", "native-profile.json"):
+            marker = self.parent / name
+            marker.symlink_to(self.parent / "missing")
+            with self.subTest(stale=name), self.assertRaisesRegex(
+                runner.Refusal, "fixture-only"
+            ):
+                harness.validate_native_config(initial=True)
+            marker.unlink()
         (self.parent / "absent-vault").write_text("synthetic unexpected vault")
         with self.assertRaisesRegex(runner.Refusal, "fixture-only"):
             harness.validate_native_config()
@@ -1474,6 +2276,15 @@ class SessionHistoryHostFixtureTests(unittest.TestCase):
         self.assertEqual(order[0], "isolate")
         self.assertEqual(len(order), 3)
 
+    def test_store_schema_refusal_uses_a_fixed_public_category(self):
+        error = type("FixtureError", (Exception,), {})
+        self.assertEqual(
+            runner.category(error("store-info-shape")), "store-info-shape"
+        )
+        self.assertEqual(
+            runner.category(error("store-info-shape /private/path")), "fixture-refusal"
+        )
+
     def test_failure_trace_reports_only_code_locations_never_messages(self):
         def inner():
             raise KeyError("private-sentinel-key")
@@ -1577,10 +2388,15 @@ class SessionHistoryHostFixtureTests(unittest.TestCase):
                         with self.assertRaises(runner.Refusal):
                             harness.verify_archive("ses_source")
 
-    def recovery_harness(self, case="snapshot"):
+    def recovery_harness(self, case="snapshot", *, native_version="2.2.6"):
         old = self.harness()
         value = runner.RecoveryHarness(
-            old.loaded, self.parent, old.binary, old.runner, case
+            old.loaded,
+            self.parent,
+            old.binary,
+            old.runner,
+            case,
+            native_version=native_version,
         )
         value.box.PACKAGE = self.source
         (self.source / "history_reader.py").write_text("# pinned reader helper\n")
@@ -1589,25 +2405,53 @@ class SessionHistoryHostFixtureTests(unittest.TestCase):
         value.box.HistoryWaitTimeout = type("HistoryWaitTimeout", (Exception,), {})
         value.timeout = value.box.HistoryWaitTimeout()
         value.timeout.recovery_eligible = True
-        value.timeout.diagnostic = "History wait timeout: phase=poll-delay; last complete observation: foreground=0, jobs-running=0, jobs-completed=0, jobs-error=0, jobs-cancelled=1."
-        value.cancelled_pairs, value.elapsed, value.owner_closed = 2, 30, True
+        current = native_version == "2.3.0"
+        value.timeout.diagnostic = (
+            "History wait timeout: phase=poll-delay; last complete observation: "
+            f"foreground=0, jobs-running={int(current)}, jobs-completed=0, "
+            f"jobs-error=0, jobs-cancelled={int(not current)}."
+        )
+        value.cancelled_pairs, value.running_pairs = (0, 2) if current else (2, 0)
+        value.elapsed, value.owner_closed = 30, True
         return value
 
-    def test_exact_profiles_thread_to_current_harness_without_changing_default_checks(
-        self,
-    ):
+    def test_exact_profiles_thread_to_current_harness_without_changing_default_checks(self):
         old = self.harness()
-        current = runner.build_harness(
-            old.loaded, self.parent, old.binary, old.runner, native_version="2.3.0"
-        )
-        self.assertEqual(current.native["version"], "2.3.0")
-        self.assertEqual(current.native["path"], str(old.binary))
-        self.assertEqual(current.native["sha256"], runner.file_hash(old.binary))
-        self.assertEqual(len(runner.CHECKS), 33)
-        self.assertEqual(runner.EXPECTED_EXITS, (0, 0, 0, 1, 0))
+        self.assertEqual(old.native["version"], "2.2.6")
+        for case in (None, *runner.RECOVERY_CHECKS):
+            with self.subTest(case=case):
+                current = runner.build_harness(
+                    old.loaded,
+                    self.parent,
+                    old.binary,
+                    old.runner,
+                    case,
+                    native_version="2.3.0",
+                )
+                self.assertEqual(
+                    current.native,
+                    {
+                        "version": "2.3.0",
+                        "path": str(old.binary),
+                        "sha256": runner.file_hash(old.binary),
+                    },
+                )
+                self.assertEqual(current.purpose()["native"], current.native)
+                current.f.prepare_native_cli = Mock()
+                current.validate_native_config = Mock()
+                options = {} if case is None else {"history_recovery": True}
+                current.prepare_native(**options)
+                current.f.prepare_native_cli.assert_called_once_with(
+                    current.root, current.binary, native_version="2.3.0", **options
+                )
+                current.validate_native_config.assert_called_once_with()
+        self.assertEqual(len(runner.CHECKS), 42)
+        self.assertEqual(runner.EXPECTED_EXITS, (0, 0, 0, 1, 0, 0, 0, 0))
         self.assertIn("tools/native_host_profile.py", runner.DONORS)
-        for version in ("2.2.7", "2.3.1", "2"):
-            with self.subTest(version=version), self.assertRaises(runner.Refusal):
+        for version in ("2.2.7", "2.3.1", "2", "2.3.0+unknown"):
+            with self.subTest(version=version), self.assertRaisesRegex(
+                runner.Refusal, "invalid-options"
+            ):
                 runner.Harness(
                     old.loaded,
                     self.parent,
@@ -1616,24 +2460,37 @@ class SessionHistoryHostFixtureTests(unittest.TestCase):
                     native_version=version,
                 )
 
+    def test_workspace_release_must_match_exact_profile_before_store_access(self):
+        for version in ("2.2.6", "2.3.0"):
+            h = self.harness()
+            h.native["version"] = version
+            h.same_identity = Mock()
+            h.f.validate_fixture = Mock()
+            h.f.private_json = Mock(return_value=h.purpose())
+            h.f.require_runtime_boot = Mock()
+            h.f.validate_store = Mock()
+            opposite = "2.2.6" if version == "2.3.0" else "2.3.0"
+            for other in (None, "2.3.1", opposite):
+                h.f.workspace_records = Mock(
+                    return_value={"source-a": (None, {"opencode_version": other})}
+                )
+                with (
+                    self.subTest(version=version, other=other),
+                    self.assertRaisesRegex(runner.Refusal, "native-version"),
+                ):
+                    h.validate()
+                h.validate_native_config.assert_not_called()
+                h.f.require_runtime_boot.assert_not_called()
+                h.f.validate_store.assert_not_called()
+
     def test_current_recovery_setup_holds_real_job_without_reload_or_release(self):
-        old = self.harness()
-        h = runner.RecoveryHarness(
-            old.loaded,
-            self.parent,
-            old.binary,
-            old.runner,
-            "snapshot",
-            native_version="2.3.0",
-        )
+        h = self.recovery_harness(native_version="2.3.0")
         h.baseline_ids = {"ses_selected", "ses_baseline"}
         h.box.session_state = Mock(return_value={"sessions": list(h.baseline_ids)})
-        h.f.verify_owned_resources = Mock(return_value={"Id": "c" * 64})
-        h.container_id = "c" * 64
+        h.f.verify_owned_resources = Mock(return_value={"Id": h.container_id})
         h.owner = SimpleNamespace(
             _history_source=SimpleNamespace(stop_token="synthetic")
         )
-        h.provider = SimpleNamespace(requests=2, errors=0)
         h.data = {"project": "/synthetic/project"}
         h.box.container_project = lambda _data: "/synthetic/project"
         job = {
@@ -1649,58 +2506,73 @@ class SessionHistoryHostFixtureTests(unittest.TestCase):
             }[route]
         )
         h.export = Mock(return_value={"messages": [{"text": "FOREGROUND_IDLE_MARKER"}]})
+        row = {
+            "id": job["id"],
+            "session_id": job["sessionID"],
+            "kind": "shell",
+            "status": "running",
+        }
         h.metadata = lambda source=True: (
-            {"jobs": [["durable-held-row"]], "starts": "x"} if source else {"jobs": []}
+            {"jobs": [row], "starts": "x"} if source else {"jobs": []}
         )
-        gate = SimpleNamespace(command=lambda: "synthetic held shell", release=Mock())
+        gate = SimpleNamespace(command=Mock(return_value="held shell"), release=Mock())
         with (
             patch.object(runner, "FileGate", return_value=gate),
-            patch.object(runner, "Worker"),
+            patch.object(runner, "Worker") as worker,
         ):
-            self.assertEqual(h.held_running("ses_selected"), 0)
-        self.assertTrue(h.provider.background["background"])
-        self.assertEqual(h.job, job)
-        self.assertEqual(h.retained_status, "running")
+            h.native_run = Mock()
+            self.assertEqual(h.held_running("ses_selected"), 1)  # Scripted client.
+            worker.call_args.args[0]()
+            h.native_run.assert_called_once_with(
+                "ses_selected", "SYNTHETIC_HISTORY_RECOVERY"
+            )
+            self.assertTrue(h.provider.background["background"])
+            self.assertEqual(h.job, job)
+            self.assertEqual(h.retained_status, "running")
+            self.assertTrue(
+                all(call.args[0] == "GET" for call in h.request.call_args_list)
+            )
+            self.assertFalse(
+                any("reload" in call.args[1] for call in h.request.call_args_list)
+            )
+            gate.command.assert_called_once_with(hold_seconds=180)
+            gate.release.assert_not_called()
+            for key, wrong in (("id", "other-job"), ("status", "cancelled")):
+                with (
+                    self.subTest(key=key),
+                    patch.dict(row, {key: wrong}),
+                    self.assertRaises(runner.Refusal),
+                ):
+                    h.held_running("ses_selected")
+            with self.assertRaises(runner.Refusal):
+                h.cancelled("ses_selected")
         gate.release.assert_not_called()
-        self.assertTrue(all(call.args[0] == "GET" for call in h.request.call_args_list))
-        self.assertFalse(
-            any("reload" in call.args[1] for call in h.request.call_args_list)
-        )
 
-    def test_current_reproduction_requires_running_pairs_and_complete_original_timeout(
-        self,
-    ):
-        old = self.harness()
+    def test_current_reproduction_requires_running_pairs_and_complete_original_timeout(self):
         for defect in (
             None,
             "cancelled diagnostic",
+            "cancelled pair",
             "no pairs",
             "short wait",
             "owner alive",
+            "foreground",
         ):
-            h = runner.RecoveryHarness(
-                old.loaded,
-                self.parent,
-                old.binary,
-                old.runner,
-                "snapshot",
-                native_version="2.3.0",
-            )
-            h.box.HistoryWaitTimeout = type("HistoryWaitTimeout", (Exception,), {})
-            h.timeout = h.box.HistoryWaitTimeout()
-            h.timeout.recovery_eligible = True
-            h.timeout.diagnostic = "History wait timeout: phase=poll-delay; last complete observation: foreground=0, jobs-running=1, jobs-completed=0, jobs-error=0, jobs-cancelled=0."
-            h.running_pairs, h.elapsed, h.owner_closed = 2, 30, True
+            h = self.recovery_harness(native_version="2.3.0")
             if defect == "cancelled diagnostic":
                 h.timeout.diagnostic = h.timeout.diagnostic.replace(
                     "jobs-running=1", "jobs-running=0"
-                )
+                ).replace("jobs-cancelled=0", "jobs-cancelled=1")
+            elif defect == "cancelled pair":
+                h.cancelled_pairs = 2
             elif defect == "no pairs":
-                h.running_pairs = 0
+                h.running_pairs = 1
             elif defect == "short wait":
                 h.elapsed = 1
             elif defect == "owner alive":
                 h.owner_closed = False
+            elif defect == "foreground":
+                h.timeout.interrupted_foreground = True
             with self.subTest(defect=defect):
                 if defect is None:
                     h.reproduction()
@@ -1708,85 +2580,19 @@ class SessionHistoryHostFixtureTests(unittest.TestCase):
                     with self.assertRaises(runner.Refusal):
                         h.reproduction()
 
-    def test_current_recovery_report_does_not_relabel_cancelled_job_evidence(self):
-        identity = {
-            "commit": self.commit,
-            "commit_count": 80,
-            "version": "1.6.51+g" + self.commit[:7],
-            "dirty": False,
-            "sha256": {"src/oc_box/history_reader.py": "c" * 64},
-        }
-        native = {"version": "2.3.0", "sha256": "d" * 64, "path": "/synthetic/native"}
-        for case in runner.RECOVERY_CHECKS:
-            observations = {
-                "cancelled_pairs": 0,
-                "running_pairs": 2,
-                "native_client_exit": 1,
-                "restarts": int(case == "snapshot"),
-                "reader_leases": int(case == "snapshot"),
-                "prepare_calls": 0,
-                "auth_calls": 0,
-                "provider_requests": 2,
-                "shell_starts": 1,
-                "explicit_stop_exit_code": 0 if case == "stop-cancel" else None,
-                "recovery_calls": 1,
-                "snapshot_completed": int(case == "snapshot"),
-            }
-
-            def report(observed):
-                return runner.recovery_result(
-                    case,
-                    dict.fromkeys(runner.RECOVERY_CHECKS[case], True),
-                    identity,
-                    "e" * 64,
-                    native,
-                    exits=(0, 1),
-                    stage="complete",
-                    observations=observed,
-                )
-
-            current = report(observations)
-            self.assertEqual(current["status"], "PASS")
-            self.assertEqual(current["launcher_stages"], ["primer", "held_running"])
-            self.assertIn("2.3.0", current["scope"])
-            for missing in ("running_pairs", "native_client_exit"):
-                self.assertEqual(
-                    report({k: v for k, v in observations.items() if k != missing})[
-                        "status"
-                    ],
-                    "FAIL",
-                )
-            for key, wrong in (
-                ("running_pairs", 0),
-                ("cancelled_pairs", 2),
-                ("native_client_exit", 0),
-                ("restarts", 2),
-                ("reader_leases", 2),
-                ("prepare_calls", 1),
-                ("auth_calls", 1),
-                ("provider_requests", 3),
-            ):
-                self.assertEqual(
-                    report({**observations, key: wrong})["status"], "FAIL", key
-                )
-
     def test_recovery_reports_keep_default_evidence_separate_and_require_real_counts(
         self,
     ):
         identity = {
             "commit": self.commit,
             "commit_count": 80,
-            "version": "1.6.51+g" + self.commit[:7],
+            "version": "1.7.51+g" + self.commit[:7],
             "dirty": False,
             "sha256": {"src/oc_box/history_reader.py": "c" * 64},
         }
         native = {"version": "2.2.6", "sha256": "d" * 64}
-        self.assertEqual(len(runner.CHECKS), 33)
-        self.assertEqual(runner.EXPECTED_EXITS, (0, 0, 0, 1, 0))
-        self.assertEqual(
-            runner.LAUNCH_STAGES,
-            ("graph", "readiness", "background", "shell", "recovery-sync"),
-        )
+        self.assertEqual(len(runner.CHECKS), 42)
+        self.assertEqual(runner.EXPECTED_EXITS, (0, 0, 0, 1, 0, 0, 0, 0))
         for case, count in (("snapshot", 12), ("stop-cancel", 6)):
             observations = {
                 "cancelled_pairs": 2,
@@ -1853,6 +2659,118 @@ class SessionHistoryHostFixtureTests(unittest.TestCase):
                     report()
             with self.assertRaises(runner.Refusal):
                 report(observations={"private-sentinel": 0})
+            with self.assertRaisesRegex(runner.Refusal, "report-schema"):
+                report(observations={**observations, "running_pairs": 2})
+
+    def test_current_recovery_report_does_not_relabel_cancelled_job_evidence(self):
+        identity = {
+            "commit": self.commit,
+            "commit_count": 80,
+            "version": "1.9.51.dev0+g" + self.commit[:7],
+            "dirty": False,
+            "sha256": {"tools/native_host_profile.py": "c" * 64},
+        }
+        native = {"version": "2.3.0", "sha256": "d" * 64, "path": "/synthetic/native"}
+        digest = "e" * 64
+        baseline = runner.result(
+            dict.fromkeys(runner.CHECKS, True),
+            identity,
+            digest,
+            native,
+            exits=runner.EXPECTED_EXITS,
+            stage="complete",
+        )
+        self.assertEqual(baseline["status"], "PASS")
+        for missing in ("archived_next_start_new_root", "unarchived_next_start_resume"):
+            self.assertEqual(
+                runner.result(
+                    dict.fromkeys(runner.CHECKS - {missing}, True),
+                    identity,
+                    digest,
+                    native,
+                    exits=runner.EXPECTED_EXITS,
+                    stage="complete",
+                )["status"],
+                "FAIL",
+            )
+        for bad in (
+            {k: v for k, v in native.items() if k != "path"},
+            {**native, "path": "relative"},
+            {**native, "path": "/synthetic/../native"},
+            {**native, "path": "/synthetic/native\n"},
+            {**native, "sha256": "Z" * 64},
+            {**native, "version": "2.3.1"},
+            {**native, "interpreter": "/synthetic/unexpected"},
+        ):
+            with self.subTest(bad=bad), self.assertRaisesRegex(
+                runner.Refusal, "report-schema"
+            ):
+                runner.result({}, identity, digest, bad)
+        with self.assertRaisesRegex(runner.Refusal, "report-schema"):
+            runner.result(
+                {},
+                {**identity, "sha256": {"src/oc_box/oc_box.py": "c" * 64}},
+                digest,
+                native,
+            )
+
+        for case in runner.RECOVERY_CHECKS:
+            observations = {
+                "cancelled_pairs": 0,
+                "running_pairs": 2,
+                "native_client_exit": 1,
+                "restarts": int(case == "snapshot"),
+                "reader_leases": int(case == "snapshot"),
+                "prepare_calls": 0,
+                "auth_calls": 0,
+                "provider_requests": 2,
+                "shell_starts": 1,
+                "explicit_stop_exit_code": 0 if case == "stop-cancel" else None,
+                "recovery_calls": 1,
+                "snapshot_completed": int(case == "snapshot"),
+            }
+
+            def report(observed, *, stage="complete"):
+                return runner.recovery_result(
+                    case,
+                    dict.fromkeys(runner.RECOVERY_CHECKS[case], True),
+                    identity,
+                    digest,
+                    native,
+                    exits=(0, 1),
+                    stage=stage,
+                    observations=observed,
+                )
+
+            current = report(observations)
+            self.assertEqual(current["status"], "PASS")
+            self.assertEqual(current["launcher_stages"], ["primer", "held_running"])
+            self.assertIn("2.3.0", current["scope"])
+            with self.assertRaisesRegex(runner.Refusal, "report-schema"):
+                report(observations, stage="cancelled")
+            for missing in ("cancelled_pairs", "running_pairs", "native_client_exit"):
+                self.assertEqual(
+                    report({k: v for k, v in observations.items() if k != missing})[
+                        "status"
+                    ],
+                    "FAIL",
+                )
+            for key, wrong in (
+                ("running_pairs", 0),
+                ("cancelled_pairs", 2),
+                ("native_client_exit", 0),
+                ("restarts", 2),
+                ("reader_leases", 2),
+                ("prepare_calls", 1),
+                ("auth_calls", 1),
+                ("provider_requests", 3),
+                ("shell_starts", 2),
+                ("recovery_calls", 2),
+                ("snapshot_completed", int(case != "snapshot")),
+            ):
+                self.assertEqual(
+                    report({**observations, key: wrong})["status"], "FAIL", key
+                )
 
     def test_recovery_option_is_opt_in_and_all_cases_keep_the_early_host_guard(self):
         base = [
@@ -1866,6 +2784,16 @@ class SessionHistoryHostFixtureTests(unittest.TestCase):
             "/synthetic/native",
         ]
         self.assertIsNone(runner.parser().parse_args(base).history_recovery_case)
+        self.assertEqual(runner.parser().parse_args(base).native_version, "2.2.6")
+        with (
+            contextlib.redirect_stderr(io.StringIO()) as errors,
+            self.assertRaises(SystemExit) as caught,
+        ):
+            runner.parser().parse_args([*base, "--native-version", "2.3.1"])
+        self.assertEqual(caught.exception.code, 2)
+        self.assertEqual(
+            errors.getvalue(), "session-history fixture: category=invalid-options\n"
+        )
         for case in (None, *runner.RECOVERY_CHECKS):
             with (
                 patch.object(runner, "Harness") as default,
@@ -1874,18 +2802,21 @@ class SessionHistoryHostFixtureTests(unittest.TestCase):
                 arguments = (object(), self.parent, Path("/synthetic/native"), "d" * 64)
                 value = runner.build_harness(*arguments, recovery_case=case)
                 if case is None:
-                    default.assert_called_once_with(*arguments)
+                    default.assert_called_once_with(*arguments, native_version="2.2.6")
                     recovery.assert_not_called()
                     self.assertIs(value, default.return_value)
                 else:
-                    recovery.assert_called_once_with(*arguments, case)
+                    recovery.assert_called_once_with(
+                        *arguments, case, native_version="2.2.6"
+                    )
                     default.assert_not_called()
                     self.assertIs(value, recovery.return_value)
         for case in runner.RECOVERY_CHECKS:
-            arguments = [*base, "--history-recovery-case", case]
+            arguments = [*base, "--history-recovery-case", case, "--native-version", "2.3.0"]
             self.assertEqual(
                 runner.parser().parse_args(arguments).history_recovery_case, case
             )
+            self.assertEqual(runner.parser().parse_args(arguments).native_version, "2.3.0")
             with (
                 patch.object(
                     runner, "host_guard", side_effect=runner.Refusal("host-only")
@@ -2272,19 +3203,9 @@ class SessionHistoryHostFixtureTests(unittest.TestCase):
         self.assertIs(raised.exception, error)
         self.assertFalse(h.closed.is_set())
 
-    def test_current_owner_shutdown_finishes_native_client_before_recovery_admission(
-        self,
-    ):
-        old = self.harness()
-        for exit_code in (1, 0, None):
-            h = runner.RecoveryHarness(
-                old.loaded,
-                self.parent,
-                old.binary,
-                old.runner,
-                "snapshot",
-                native_version="2.3.0",
-            )
+    def test_current_owner_shutdown_finishes_native_client_before_recovery_admission(self):
+        for exit_code in (1, 0, None, True):
+            h = self.recovery_harness(native_version="2.3.0")
             h.stage, h.returned_at, h.data = "held_running", time.monotonic() - 30, {}
             h.service.live_connection = lambda: None
             h.service.socket_path = lambda *_: self.parent / "absent-socket"
@@ -2293,7 +3214,7 @@ class SessionHistoryHostFixtureTests(unittest.TestCase):
                 clients=0,
                 thread=SimpleNamespace(is_alive=lambda: False),
                 listener=SimpleNamespace(fileno=lambda: -1),
-                _history_timeout=object(),
+                _history_timeout=h.timeout,
             )
             calls = []
 
@@ -2312,23 +3233,82 @@ class SessionHistoryHostFixtureTests(unittest.TestCase):
             h.raw_shutdown = close
             h.client = SimpleNamespace(join=join)
             with self.subTest(exit_code=exit_code):
-                if exit_code == 1:
+                if type(exit_code) is int and exit_code == 1:
                     self.assertEqual(
                         h.observe_shutdown(owner), "actual-shutdown-result"
                     )
                     self.assertTrue(h.closed.is_set())
+                    self.assertEqual(h.observations()["native_client_exit"], 1)
+                    h.reproduction()
                 else:
-                    with self.assertRaises(runner.Refusal):
+                    with self.assertRaisesRegex(runner.Refusal, "launcher-exit"):
                         h.observe_shutdown(owner)
                     self.assertFalse(h.closed.is_set())
                 self.assertEqual(calls, ["owner-closed", "native-client-finished"])
+
+    def test_recovery_observer_counts_only_identity_matched_complete_pairs(self):
+        for version in runner.NATIVE_VERSIONS:
+            h = self.recovery_harness(native_version=version)
+            h.stage, h.returned_at = h.recovery_stage, 1
+            h.cancelled_pairs = h.running_pairs = 0
+            h.job = {"id": "job_real", "sessionID": "ses_real"}
+            h.raw_api = Mock()
+            job = {**h.job, "kind": "shell", "status": h.retained_status}
+
+            def call(path, data):
+                response = {"data": data}
+                h.raw_api.return_value = response
+                self.assertIs(h.observe_api(h.box, {}, {}, "GET", path), response)
+
+            route, active = "/api/experimental/job", "/api/session/active"
+            call(route, [job])  # No session observation for this jobs reply.
+            for changes in (
+                {"id": "job_other"},
+                {"sessionID": "ses_other"},
+                {"kind": "subagent"},
+                {"status": "cancelled" if version == "2.3.0" else "running"},
+            ):
+                call(active, {})
+                call(route, [{**job, **changes}])
+            call(active, {"ses_real": "active"})
+            call(route, [job])
+            self.assertEqual((h.cancelled_pairs, h.running_pairs), (0, 0))
+            for _ in range(2):
+                call(active, {})
+                call(route, [job])
+            self.assertEqual(
+                (h.cancelled_pairs, h.running_pairs),
+                (0, 2) if version == "2.3.0" else (2, 0),
+            )
+
+    def test_recovery_warns_about_interruption_without_announcing_live_sync(self):
+        h = self.recovery_harness()
+        h.output = "Available history synced. Interrupted work may be incomplete.\n"
+        h.warning = ""
+        h.verify_interruption_warning()
+        for invalid in (
+            h.output + "History synced.\n",
+            "Available history synced.\n",
+            h.output * 2,
+            h.output + "Session history synced to your normal host OpenCode database.\n",
+        ):
+            with self.subTest(output=invalid), patch.object(h, "output", invalid):
+                with self.assertRaises(runner.Refusal):
+                    h.verify_interruption_warning()
+        h.output = ""
+        h.warning = (
+            "Checked persisted history snapshots were synchronized after stopping "
+            "the workspace. Execution was interrupted; completion notices or final "
+            "results may be missing. The original history-wait failure remains nonzero."
+        )
+        h.verify_interruption_warning()
 
     def test_scheduler_probe_is_read_only_and_refuses_every_row_not_only_due_work(self):
         import sqlite3
 
         database = self.parent / "native-fixture.db"
         for state in (None, "paused", "completed", "cancelled", "unknown"):
-            with sqlite3.connect(database) as db:
+            with contextlib.closing(sqlite3.connect(database)) as db, db:
                 db.execute(
                     "CREATE TABLE IF NOT EXISTS schedule(id TEXT PRIMARY KEY, session_id TEXT, status TEXT, last_message_id TEXT)"
                 )
@@ -2358,6 +3338,50 @@ class SessionHistoryHostFixtureTests(unittest.TestCase):
                             ),
                             {},
                         )
+            self.assertEqual(database.read_bytes(), before)
+
+    def test_current_metadata_probe_refuses_unknown_schemas_and_legacy_job_rows(self):
+        import sqlite3
+        from test_history_reader import JOB_SCHEMA, KV_SCHEMA, SCHEDULE_SCHEMA
+
+        for defect, statement in (
+            (None, None),
+            ("legacy schedule", "ALTER TABLE schedule DROP COLUMN last_outcome"),
+            ("later scheduler", "CREATE TABLE automation(id TEXT PRIMARY KEY)"),
+            ("unknown job schema", "ALTER TABLE job ADD COLUMN unknown TEXT"),
+            (
+                "legacy row",
+                "INSERT INTO kv VALUES ('job.background/synthetic', '{}', 0, 0)",
+            ),
+        ):
+            database = self.parent / (f"{defect}.db")
+            with contextlib.closing(sqlite3.connect(database)) as db, db:
+                for sql in (JOB_SCHEMA, KV_SCHEMA, SCHEDULE_SCHEMA):
+                    db.execute(sql)
+                db.execute(
+                    "INSERT INTO job VALUES "
+                    "('msg_notice','job_hold','ses_held',NULL,'shell',NULL,'running',"
+                    "NULL,NULL,'{}',0,0)"
+                )
+                if statement:
+                    db.execute(statement)
+            before = database.read_bytes()
+            with (
+                self.subTest(defect=defect),
+                patch.object(sys, "argv", ["probe", str(database), "--native-2.3.0"]),
+                contextlib.redirect_stdout(io.StringIO()) as output,
+            ):
+                code = compile(runner.METADATA_HELPER, "fixture-scheduler", "exec")
+                if defect is None:
+                    exec(code, {})
+                    jobs = json.loads(output.getvalue())["jobs"]
+                    self.assertEqual(len(jobs), 1)
+                    self.assertEqual(jobs[0]["status"], "running")
+                    self.assertEqual(jobs[0]["notification_id"], "msg_notice")
+                else:
+                    with self.assertRaises(AssertionError):
+                        exec(code, {})
+                    self.assertEqual(output.getvalue(), "")
             self.assertEqual(database.read_bytes(), before)
 
     def test_recovery_selector_preserves_only_public_fences_without_manufacturing_them(

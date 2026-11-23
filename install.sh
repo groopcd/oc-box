@@ -184,11 +184,11 @@ PY
         exit 1
     fi
     public_git -C "$work/source" checkout --quiet --detach "$commit"
-    if [ "$with_tui" = true ]; then
-        # Features belong to the verified release, not its update channel.
-        # Inspect parser literals without importing or executing installer code.
+    # Features belong to the verified release, not its update channel.
+    # Inspect parser literals without importing or executing installer code.
+    installer_proof=$(
         env -i PATH="$PATH" HOME="$work" PYTHONNOUSERSITE=1 \
-            python3 -I - "$work/source" <<'PY'
+            python3 -I - "$work/source" "$with_tui" <<'PY'
 import ast
 from pathlib import Path
 import sys
@@ -201,23 +201,38 @@ try:
     tree = ast.parse(implementation.read_text(encoding="utf-8"))
 except (OSError, SyntaxError, UnicodeError):
     sys.exit("Cannot inspect the selected release installer; nothing was installed.")
-if not any(
-    isinstance(node, ast.Constant) and node.value == "--with-tui"
+options = {
+    node.value
     for node in ast.walk(tree)
-):
+    if isinstance(node, ast.Constant) and isinstance(node.value, str)
+}
+if sys.argv[2] == "true" and "--with-tui" not in options:
     sys.exit(
         "The selected release installer does not support --with-tui; "
         "nothing was installed."
     )
+print("commit" if "--verified-release-commit" in options else "legacy")
 PY
-    fi
+    )
     set -- "--$channel" --release-version "$version"
+    if [ "$installer_proof" = commit ]; then
+        set -- "$@" --verified-release-commit "$commit"
+    fi
     if [ "$with_vault" = true ]; then set -- "$@" --with-vault; fi
     if [ "$with_tui" = true ]; then set -- "$@" --with-tui; fi
+    set -- python3 -B "$work/source/install.py" "$@"
+    if [ "$installer_proof" = commit ]; then
+        # Fresh-install validation needs the actual state selectors. Older
+        # installers retain their original environment and cannot enroll.
+        xdg_state=${XDG_STATE_HOME-"$HOME/.local/state"}
+        set -- "XDG_DATA_HOME=${XDG_DATA_HOME-"$HOME/.local/share"}" \
+            "XDG_STATE_HOME=$xdg_state" "XDG_CACHE_HOME=${XDG_CACHE_HOME-"$HOME/.cache"}" \
+            "OC_BOX_STATE_HOME=${OC_BOX_STATE_HOME-"$xdg_state/oc-box"}" "$@"
+    fi
     env -i PATH="$PATH" HOME="$HOME" LANG=C.UTF-8 PYTHONNOUSERSITE=1 \
         XDG_CONFIG_HOME="${XDG_CONFIG_HOME-"$HOME/.config"}" \
         GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
-        python3 -B "$work/source/install.py" "$@"
+        "$@"
 }
 
 # Keep actions in main so a truncated pipeline does not execute a partial script.

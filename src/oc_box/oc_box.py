@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+from contextvars import ContextVar
 import fcntl
 import hashlib
 import io
@@ -14,40 +15,52 @@ from pathlib import Path
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import tarfile
 import tempfile
 import threading
 import time
+import unicodedata
 import uuid
 
 if __package__:
     from . import (
+        cli_help,
         credentials,
         dependencies,
         history_reader,
         history_recovery,
+        lifecycle_output,
+        log_config,
+        native_tabs,
         opencode_compat,
         opencode_v2_io,
         paths,
         plugin_compat,
         private_memory,
+        sync_config,
         vault,
         workspace_control,
         workspace_identity,
         workspace_service,
     )
 else:
+    import cli_help
     import credentials
     import dependencies
     import history_reader
     import history_recovery
+    import lifecycle_output
+    import log_config
+    import native_tabs
     import opencode_compat
     import opencode_v2_io
     import paths
     import plugin_compat
     import private_memory
+    import sync_config
     import vault
     import workspace_control
     import workspace_identity
@@ -105,60 +118,627 @@ class HistoryPending(BoxError):
 
 
 class HistoryWaitTimeout(BoxError):
-    """Keep the fixed refusal separate from count-only readiness diagnostics."""
+    """Keep the fixed refusal separate from aggregate readiness diagnostics."""
 
-    def __init__(self, diagnostic, *, recovery_eligible=False):
+    def __init__(
+        self,
+        diagnostic,
+        *,
+        recovery_eligible=False,
+        recovery_reason="readiness-unverified",
+        timing_diagnostic=None,
+        interrupted_foreground=False,
+    ):
         super().__init__("OpenCode 2.x history wait failed (activity-timeout).")
         self.diagnostic = diagnostic
         self.recovery_eligible = recovery_eligible
+        self.recovery_reason = recovery_reason
+        self.timing_diagnostic = timing_diagnostic
+        self.interrupted_foreground = interrupted_foreground
+
+
+_TTY_PROGRESS = ContextVar("oc_box_tty_progress", default=None)
+_DEBUG_ONLY_STAGES = frozenset(
+    {"history-wait", "history-sync", "history-recovery", "shutdown"}
+)
 
 
 @contextlib.contextmanager
-def loading_stage(label, *, interval=5.0, stream=None):
-    stream = sys.stderr if stream is None else stream
+def loading_stage(label, *, stage=None, interval=0.1, stream=None):
+    """Foreground CLI feedback; Python stream proxying must nest lexically.
+
+    Only explicitly tagged stages opt in to concise presentation and journaling.
+    The label is for display, never diagnostic metadata.
+    """
     started = time.monotonic()
+    outcome = "failure"
+    try:
+        with _loading_progress(
+            label,
+            started,
+            interval,
+            stream,
+            stage is not None and lifecycle_output.concise(),
+        ):
+            yield
+        outcome = "success"
+    except KeyboardInterrupt:
+        outcome = "cancelled"
+        raise
+    finally:
+        if stage is not None:
+            startup_failed = outcome == "failure" and stage not in _DEBUG_ONLY_STAGES
+            lifecycle_output.record(
+                "lifecycle.stage",
+                level="error" if startup_failed else "debug",
+                stage=stage,
+                reason="startup-failed" if startup_failed else None,
+                outcome=outcome,
+                duration_ms=int((time.monotonic() - started) * 1000),
+            )
+
+
+@contextlib.contextmanager
+def _loading_progress(label, started, interval, stream, concise):
+    stream = sys.stderr if stream is None else stream
+    try:
+        fd = stream.fileno()
+        interactive = (
+            stream.isatty()
+            and os.environ.get("TERM") != "dumb"
+            and os.get_terminal_size(fd).columns > 1
+        )
+    except (AttributeError, OSError, ValueError):
+        interactive = False
+    if concise and not interactive:
+        yield
+        return
+    progress = _TTY_PROGRESS.get() if concise else None
+    if progress is not None:
+        matches, show_stage, _ = progress
+        if matches(stream):
+            with show_stage(label, started):
+                yield
+            return
+
     stopped = threading.Event()
-    print(f"oc-box: {label}...", file=stream, flush=True)
+    lock = threading.RLock()
+    drawn = False
+    partial_output = False
+    paused = False
+    writable = True
+    worker = None
+    frames = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+    try:
+        frames.encode(getattr(stream, "encoding", None) or "ascii")
+    except (LookupError, UnicodeError):
+        frames = "|/-\\"
+    frame = 0
+
+    def emit(text):
+        nonlocal writable
+        if writable:
+            try:
+                stream.write(text)
+                stream.flush()
+            except (OSError, ValueError):
+                # Progress is best-effort; do not replace the operation's error.
+                writable = False
+
+    def clear():
+        nonlocal drawn
+        if drawn:
+            emit("\r\x1b[K")
+            drawn = False
+
+    def clip(text, width):
+        result = []
+        for character in text:
+            cells = (
+                0
+                if unicodedata.combining(character)
+                else 2
+                if unicodedata.east_asian_width(character) in ("W", "F")
+                else 1
+            )
+            if cells > width:
+                break
+            result.append(character)
+            width -= cells
+        return "".join(result)
+
+    def render(suffix, *, final=False):
+        nonlocal drawn, frame
+        try:
+            # Query the actual output fd on every draw, including after resize;
+            # leave the last cell unused to avoid terminal autowrap.
+            width = max(os.get_terminal_size(fd).columns - 1, 0)
+        except (OSError, ValueError):
+            width = 0
+        spinner = "" if final else frames[frame % len(frames)] + " "
+        frame += 1
+        prefix = "".join(
+            character if character.isprintable() else " "
+            for character in f"oc-box: {spinner}{label}"
+        )
+        text = (
+            clip(prefix, width - len(suffix)) + suffix
+            if len(suffix) < width
+            else suffix.lstrip()[:width]
+        )
+        emit("\r\x1b[K" + text + ("\n" if final else ""))
+        drawn = not final
+
+    class StageOutput:
+        """Separate Python output without saving it or capturing child fds."""
+
+        def __init__(self, target):
+            self.target = target
+
+        def __getattr__(self, name):
+            return getattr(self.target, name)
+
+        def write(self, text):
+            nonlocal partial_output
+            with lock:
+                if text:
+                    clear()
+                count = self.target.write(text)
+                if text:
+                    partial_output = not text.endswith("\n")
+                return count
+
+        def writelines(self, lines):
+            for line in lines:
+                self.write(line)
+
+    def same_terminal(other):
+        while isinstance(other, StageOutput):
+            other = other.target
+        if other is stream:
+            return True
+        try:
+            here, there = os.fstat(fd), os.fstat(other.fileno())
+            return other.isatty() and (here.st_dev, here.st_ino) == (
+                there.st_dev,
+                there.st_ino,
+            )
+        except (AttributeError, OSError, ValueError):
+            return False
+
+    def redraw():
+        if not paused and not partial_output:
+            render(f"... ({int(time.monotonic() - started)}s elapsed)")
+
+    @contextlib.contextmanager
+    def show_stage(message, since):
+        nonlocal label, started
+        with lock:
+            previous = label, started
+            label, started = message, since
+            redraw()
+        try:
+            yield
+        finally:
+            with lock:
+                clear()
+                label, started = previous
+
+    @contextlib.contextmanager
+    def pause():
+        nonlocal paused
+        with lock:
+            previous, paused = paused, True
+            clear()
+        try:
+            yield
+        finally:
+            with lock:
+                paused = previous
 
     def heartbeat():
         while not stopped.wait(interval):
-            print(
-                f"oc-box: {label}... ({int(time.monotonic() - started)}s elapsed)",
-                file=stream,
-                flush=True,
-            )
+            with lock:
+                if not writable:
+                    return
+                redraw()
 
-    worker = threading.Thread(target=heartbeat, daemon=True)
-    worker.start()
-    try:
-        yield
-    except BaseException:
-        stopped.set()
-        worker.join()
-        print(
-            f"oc-box: {label} failed after {time.monotonic() - started:.1f}s",
-            file=stream,
-            flush=True,
-        )
-        raise
-    else:
-        stopped.set()
-        worker.join()
-        print(
-            f"oc-box: {label} done ({time.monotonic() - started:.1f}s)",
-            file=stream,
-            flush=True,
-        )
+    with contextlib.ExitStack() as redirects:
+        if interactive:
+            # Python warnings/status lines must not be overwritten by a redraw.
+            # Inherited subprocess fds and previously saved stream references
+            # remain direct output; this is not a terminal recorder or relay.
+            for name, redirect in (
+                ("stdout", contextlib.redirect_stdout),
+                ("stderr", contextlib.redirect_stderr),
+            ):
+                target = getattr(sys, name)
+                if same_terminal(target):
+                    redirects.enter_context(redirect(StageOutput(target)))
+            if concise:
+                token = _TTY_PROGRESS.set((same_terminal, show_stage, pause))
+                redirects.callback(_TTY_PROGRESS.reset, token)
+            render("... (0s elapsed)")
+            worker = threading.Thread(target=heartbeat, daemon=True)
+            worker.start()
+        else:
+            emit(f"oc-box: {label}...\n")
+        failed = True
+        try:
+            yield
+            failed = False
+        finally:
+            stopped.set()
+            if worker is not None:
+                worker.join()
+            with lock:
+                if concise:
+                    clear()
+                else:
+                    elapsed = time.monotonic() - started
+                    suffix = (
+                        f" failed after {elapsed:.1f}s"
+                        if failed
+                        else f" done ({elapsed:.1f}s)"
+                    )
+                    if interactive:
+                        if partial_output:
+                            emit("\n")
+                        render(suffix, final=True)
+                    else:
+                        emit(f"oc-box: {label}{suffix}\n")
 
 
-def run_tui(command):
+def _startup_tool_output():
+    """Keep live Podman/installer output on inherited FDs without a redraw."""
+    progress = _TTY_PROGRESS.get()
+    return progress[2]() if progress is not None else contextlib.nullcontext()
+
+
+def run_tui(command, *, file_drops=None, startup_logo="graphics"):
     # Lazy import also keeps noninteractive CLI/library consumers lightweight.
     if __package__:
         from .terminal_ui import run_tui as relay
     else:
         from terminal_ui import run_tui as relay
 
-    return relay(command, env=getattr(command, "environment", None))
+    preview_options = {}
+    preview_open = getattr(command, "preview_host_open", None)
+    if callable(preview_open):
+        if __package__:
+            from . import file_preview_host
+        else:
+            import file_preview_host
+        preview_options = {
+            "preview_relay": file_preview_host.Relay(),
+            "preview_open": preview_open,
+        }
+    return relay(
+        command,
+        env=getattr(command, "environment", None),
+        **({"file_drops": file_drops} if file_drops is not None else {}),
+        **({"startup_logo": startup_logo} if startup_logo != "graphics" else {}),
+        **preview_options,
+    )
+
+
+def validate_host_drop(version=None):
+    if __package__:
+        from . import host_drop
+    else:
+        import host_drop
+    try:
+        return host_drop.preflight(version)
+    except host_drop.DropError as error:
+        raise BoxError(str(error)) from None
+
+
+def workspace_ui_preferences(path, data):
+    if __package__:
+        from . import workspace_preferences
+    else:
+        import workspace_preferences
+    try:
+        return workspace_preferences.read(path, data["id"])
+    except workspace_preferences.PreferenceError as error:
+        raise BoxError(str(error)) from None
+
+
+def configure_host_drop(path, data, args, version, *, saved=None):
+    """Resolve the separate host preference before unlock or lifecycle changes."""
+    if getattr(args, "_host_drop_resolved", False):
+        return
+    if __package__:
+        from . import workspace_preferences
+    else:
+        import workspace_preferences
+    requested = getattr(args, "host_drop", None)
+    if requested is not None and type(requested) is not bool:
+        raise BoxError("Invalid host file-drop preference.")
+    try:
+        # Validate even when overriding: corrupt policy is not permission to
+        # replace an unverified workspace's preference file.
+        if saved is None:
+            saved = workspace_ui_preferences(path, data)
+        # Snapshot independent host choices at the same native-client boundary;
+        # a start/reset or attach never writes either of these fields.
+        args._saved_host_file_open = saved.get("host_file_open")
+        args._startup_logo = saved.get(
+            "startup_logo", workspace_preferences.DEFAULT_STARTUP_LOGO
+        )
+        wanted = saved["host_drop"] if requested is None else requested
+        enabled = False
+        if wanted:
+            try:
+                # Automatic noninteractive/unsupported terminals must not add
+                # a version probe ahead of ordinary credential validation.
+                if version is None:
+                    validate_host_drop()
+                    version = detect_opencode_release()
+                    args._opencode_release = version
+                validate_host_drop(version)
+                enabled = True
+            except BoxError:
+                if requested is True:
+                    raise
+                if sys.stdin.isatty() and sys.stdout.isatty():
+                    print(
+                        "oc-box: Host importing is unavailable for this client; "
+                        "the workspace preference is unchanged.",
+                        flush=True,
+                    )
+        if requested is not None:
+            workspace_preferences.set_host_drop(path, data["id"], requested)
+            print(
+                "oc-box: Saved workspace host importing: "
+                + ("enabled." if requested else "disabled.")
+                + " Existing clients keep their current setting.",
+                flush=True,
+            )
+    except workspace_preferences.PreferenceError as error:
+        raise BoxError(str(error)) from None
+    args._host_drop_enabled = enabled
+    args._host_drop_resolved = True
+
+
+def effective_host_drop(args):
+    return bool(getattr(args, "_host_drop_enabled", getattr(args, "host_drop", False)))
+
+
+def effective_host_file_open(args, data):
+    """The owning launcher and attached native clients resolve this separately."""
+    requested = getattr(args, "host_file_open", None)
+    if requested is not None:
+        return requested is True
+    saved = getattr(args, "_saved_host_file_open", None)
+    if saved is not None:
+        return saved is True
+    if "restored_from" in data:
+        return False
+    if __package__:
+        from . import host_file_open_policy
+    else:
+        import host_file_open_policy
+    return host_file_open_policy.enabled(
+        PACKAGE, home=Path.home(), registry=state_root()
+    )
+
+
+def effective_image_preview(args):
+    """Only a caller or a prevalidated owning-launch snapshot requests an override."""
+    requested = getattr(args, "image_preview", None)
+    if requested is not None:
+        return requested is True
+    return getattr(args, "_image_preview_enabled", False) is True
+
+
+def validate_host_file_open(args, version=None, data=None):
+    if getattr(args, "host_file_open", None) is not True:
+        return
+    if __package__:
+        from . import file_preview
+    else:
+        import file_preview
+    reason = file_preview.client_incompatibility(version)
+    if reason is not None:
+        raise BoxError(
+            "--host-file-open requires an interactive native OpenCode 2.3.x "
+            f"TUI in direct Konsole or Yakuake ({reason})."
+        )
+    if getattr(args, "podman_arg", None) or (
+        data
+        and data.get("podman_args")
+        and not getattr(args, "clear_podman_args", False)
+    ):
+        raise BoxError("--host-file-open cannot be used with custom Podman arguments.")
+
+
+def configure_host_clipboard(args, version=None):
+    """Discover the host helper before unlock/reset, never read its clipboard."""
+    if not effective_host_clipboard(args):
+        if (
+            getattr(args, "host_clipboard", None) is False
+            and getattr(args, "host_clipboard_symlinks", None) is not None
+        ):
+            raise BoxError(
+                "Clipboard symlink options require --host-clipboard or a saved enabled preference."
+            )
+        return None
+    validate_host_drop(version)
+    if not hasattr(args, "_host_clipboard_reader"):
+        if __package__:
+            from . import host_clipboard
+        else:
+            import host_clipboard
+        try:
+            args._host_clipboard_reader = host_clipboard.preflight()
+        except host_clipboard.ClipboardError as error:
+            raise BoxError(str(error)) from None
+    return args._host_clipboard_reader
+
+
+def effective_host_clipboard(args):
+    return bool(
+        getattr(args, "_host_clipboard_enabled", getattr(args, "host_clipboard", False))
+    )
+
+
+def effective_host_clipboard_symlinks(args):
+    value = getattr(
+        args, "_host_clipboard_symlinks", getattr(args, "host_clipboard_symlinks", None)
+    )
+    return True if value is None else value
+
+
+def configure_host_clipboard_preferences(path, data, args, version):
+    """Resolve saved future-client policy without ever reading clipboard contents."""
+    if getattr(args, "_host_clipboard_resolved", False):
+        return
+    if __package__:
+        from . import workspace_preferences
+    else:
+        import workspace_preferences
+    requested = getattr(args, "host_clipboard", None)
+    symlinks = getattr(args, "host_clipboard_symlinks", None)
+    if any(
+        type(value) is not bool for value in (requested, symlinks) if value is not None
+    ):
+        raise BoxError("Invalid host clipboard preference.")
+    try:
+        saved = workspace_preferences.read(path, data["id"])
+        wanted = (
+            saved.get("host_clipboard", workspace_preferences.DEFAULT_HOST_CLIPBOARD)
+            if requested is None
+            else requested
+        )
+        if symlinks is not None and not wanted:
+            raise BoxError(
+                "Clipboard symlink options require --host-clipboard or a saved enabled preference."
+            )
+        args._host_clipboard_symlinks = (
+            saved.get(
+                "host_clipboard_symlinks",
+                workspace_preferences.DEFAULT_HOST_CLIPBOARD_SYMLINKS,
+            )
+            if symlinks is None
+            else symlinks
+        )
+        args._host_clipboard_enabled = wanted
+        try:
+            if wanted and version is None:
+                # Automatic unsupported clients must not add version/helper
+                # probes ahead of ordinary credential validation.
+                validate_host_drop()
+                version = (
+                    getattr(args, "_opencode_release", None)
+                    or detect_opencode_release()
+                )
+                args._opencode_release = version
+            configure_host_clipboard(args, version)
+        except BoxError:
+            args._host_clipboard_enabled = False
+            if requested is True or symlinks is not None:
+                raise
+            if sys.stdin.isatty() and sys.stdout.isatty():
+                print(
+                    "oc-box: Host clipboard importing is unavailable for this client; "
+                    "the workspace preference is unchanged.",
+                    flush=True,
+                )
+        if requested is not None or symlinks is not None:
+            workspace_preferences.set_preferences(
+                path,
+                data["id"],
+                host_clipboard=requested,
+                host_clipboard_symlinks=symlinks,
+            )
+            print(
+                "oc-box: Saved workspace host clipboard preferences. "
+                "Existing clients keep their current setting.",
+                flush=True,
+            )
+    except workspace_preferences.PreferenceError as error:
+        args._host_clipboard_enabled = False
+        raise BoxError(str(error)) from None
+    args._host_clipboard_resolved = True
+
+
+def run_native_tui(
+    data,
+    command,
+    connection,
+    *,
+    host_drop_enabled=False,
+    host_drop_required=True,
+    host_clipboard_reader=None,
+    host_clipboard_symlinks=True,
+    startup_logo="graphics",
+):
+    logo_options = {"startup_logo": startup_logo} if startup_logo != "graphics" else {}
+    if not host_drop_enabled and host_clipboard_reader is None:
+        return run_tui(command, **logo_options)
+    required = host_drop_required or host_clipboard_reader is not None
+    try:
+        profile = validate_host_drop(str(data.get("opencode_version", "")))
+    except BoxError:
+        if required:
+            raise
+        print(
+            "oc-box: Host importing is unavailable; opening the ordinary native TUI.",
+            flush=True,
+        )
+        return run_tui(command, **logo_options)
+    if connection is None:
+        raise BoxError("Host file drops require an existing private V2 connection.")
+    if __package__:
+        from . import host_drop
+    else:
+        import host_drop
+    client_started = False
+    try:
+        with host_drop.Relay(
+            sys.modules[__name__],
+            data,
+            connection,
+            profile=profile,
+            **(
+                {
+                    "paths_enabled": host_drop_enabled,
+                    "clipboard": host_clipboard_reader,
+                    "clipboard_symlinks": host_clipboard_symlinks,
+                }
+                if host_clipboard_reader is not None
+                else {}
+            ),
+        ) as drops:
+            client_started = True
+            details = lifecycle_output.feature_details()
+            if host_drop_enabled:
+                print("oc-box: " + host_drop.DROP_ENABLED, flush=True)
+                if details:
+                    print("oc-box: " + host_drop.DROP_DETAILS, flush=True)
+            if host_clipboard_reader is not None:
+                print("oc-box: " + host_drop.CLIPBOARD_ENABLED, flush=True)
+                if details:
+                    policy = (
+                        host_drop.CLIPBOARD_SYMLINKS_WARNING
+                        if host_clipboard_symlinks
+                        else host_drop.CLIPBOARD_STRICT_WARNING
+                    )
+                    print("oc-box: " + host_drop.CLIPBOARD_DETAILS, flush=True)
+                    print("oc-box: " + policy, flush=True)
+            return run_tui(command, file_drops=drops, **logo_options)
+    except host_drop.DropError:
+        if not client_started and not required:
+            print(
+                "oc-box: Host importing could not start; opening the ordinary native TUI. "
+                "The workspace preference is unchanged.",
+                flush=True,
+            )
+            return run_tui(command, **logo_options)
+        raise BoxError(
+            "Host file-drop transfer failed; no automatic retry or workspace restart was attempted."
+        ) from None
 
 
 def state_root():
@@ -260,7 +840,7 @@ def check_private_output():
         raise BoxError(private_memory.error_message()) from exc
 
 
-def run(argv, *, capture=False, check=True, private=False, **kwargs):
+def run(argv, *, capture=False, check=True, private=False, preparation=None, **kwargs):
     remaining = history_recovery.remaining()
     if remaining is not None:
         requested = kwargs.get("timeout")
@@ -272,6 +852,14 @@ def run(argv, *, capture=False, check=True, private=False, **kwargs):
             **kwargs.get("env", os.environ),
             "PWD": str(Path(kwargs["cwd"]).resolve()),
         }
+    tracked_preparation = (
+        preparation is not None
+        and not capture
+        and not private
+        and lifecycle_output.preparing_environment()
+        and history_recovery.FENCE.get() is None
+    )
+    details = {}
     try:
         command = [str(x) for x in argv]
         invoke = (
@@ -293,16 +881,50 @@ def run(argv, *, capture=False, check=True, private=False, **kwargs):
                 errors.seek(0)
                 result.stdout = output.read().decode("utf-8")
                 result.stderr = errors.read().decode("utf-8", errors="replace")
+        elif tracked_preparation:
+            # The selected setup tools already ran noninteractively. Don't
+            # route raw output or interactive/native subprocesses to disk.
+            live = lifecycle_output.live_preparation_output()
+            if not live:
+                kwargs.update(stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                if "input" not in kwargs and "stdin" not in kwargs:
+                    kwargs["stdin"] = subprocess.DEVNULL
+            with (
+                lifecycle_output.preparation(preparation) as details,
+                _startup_tool_output() if live else contextlib.nullcontext(),
+            ):
+                try:
+                    result = invoke(command, text=True, **kwargs)
+                except subprocess.TimeoutExpired:
+                    details["reason"] = "timeout"
+                    raise
+                except OSError:
+                    details["reason"] = "io"
+                    raise
+                details.update(
+                    outcome="failure" if result.returncode else "success",
+                    exit_code=result.returncode
+                    if -255 <= result.returncode <= 255
+                    else None,
+                )
         else:
             result = invoke(command, text=True, **kwargs)
     except FileNotFoundError as exc:
         raise BoxError(f"Executable not found: {argv[0]}") from exc
     except subprocess.TimeoutExpired as exc:
+        if tracked_preparation:
+            task = lifecycle_output.preparation_label(preparation)
+            hint = lifecycle_output.preparation_failure_hint(details)
+            raise BoxError(f"{task} timed out. {hint}") from exc
         raise BoxError(
             f"{argv[0]} exceeded its {exc.timeout}s timeout; operation stopped."
         ) from exc
     history_recovery.remaining()
     if check and result.returncode:
+        if tracked_preparation:
+            task = lifecycle_output.preparation_label(preparation)
+            hint = lifecycle_output.preparation_failure_hint(details)
+            raise BoxError(f"{task} failed (exit {result.returncode}). {hint}")
         detail = (
             (result.stderr or result.stdout or "").strip()
             if capture and not private
@@ -424,6 +1046,13 @@ def validate_project(path):
         raise BoxError(
             "Choose a dedicated project directory, not /, /home, your home, or oc-box state."
         )
+    if __package__:
+        from .paths import web_tls_home
+    else:
+        from paths import web_tls_home
+    web_tls = web_tls_home().resolve()
+    if web_tls.is_relative_to(project) or project.is_relative_to(web_tls):
+        raise BoxError("Project would expose private host web TLS files.")
     for private in (
         state_root(),
         APP,
@@ -780,7 +1409,9 @@ def container_project(data):
 def create_container(path, data, *, environment=None):
     def create_podman(*args, **kwargs):
         return podman(
-            *args, **kwargs, **({"env": environment} if environment is not None else {})
+            *args,
+            **kwargs,
+            **({"env": environment} if environment is not None else {}),
         )
 
     project = validate_project(data["project"])
@@ -793,7 +1424,8 @@ def create_container(path, data, *, environment=None):
     for option in data.get("podman_args", []):
         validate_podman_arg(option)
     warn_device_access(data)
-    print(f"Creating {data['distro']} environment ({data['image']})", flush=True)
+    if not lifecycle_output.concise():
+        print(f"Creating {data['distro']} environment ({data['image']})", flush=True)
     # The named home is container-only storage, not a bind of the user's home.
     volume = create_podman(
         "volume", "exists", data["home_volume"], capture=True, check=False
@@ -855,6 +1487,7 @@ def create_container(path, data, *, environment=None):
         data["image"],
         "-c",
         "exec sleep infinity",
+        preparation="container-image",
     )
     data["ready"] = False
     atomic_json(path, data)
@@ -892,23 +1525,36 @@ def start_container(path, data):
         podman("start", data["container"], capture=True)
     if not data.get("ready"):
         try:
-            podman(
-                "exec",
-                data["container"],
-                "/bin/sh",
-                "-c",
-                DISTROS[data["distro"]][1],
-                timeout=1800,
-            )
-            podman(
-                "exec",
-                "-i",
-                data["container"],
-                "python3",
-                "-",
-                input=(PACKAGE / "bootstrap.py").read_text(),
-                timeout=600,
-            )
+            quiet = lifecycle_output.concise()
+            with (
+                loading_stage("Installing container baseline tools", stage="bootstrap")
+                if quiet
+                else contextlib.nullcontext()
+            ):
+                podman(
+                    "exec",
+                    data["container"],
+                    "/bin/sh",
+                    "-c",
+                    DISTROS[data["distro"]][1],
+                    timeout=1800,
+                    preparation="baseline-packages",
+                )
+                podman(
+                    "exec",
+                    "-i",
+                    data["container"],
+                    "python3",
+                    "-",
+                    *(
+                        ["--quiet-ready"]
+                        if quiet and not lifecycle_output.live_preparation_output()
+                        else []
+                    ),
+                    input=(PACKAGE / "bootstrap.py").read_text(),
+                    timeout=600,
+                    preparation="baseline-tools",
+                )
         except BaseException:
             podman("stop", "--time", "5", data["container"], capture=True, check=False)
             raise
@@ -1257,7 +1903,9 @@ def maintenance_terminal(path, data):
     was_running = bool(info["State"]["Running"])
     try:
         if not was_running:
-            with loading_stage("Starting existing container for maintenance"):
+            with loading_stage(
+                "Starting existing container for maintenance", stage="container"
+            ):
                 podman(
                     "start",
                     data["container"],
@@ -1274,7 +1922,7 @@ def maintenance_terminal(path, data):
         return relay(command, env=command.environment, show_loading=False)
     finally:
         if not was_running:
-            with loading_stage("Stopping maintenance container"):
+            with loading_stage("Stopping maintenance container", stage="shutdown"):
                 stop_container(data, env=environment)
 
 
@@ -1357,7 +2005,87 @@ def rewrite_config(value, key=None):
     )
 
 
-def config_archive(data):
+def image_preview_cli_config():
+    """Freeze the unchanged CLI base for seeding, never a persistent opt-in."""
+    source = (
+        Path(os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config")))
+        / "opencode"
+    )
+    refusal = (
+        "--image-preview requires a regular, user-owned cli.json and config "
+        "directory without symlinks or group/world write access."
+    )
+    try:
+        # Do not silently follow a copied-config selector through a symlink.
+        if any(path.is_symlink() for path in (source, *source.parents)):
+            raise BoxError(refusal)
+        try:
+            directory = os.open(source, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        except FileNotFoundError:
+            directory = None
+        text = None
+        if directory is not None:
+            try:
+                info = os.fstat(directory)
+                if info.st_uid != os.getuid() or info.st_mode & 0o022:
+                    raise BoxError(refusal)
+                try:
+                    descriptor = os.open(
+                        "cli.json",
+                        os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+                        dir_fd=directory,
+                    )
+                except FileNotFoundError:
+                    descriptor = None
+                if descriptor is not None:
+                    with os.fdopen(descriptor, encoding="utf-8", newline="") as stream:
+                        info = os.fstat(stream.fileno())
+                        if (
+                            not stat.S_ISREG(info.st_mode)
+                            or info.st_uid != os.getuid()
+                            or info.st_nlink != 1
+                            or info.st_mode & 0o022
+                        ):
+                            raise BoxError(refusal)
+                        text = stream.read()
+            finally:
+                os.close(directory)
+        config = (
+            parse_jsonc(text)
+            if text is not None
+            else {"$schema": "https://opencode.ai/v2/cli.json"}
+        )
+        for key in ("prompt", "session"):
+            section = config.get(key, {})
+            if not isinstance(section, dict):
+                raise ValueError("CLI section must be an object")
+        # Validate finite JSON values without altering image preferences, other
+        # settings, comments or formatting. Only the native client gets the
+        # separate two-boolean override, and only for this owner's lifetime.
+        encoded = (json.dumps(config, indent=2, allow_nan=False) + "\n").encode()
+        return text.encode() if text is not None else encoded
+    except (OSError, UnicodeError) as exc:
+        raise BoxError(refusal) from exc
+    except (ValueError, BoxError) as exc:
+        # Never include config text or a parser's source excerpt in diagnostics.
+        if isinstance(exc, BoxError) and str(exc) == refusal:
+            raise
+        raise BoxError(
+            "--image-preview requires valid cli.json JSON/JSONC with an object "
+            "root and object-valued prompt/session settings; no config was changed."
+        ) from exc
+
+
+def validate_image_preview(version):
+    """Return the private CLI bytes validated before registration or reset."""
+    if opencode_compat.major(version) != 2:
+        raise BoxError("--image-preview requires native OpenCode 2.x.")
+    return image_preview_cli_config()
+
+
+def config_archive(
+    data, *, image_preview=False, image_preview_snapshot=None, history_only=False
+):
     """Snapshot user config as bytes. Extracted only inside the container."""
     source = (
         Path(os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config")))
@@ -1365,10 +2093,35 @@ def config_archive(data):
     )
     release = data.get("opencode_version", "1.0.0")
     v2 = opencode_compat.major(release) == 2
+    # Manual sync uses normal config transport but never needs the broader
+    # reporting helper. Retain the pre-existing archive for its legacy releases.
+    ui_reporting = native_tabs.supports_web_tabs(release) and (
+        not history_only or release in native_tabs.AUTO_RESUME_RELEASES
+    )
+    preview_config = None
+    if image_preview:
+        if not v2:
+            raise BoxError("--image-preview requires native OpenCode 2.x.")
+        preview_config = (
+            image_preview_cli_config()
+            if image_preview_snapshot is None
+            else image_preview_snapshot
+        )
     local_plugins = {}
     replacements = {}
     sandbox_version = None
     config_home = data["home"] + "/.config/opencode"
+    if ui_reporting:
+        if __package__:
+            from . import ui_state
+        else:
+            import ui_state
+        if (source / "plugins/oc-box-ui-state").exists() or (
+            source / "plugins/oc-box-ui-state"
+        ).is_symlink():
+            raise BoxError(
+                "Generated UI-state helper conflicts with an existing host plugin."
+            )
     if v2 and source.is_dir():
         candidates = set()
         configured = {}
@@ -1441,6 +2194,7 @@ def config_archive(data):
             relative = file.relative_to(source)
             if (
                 any(part in ("node_modules", ".git") for part in relative.parts)
+                or (image_preview and relative.parts[0] == "cli.json")
                 or not file.is_file()
                 or relative == Path("AGENTS.md")
                 or (file.name.startswith("service") and file.suffix == ".json")
@@ -1493,6 +2247,8 @@ def config_archive(data):
                     .encode()
                 )
             add_bytes(str(relative), content, file.stat().st_mode & 0o777)
+        if preview_config is not None:
+            add_bytes("cli.json", preview_config)
         if v2 and (local_plugins or sandbox_version):
             if any(
                 (source / name).exists()
@@ -1576,6 +2332,12 @@ def config_archive(data):
                 "plugins/oc-box-build-permissions/package.json",
                 b'{"type":"module","main":"index.js"}',
             )
+            if ui_reporting:
+                # Only normal configuration preparation installs this.
+                # Native/project/managed plugin policy remains authoritative:
+                # unlike the Build helper it gets no final mandatory overlay.
+                for name, content in ui_state.package_sources(PACKAGE).items():
+                    add_bytes("plugins/oc-box-ui-state/" + name, content)
     return buffer.getvalue()
 
 
@@ -1604,6 +2366,7 @@ def ensure_opencode_version(data, version):
                 ],
             ),
             timeout=600,
+            preparation="native-cli-install",
         )
         installed = run(
             exec_command(data, [CONTAINER_OPENCODE, "--version"]),
@@ -1614,10 +2377,34 @@ def ensure_opencode_version(data, version):
             raise BoxError(
                 f"OpenCode version mismatch: host is {version}, container reports {installed!r}. Refusing to launch a different version."
             )
-    print(f"oc-box: OpenCode {version} matches the host version.", flush=True)
+    if not lifecycle_output.concise():
+        print(f"oc-box: OpenCode {version} matches the host version.", flush=True)
 
 
-def prepare_runtime(path, data, version):
+def prepare_runtime(
+    path,
+    data,
+    version,
+    *,
+    image_preview=False,
+    image_preview_snapshot=None,
+    history_only=False,
+):
+    # Owning launches carry the preflight bytes past credential prompts/reset;
+    # never reopen that CLI input after resource removal.
+    if image_preview and opencode_compat.major(version) != 2:
+        raise BoxError("--image-preview requires native OpenCode 2.x.")
+    archive_options = {"history_only": True} if history_only else {}
+    archive = (
+        config_archive(
+            data,
+            image_preview=True,
+            image_preview_snapshot=image_preview_snapshot,
+            **archive_options,
+        )
+        if image_preview
+        else None
+    )
     # Install the unmodified upstream version currently installed on the host.
     # Node/npm/uv are also used by the user's ordinary MCP/LSP setup.
     ensure_opencode_version(data, version)
@@ -1631,7 +2418,8 @@ def prepare_runtime(path, data, version):
             capture=True,
             timeout=120,
         )
-    archive = config_archive(data)
+    if archive is None:
+        archive = config_archive(data, **archive_options)
     unpack = (PACKAGE / "sync_config.py").read_text()
     copy_command = exec_command(data, ["python3", "-c", unpack, version])
     # binary input requires the binary subprocess mode here.
@@ -1647,33 +2435,87 @@ def prepare_runtime(path, data, version):
         raise BoxError("Copying configuration into the container timed out.") from exc
     if proc.returncode:
         raise BoxError(
-            "Cannot copy OpenCode config into container: "
-            + credentials.redact(proc.stderr.decode(errors="replace"))
+            f"Cannot copy OpenCode config into container (exit {proc.returncode})."
         )
-    if proc.stdout:
-        print("oc-box: " + proc.stdout.decode(errors="replace").strip(), flush=True)
-    reused = (
-        proc.stdout.decode(errors="replace").strip()
-        == "Reusing container plugin dependencies."
-    )
+    message = proc.stdout.decode(errors="replace").strip()
+    reused = message == "Reusing container plugin dependencies."
+    if message:
+        if (
+            reused
+            or message == "Plugin dependencies will be resolved by OpenCode if needed."
+        ):
+            if not lifecycle_output.concise():
+                print("oc-box: " + message, flush=True)
+        else:
+            print(
+                "oc-box: Configuration copy returned an unrecognized status; checking plugin dependencies.",
+                file=sys.stderr,
+                flush=True,
+            )
     if v2 and not reused:
         # V2 can supply its SDK to local plugins, but unlike V1 it does not
         # automatically install a copied config directory's custom manifest.
-        with loading_stage("Installing OpenCode 2.x plugin dependencies"):
+        with loading_stage(
+            "Installing OpenCode 2.x plugin dependencies", stage="dependencies"
+        ):
+            npm_options = [
+                "--prefix",
+                data["home"] + "/.config/opencode",
+                "--no-audit",
+                "--no-fund",
+            ]
+            managed = bool(sync_config.sdk_security_overrides(version))
+            if managed:
+                # Resolve without executing package scripts. No private package
+                # inventory is uploaded to an advisory service.
+                run(
+                    exec_command(
+                        data,
+                        [
+                            "npm", "install", *npm_options,
+                            "--package-lock-only", "--ignore-scripts",
+                        ],
+                    ),
+                    timeout=600,
+                    preparation="plugin-dependencies",
+                )
+                checked = run(
+                    exec_command(
+                        data, ["python3", "-c", unpack, "check-sdk-lock", version]
+                    ),
+                    check=False,
+                    capture=True,
+                    private=True,
+                    timeout=30,
+                )
+                if checked.returncode:
+                    raise BoxError(
+                        "Plugin dependencies contain a known unsafe glob/minimatch "
+                        "version or their resolution could not be verified. "
+                        "Review your OpenCode plugin dependency overrides."
+                    )
             run(
                 exec_command(
-                    data,
-                    [
-                        "npm",
-                        "install",
-                        "--prefix",
-                        data["home"] + "/.config/opencode",
-                        "--no-audit",
-                        "--no-fund",
-                    ],
+                    data, ["npm", "ci" if managed else "install", *npm_options],
                 ),
                 timeout=600,
+                preparation="plugin-dependencies",
             )
+            if managed:
+                cached = run(
+                    exec_command(
+                        data, ["python3", "-c", unpack, "mark-sdk-installed", version]
+                    ),
+                    check=False,
+                    capture=True,
+                    private=True,
+                    timeout=30,
+                )
+                if cached.returncode:
+                    raise BoxError(
+                        "Installed OpenCode plugin dependencies did not match "
+                        "their verified npm lock."
+                    )
     auth = (
         Path(os.environ.get("XDG_DATA_HOME", str(Path.home() / ".local/share")))
         / "opencode/auth.json"
@@ -1742,7 +2584,8 @@ def prepare_runtime(path, data, version):
         # plugins. Run before terminal takeover so cold downloads have visible
         # elapsed-time feedback; warm launches skip this extra process.
         with loading_stage(
-            "Resolving OpenCode plugin dependencies (first run or changed configuration)"
+            "Resolving OpenCode plugin dependencies (first run or changed configuration)",
+            stage="dependencies",
         ):
             run(
                 exec_command(
@@ -1755,15 +2598,24 @@ def prepare_runtime(path, data, version):
     if v2:
         # Resolve the public readiness boundary before inspecting plugin state;
         # early agent/plugin snapshots can legitimately precede activation.
-        with loading_stage("Preparing OpenCode 2.x private service and plugins"):
+        with loading_stage(
+            "Preparing OpenCode 2.x private service and plugins", stage="service"
+        ):
             initialized = run(
                 exec_command(
                     data, ["python3", "-c", bridge, "plugins", CONTAINER_OPENCODE]
                 ),
                 capture=True,
                 private=True,
+                check=False,
                 timeout=240,
             )
+            if initialized.returncode:
+                raise BoxError(
+                    opencode_v2_io.fixed_message(initialized.stderr)
+                    or f"OpenCode 2.x private service/plugin preparation failed "
+                    f"(exit {initialized.returncode})."
+                )
             for line in initialized.stdout.splitlines():
                 if line.startswith("oc-box: OpenCode 2.x plugin unavailable: "):
                     print(credentials.redact(line), file=sys.stderr, flush=True)
@@ -1782,6 +2634,24 @@ def prepare_runtime(path, data, version):
 
 def run_v2_history(data, action, **settings):
     """Use the owning service when present; never elect a host shared service."""
+
+    def failed(result, fallback):
+        message = opencode_v2_io.fixed_message(result.stderr)
+        if message in opencode_v2_io.PENDING_MESSAGES:
+            raise HistoryPending(message)
+        error = BoxError(message or fallback)
+        if message is not None and message != opencode_v2_io.NOT_READY:
+            error.history_contract_refusal = True
+        else:
+            error.history_retryable = True
+        raise error
+
+    stream = history_reader.EXPORTS.get()
+    if stream is not None:
+        result = stream.run(data, action, settings)
+        if result.returncode:
+            failed(result, "OpenCode 2.x history export helper failed.")
+        return result
     live = workspace_service.live_connection()
     endpoint = (
         {key: live[key] for key in ("url", "password")}
@@ -1815,10 +2685,7 @@ def run_v2_history(data, action, **settings):
     if result.returncode:
         # Only a whitelisted constant explanation is ever shown; native errors
         # and private output stay hidden behind the generic exit status.
-        message = opencode_v2_io.fixed_message(result.stderr)
-        if message in opencode_v2_io.PENDING_MESSAGES:
-            raise HistoryPending(message)
-        raise BoxError(message or f"podman failed (exit {result.returncode})")
+        failed(result, f"podman failed (exit {result.returncode})")
     return result
 
 
@@ -1864,7 +2731,13 @@ def refresh_sessions(path, data):
         for item in values
         if opencode_compat.directory({"info": item}) == container_project(data)
         and valid_session_id(item.get("id"))
-        and (not v2 or not item.get("parentID"))
+        and (
+            not v2
+            or (
+                not item.get("parentID")
+                and item.get("time", {}).get("archived") is None
+            )
+        )
     ]
     roots.sort(
         key=lambda item: (
@@ -2364,11 +3237,65 @@ def verify_host_archive(path, data, archived):
         )
 
 
+def _announce_history_synced(*, recovered=False):
+    with contextlib.suppress(OSError, ValueError):
+        print(
+            "Session history synced to your normal host OpenCode database"
+            + (" using the post-stop fallback." if recovered else "."),
+            flush=True,
+        )
+
+
 def sync_sessions(path, data, *, announce=True):
+    started = time.monotonic()
+    source_mode = (
+        "post-stop-reader"
+        if history_reader.current() is not None
+        else "private-endpoint"
+        if workspace_service.live_connection() is not None
+        else "standalone"
+    )
+    counts = dict.fromkeys(
+        ("sessions", "exported", "unchanged", "updated", "pending", "interrupted"), 0
+    )
+    report = history_recovery.REPORT.get()
+    reason = None
+    try:
+        with history_reader.export_pass(sys.modules[__name__], data):
+            populated = _sync_sessions(path, data, started, source_mode, counts)
+    except BaseException as exc:
+        reason = _history_failure_reason(exc)
+        if report is not None and reason == "cleanup-unverified":
+            # Remember this before outer lease/stop cleanup can raise its own
+            # exception. Reporting must not change which exception wins.
+            report.reason = reason
+        raise
+    else:
+        if report is not None:
+            report.populated = populated
+            report.omitted_interrupted_assistants = bool(counts["interrupted"])
+    finally:
+        if report is not None:
+            report.verified |= bool(counts["unchanged"] or counts["updated"])
+        lifecycle_output.record(
+            "history.pass",
+            level="debug",
+            stage=source_mode,
+            reason=reason,
+            outcome="success" if reason is None else "failure",
+            duration_ms=int(max(0, min(time.monotonic() - started, 9999)) * 1000),
+            metrics={key: min(count, 9999) for key, count in counts.items()},
+        )
+    if report is None and populated and announce and not lifecycle_output.concise():
+        _announce_history_synced()
+
+
+def _sync_sessions(path, data, started, source_mode, counts):
     state = refresh_sessions(path, data)
+    counts["sessions"] = len(state.get("sessions", []))
     archives = path.parent / "history"
     archives.mkdir(exist_ok=True, mode=0o700)
-    pending, interrupted = [], 0
+    pending = []
     for ident in state.get("sessions", []):
         if not valid_session_id(ident):
             raise BoxError("Invalid stored session ID")
@@ -2377,14 +3304,17 @@ def sync_sessions(path, data, *, announce=True):
         except HistoryPending as exc:
             # Keep this session's last good archives and continue with the rest.
             pending.append(str(exc))
+            counts["pending"] += 1
             continue
-        interrupted += bool(exported.get(opencode_v2_io.INTERRUPTED))
+        counts["exported"] += 1
+        counts["interrupted"] += bool(exported.get(opencode_v2_io.INTERRUPTED))
         archived = archive_session(exported, data)
         target = archives / (archived["info"]["id"] + ".json")
         atomic_json(target, archived)
         digest = hashlib.sha256(target.read_bytes()).hexdigest()
         state.setdefault("synced", {})
         if state["synced"].get(ident) == digest:
+            counts["unchanged"] += 1
             continue
         if ident in state.get("host_sessions", {}):
             if opencode_compat.native(archived):
@@ -2413,23 +3343,135 @@ def sync_sessions(path, data, *, announce=True):
         state["synced"][ident] = digest
         state.setdefault("host_sessions", {})[ident] = archived["info"]["id"]
         atomic_json(session_file(path), state)
-    if interrupted:
+        counts["updated"] += 1
+    if not lifecycle_output.concise():
         print(
-            f"oc-box: {interrupted} session(s) contain interrupted unfinished assistant "
+            f"oc-box: History sync summary: source={source_mode}, "
+            f"sessions={counts['sessions']}, exported={counts['exported']}, "
+            f"unchanged={counts['unchanged']}, updated={counts['updated']}, "
+            f"pending={counts['pending']}, elapsed={time.monotonic() - started:.1f}s.",
+            flush=True,
+        )
+    if counts["interrupted"] and not lifecycle_output.concise():
+        print(
+            f"oc-box: {counts['interrupted']} session(s) contain interrupted unfinished assistant "
             "messages that native OpenCode omits from its export; their archives mirror "
             "that export and record the omitted count.",
             flush=True,
         )
     if pending:
-        raise BoxError(
+        raise HistoryPending(
             f"{len(pending)} session(s) not settled yet: "
             + "; ".join(dict.fromkeys(pending))
             + " Their last archives are retained and other sessions were synchronized."
         )
-    if state.get("sessions") and announce:
-        print(
-            "Session history synced to your normal host OpenCode database.", flush=True
+    return bool(state.get("sessions"))
+
+
+def _history_compatibility_refusal(error):
+    reason = getattr(error, "history_compatibility_category", None)
+    if history_recovery.compatibility_category(reason) is not None:
+        return reason
+    if isinstance(error, HistoryWaitTimeout):
+        reason = error.recovery_reason
+        if history_recovery.compatibility_category(reason) is not None:
+            return reason
+    return None
+
+
+def _history_failure_reason(error):
+    reader = getattr(error, "history_reader_category", None)
+    if getattr(error, "history_source_cleanup_failed", False) or reader in (
+        "cleanup-failed",
+        "history-cleanup",
+    ):
+        return "cleanup-unverified"
+    if isinstance(error, (KeyboardInterrupt, SystemExit)):
+        return "cancelled"
+    compatibility = history_recovery.compatibility_category(
+        _history_compatibility_refusal(error)
+    ) or history_recovery.compatibility_category(reader)
+    if compatibility is not None:
+        return compatibility
+    if isinstance(error, HistoryWaitTimeout):
+        return "timeout"
+    if isinstance(error, HistoryPending):
+        return "pending"
+    return "sync-failed"
+
+
+_HISTORY_FAILURE_DETAILS = {
+    "cancelled": "the operation was interrupted",
+    "pending": "some sessions were still unsettled",
+    "schema": "the OpenCode compatibility contract was not recognized",
+    "stop-requested": "a workspace stop was requested",
+    "sync-failed": "verification did not finish",
+    "timeout": "OpenCode activity did not settle",
+    "unsupported-version": "this OpenCode version is not supported for post-stop recovery",
+}
+
+
+def _report_history_result(report, *, recovered, error):
+    """Emit the only concise archive outcome, after required cleanup."""
+    reason = report.reason
+    interruption = " Interrupted work may be incomplete." if report.interrupted else ""
+    if reason == "cleanup-unverified":
+        level, outcome = "error", "failure"
+        message = (
+            f"History sync cleanup could not be verified.{interruption} Container data retained. "
+            "Inspect the workspace on the host before retrying with 'oc-box sync'."
         )
+    elif recovered:
+        level, outcome, reason = "warn", "success", "interrupted"
+        message = (
+            "No history to sync. Interrupted work may be incomplete."
+            if report.populated is False
+            else "Available history synced. Interrupted work may be incomplete."
+        )
+    elif reason is not None:
+        level = "warn" if report.verified or reason == "cancelled" else "error"
+        outcome = (
+            "cancelled" if reason in ("cancelled", "stop-requested") else "failure"
+        )
+        status = "History partially synced" if report.verified else "History not synced"
+        detail = _HISTORY_FAILURE_DETAILS.get(reason, "verification did not finish")
+        guidance = interruption
+        if reason in ("schema", "unsupported-version"):
+            guidance += (
+                " Check for an oc-box update first; update OpenCode if necessary. "
+                "Do not reset or downgrade workspace state."
+            )
+        message = (
+            f"{status}: {detail}.{guidance} "
+            "Container data retained; retry with 'oc-box sync'."
+        )
+    elif report.populated is not None:
+        level, outcome = "info", "success"
+        reason = None if report.populated else "not-needed"
+        message = "History synced." if report.populated else "No history to sync."
+        if report.populated and report.omitted_interrupted_assistants:
+            message += " Native export omitted interrupted assistant messages."
+    else:
+        return
+    lifecycle_output.record(
+        "history.result",
+        level=level,
+        stage="history-recovery" if report.recovery_attempted else "history-sync",
+        reason=reason,
+        outcome=outcome,
+    )
+    if lifecycle_output.concise():
+        if error is not None:
+            error.history_outcome_reported = True
+        try:
+            print(
+                message,
+                file=sys.stdout if outcome == "success" else sys.stderr,
+                flush=True,
+            )
+        except (OSError, ValueError):
+            # A closed output stream cannot turn a verified sync into failure.
+            return
 
 
 def parse_jsonc(text):
@@ -2462,7 +3504,7 @@ def launch_credentials(data, args):
         or getattr(args, "no_vault", False)
     ):
         if version is None:
-            with loading_stage("Checking OpenCode version"):
+            with loading_stage("Checking OpenCode version", stage="version"):
                 version = detect_opencode_release()
             args._opencode_release = version
     try:
@@ -2483,25 +3525,49 @@ def launch_credentials(data, args):
             del args._opencode_release
 
 
-def launch(path, data, args):
+def launch(path, data, args, *, image_preview_snapshot=None):
     # Keep plaintext values out of persisted workspace metadata, os.environ,
     # and informational/maintenance/sync invocations. Launch unlock is local.
+    runtime_options = (
+        {"image_preview_snapshot": image_preview_snapshot}
+        if image_preview_snapshot is not None
+        else {}
+    )
+    if getattr(args, "host_drop", None) is True or effective_host_clipboard(args):
+        release = getattr(args, "_opencode_release", None) or detect_opencode_release()
+        if getattr(args, "host_drop", None) is True:
+            validate_host_drop(release)
+        configure_host_clipboard(args, release)
+        args._opencode_release = release
     try:
         if args.command == "sync":
             if getattr(args, "no_vault", False):
                 raise BoxError("--no-vault is not a history-sync option.")
-            return launch_environment(path, data, args)
+            return launch_environment(path, data, args, **runtime_options)
         with launch_credentials(data, args):
-            return launch_environment(path, data, args)
+            return launch_environment(path, data, args, **runtime_options)
     except vault.VaultError as exc:
         raise BoxError(str(exc)) from exc
 
 
-def launch_environment(path, data, args):
+def launch_environment(path, data, args, *, image_preview_snapshot=None):
     version = getattr(args, "_opencode_release", None)
     if version is None:
-        with loading_stage("Checking OpenCode version"):
+        with loading_stage("Checking OpenCode version", stage="version"):
             version = detect_opencode_release()
+    validate_host_file_open(args, version, data)
+    if getattr(args, "host_drop", None) is True:
+        validate_host_drop(version)
+    configure_host_clipboard(args, version)
+    if effective_image_preview(args):
+        if args.command not in ("start", "reset"):
+            raise BoxError(
+                "--image-preview applies only to an owning start/reset TUI launch."
+            )
+        if opencode_compat.major(version) != 2:
+            raise BoxError("--image-preview requires native OpenCode 2.x.")
+        if image_preview_snapshot is None:
+            image_preview_snapshot = validate_image_preview(version)
     if opencode_compat.major(version) == 2 or credentials.has_unlocked_values():
         check_private_output()
     if data.get("opencode_version") != version:
@@ -2509,10 +3575,16 @@ def launch_environment(path, data, args):
         atomic_json(path, data)
     exported = None
     if args.import_session:
-        with loading_stage("Exporting host session"):
+        with loading_stage("Exporting host session", stage="session"):
             exported = export_host_session(path, data, args.import_session)
     code = 1
+    recovered = False
+    history_started = False
+    manual_populated = False
+    manual_closing_source = client_returned = owner_closed = False
+    error, owner = None, None
     stop_token, source, cleanup_data = None, None, data
+    control_refusal = "control-unavailable"
     if (
         opencode_compat.major(version) == 2
         and args.command != "sync"
@@ -2520,85 +3592,295 @@ def launch_environment(path, data, args):
     ):
         try:
             stop_token = workspace_control.capture(path)
-        except (workspace_control.ControlError, OSError):
+        except workspace_control.ControlError as exc:
             # Optional recovery never repairs unsafe control state or prevents
             # the ordinary owning launch/cleanup from retaining its old behavior.
+            control_refusal = (
+                "control-uncertain"
+                if exc.category == "uncertain-control"
+                else "control-state"
+            )
+        except OSError:
             pass
+    concise = lifecycle_output.concise()
+    report = history_recovery.Report()
+    report_token = history_recovery.REPORT.set(report)
     try:
-        with loading_stage(f"Starting {data['distro']} container"):
+        with loading_stage(f"Starting {data['distro']} container", stage="container"):
             initial_info = start_container(path, data)
-        with loading_stage("Preparing OpenCode and syncing configuration"):
-            prepare_runtime(path, data, version)
+        with loading_stage(
+            "Preparing OpenCode and syncing configuration", stage="configuration"
+        ):
+            prepare_runtime(
+                path,
+                data,
+                version,
+                **({"history_only": True} if args.command == "sync" else {}),
+                **(
+                    {
+                        "image_preview": True,
+                        "image_preview_snapshot": image_preview_snapshot,
+                    }
+                    if effective_image_preview(args)
+                    else {}
+                ),
+            )
         if args.command == "sync":
-            with loading_stage("Syncing session history"):
-                sync_sessions(path, data)
+            history_started = True
+            report.attempted = True
+            with loading_stage("Syncing session history", stage="history-sync"):
+                with (
+                    workspace_service.history_source(sys.modules[__name__], data)
+                    if opencode_compat.major(version) == 2
+                    else contextlib.nullcontext()
+                ):
+                    sync_sessions(path, data, announce=False)
+                    manual_closing_source = True
+                manual_closing_source = False
+                manual_populated = bool(session_state(path).get("sessions"))
             return 0
         with contextlib.ExitStack() as services:
             owner = (
                 services.enter_context(
-                    workspace_service.Owner(sys.modules[__name__], path, data)
+                    workspace_service.Owner(
+                        sys.modules[__name__],
+                        path,
+                        data,
+                        ui_bridge=native_tabs.supports_web_tabs(version),
+                        **(
+                            {"image_preview": True}
+                            if effective_image_preview(args)
+                            else {}
+                        ),
+                    )
                 )
                 if opencode_compat.major(version) == 2
                 else None
             )
             if owner:
+                refusals = []
                 source = history_recovery.capture(
-                    sys.modules[__name__], data, initial_info, stop_token
+                    sys.modules[__name__],
+                    data,
+                    initial_info,
+                    stop_token,
+                    refusal=refusals.append,
                 )
                 owner._history_source = source
+                owner._history_source_refusal = (
+                    control_refusal
+                    if stop_token is None
+                    else refusals[0]
+                    if refusals
+                    else "source-unavailable"
+                )
+                if history_reader.snapshot_profile(version) is None:
+                    history_recovery.report_compatibility_refusal("unsupported-version")
+            history_started = True
             code = launch_client(path, data, args, version, exported, owner)
-        timeout = getattr(owner, "_history_timeout", None) if owner else None
-        if isinstance(timeout, HistoryWaitTimeout):
+            client_returned = True
+        owner_closed = True
+        if owner and report.attempted:
+            clients = getattr(owner, "clients", None)
+            owner_code = getattr(getattr(owner, "child", None), "returncode", None)
+            if (
+                type(clients) is not int
+                or clients != 0
+                or type(owner_code) is not int
+                or owner_code != 0
+            ):
+                report.reason = "cleanup-unverified"
+        failure = None
+        if owner:
+            failure = getattr(owner, "_history_failure", None) or getattr(
+                owner, "_history_timeout", None
+            )
+        if failure is not None:
             code = code or 1
+            report.attempted = True
+            report.interrupted = getattr(failure, "interrupted_foreground", False)
+            if report.reason is None:
+                report.reason = _history_failure_reason(failure)
         if (
             source is not None
-            and isinstance(timeout, HistoryWaitTimeout)
-            and timeout.recovery_eligible
+            and history_recovery.exit_retry_eligible(
+                sys.modules[__name__], data, failure
+            )
             and type(owner.clients) is int
             and owner.clients == 0
             and type(owner.child.returncode) is int
             and owner.child.returncode == 0
         ):
             cleanup_data = {**data, "container": source.container_id}
-            history_recovery.recover(sys.modules[__name__], path, data, source)
-        elif timeout is not None:
-            print(
-                f"oc-box: history sync pending: {timeout}\n"
-                "Container data retained. Retry with 'oc-box sync'.",
-                file=sys.stderr,
+            report.recovery_attempted = True
+            recovered = (
+                history_recovery.recover(sys.modules[__name__], path, data, source)
+                is True
             )
-        return code
-    finally:
-        if cleanup_data is data:
-            with loading_stage("Stopping container"):
-                stop_container(cleanup_data)
-        else:
-            try:
-                with (
-                    loading_stage("Stopping container"),
-                    history_recovery.budget(history_recovery.CLEANUP_BUDGET),
-                ):
-                    stop_container(cleanup_data)
-            except (BoxError, OSError, ValueError, subprocess.SubprocessError):
-                # The original failure is already nonzero; do not mask it or
-                # claim stopped state after an unverified bounded final attempt.
+            if recovered:
+                # Archival can recover without completing interrupted execution.
+                # Never clear a real client failure or an observed foreground
+                # interruption, or infer a missing client's exit status.
+                client_code = getattr(owner, "_client_exit_code", None)
+                if type(client_code) is int:
+                    code = client_code or int(
+                        getattr(failure, "interrupted_foreground", False)
+                    )
+        elif failure is not None:
+            if isinstance(failure, HistoryWaitTimeout):
+                history_recovery.report_skipped(
+                    history_recovery.skip_reasons(owner, failure, closed=True)
+                )
+            if not concise:
                 print(
-                    "oc-box: Final history-recovery cleanup could not be verified; inspect the workspace on the host.",
+                    f"oc-box: history sync pending: {failure}\n"
+                    "Container data retained. Retry with 'oc-box sync'.",
                     file=sys.stderr,
                 )
+    except BaseException as exc:
+        error = exc
+        if report.attempted:
+            if manual_closing_source or (
+                owner and client_returned and not owner_closed
+            ):
+                report.reason = "cleanup-unverified"
+            elif report.reason != "cleanup-unverified":
+                report.reason = _history_failure_reason(exc)
+        if history_started and not concise:
+            print(
+                "oc-box: Container data retained. Retry with 'oc-box sync'.",
+                file=sys.stderr,
+            )
+        raise
+    finally:
+        history_recovery.REPORT.reset(report_token)
+        try:
+            if cleanup_data is data:
+                try:
+                    with loading_stage("Stopping container", stage="shutdown"):
+                        stop_container(cleanup_data)
+                except BaseException as exc:
+                    error = exc
+                    report.reason = "cleanup-unverified"
+                    if not report.attempted:
+                        lifecycle_output.record(
+                            "lifecycle.notice",
+                            level="error",
+                            stage="shutdown",
+                            reason="cleanup-unverified",
+                            outcome="failure",
+                        )
+                        if concise and isinstance(exc, (BoxError, OSError, ValueError)):
+                            exc.history_outcome_reported = True
+                        with contextlib.suppress(OSError, ValueError):
+                            print(
+                                "oc-box: Workspace shutdown could not be verified. "
+                                "Container data retained; inspect the workspace on the host.",
+                                file=sys.stderr,
+                            )
+                    elif not concise:
+                        print(
+                            "oc-box: Container data retained. Retry with 'oc-box sync'.",
+                            file=sys.stderr,
+                        )
+                    raise
+            else:
+                try:
+                    with (
+                        loading_stage("Stopping container", stage="shutdown"),
+                        history_recovery.budget(history_recovery.CLEANUP_BUDGET),
+                    ):
+                        stop_container(cleanup_data)
+                except BaseException as exc:
+                    # A saved snapshot is not a clean launch outcome unless the
+                    # final stop also completes. Do not mask an existing exception.
+                    code = code or 1
+                    recovered = False
+                    report.reason = "cleanup-unverified"
+                    if not concise:
+                        print(
+                            "oc-box: Final history-recovery cleanup could not be verified; "
+                            "inspect the workspace on the host. Container data retained. "
+                            "Retry with 'oc-box sync' after resolving the cleanup failure.",
+                            file=sys.stderr,
+                        )
+                    if not isinstance(
+                        exc, (BoxError, OSError, ValueError, subprocess.SubprocessError)
+                    ):
+                        error = exc
+                        raise
+        finally:
+            if report.attempted:
+                _report_history_result(report, recovered=recovered, error=error)
+                if (
+                    not concise
+                    and not recovered
+                    and report.reason is None
+                    and (
+                        manual_populated if args.command == "sync" else report.populated
+                    )
+                ):
+                    _announce_history_synced()
+    if recovered and not concise:
+        history_recovery.announce_saved()
+        _announce_history_synced(recovered=True)
+    return code
+
+
+def native_tab_selection(data, last, connection):
+    """Keep history discovery distinct from the native client's open tab set."""
+    snapshot = native_tabs.inspect(sys.modules[__name__], data, connection=connection)
+    if snapshot.status == "missing":
+        return last, True
+    if snapshot.status == "invalid":
+        print(
+            "oc-box: Saved native tab state could not be verified; opening native home without reopening history.",
+            file=sys.stderr,
+        )
+        return None, False
+    inventory = list_container_sessions(data) if snapshot.tabs else []
+    try:
+        selected = native_tabs.choose(
+            snapshot, inventory, last, directory=container_project(data)
+        )
+    except native_tabs.TabError as exc:
+        raise BoxError(str(exc)) from None
+    return selected, False
 
 
 def launch_client(path, data, args, version, exported, owner=None):
     if exported is not None:
-        with loading_stage("Importing and verifying host session"):
+        with loading_stage("Importing and verifying host session", stage="session"):
             sessions = import_host_session(path, data, exported)
     else:
-        with loading_stage("Finding workspace session"):
+        with loading_stage("Finding workspace session", stage="session"):
             sessions = refresh_sessions(path, data)
     selected_session = sessions.get("last") if not args.new else None
+    allow_creation, created_session = True, False
+    explicit_web = getattr(args, "web_session", None) if args.command == "web" else None
+    if owner and explicit_web is not None:
+        if __package__:
+            from . import web_sessions
+        else:
+            import web_sessions
+        web_sessions.explicit_session(
+            sys.modules[__name__], data, owner.connection, explicit_web
+        )
+        selected_session, allow_creation = explicit_web, False
+    if (
+        owner
+        and explicit_web is None
+        and version in native_tabs.AUTO_RESUME_RELEASES
+        and not any(
+            (args.new, exported is not None, getattr(args, "resume", False), args.model)
+        )
+    ):
+        selected_session, allow_creation = native_tab_selection(
+            data, selected_session, owner.connection
+        )
     if owner:
         selected_model = opencode_compat.model(args.model) if args.model else None
-        if not selected_session:
+        if not selected_session and allow_creation:
             payload = {"location": {"directory": container_project(data)}}
             if selected_model:
                 payload["model"] = selected_model
@@ -2613,6 +3895,7 @@ def launch_client(path, data, args, version, exported, owner=None):
             selected_session = created["data"]["id"]
             if not valid_session_id(selected_session):
                 raise BoxError("Invalid OpenCode 2.x session creation response.")
+            created_session = True
         elif selected_model:
             workspace_service.api(
                 sys.modules[__name__],
@@ -2631,63 +3914,140 @@ def launch_client(path, data, args, version, exported, owner=None):
         None if owner else args.model,
         server=owner.connection["url"] if owner else None,
     )
-    print(
-        f"oc-box: {data['distro']} | {data['project']} | {'new session' if args.new or not sessions.get('last') else 'resuming ' + sessions['last']}",
-        flush=True,
-    )
+    if not lifecycle_output.concise():
+        if owner:
+            selection = (
+                "new session"
+                if created_session
+                else "resuming " + selected_session
+                if selected_session is not None
+                else "native home (no open session selected)"
+            )
+        else:
+            selection = (
+                "new session"
+                if args.new or not sessions.get("last")
+                else "resuming " + sessions["last"]
+            )
+        print(f"oc-box: {data['distro']} | {data['project']} | {selection}", flush=True)
+    report = history_recovery.REPORT.get()
     try:
         if args.command == "web":
             assert owner is not None
             code = workspace_service.web_session(
                 sys.modules[__name__],
                 data,
-                {**owner.connection, "session": selected_session},
+                {**owner.connection, "session": selected_session, "version": version},
                 args,
             )
         else:
-            print(
-                "oc-box: Opening OpenCode; plugins and MCP servers may need time to initialize.",
-                flush=True,
-            )
-            code = run_tui(
+            if not lifecycle_output.concise():
+                print(
+                    "oc-box: Opening OpenCode; plugins and MCP servers may need time to initialize.",
+                    flush=True,
+                )
+            code = run_native_tui(
+                data,
                 workspace_service.client_command(
                     sys.modules[__name__],
                     data,
                     owner.connection,
                     command,
                     interactive=True,
+                    ui_owner=True,
+                    file_preview=effective_host_file_open(args, data),
                 )
                 if owner
-                else exec_command(data, command, interactive=True)
+                else exec_command(data, command, interactive=True),
+                owner.connection if owner else None,
+                host_drop_enabled=effective_host_drop(args),
+                host_drop_required=getattr(args, "host_drop", None) is True,
+                **(
+                    {"startup_logo": args._startup_logo}
+                    if getattr(args, "_startup_logo", "graphics") != "graphics"
+                    else {}
+                ),
+                **(
+                    {
+                        "host_clipboard_reader": args._host_clipboard_reader,
+                        "host_clipboard_symlinks": effective_host_clipboard_symlinks(
+                            args
+                        ),
+                    }
+                    if effective_host_clipboard(args)
+                    else {}
+                ),
             )
+    except (KeyboardInterrupt, SystemExit):
+        if report is not None:
+            report.attempted = True
+        raise
+    else:
+        if report is not None:
+            report.attempted = True
     finally:
         if owner:
             owner.wait_clients()
+    if owner:
+        owner._client_exit_code = code
     try:
-        with loading_stage("Syncing session history"):
-            if owner:
+        if owner:
+            with loading_stage(
+                "Waiting for OpenCode activity to settle", stage="history-wait"
+            ):
                 workspace_service.wait_history(
                     sys.modules[__name__], data, owner.connection
                 )
+        with loading_stage("Syncing session history", stage="history-sync"):
             sync_sessions(path, data)
     except (BoxError, ValueError, KeyError) as exc:
-        if isinstance(exc, HistoryWaitTimeout):
+        concise = lifecycle_output.concise()
+        if report is not None:
+            report.reason = _history_failure_reason(exc)
+            report.interrupted = getattr(exc, "interrupted_foreground", False)
+        if isinstance(exc, HistoryWaitTimeout) and not concise:
             print(f"oc-box: {exc.diagnostic}", file=sys.stderr)
-            if (
-                exc.recovery_eligible
-                and getattr(owner, "_history_source", None) is not None
-            ):
+            if exc.timing_diagnostic is not None:
+                print(f"oc-box: {exc.timing_diagnostic}", file=sys.stderr)
+        if (
+            owner
+            and getattr(owner, "_history_source", None) is not None
+            and history_recovery.exit_retry_eligible(sys.modules[__name__], data, exc)
+        ):
+            owner._history_failure = exc
+            if isinstance(exc, HistoryWaitTimeout):
                 owner._history_timeout = exc
+            if not concise:
                 print(
-                    f"oc-box: {exc} Closing the owner before a bounded, "
+                    "oc-box: Live history synchronization did not finish. "
+                    "Closing the owner before one automatic, bounded "
                     "post-stop persisted-history snapshot attempt.",
                     file=sys.stderr,
                 )
-                return code or 1
-        print(
-            f"oc-box: history sync pending: {exc}\nContainer data retained. Retry with 'oc-box sync'.",
-            file=sys.stderr,
+                if getattr(exc, "interrupted_foreground", False):
+                    print(
+                        "oc-box: Foreground execution was still active. "
+                        "Saving persisted history will not complete interrupted work.",
+                        file=sys.stderr,
+                    )
+            return code or 1
+        if isinstance(exc, HistoryWaitTimeout):
+            history_recovery.report_skipped(history_recovery.skip_reasons(owner, exc))
+            if report is not None:
+                report.reason = (
+                    history_recovery.compatibility_category(
+                        getattr(owner, "_history_source_refusal", None)
+                    )
+                    or report.reason
+                )
+        history_recovery.report_compatibility_refusal(
+            _history_compatibility_refusal(exc)
         )
+        if not concise:
+            print(
+                f"oc-box: history sync pending: {exc}\nContainer data retained. Retry with 'oc-box sync'.",
+                file=sys.stderr,
+            )
         return code or 1
     return code
 
@@ -2859,7 +4219,7 @@ def purge(path, data, args):
 
 
 def parser():
-    result = argparse.ArgumentParser(
+    result = cli_help.LauncherParser(
         prog="oc-box",
         description="Run full OpenCode in rootless Podman; sync session history to the host on exit.",
     )
@@ -2884,15 +4244,22 @@ def parser():
             "list",
             "distros",
             "status",
+            "logs",
             "doctor",
             "completion",
+            "tui",
+            "share",
+            "attach",
+            "preferences",
         ),
-        default="start",
+        default=cli_help.DEFAULT_COMMAND,
+        help="operation to run; omitting it starts or resumes OpenCode",
     )
     result.add_argument(
         "--project",
         type=Path,
-        help="project directory (default: current directory; --status defaults to all workspaces)",
+        metavar="PATH",
+        help="select the host project directory",
     )
     info = result.add_mutually_exclusive_group()
     info.add_argument(
@@ -2908,31 +4275,36 @@ def parser():
     info.add_argument(
         "--version", action="store_true", help="show the commit-derived oc-box version"
     )
-    result.add_argument(
+    formats = result.add_mutually_exclusive_group()
+    formats.add_argument(
         "--json",
         action="store_true",
-        help="emit status or doctor as JSON",
+        help="emit the workspace status report as JSON",
+    )
+    formats.add_argument(
+        "--table",
+        action="store_true",
+        help="show workspace status as human-readable field/value tables",
     )
     result.add_argument(
         "--check",
         action="store_true",
-        help="with upgrade, preview the selected published release without installing or saving a channel",
+        help="with upgrade, preview the selected published channel without installing",
     )
     channel = result.add_mutually_exclusive_group()
     channel.add_argument(
         "--stable",
+        dest="update_channel",
         action="store_const",
         const="stable",
-        dest="update_channel",
-        default=None,
-        help="with upgrade, select published stable releases",
+        help="select the stable release channel for upgrade; remember it after a successful selection",
     )
     channel.add_argument(
         "--devel",
+        dest="update_channel",
         action="store_const",
         const="devel",
-        dest="update_channel",
-        help="with upgrade, select published development releases",
+        help="select the development release channel for upgrade; remember it after a successful selection",
     )
     result.add_argument(
         "--vault",
@@ -2954,11 +4326,12 @@ def parser():
     result.add_argument(
         "--auto-update",
         choices=("on", "off"),
-        help="with upgrade, enable/disable automatic GitHub updates before normal launches",
+        help="with upgrade, toggle automatic updates for a GitHub installation (not a Python package)",
     )
     result.add_argument(
         "--workspace",
-        help="workspace ID, also works after the project directory was deleted",
+        metavar="ID",
+        help="select a registered workspace by ID; takes precedence over --project",
     )
     result.add_argument(
         "--distro",
@@ -2973,14 +4346,95 @@ def parser():
     group.add_argument(
         "--resume",
         action="store_true",
-        help="explicitly resume the recorded conversation",
+        help="require an existing workspace and try its remembered conversation",
     )
     group.add_argument(
         "--import-session",
         metavar="SESSION_ID",
         help="copy a host conversation from this project into the container and resume it",
     )
-    result.add_argument("--model", help="OpenCode provider/model")
+    result.add_argument(
+        "--model",
+        metavar="PROVIDER/MODEL",
+        help="choose the native OpenCode model for the launch; use provider/model syntax",
+    )
+    image_preview_choice = result.add_mutually_exclusive_group()
+    image_preview_choice.add_argument(
+        "--image-preview",
+        action="store_const",
+        const=True,
+        default=None,
+        help="V2 owning start/reset TUI only: enable prompt/session image previews for this owner without changing saved CLI preferences",
+    )
+    image_preview_choice.add_argument(
+        "--no-image-preview",
+        dest="image_preview",
+        action="store_const",
+        const=False,
+        help="owning start/reset TUI only: skip the launcher preview override for this launch",
+    )
+    file_open_choice = result.add_mutually_exclusive_group()
+    file_open_choice.add_argument(
+        "--host-file-open",
+        action="store_const",
+        const=True,
+        default=None,
+        help="enable Ctrl-click opening of private host-side file copies for this native TUI client",
+    )
+    file_open_choice.add_argument(
+        "--no-host-file-open",
+        dest="host_file_open",
+        action="store_const",
+        const=False,
+        help="disable Ctrl-click host opening for this native TUI client",
+    )
+    host_drop_choice = result.add_mutually_exclusive_group()
+    host_drop_choice.add_argument(
+        "--host-drop",
+        dest="host_drop",
+        action="store_const",
+        const=True,
+        default=None,
+        help="save host file importing enabled for this workspace (default on for supported native TUI clients)",
+    )
+    host_drop_choice.add_argument(
+        "--no-host-drop",
+        dest="host_drop",
+        action="store_const",
+        const=False,
+        help="save host file importing disabled for this workspace",
+    )
+    clipboard_choice = result.add_mutually_exclusive_group()
+    clipboard_choice.add_argument(
+        "--host-clipboard",
+        action="store_const",
+        const=True,
+        default=None,
+        help="save Ctrl+Y host clipboard importing enabled for this workspace (default off)",
+    )
+    clipboard_choice.add_argument(
+        "--no-host-clipboard",
+        dest="host_clipboard",
+        action="store_const",
+        const=False,
+        help="save host clipboard importing disabled for this workspace",
+    )
+    clipboard_symlinks = result.add_mutually_exclusive_group()
+    clipboard_symlinks.add_argument(
+        "--host-clipboard-symlinks",
+        dest="host_clipboard_symlinks",
+        action="store_const",
+        const=True,
+        default=None,
+        help="save symlink following for clipboard files (requires clipboard importing; default follows them)",
+    )
+    clipboard_symlinks.add_argument(
+        "--no-host-clipboard-symlinks",
+        dest="host_clipboard_symlinks",
+        action="store_const",
+        const=False,
+        help="save strict no-symlink clipboard file importing for this workspace (requires clipboard importing)",
+    )
     result.add_argument(
         "--credential-mode",
         choices=("env", "selected", "vault"),
@@ -3008,9 +4462,14 @@ def parser():
         action="store_true",
         help="with credentials, clear saved credential-name selections before adding new names",
     )
-    result.add_argument("--cpus", help="CPU limit (default: 4)")
-    result.add_argument("--memory", help="memory limit (default: 8g)")
-    result.add_argument("--pids-limit", type=int, help="process limit (default: 2048)")
+    result.add_argument("--cpus", help="CPU limit (new workspace default: 4)")
+    result.add_argument("--memory", help="memory limit (new workspace default: 8g)")
+    result.add_argument(
+        "--pids-limit",
+        type=int,
+        metavar="N",
+        help="process limit, at least 32 (new workspace default: 2048)",
+    )
     result.add_argument(
         "--device",
         action="append",
@@ -3026,12 +4485,12 @@ def parser():
     result.add_argument(
         "--clear-devices",
         action="store_true",
-        help="clear saved device mappings during reset",
+        help="clear saved device mappings on container creation or reset",
     )
     result.add_argument(
         "--clear-podman-args",
         action="store_true",
-        help="clear saved additional Podman options during reset",
+        help="clear saved additional Podman options on container creation or reset",
     )
     result.add_argument(
         "--delete-sessions",
@@ -3046,14 +4505,15 @@ def parser():
     result.add_argument(
         "-y", "--yes", action="store_true", help="skip purge confirmation"
     )
+    log_config.add_launch_arguments(result)
     return result
 
 
 def report_status(args):
     if __package__:
-        from .status_report import collect_reports, print_report
+        from .status_report import collect_reports, print_report, print_tabular_report
     else:
-        from status_report import collect_reports, print_report
+        from status_report import collect_reports, print_report, print_tabular_report
 
     if args.workspace or args.project is not None:
         path, data = find_workspace(args.project, args.workspace)
@@ -3079,6 +4539,8 @@ def report_status(args):
         )
     if args.json:
         print(json.dumps(report, indent=2))
+    elif getattr(args, "table", False):
+        print_tabular_report(report)
     else:
         print_report(report)
     return 0
@@ -3088,15 +4550,28 @@ def secrets_parser():
     parser = argparse.ArgumentParser(
         prog="oc-box secrets",
         description="Manage the optional host encrypted vault; values/passphrases use hidden controlling-terminal prompts, never argv/env/stdin.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "Actions:\n"
+            "  init     Create a new encrypted vault; never replace an existing one.\n"
+            "  set      Add or replace the named secret using a masked prompt.\n"
+            "  list     Unlock the vault and show credential names only.\n"
+            "  remove   Remove the named secret from the vault.\n"
+            "  passwd   Unlock the vault and re-encrypt it with a new passphrase."
+        ),
     )
-    parser.add_argument("action", choices=("init", "set", "list", "remove", "passwd"))
+    parser.add_argument(
+        "action",
+        choices=("init", "set", "list", "remove", "passwd"),
+        help="vault operation; see action details below",
+    )
     parser.add_argument(
         "name", nargs="?", help="credential environment name for set/remove"
     )
     parser.add_argument(
         "--min-passphrase-length",
         type=int,
-        help="minimum characters for a new vault passphrase, 8..1024; init/passwd only; overrides host config",
+        help="minimum characters for a new vault passphrase, 8..1024; init/passwd only (default: 8 unless configured)",
     )
     return parser
 
@@ -3173,14 +4648,129 @@ def credentials_command(args):
 def completion_parser():
     result = argparse.ArgumentParser(
         prog="oc-box completion",
-        description="Print shell completion for local activation or installation.",
+        description="Write the Bash completion script to stdout without editing shell startup files.",
+        epilog="To enable it in the current Bash session: source <(oc-box completion bash)",
     )
-    result.add_argument("shell", choices=("bash",))
+    result.add_argument(
+        "shell", choices=("bash",), help="shell to generate completion for (Bash)"
+    )
     return result
+
+
+_LOGGING_COMMANDS = frozenset({"start", "reset", "stop", "sync", "terminal", "web"})
+_LOGGING_FLAGS = (
+    "--log-dir",
+    "--journald",
+    "--no-journald",
+    "--lifecycle-diagnostics",
+    "--verbose",
+)
+_LOGGING_SCOPE_ERROR = "Launcher logging options apply only to start, reset, stop, sync, terminal, and web."
+_WEB_ORDER_ERROR = (
+    "Use 'oc-box web' first, followed by --project/--workspace/--port/--no-open."
+)
+
+
+def _logging_options_requested(args):
+    return (
+        args.journald is not None
+        or args.log_dir is not None
+        or args.lifecycle_diagnostics
+        or args.verbose is not None
+    )
+
+
+def _informational_request(args):
+    return any(
+        getattr(args, name, False)
+        for name in ("status", "version", "about", "json", "table")
+    )
+
+
+_STATUS_TABLE_ERROR = (
+    "Use --table with status, logs, doctor, preferences, or backup-info."
+)
+_JOURNALED_COMMANDS = frozenset(
+    {
+        "start",
+        "stop",
+        "sync",
+        "reset",
+        "repair",
+        "terminal",
+        "web",
+        "tui",
+        "backup",
+        "restore",
+        "purge",
+        "credentials",
+        "secrets",
+        "upgrade",
+    }
+)
+
+
+def _validate_table_options(args):
+    if getattr(args, "table", False) and (
+        args.about
+        or args.version
+        or (args.command != "status" and not (args.command == "start" and args.status))
+    ):
+        raise BoxError(_STATUS_TABLE_ERROR)
+
+
+def _validate_logging_options(args):
+    if _logging_options_requested(args) and (
+        args.command not in _LOGGING_COMMANDS or _informational_request(args)
+    ):
+        raise BoxError(_LOGGING_SCOPE_ERROR)
+
+
+def _has_launcher_logging_flag(arguments):
+    """Identify otherwise unsupported flags before journaling another command."""
+    for argument in arguments:
+        if argument == "--":
+            break
+        flag = argument.partition("=")[0]
+        if flag.startswith("--") and any(
+            option.startswith(flag) for option in _LOGGING_FLAGS
+        ):
+            return True
+    return False
 
 
 def main(argv=None):
     arguments = list(sys.argv[1:] if argv is None else argv)
+    if arguments and arguments[0] == "logs":
+        if __package__:
+            from .logs_cli import cli
+        else:
+            from logs_cli import cli
+        return cli(sys.modules[__name__], arguments[1:])
+    if arguments and arguments[0] == "preferences":
+        if __package__:
+            from .workspace_preferences import cli
+        else:
+            from workspace_preferences import cli
+        return cli(sys.modules[__name__], arguments[1:])
+    if arguments and arguments[0] == "attach":
+        if __package__:
+            from .attachments import cli
+        else:
+            from attachments import cli
+        return cli(sys.modules[__name__], arguments[1:])
+    if arguments and arguments[0] == "share":
+        if __package__:
+            from .sharing import cli
+        else:
+            from sharing import cli
+        return cli(sys.modules[__name__], arguments[1:])
+    if arguments and arguments[0] == "tui":
+        if __package__:
+            from .tui import cli
+        else:
+            from tui import cli
+        return cli(sys.modules[__name__], arguments[1:])
     if arguments and arguments[0] == "completion":
         completion_parser().parse_args(arguments[1:])
         print((APP / "completions/oc-box").read_text(), end="")
@@ -3206,6 +4796,8 @@ def main(argv=None):
             )
         if not 0 <= web.port <= 65535:
             raise BoxError("--port must be 0 (automatic) or 1..65535.")
+        if web.session is not None and not valid_session_id(web.session):
+            raise BoxError("--session must be a valid native session ID.")
         selectors = (
             ["--workspace", web.workspace]
             if web.workspace
@@ -3213,23 +4805,120 @@ def main(argv=None):
         )
         args = parser().parse_args(["start", *selectors])
         args.command, args.port, args.no_open = "web", web.port, web.no_open
+        args.web_session = web.session
         args.no_vault = web.no_vault
+        args.attachments = web.attachments
+        args.workspace_layout = web.workspace_layout
+        args.log_dir = web.log_dir
+        args.journald = web.journald
+        args.lifecycle_diagnostics = web.lifecycle_diagnostics
+        args.verbose = web.verbose
         args._opencode_release = detect_opencode_release()
         if opencode_compat.major(args._opencode_release) != 2:
             raise BoxError(
                 "'oc-box web' requires OpenCode 2.x; use the native TUI with 1.x."
             )
+        if web.attachments:
+            if __package__:
+                from .web_attachments import SUPPORTED
+            else:
+                from web_attachments import SUPPORTED
+            if args._opencode_release not in SUPPORTED:
+                raise BoxError(
+                    "The browser attachment adapter requires native OpenCode 2.2.6 or 2.3.0."
+                )
         workspace_service.preflight_port(web.port)
     else:
         args = parser().parse_args(argv)
+    _validate_logging_options(args)
+    if _logging_options_requested(args) and lifecycle_output.command_name() is None:
+        # Direct callers may explicitly select CLI behavior. Without options,
+        # source-bound harnesses retain the legacy console renderer.
+        with (
+            log_config.overrides(directory=args.log_dir, journald=args.journald),
+            lifecycle_output.invocation(
+                args.command,
+                verbose=args.lifecycle_diagnostics,
+                console_level=args.verbose,
+            ),
+        ):
+            return _main_command(args, argv)
+    return _main_command(args, argv)
+
+
+def _main_command(args, argv):
+    _validate_table_options(args)
+    lifecycle_output.bind_command(args.command)
+    if args.command == "logs":
+        raise BoxError("Use 'oc-box logs' first, followed by its filters; see --help.")
     if (args.upgrade_vault or args.upgrade_tui) and args.command != "upgrade":
         raise BoxError("--vault and --tui apply only to upgrade.")
-    if args.command == "web" and not hasattr(args, "port"):
+    if args.command == "tui":
         raise BoxError(
-            "Use 'oc-box web' first, followed by --project/--workspace/--port/--no-open."
+            "Use 'oc-box tui' first, followed by its workspace selectors/options; see 'oc-box tui --help'."
         )
+    if args.command == "share":
+        raise BoxError(
+            "Use 'oc-box share PATH' first, followed by its workspace selector; see --help."
+        )
+    if args.command == "attach":
+        raise BoxError(
+            "Use 'oc-box attach' first, followed by PATH or --broker and --session; see 'oc-box attach --help'."
+        )
+    if args.command == "preferences":
+        raise BoxError(
+            "Use 'oc-box preferences' first, followed by its workspace selector."
+        )
+    if args.command == "web" and not hasattr(args, "port"):
+        raise BoxError(_WEB_ORDER_ERROR)
     if args.maintenance and args.command != "terminal":
         raise BoxError("--maintenance applies only to terminal.")
+    if args.image_preview is not None and (
+        args.command not in ("start", "reset")
+        or args.status
+        or args.about
+        or args.version
+        or args.json
+    ):
+        raise BoxError(
+            "--image-preview and --no-image-preview apply only to an owning start/reset TUI launch."
+        )
+    if getattr(args, "host_file_open", None) is not None and (
+        args.command not in ("start", "reset")
+        or args.status
+        or args.about
+        or args.version
+        or args.json
+    ):
+        raise BoxError(
+            "--host-file-open/--no-host-file-open apply only to native start/reset TUI clients."
+        )
+    validate_host_file_open(args)
+    if args.host_drop is not None and (
+        args.command not in ("start", "reset")
+        or args.status
+        or args.about
+        or args.version
+        or args.json
+    ):
+        raise BoxError(
+            "--host-drop/--no-host-drop apply only to native start/reset TUI clients."
+        )
+    if args.host_drop is True:
+        validate_host_drop()
+    if (
+        args.host_clipboard is not None or args.host_clipboard_symlinks is not None
+    ) and (
+        args.command not in ("start", "reset")
+        or args.status
+        or args.about
+        or args.version
+        or args.json
+    ):
+        raise BoxError(
+            "Host clipboard options apply only to native start/reset TUI clients."
+        )
+    configure_host_clipboard(args)
     if args.no_vault and (
         args.command not in ("start", "reset", "web")
         or args.status
@@ -3244,7 +4933,7 @@ def main(argv=None):
         raise BoxError("Use 'oc-box completion bash' with no workspace options.")
     if args.command == "doctor":
         raise BoxError(
-            "Use 'oc-box doctor' first, followed by --json/--feature; see its --help."
+            "Use 'oc-box doctor' first, followed by --json, --table or --feature; see its --help."
         )
     if args.command in ("backup", "backup-info", "restore"):
         raise BoxError(
@@ -3445,7 +5134,7 @@ def main(argv=None):
             or args.clear_podman_args
         ):
             raise BoxError(
-                "Status accepts only --project, --workspace, and --json selectors."
+                "Status accepts only --project, --workspace, --json or --table."
             )
         return report_status(args)
     args.project = args.project or Path.cwd()
@@ -3464,11 +5153,13 @@ def main(argv=None):
         or args.clear_podman_args
     ):
         raise BoxError(
-            f"{args.command.capitalize()} accepts only --project or --workspace selectors."
+            f"Unsupported option for '{args.command}'; see 'oc-box {args.command} --help'."
         )
     if args.command == "terminal":
         if args.all or args.delete_sessions or args.yes:
-            raise BoxError("Terminal accepts only --project or --workspace selectors.")
+            raise BoxError(
+                "Purge options do not apply to terminal; see 'oc-box terminal --help'."
+            )
         if not sys.stdin.isatty() or not sys.stdout.isatty():
             raise BoxError(
                 "'oc-box terminal' requires an interactive host terminal (TTY); redirected or piped input/output is not accepted."
@@ -3559,7 +5250,7 @@ def main(argv=None):
                     ],
                     environment,
                 )
-    with loading_stage("Checking rootless Podman"):
+    with loading_stage("Checking rootless Podman", stage="backend"):
         check_backend(
             **({"env": maintenance_host_env()} if args.command == "terminal" else {}),
             **(
@@ -3568,6 +5259,7 @@ def main(argv=None):
                 else {}
             ),
         )
+    image_preview_snapshot = None
     state_root().mkdir(parents=True, exist_ok=True, mode=0o700)
     path, data = find_workspace(
         args.project, args.workspace, allow_identity_change=args.command == "repair"
@@ -3582,10 +5274,16 @@ def main(argv=None):
         project = validate_project(args.project)
         version = getattr(args, "_opencode_release", None)
         if version is None:
-            with loading_stage("Checking OpenCode version"):
+            with loading_stage("Checking OpenCode version", stage="version"):
                 version = detect_opencode_release()
         if args.no_vault and opencode_compat.major(version) != 2:
             raise BoxError("--no-vault requires native OpenCode 2.x.")
+        if args.image_preview:
+            image_preview_snapshot = validate_image_preview(version)
+        validate_host_file_open(args, version)
+        if args.host_drop is True:
+            validate_host_drop(version)
+        configure_host_clipboard(args, version)
         if opencode_compat.major(version) == 2:
             check_private_output()
         args._opencode_release = version
@@ -3596,6 +5294,7 @@ def main(argv=None):
         raise BoxError(
             "This workspace uses the retired experimental tool-routing design. Purge it with the older launcher before creating a new environment."
         )
+    lifecycle_output.bind_workspace(data.get("id"))
     # Explicit stop is usable from a second terminal. Tool calls
     # never auto-restart a stopped container; the running TUI can then be exited.
     if args.command == "stop":
@@ -3622,6 +5321,9 @@ def main(argv=None):
             with workspace_service.attach(
                 sys.modules[__name__], path, data
             ) as connection:
+                selected_session = workspace_service.require_session(
+                    sys.modules[__name__], connection
+                )
                 command = workspace_service.client_command(
                     sys.modules[__name__],
                     data,
@@ -3631,14 +5333,14 @@ def main(argv=None):
                         "-c",
                         (PACKAGE / "session_terminal.py").read_text(),
                         connection["url"],
-                        connection["session"],
+                        selected_session,
                         container_project(data),
                     ],
                     interactive=True,
                 )
                 print(
                     "oc-box: Attaching terminal client to session "
-                    + connection["session"]
+                    + selected_session
                     + "; the existing service and credentials are retained.",
                     flush=True,
                 )
@@ -3668,11 +5370,18 @@ def main(argv=None):
                     args.clear_devices,
                     args.clear_podman_args,
                     args.no_vault,
+                    args.image_preview is not None,
                 )
             ):
                 raise BoxError(
                     "An active V2 workspace accepts additional TUI clients with selectors/--resume only; change session/configuration after the owner exits."
                 )
+            validate_host_file_open(args, data.get("opencode_version"), data)
+            configure_host_drop(path, data, args, data.get("opencode_version"))
+            configure_host_clipboard_preferences(
+                path, data, args, data.get("opencode_version")
+            )
+            configure_host_clipboard(args, data.get("opencode_version"))
             with workspace_service.attach(
                 sys.modules[__name__], path, data
             ) as connection:
@@ -3685,12 +5394,37 @@ def main(argv=None):
                         container_project(data),
                         "--server",
                         connection["url"],
-                        "--session",
-                        connection["session"],
+                        *(
+                            ["--session", connection["session"]]
+                            if connection["session"] is not None
+                            else []
+                        ),
                     ],
                     interactive=True,
+                    file_preview=effective_host_file_open(args, data),
                 )
-                return run_tui(command)
+                return run_native_tui(
+                    data,
+                    command,
+                    connection,
+                    host_drop_enabled=effective_host_drop(args),
+                    host_drop_required=args.host_drop is True,
+                    **(
+                        {"startup_logo": args._startup_logo}
+                        if getattr(args, "_startup_logo", "graphics") != "graphics"
+                        else {}
+                    ),
+                    **(
+                        {
+                            "host_clipboard_reader": args._host_clipboard_reader,
+                            "host_clipboard_symlinks": effective_host_clipboard_symlinks(
+                                args
+                            ),
+                        }
+                        if effective_host_clipboard(args)
+                        else {}
+                    ),
+                )
         if args.command == "web" and workspace_service.controller_running(
             sys.modules[__name__], data
         ):
@@ -3704,6 +5438,38 @@ def main(argv=None):
                 return workspace_service.web_session(
                     sys.modules[__name__], data, connection, args
                 )
+    if (
+        args.image_preview
+        or getattr(args, "host_file_open", None) is True
+        or args.host_drop is True
+        or effective_host_clipboard(args)
+    ):
+        version = getattr(args, "_opencode_release", None) or detect_opencode_release()
+        if args.image_preview and image_preview_snapshot is None:
+            image_preview_snapshot = validate_image_preview(version)
+        validate_host_file_open(args, version, data)
+        args._opencode_release = version
+        configure_host_clipboard(args, version)
+    if args.command in ("start", "reset"):
+        saved = workspace_ui_preferences(path, data)
+        if args.image_preview is None and saved.get("image_preview") is True:
+            # Saved policy applies only to a new owner. V1 keeps ordinary
+            # behavior; invalid V2 CLI settings fail before any preference
+            # writes, credential unlock or reset.
+            version = getattr(args, "_opencode_release", None)
+            if version is None:
+                with loading_stage("Checking OpenCode version", stage="version"):
+                    version = detect_opencode_release()
+                args._opencode_release = version
+            if opencode_compat.major(version) == 2:
+                image_preview_snapshot = validate_image_preview(version)
+                args._image_preview_enabled = True
+        configure_host_drop(
+            path, data, args, getattr(args, "_opencode_release", None), saved=saved
+        )
+        configure_host_clipboard_preferences(
+            path, data, args, getattr(args, "_opencode_release", None)
+        )
     with workspace_lock(path), contextlib.ExitStack() as launch_context:
         if data.get("restore_incomplete") and args.command != "purge":
             raise BoxError(
@@ -3776,20 +5542,154 @@ def main(argv=None):
                     raise BoxError("Change resource limits using 'oc-box reset'.")
                 data["pids"] = args.pids_limit
             atomic_json(path, data)
-            return launch(path, data, args)
+            return launch(
+                path,
+                data,
+                args,
+                **(
+                    {"image_preview_snapshot": image_preview_snapshot}
+                    if effective_image_preview(args)
+                    else {}
+                ),
+            )
         if args.command == "purge":
             purge(path, data, args)
     return 0
 
 
+def _help_requested(arguments):
+    """Keep help and help-like syntax out of the activity journal."""
+    for argument in arguments:
+        if argument == "--":
+            break
+        flag = argument.partition("=")[0]
+        if flag.startswith("--"):
+            if "--help".startswith(flag):
+                return True
+        elif "h" in argument and re.fullmatch(r"-(?:[hy]+|[hy]=[hy]*)", argument):
+            # Only -h and -y are launcher short switches. Older argparse also
+            # treats -y=h as -y -h. Leave validity to the parser, and do not
+            # mistake a value such as '-draft checkout' for a flag cluster.
+            return True
+    return False
+
+
 def entrypoint():
+    arguments = sys.argv[1:]
+    informational = _help_requested(arguments) or any(
+        arg in arguments for arg in ("--version", "--about", "--status", "--demo")
+    )
+    command = (
+        arguments[0] if arguments and not arguments[0].startswith("-") else "start"
+    )
+    launch_options = None
     try:
-        return main()
-    except (BoxError, vault.VaultError, OSError, ValueError) as exc:
+        if command == "web":
+            launch_options = workspace_service.web_parser().parse_args(arguments[1:])
+            launch_options.command = command
+        elif command in _LOGGING_COMMANDS:
+            # A selector-first command may be read-only. Use the actual parser
+            # before any journal append; only valid options can select a sink.
+            launch_options = parser().parse_args(arguments)
+            command = launch_options.command
+            if command == "web":
+                raise BoxError(_WEB_ORDER_ERROR)
+        elif (
+            command != "logs"
+            and not informational
+            and _has_launcher_logging_flag(arguments[1:])
+        ):
+            raise BoxError(_LOGGING_SCOPE_ERROR)
+        elif command in _JOURNALED_COMMANDS and command != "tui" and not informational:
+            for argument in arguments[1:]:
+                if argument == "--":
+                    break
+                flag = argument.partition("=")[0]
+                if flag.startswith("--ta") and "--table".startswith(flag):
+                    raise BoxError(_STATUS_TABLE_ERROR)
+        if command == "tui" and not informational:
+            if __package__:
+                from .tui import parser as dashboard_parser
+            else:
+                from tui import parser as dashboard_parser
+            # Use argparse's actual mode, including --dem, before opening the
+            # activity journal. The dashboard parser uses only the stdlib.
+            informational = dashboard_parser().parse_args(arguments[1:]).demo
+        if launch_options is not None:
+            _validate_logging_options(launch_options)
+            _validate_table_options(launch_options)
+            # Argparse accepts abbreviations such as --statu. The parsed
+            # request, not the spelling in argv, determines read-only behavior.
+            informational = informational or _informational_request(launch_options)
+    except BoxError as exc:
         print(f"oc-box: {exc}", file=sys.stderr)
         return 1
-    except KeyboardInterrupt:
-        return 130
+    journaled = command in _JOURNALED_COMMANDS and not informational
+    started = time.monotonic()
+
+    def journal(event, code=None):
+        if not journaled:
+            return
+        try:
+            fields = dict(
+                command=lifecycle_output.command_name() or command,
+                workspace=lifecycle_output.workspace(),
+                exit_code=code,
+                duration_ms=int((time.monotonic() - started) * 1000),
+            )
+            lifecycle_output.console_event(event, **fields)
+            if event != "command.started":
+                lifecycle_output.flush()
+            if __package__:
+                from .activity_log import record_event
+            else:
+                from activity_log import record_event
+            record_event(event, **fields)
+        except Exception:
+            # Diagnostics must never alter lifecycle results or expose private
+            # errors. No argv/env/native output is sent to the journal.
+            pass
+        except KeyboardInterrupt:
+            if event == "command.started":
+                raise
+
+    reporting = (
+        lifecycle_output.invocation(
+            command,
+            verbose=launch_options.lifecycle_diagnostics,
+            console_level=launch_options.verbose,
+        )
+        if journaled and command in _LOGGING_COMMANDS
+        else contextlib.nullcontext()
+    )
+    policy = (
+        log_config.overrides(
+            directory=launch_options.log_dir, journald=launch_options.journald
+        )
+        if launch_options is not None and command in _LOGGING_COMMANDS
+        else contextlib.nullcontext()
+    )
+    with policy, reporting:
+        try:
+            journal("command.started")
+            result = main()
+        except (BoxError, vault.VaultError, OSError, ValueError) as exc:
+            if not getattr(exc, "history_outcome_reported", False):
+                print(f"oc-box: {exc}", file=sys.stderr)
+            result = 1
+        except KeyboardInterrupt:
+            result = 130
+        except SystemExit as exc:
+            code = exc.code if type(exc.code) is int else 1
+            journal("command.finished" if code == 0 else "command.failed", code)
+            raise
+        except BaseException as exc:
+            journal("command.failed", 1)
+            if getattr(exc, "history_outcome_reported", False):
+                return 1
+            raise
+        journal("command.finished" if not result else "command.failed", result or 0)
+        return result
 
 
 if __name__ == "__main__":

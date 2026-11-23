@@ -11,9 +11,6 @@ This page covers the retained OpenCode **1.x** operating contract.
 Both runtime lines and version-specific regression coverage remain supported;
 this is not a security guarantee or validation of every upstream integration.
 OpenCode's `1.x`/`2.x` versions are separate from **oc-box** releases such as `1.7`.
-The development-only features linked from this documentation also require the
-appropriate oc-box channel; including their guides on `master` does not add
-them to the stable runtime.
 
 ## Legacy quick start
 

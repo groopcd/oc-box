@@ -1,32 +1,63 @@
 # Update channels
 
-[Documentation hub](README.md) · [Installation](installation.md) ·
-[Development feature setup](https://github.com/groopcd/oc-box/blob/devel/docs/update-channels.md#enable-the-dashboard-after-a-github-channel-switch)
+> **Two different version choices:** stable/development select the **oc-box**
+> release channel, not the native OpenCode major. The workspace follows the
+> host's installed OpenCode version. Current guides target [OpenCode 2.x](README.md);
+> existing 1.x installations use the [legacy documentation](legacy/README.md).
 
-**Two independent versions:** stable/development select the **oc-box release**,
-not the native OpenCode major. Current guides focus on OpenCode 2.x;
-[1.x operating instructions are legacy](legacy/README.md).
-This page retains the stable channel contract. The dashboard and other 1.7-only
-guides require an appropriate published development release.
+[Documentation hub](README.md) · [Getting started](getting-started.md) ·
+[Installation](installation.md)
 
-**On this page:** [Select/preview](#select-or-preview-a-channel) ·
-[Optional extras](#enable-the-dashboard-after-a-github-channel-switch) ·
-[Automatic updates](#automatic-updates) ·
-[Older installations](#bootstrap-and-older-installations) ·
-[Publication policy](#publication-policy)
+**On this page**
 
-Stable/devel are **release choices**, not installation methods or version
-series. GitHub/curl and PyPI both remain supported.
+- [Select or preview a channel](#select-or-preview-a-channel)
+- [Enable the dashboard after a GitHub channel switch](#enable-the-dashboard-after-a-github-channel-switch)
+- [Automatic updates](#automatic-updates)
+- [Bootstrap and older installations](#bootstrap-and-older-installations)
+- [Publication policy](#publication-policy)
+
+For a first installation, start with the [installation guide](installation.md).
+This page covers release-channel selection and its compatibility limits.
+
+---
+
+Stable/devel are **release choices**, not installation methods. GitHub/curl and
+PyPI both remain supported.
 
 | Channel | Publication branch | GitHub publication | PyPI version |
 | --- | --- | --- | --- |
-| `stable` (default) | `master` | Final Release, for example `v1.6.N` | `1.6.N` |
-| `devel` (explicit opt-in) | `devel` | Prerelease, for example `v1.7.N.dev0` | `1.7.N.dev0`, in the same `oc-box` project |
+| `stable` (default) | `master` | Final Release, for example `v1.8.N` | `1.8.N` |
+| `devel` (explicit opt-in) | `devel` | Prerelease, for example `v1.9.N.dev0` | `1.9.N.dev0`, in the same `oc-box` project |
 
-These are current series examples, not permanent channel mappings. A future
-stable 1.7 release remains stable. Unpublished branch commits are not channel
-updates. Both distributions retain the full source hash and absolute commit
-count in build metadata, even though PyPI versions cannot contain `+gHASH`.
+Starting with 1.8, **even minor numbers** are stable (`1.8`, `2.0`, `2.2`) and
+**odd minor numbers** are development (`1.9`, `2.1`, `2.3`). Stable uses final
+versions such as `1.8.N`; development uses prereleases such as `1.9.N.dev0`.
+Historical releases and tags keep their original identities. The patch number
+continues to derive from the same Git commit-count baseline across minor changes.
+Unpublished branch commits are not channel updates. Both distributions retain the
+full source hash and absolute commit count, even though PyPI versions cannot
+contain `+gHASH`.
+
+**The initial `1.8` and `1.9` releases share the optional seven-tab manager and
+temporary sharing.** These were experimental development features in `1.7`,
+not part of stable `1.6.94`. The historical [1.7 acceptance limitations](releases/1.7.md#known-acceptance-limitations)
+do not establish a stable pass. The original native OpenCode **2.3.0**
+persisted-history recovery extension and later guarded **stable 2.3.x**
+compatibility amendment have focused native/offline coverage, not new integrated
+external-host or dashboard acceptance. The shell/subagent storage profile still
+requires exact captured-patch agreement and compatible contracts; it does not
+certify untested future native behavior or waive refusals. Other integrations
+retain their independently documented version limits. See the
+[recovery reference](cli.md#web--browser-interface).
+
+The shared update also includes the card dashboard, saved
+per-workspace native host importing (enabled by default on supported clients),
+the shared web tabstrip/current-conversation reports and optional browser File
+attachments. Existing clients do not live-toggle; save `--no-host-drop` or use
+`oc-box preferences --host-drop off` to disable importing for future clients.
+The [final combined-browser validation gap](releases/1.7.md#attachment-and-web-validation-limitations)
+is explicit; development publication is not a browser/desktop or stable acceptance
+claim.
 
 ## Select or preview a channel
 
@@ -44,8 +75,7 @@ oc-box upgrade --stable         # Return to stable
 never a workspace start. A successful explicit selection is saved per owner.
 The GitHub installation's preference and individual package-owner preferences
 are separate; one does not change the other's choice. `--check` makes no
-installation or preference changes. A failure does not count as a successful
-switch.
+installation or preference changes. A failure is not a successful switch.
 
 GitHub installations verify the release tag/commit against the selected branch
 and use the staged immutable installer. Package installations delegate to the
@@ -59,8 +89,8 @@ select an older release and warns before doing so. This changes program files,
 not workspace/session schemas, private volumes, project files or credentials:
 it is not a data rollback. Stop active clients, keep appropriate encrypted
 backups, and check compatibility before returning from development to stable.
-Only extras supported by the target are installed. Current stable 1.6 has no
-dashboard; selecting stable does not carry the development manager into it.
+Only extras supported by the target are installed. Older stable `1.6` has no
+dashboard; selecting a target without the dashboard does not carry it into that release.
 An inherited TUI preference is retained so it can apply on a later return to
 development. An explicit `--tui` request against an unsupported target refuses.
 
@@ -80,13 +110,13 @@ oc-box upgrade --devel --vault --tui # Add both
 not workspace credential settings. `upgrade` accepts these canonical names only;
 the bootstrap keeps its separate `--with-vault`/`--with-tui` options. Without
 either flag, channel selection alone does not enable a new extra. Use
-`oc-box upgrade --vault` to add vault support on the saved channel; stable does
-not include the dashboard, so select `--devel` for it.
+`oc-box upgrade --vault` or `oc-box upgrade --tui` to add support on the saved
+channel. Use a published target that includes the requested feature.
 
 The selected release can gain extras even when it is already installed.
 Repeating a satisfied request is a no-op. Omitted extras are not removed;
 inherited requests are installed where supported, and the dashboard preference
-survives a stable interval for a later return to development. Explicitly
+survives a switch to an older target without the dashboard. Explicitly
 requesting an unavailable extra refuses instead of silently ignoring it.
 `--check` validates requested support but changes neither installation nor saved
 channel/extra preferences.
@@ -126,7 +156,7 @@ Network failure leaves the installed version available for the normal launch.
 Package automatic updating remains disabled. Package `--auto-update on`
 refuses; `off` gives package guidance without changing GitHub settings. Direct
 package-manager commands are still supported, but their prerelease/downgrade
-behavior belongs to that manager; they are not a substitute for the channel
+behavior belongs to that manager; they are not a substitute for channel
 selection and verified ownership checks in `oc-box upgrade`.
 
 ## Bootstrap and older installations
@@ -138,13 +168,38 @@ without a preference defaults to a published stable release:
 curl -fsSL --proto '=https' --tlsv1.2 https://raw.githubusercontent.com/groopcd/oc-box/master/install.sh | sh -s -- --stable --with-vault
 ```
 
-Use `--devel` instead of `--stable` for a published development prerelease.
-`--with-vault` is optional and compatible with either selector. The bootstrap
-script's source URL is not the target release: fetching its entrypoint from
-`master` does not mean installing moving master HEAD.
-Repeating the bootstrap without a selector does not reset a saved development
-choice. Selecting an older launcher warns that workspace/session state is not
-rolled back.
+For development, explicitly select `--devel`; the manager and vault are independent
+optional features:
+
+```sh
+curl -fsSL --proto '=https' --tlsv1.2 https://raw.githubusercontent.com/groopcd/oc-box/devel/install.sh | sh -s -- --devel --with-tui --with-vault
+```
+
+Review the downloaded installer before running it if appropriate. Its source URL
+is not the target release: neither bootstrap installs moving branch HEAD. The
+development bootstrap can establish the Ctrl-click default on a verified fresh
+installation; an older bootstrap still installs the release but leaves that
+default off. Repeating the bootstrap without a selector does
+not reset a saved development choice. Selecting an older launcher warns that
+workspace/session state is not rolled back.
+
+New isolated package installations default to stable unless prereleases are
+explicitly requested. After a development package has been published:
+
+```sh
+pipx install --pip-args='--pre' 'oc-box[tui,vault]'
+# Or:
+uv tool install --prerelease allow 'oc-box[tui,vault]'
+# Or, only inside an activated dedicated virtual environment:
+python -m pip install --pre 'oc-box[tui,vault]'
+```
+
+Use `[tui]` without `[vault]` if appropriate. For an existing channel-aware
+installation, use `oc-box upgrade --devel --vault --tui` once its launcher
+supports these extras flags, or request either extra independently. Upgrade
+normally first if necessary; do not create another owner.
+These commands do not claim a particular development version is already public;
+check the [release page](https://github.com/groopcd/oc-box/releases).
 
 Package-manager delegation requires recognized receipts and options. Unsupported
 versions or custom options receive manual guidance; uv receipt parsing requires
@@ -153,13 +208,15 @@ advertising extras cannot be updated automatically without guessing what to
 preserve. Automatic targets require a compatible, unyanked universal wheel.
 
 - **Exact `v1.6.60`:** run one plain `oc-box upgrade` first. That published
-  launcher's old parser does not accept `--stable`/`--devel`; its existing
-  GitHub path provides the bridge to channel support.
-- **Pre-feature 1.7 builds:** rerun the channel-aware bootstrap for the desired
-  channel. Their old ahead-of-master check can retain the development build,
-  so a plain upgrade is not a reliable bridge.
+  launcher's old parser does not accept `--stable`/`--devel`; its existing GitHub
+  path provides the bridge to channel support.
+- **Pre-feature 1.7 builds, including `5573965`:** rerun the channel-aware
+  bootstrap for the desired channel. Their old ahead-of-master check can retain
+  the development build, so a plain upgrade is not a reliable bridge. For the
+  manager, select `--devel --with-tui` explicitly.
 - **Older package copies:** update once with the package manager that owns the
-  installation, then use the new channel-aware command.
+  installation, explicitly allowing prereleases for development, then use the
+  new channel-aware command.
 - **Channel-aware launchers without `upgrade --vault`/`--tui`:** upgrade normally
   to a published release supporting the flags, then request extras through that
   release. Do not send unknown flags to the old parser or assume an unpublished
@@ -171,33 +228,40 @@ are present.
 
 ## Publication policy
 
-The initial channel-capable stable release belongs to the **1.6 series on
-master**. Subsequent **1.7 development releases belong on devel**, without
-merging the unaccepted 1.7 line into master to obtain channel support. Existing
-published tags and artifacts remain unchanged.
+Stable `master`, its `v1.6.94` release/tag and its PyPI files remain unchanged by
+the 1.7 development publication. Publish the channel-integrated successor of the
+earlier `5573965` candidate on `devel`; do not merge that unaccepted manager line
+into stable to obtain channel support. A new source commit derives a new N from
+full history minus the original baseline, 29; do not reuse `1.7.110` or imply
+that the successor is the exact previously tested source.
 
-Freeze a clean exact candidate and keep its full history. Run the existing
-source/package/native gates, build-only distribution checks and applicable
-external-host acceptance before publication. Keep the seven-image distro gate
-for package mapping changes. Runtime/history/lifecycle/credential changes still
-need their relevant new host evidence on the clean integrated candidate; a
-prerelease label does not waive validation or turn offline tests into host
-acceptance. Preserve previous accepted reports and failed evidence verbatim.
+Run relevant source/package/native CI and guarded build-only distribution checks
+on the new source, concentrating new coverage on channel/install/version/upgrade
+behavior. Earlier accepted host reports remain bound to their exact source and
+scope. Document unchanged core workspace behavior separately from changed CLI
+upgrade paths; neither matching component hashes nor an approved experimental
+release is a new full-source host pass. Do not resume retained fixtures or
+replay the completed separate CLI lifecycle gate for publication paperwork.
+No protected-data, secret-lifetime or supported-version regression is retired.
 
-Publish only the tested commit on its intended branch. Stable uses a final
-GitHub Release and public final version; development uses a GitHub prerelease
-and `.dev0` version. Tag, public version, source metadata, branch membership,
-GitHub assets and the same project's PyPI files must agree. Do not select or
-advertise moving HEAD as a release. A later branch/evidence commit does not
-silently become an updater target.
+Stable promotion still requires complete manager acceptance and the applicable
+final-source host gates. Runtime/history/lifecycle/credential changes need their
+relevant evidence; a prerelease label does not turn offline tests into host
+acceptance. Preserve previous accepted reports and failed evidence.
 
-The publishing workflow retains the validated clean identity through testing
-and rechecks it against the final wheel and sdist. Existing GitHub package
-assets must match the built files by checksum. Its output bundle includes
-`validated-identity.json` and `SHA256SUMS`; only the verified distributions go
-to PyPI. Attach those same distributions and evidence to the GitHub release.
+Development requires **all three**: the `devel` publication branch, a GitHub
+prerelease, and a public `.dev0` version. A GitHub prerelease must never upload a
+regular `1.7.N` version; manual dispatch is not a guard bypass. Tag, public version,
+source metadata and branch membership must agree. Publish only the validated
+commit, not an arbitrary later branch HEAD.
 
-See [the publication checklist](../CONTRIBUTING.md#release-gate-and-publication-checklist),
+The workflow retains its validated clean identity through testing and rechecks
+the final wheel and sdist. Attach its exact distributions,
+`validated-identity.json` and `SHA256SUMS` to the GitHub release. Compare the public
+PyPI hashes with those assets. Earlier local/build-only artifacts are not
+substitutes, and existing assets must match by checksum before reuse.
+
+See the [publication checklist](../CONTRIBUTING.md#release-gate-and-publication-checklist),
 [test strategy](testing.md), [CLI reference](cli.md#upgrade), and
-[security model](../SECURITY.md#installation-and-updates). This policy records
-no new live host acceptance or publication.
+[security model](../SECURITY.md#installation-and-updates). Retain GPL-3.0-or-later
+LICENSE and NOTICE in both distributions.

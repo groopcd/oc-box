@@ -87,9 +87,13 @@ class DependencyTests(unittest.TestCase):
                 "uv tool install --force 'oc-box[vault]'",
                 " ".join(data["features"][2]["guidance"]),
             )
-            with contextlib.redirect_stdout(io.StringIO()):
-                self.assertEqual(deps.cli([]), 0)
-                self.assertEqual(deps.cli(["--feature", "backup"]), 1)
+            for output_format in ([], ["--json"], ["--table"]):
+                with self.subTest(output_format=output_format):
+                    with contextlib.redirect_stdout(io.StringIO()):
+                        self.assertEqual(deps.cli(output_format), 0)
+                        self.assertEqual(
+                            deps.cli([*output_format, "--feature", "backup"]), 1
+                        )
 
     def test_unknown_os_reports_missing_names_without_guessing_a_package_manager(self):
         with patch.object(deps, "host_distro", return_value=None):
@@ -107,16 +111,68 @@ class DependencyTests(unittest.TestCase):
             patch.object(box, "workspace_paths") as workspaces,
             patch.object(vault, "hidden") as prompt,
             patch.object(subprocess, "run") as execute,
+        ):
+            command = ["doctor", "--feature", "backup-info"]
+            with contextlib.redirect_stdout(io.StringIO()) as output:
+                self.assertEqual(box.main([*command, "--json"]), 1)
+            with contextlib.redirect_stdout(io.StringIO()) as table_output:
+                self.assertEqual(box.main([*command, "--table"]), 1)
+        data = json.loads(output.getvalue())
+        self.assertEqual(data["schema_version"], 1)
+        self.assertEqual(data["distro"], "ubuntu")
+        self.assertEqual(data["features"][0]["packages"], ["age", "python3"])
+        table = table_output.getvalue()
+        self.assertRegex(table, r"backup-info[^\n]*unavailable[^\n]*age, python3")
+        self.assertIn("sudo apt update && sudo apt install age python3", table)
+        self.assertNotIn("newuidmap", table)
+        for mocked in (backend, workspaces, prompt, execute):
+            mocked.assert_not_called()
+
+    def test_table_keeps_missing_providers_and_scope_for_an_unknown_distro(self):
+        def probe(key):
+            return key != "age-keygen", "missing\x1b[31m provider\nfake row"
+
+        with (
+            patch.dict(os.environ, {"OC_BOX_CONTAINER": "1"}, clear=True),
+            patch.object(deps, "host_distro", return_value=None),
+            patch.object(deps, "probe", side_effect=probe) as inspect,
             contextlib.redirect_stdout(io.StringIO()) as output,
         ):
             self.assertEqual(
-                box.main(["doctor", "--feature", "backup-info", "--json"]), 1
+                deps.cli(["--table", "--feature", "backup-info", "--feature", "vault"]),
+                1,
             )
-        data = json.loads(output.getvalue())
-        self.assertEqual(data["distro"], "ubuntu")
-        self.assertEqual(data["features"][0]["packages"], ["age", "python3"])
-        for mocked in (backend, workspaces, prompt, execute):
-            mocked.assert_not_called()
+        self.assertEqual(
+            [call.args[0] for call in inspect.call_args_list],
+            ["linux", "python", "age", "age-keygen", "memfd", "cryptography"],
+        )
+        table = output.getvalue()
+        self.assertIn("current-container", table)
+        self.assertIn("unrecognized distro", table)
+        self.assertRegex(table, r"backup-info[^\n]*unavailable[^\n]*age-keygen")
+        self.assertRegex(table, r"\bvault[^\n]*\bavailable")
+        self.assertNotIn("sudo ", table)
+        self.assertNotIn("\x1b", table)
+        self.assertNotIn("\nfake row", table)
+
+    def test_doctor_help_lists_feature_choices_and_formats_conflict_before_reporting(
+        self,
+    ):
+        with (
+            patch.object(deps, "report") as report,
+            contextlib.redirect_stdout(io.StringIO()) as help_text,
+            contextlib.redirect_stderr(io.StringIO()) as error,
+        ):
+            with self.assertRaises(SystemExit) as help_exit:
+                deps.cli(["--help"])
+            with self.assertRaises(SystemExit) as conflict:
+                deps.cli(["--table", "--json"])
+        self.assertEqual(help_exit.exception.code, 0)
+        self.assertEqual(conflict.exception.code, 2)
+        for token in ("--feature FEATURE", "--table", "--json", *deps.FEATURES):
+            self.assertIn(token, help_text.getvalue())
+        self.assertIn("not allowed with argument", error.getvalue())
+        report.assert_not_called()
 
     def test_partial_age_install_reports_only_the_missing_command_and_one_package(self):
         with (

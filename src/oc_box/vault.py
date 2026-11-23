@@ -275,6 +275,14 @@ def read_envelope(path):
             )
         with os.fdopen(fd, "rb", closefd=False) as stream:
             raw = stream.read(MAX_FILE + 1)
+        return parse_envelope(raw)
+    finally:
+        os.close(fd)
+
+
+def parse_envelope(raw):
+    """Validate encrypted vault bytes without a passphrase or crypto import."""
+    try:
         if len(raw) > MAX_FILE:
             raise ValueError
         envelope = json.loads(raw)
@@ -316,8 +324,6 @@ def read_envelope(path):
         raise VaultError(
             "Unsupported or damaged vault format; no data was changed."
         ) from exc
-    finally:
-        os.close(fd)
 
 
 def encode(value):

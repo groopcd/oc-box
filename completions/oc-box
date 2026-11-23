@@ -27,10 +27,11 @@ _oc_box_paths()
 _oc_box()
 {
     local cur=${COMP_WORDS[COMP_CWORD]} prev='' prefix='' option=''
-    local command='' action='' word skip=0 positional=0 ended=0 i
-    local commands='start stop sync reset repair terminal web upgrade secrets credentials backup backup-info restore purge list distros status doctor completion'
+    local command='' action='' word skip=0 positional=0 ended=0 broker=0 i
+    local commands='start stop sync reset repair terminal web tui share attach preferences upgrade secrets credentials backup backup-info restore purge list distros status logs doctor completion'
     local selectors='--project --workspace'
-    local launch='--distro --new --resume --import-session --model --cpus --memory --pids-limit --device --podman-arg --clear-devices --clear-podman-args --no-vault'
+    local launch_logs='--journald --no-journald --log-dir --lifecycle-diagnostics --verbose'
+    local launch='--distro --new --resume --import-session --model --cpus --memory --pids-limit --device --podman-arg --clear-devices --clear-podman-args --no-vault --image-preview --no-image-preview --host-file-open --no-host-file-open --host-drop --no-host-drop --host-clipboard --no-host-clipboard --host-clipboard-symlinks --no-host-clipboard-symlinks'
     local help='-h --help' options
     COMPREPLY=()
     (( COMP_CWORD > 0 )) && prev=${COMP_WORDS[COMP_CWORD-1]}
@@ -51,8 +52,17 @@ _oc_box()
         if (( ! ended )); then
             case $word in
                 --*=*) continue ;;
-                --project|--workspace|--distro|--auto-update|--import-session|--model|--credential-mode|--env-secret|--vault-secret|--cpus|--memory|--pids-limit|--device|--podman-arg|--output|--recipient|--identity|--min-passphrase-length|--feature|--port)
+                --verbose)
+                    case ${COMP_WORDS[i+1],,} in
+                        =|all|debug|info|warn|error) skip=1 ;;
+                    esac
+                    continue ;;
+                --project|--workspace|--distro|--auto-update|--import-session|--model|--credential-mode|--env-secret|--vault-secret|--cpus|--memory|--pids-limit|--device|--podman-arg|--output|--recipient|--identity|--opencode-auth-export|--min-passphrase-length|--feature|--port|--session|--text|--level|--limit|--log-dir|--origin|--cert|--key|--account-cert|--account-key|--workspace-cert|--workspace-key|--account-port|--workspace-port)
                     skip=1; continue ;;
+                --broker) broker=1; continue ;;
+                --host-drop|--host-clipboard|--host-clipboard-symlinks|--host-file-open|--image-preview|--startup-logo)
+                    [[ $command == preferences ]] && skip=1
+                    continue ;;
                 --status) command=status; continue ;;
                 -*) continue ;;
             esac
@@ -84,34 +94,61 @@ _oc_box()
             option=$prev
         fi
         case $option in
-            --project) _oc_box_paths -d; return 0 ;;
-            --output|--identity) _oc_box_paths -f; return 0 ;;
+            --project|--log-dir) _oc_box_paths -d; return 0 ;;
+            --output|--identity|--opencode-auth-export) _oc_box_paths -f; return 0 ;;
             --distro)
                 _oc_box_words 'tumbleweed leap ubuntu debian fedora arch alpine opensuse opensuse-tumbleweed opensuse-leap archlinux'; return 0 ;;
             --feature)
                 _oc_box_words 'launch private-output maintenance history backup backup-info restore vault github-upgrade bootstrap storage overlay manuals docs-build'; return 0 ;;
             --auto-update) _oc_box_words 'on off'; return 0 ;;
+            --level)
+                if [[ $command == logs ]]; then
+                    _oc_box_words 'debug info warn error'; return 0
+                fi ;;
+            --verbose)
+                if [[ $cur != -* ]]; then
+                    case $command in
+                        ''|start|reset|stop|sync|terminal|web|logs)
+                            _oc_box_words 'all debug info warn error'; return 0 ;;
+                    esac
+                fi ;;
+            --host-drop|--host-clipboard|--host-clipboard-symlinks|--host-file-open|--image-preview)
+                if [[ $command == preferences ]]; then
+                    _oc_box_words 'on off'; return 0
+                fi ;;
+            --startup-logo)
+                if [[ $command == preferences ]]; then
+                    _oc_box_words 'ascii graphics'; return 0
+                fi ;;
             --credential-mode) _oc_box_words 'env selected vault'; return 0 ;;
-            --workspace|--import-session|--model|--env-secret|--vault-secret|--cpus|--memory|--pids-limit|--device|--podman-arg|--recipient|--min-passphrase-length|--port)
+            --workspace|--import-session|--model|--env-secret|--vault-secret|--cpus|--memory|--pids-limit|--device|--podman-arg|--recipient|--min-passphrase-length|--port|--session|--text|--limit)
                 return 0 ;;
         esac
     fi
 
     case $command in
-        start) options="$help $selectors $launch" ;;
-        reset) options="$help $selectors --distro --model --cpus --memory --pids-limit --device --podman-arg --clear-devices --clear-podman-args --no-vault" ;;
-        sync) options="$help $selectors" ;;
-        stop|repair) options="$help $selectors" ;;
-        terminal) options="$help $selectors --maintenance" ;;
-        web) options="$help $selectors --port --no-open --no-vault" ;;
-        status) options="$help $selectors --json" ;;
+        start) options="$help $selectors $launch $launch_logs" ;;
+        reset) options="$help $selectors $launch_logs --distro --new --resume --model --cpus --memory --pids-limit --device --podman-arg --clear-devices --clear-podman-args --no-vault --image-preview --no-image-preview --host-file-open --no-host-file-open --host-drop --no-host-drop --host-clipboard --no-host-clipboard --host-clipboard-symlinks --no-host-clipboard-symlinks" ;;
+        sync) options="$help $selectors $launch_logs --cpus --memory --pids-limit" ;;
+        stop) options="$help $selectors $launch_logs" ;;
+        repair) options="$help $selectors" ;;
+        terminal) options="$help $selectors $launch_logs --maintenance" ;;
+        web) options="$help $selectors $launch_logs --session --port --no-open --no-vault --attachments --workspace-layout" ;;
+        tui) options="$help $selectors --read-only --demo" ;;
+        share) options="$help $selectors --acknowledge-risk" ;;
+        attach)
+            options="$help $selectors --session --broker"
+            (( broker )) || options+=' --text --send --acknowledge-risk' ;;
+        status) options="$help $selectors --json --table" ;;
+        logs) options="$help $selectors --level --verbose --limit --follow --tail --json --table --journald --log-dir --path" ;;
         purge) options="$help $selectors --delete-sessions --all -y --yes" ;;
         credentials) options="$help $selectors --credential-mode --env-secret --vault-secret --clear-credentials" ;;
+        preferences) options="$help $selectors --host-drop --host-clipboard --host-clipboard-symlinks --host-file-open --image-preview --startup-logo --json --table" ;;
         upgrade) options="$help --check --stable --devel --vault --tui --auto-update" ;;
-        doctor) options="$help --json --feature" ;;
-        backup) options="$help $selectors --output --portable --recipient --min-passphrase-length" ;;
-        backup-info) options="$help --identity" ;;
-        restore) options="$help --project --identity" ;;
+        doctor) options="$help --json --table --feature" ;;
+        backup) options="$help $selectors --output --portable --host --opencode-auth-export --recipient --min-passphrase-length" ;;
+        backup-info) options="$help --identity --json --table" ;;
+        restore) options="$help --project --identity --host --include-opencode" ;;
         secrets)
             options=$help
             if [[ -z $action ]]; then
@@ -123,13 +160,16 @@ _oc_box()
             options=$help
             (( positional == 0 )) && options+=' bash' ;;
         list|distros) options=$help ;;
-        *) options="$commands $help $selectors $launch --status --about --version --json --check --stable --devel --vault --tui --auto-update --credential-mode --env-secret --vault-secret --clear-credentials --delete-sessions --all -y --yes --maintenance" ;;
+        *) options="$commands $help $selectors $launch $launch_logs --status --about --version --json --table --check --stable --devel --vault --tui --auto-update --credential-mode --env-secret --vault-secret --clear-credentials --delete-sessions --all -y --yes --maintenance" ;;
     esac
     if (( ! ended )); then
         _oc_box_words "$options"
         [[ $cur == -* ]] && return 0
     fi
-    if [[ $command == backup-info || $command == restore ]] && (( positional == 0 )); then
+    if (( positional == 0 )) && {
+        [[ $command == backup-info || $command == restore || $command == share ]] ||
+        { [[ $command == attach ]] && (( ! broker )); }
+    }; then
         _oc_box_paths -f
     fi
     return 0

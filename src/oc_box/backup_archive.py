@@ -29,7 +29,7 @@ class BoundedTarInfo(tarfile.TarInfo):
         raise ValueError("Sparse archive extensions are not accepted")
 
 
-def create(root):
+def create(root, *, excluded_inode=None):
     root = Path(root).absolute()
     # Refuse even same-filesystem bind mounts nested under the selected root;
     # stat.st_dev alone does not distinguish them. Linux mountinfo paths use
@@ -80,6 +80,10 @@ def create(root):
                     add_entry(directory_fd, name, path, relative, metadata)
 
             def add_entry(directory_fd, name, path, relative, metadata):
+                if (metadata.st_dev, metadata.st_ino) == excluded_inode:
+                    raise ValueError(
+                        "Selected native credential export moved into archived files"
+                    )
                 if metadata.st_dev != root_device:
                     raise ValueError("Nested filesystems are not captured implicitly")
                 if not (
@@ -297,10 +301,14 @@ if __name__ == "__main__":
     parser.add_argument("root", type=Path)
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--owners", action="store_true")
+    parser.add_argument("--exclude-inode", type=int, nargs=2)
     args = parser.parse_args()
     if args.action == "create":
-        create(args.root)
+        create(
+            args.root,
+            excluded_inode=tuple(args.exclude_inode) if args.exclude_inode else None,
+        )
     else:
-        if args.limit < 1:
+        if args.limit < 1 or args.exclude_inode is not None:
             raise ValueError("A positive extraction bound is required")
         extract(args.root, args.limit, args.owners)

@@ -17,6 +17,7 @@ import os
 from pathlib import Path
 import re
 import select
+import secrets
 import signal
 import socket
 import stat
@@ -28,6 +29,11 @@ import threading
 import time
 from urllib.parse import urlparse
 from urllib.request import Request, build_opener, ProxyHandler
+
+if __package__:
+    from . import lifecycle_output
+else:
+    import lifecycle_output
 
 CONNECTION = contextvars.ContextVar("oc_box_v2_connection")
 MAX_CONTROL = 16384
@@ -78,6 +84,310 @@ def live_connection():
     return CONNECTION.get(None)
 
 
+class HistorySource:
+    """Pass-local unregistered quiet source, never the post-stop Reader.
+
+    The caller must retain its normal exclusive workspace lifecycle lock.
+    Unsupported/incompatible sources opt out *before* native service creation.
+    Startup/cleanup uncertainty is fatal, never an instruction to replay sync.
+    """
+
+    def __init__(self, box, data):
+        self.box, self.data = box, dict(data)
+        self.child = self.errors = self.error_file = self.token = None
+        self.connection = None
+        self.started = False
+        self.fallback = False
+
+    def fail(self, category):
+        return self.box.BoxError(
+            "Private history source lease failed (" + category + ")."
+        )
+
+    def command(self):
+        if __package__:
+            from . import history_reader
+        else:
+            import history_reader
+
+        return self.box.ContainerCommand(
+            [
+                "podman",
+                "exec",
+                "-i",
+                "--workdir",
+                "/",
+                self.data["container"],
+                "/usr/bin/env",
+                "-i",
+                "PATH=" + history_reader.PATH,
+                "LANG=C.UTF-8",
+                "/usr/bin/python3",
+                "-I",
+                "-S",
+                "-c",
+                (self.box.PACKAGE / "opencode_v2_io.py").read_text(),
+                "history-source",
+                self.box.CONTAINER_OPENCODE,
+            ],
+            self.box.maintenance_host_env(),
+        )
+
+    def _write(self, payload, deadline):
+        descriptor = self.child.stdin.fileno()
+        os.set_blocking(descriptor, False)
+        offset = 0
+        while offset < len(payload):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise self.fail("startup-timeout")
+            if not select.select([], [descriptor], [], min(0.1, remaining))[1]:
+                continue
+            try:
+                count = os.write(descriptor, payload[offset : offset + 4096])
+            except BlockingIOError:
+                continue
+            if count <= 0:
+                raise self.fail("startup-failed")
+            offset += count
+
+    def _category(self):
+        if __package__:
+            from . import opencode_v2_io as bridge
+        else:
+            import opencode_v2_io as bridge
+
+        self.error_file.seek(0)
+        lines = self.error_file.read(MAX_CONTROL).decode("utf-8", errors="replace")
+        for line in reversed(lines.splitlines()):
+            if line.startswith(bridge.HISTORY_SOURCE_MARKER):
+                category = line[len(bridge.HISTORY_SOURCE_MARKER) :]
+                if category in bridge.HISTORY_SOURCE_ERRORS:
+                    return category
+        return "startup-failed"
+
+    def __enter__(self):
+        if __package__:
+            from . import history_reader, opencode_v2_io as bridge
+        else:
+            import history_reader
+            import opencode_v2_io as bridge
+
+        if self.started:
+            raise self.fail("reuse")
+        self.started = True
+        try:
+            if (
+                not isinstance(self.data.get("id"), str)
+                or not re.fullmatch(r"[a-f0-9]{32}", self.data["id"])
+                or not isinstance(self.data.get("container"), str)
+                or not re.fullmatch(
+                    r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", self.data["container"]
+                )
+                or not isinstance(self.data.get("home"), str)
+                or not self.data["home"].startswith("/")
+                or os.path.normpath(self.data["home"]) != self.data["home"]
+                or "\0" in self.data["home"]
+            ):
+                raise self.fail("source")
+            payload = (
+                json.dumps(
+                    {
+                        "guards": (self.box.PACKAGE / "history_reader.py").read_text(),
+                        "version": self.data["opencode_version"],
+                        "home": self.data["home"],
+                    }
+                ).encode()
+                + b"\n"
+            )
+            if len(payload) > bridge.HISTORY_SOURCE_MAX_PAYLOAD:
+                raise self.fail("payload")
+            command = self.command()
+            self.errors = self.box.captured_output(private=True)
+            self.error_file = self.errors.__enter__()
+            self.child = subprocess.Popen(
+                command,
+                env=command.environment,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=self.error_file,
+                start_new_session=True,
+            )
+            # Child startup alarm is 45s, leaving time for its native cleanup
+            # before this wrapper's independent hard deadline.
+            deadline = time.monotonic() + 60
+            self._write(payload, deadline)
+            output = bytearray()
+            while b"\n" not in output:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise self.fail("startup-timeout")
+                if select.select([self.child.stdout], [], [], min(0.1, remaining))[0]:
+                    chunk = os.read(
+                        self.child.stdout.fileno(), MAX_CONTROL + 1 - len(output)
+                    )
+                    if not chunk:
+                        self.child.wait(timeout=min(1, remaining))
+                        raise self.fail(self._category())
+                    output.extend(chunk)
+                elif self.child.poll() is not None:
+                    raise self.fail(self._category())
+                if len(output) > MAX_CONTROL:
+                    raise self.fail("startup-response")
+            line, trailing = output.split(b"\n", 1)
+            response = json.loads(line)
+            if trailing or not isinstance(response, dict):
+                raise self.fail("startup-response")
+            if set(response) == {"fallback"}:
+                if response["fallback"] not in bridge.HISTORY_SOURCE_FALLBACKS:
+                    raise self.fail("startup-response")
+                self.shutdown()
+                self.fallback = True
+                return None
+            if set(response) != {"endpoint"} or set(response["endpoint"]) != {
+                "url",
+                "password",
+            }:
+                raise self.fail("startup-response")
+            endpoint = validate_endpoint(response["endpoint"])
+            if self.child.poll() is not None:
+                raise self.fail(self._category())
+            self.connection = {**endpoint, "workspace": self.data["id"]}
+            self.token = CONNECTION.set(self.connection)
+            return self.connection
+        except BaseException as error:
+            self._shutdown_preserving(
+                error,
+                startup_failed=not isinstance(error, (KeyboardInterrupt, SystemExit)),
+            )
+            if isinstance(error, (KeyboardInterrupt, SystemExit, self.box.BoxError)):
+                raise
+            raise self.fail("startup-failed") from None
+
+    def _shutdown_preserving(self, original, *, startup_failed=False):
+        try:
+            self.shutdown(startup_failed=startup_failed)
+        except BaseException:
+            if isinstance(original, (KeyboardInterrupt, SystemExit)):
+                # The original interruption remains authoritative, including
+                # during startup. The fixed marker records uncertain cleanup
+                # without replacing it with a different exception or success.
+                self._mark_cleanup_interruption(original)
+                raise original from None
+            raise
+
+    @staticmethod
+    def _mark_cleanup_interruption(error):
+        error.history_source_cleanup_failed = True
+        if isinstance(error, SystemExit) and (error.code is None or error.code == 0):
+            # Preserve identity, never let uncertain cleanup become exit zero.
+            error.code = 1
+
+    def shutdown(self, *, startup_failed=False):
+        failed = False
+        interruption = None
+
+        def caught(error):
+            nonlocal failed, interruption
+            failed = True
+            if interruption is None and isinstance(
+                error, (KeyboardInterrupt, SystemExit)
+            ):
+                interruption = error
+
+        try:
+            if self.child is not None:
+                try:
+                    if self.child.stdin:
+                        try:
+                            self.child.stdin.close()
+                        except OSError:
+                            pass  # A remote refusal can close its input first.
+                        except BaseException as error:
+                            caught(error)
+                    try:
+                        code = self.child.wait(timeout=20)
+                    except BaseException as error:
+                        caught(error)
+                        try:
+                            os.killpg(self.child.pid, signal.SIGKILL)
+                        except OSError:
+                            pass
+                        except BaseException as error:
+                            caught(error)
+                        try:
+                            self.child.wait(timeout=5)
+                        except BaseException as error:
+                            caught(error)
+                        code = None
+                    failed = failed or (code != 0 and not startup_failed)
+                finally:
+                    if self.child.stdout:
+                        try:
+                            self.child.stdout.close()
+                        except BaseException as error:
+                            caught(error)
+                    self.child = None
+        finally:
+            if self.token is not None:
+                try:
+                    CONNECTION.reset(self.token)
+                except BaseException as error:
+                    caught(error)
+                self.token = None
+            self.connection = None
+            if self.error_file is not None:
+                try:
+                    self.errors.__exit__(None, None, None)
+                except BaseException as error:
+                    caught(error)
+                self.error_file = None
+        if interruption is not None:
+            self._mark_cleanup_interruption(interruption)
+            raise interruption
+        if failed:
+            raise self.fail("cleanup-failed")
+
+    def __exit__(self, kind, value, traceback):
+        if self.fallback:
+            return
+        try:
+            ended = kind is None and (
+                self.child is None
+                or self.child.poll() is not None
+                or bool(select.select([self.child.stdout], [], [], 0)[0])
+            )
+        except BaseException as error:
+            self._shutdown_preserving(error)
+            raise
+        self._shutdown_preserving(value)
+        if ended:
+            raise self.fail("lease-ended")
+
+
+@contextlib.contextmanager
+def history_source(box, data):
+    """Optional manual-sync optimization; existing owners/recovery stay intact."""
+    if __package__:
+        from . import history_reader, history_recovery, opencode_v2_io
+    else:
+        import history_reader
+        import history_recovery
+        import opencode_v2_io
+
+    live = live_connection()
+    if (
+        live is not None
+        or history_reader.current() is not None
+        or history_recovery.FENCE.get() is not None
+        or data.get("opencode_version") not in opencode_v2_io.HISTORY_SOURCE_SUPPORTED
+    ):
+        yield live
+        return
+    with HistorySource(box, data) as connection:
+        yield connection
+
+
 def controller_running(box, data):
     address = socket_path(box, data)
     with socket.socket(socket.AF_UNIX) as stream:
@@ -92,6 +402,14 @@ def controller_running(box, data):
 def validate_endpoint(value):
     if not isinstance(value, dict):
         raise ValueError("Invalid private workspace service response.")
+    if type(value.get("image_preview", False)) is not bool:
+        raise ValueError("Invalid private workspace image-preview setting.")
+    if "ui_state" in value:
+        if __package__:
+            from . import ui_state
+        else:
+            import ui_state
+        ui_state._metadata(value)
     parsed = urlparse(value.get("url", ""))
     if (
         parsed.scheme != "http"
@@ -111,6 +429,16 @@ def validate_endpoint(value):
     ):
         raise ValueError("Invalid private workspace service credential.")
     return value
+
+
+def require_session(box, connection):
+    """Session-bound clients must not invent a target for a native home view."""
+    ident = connection.get("session")
+    if not box.valid_session_id(ident):
+        raise box.BoxError(
+            "No open native session is selected. Open one in OpenCode or start with --new."
+        )
+    return ident
 
 
 def read_control(stream):
@@ -150,12 +478,27 @@ def validate_workspace(box, path, data):
         )
 
 
-def client_command(box, data, connection, arguments, *, interactive=False):
+def client_command(
+    box,
+    data,
+    connection,
+    arguments,
+    *,
+    interactive=False,
+    force_tty=False,
+    ui_owner=False,
+    file_preview=False,
+):
     """No host pass_env, auth refresh, profiles, or vault unlock on attach."""
+    image_preview = connection.get("image_preview", False)
+    if type(image_preview) is not bool:
+        raise box.BoxError("Invalid private workspace image-preview setting.")
     env = box.maintenance_host_env()
     env["OPENCODE_PASSWORD"] = connection["password"]
     command = ["podman", "exec", "-i"]
-    if interactive and sys.stdin.isatty() and sys.stdout.isatty():
+    # An embedded client has its own local PTY even when the dashboard's
+    # Python stdio isn't a TTY (e.g. headless terminal protocol fixtures).
+    if force_tty or (interactive and sys.stdin.isatty() and sys.stdout.isatty()):
         command.append("-t")
     command.extend(
         [
@@ -179,6 +522,93 @@ def client_command(box, data, connection, arguments, *, interactive=False):
         "XDG_CACHE_HOME": data["home"] + "/.cache",
         "OPENCODE_DB": "oc-box-v2.db",
     }
+    preview_host_open = None
+    if (
+        interactive
+        and len(arguments) >= 2
+        and arguments[:2] == [box.CONTAINER_OPENCODE, box.container_project(data)]
+        and "--server" in arguments
+        and arguments[arguments.index("--server") + 1 :]
+        and arguments[arguments.index("--server") + 1] == connection["url"]
+    ):
+        if __package__:
+            from . import ui_state
+        else:
+            import ui_state
+        try:
+            binding = ui_state._metadata(connection)
+        except ui_state.StateError:
+            raise box.BoxError("Invalid private workspace UI-state setting.") from None
+        if binding is not None:
+            # NONSECRET labels, not native identity or caller attestation. Do
+            # not overwrite cli.json plugins to supply per-client options.
+            names["OC_BOX_UI_STATE_CLIENT"] = (
+                binding["ownerClient"] if ui_owner else secrets.token_hex(16)
+            )
+            names["OC_BOX_UI_STATE_GENERATION"] = binding["generation"]
+        if file_preview:
+            if __package__:
+                from . import file_preview as preview, file_preview_host
+            else:
+                import file_preview as preview
+                import file_preview_host
+            release = data.get("opencode_version")
+            verified = (
+                preview.client_binding(box, data, connection)
+                if preview.supports(release)
+                and preview.client_incompatibility(release) is None
+                else None
+            )
+            if verified is not None:
+                # Use the inspected immutable container ID, not a mutable name.
+                container, mounts = verified
+                reason = file_preview_host.readiness_reason()
+                if reason is None:
+                    refusals = []
+                    sources = preview.host_export_mounts(
+                        box, data, container, refusals=refusals
+                    )
+                    reason = (
+                        (refusals[0] if refusals else "mount-inventory-unverified")
+                        if sources is None
+                        else file_preview_host.readiness_reason(host_mounts=sources)
+                    )
+                if reason is None:
+                    command[-1] = container
+                    names[preview.ROOTS] = json.dumps(mounts)
+
+                    def preview_host_open(kind, candidate):
+                        sources = preview.host_export_mounts(box, data, container)
+                        if sources is None:
+                            raise file_preview_host.PreviewError(
+                                "host-mounts-unverified",
+                                reason="mount-recheck-unverified",
+                            )
+                        file_preview_host.open_artifact(
+                            kind, candidate, host_mounts=sources
+                        )
+
+                if preview_host_open is None:
+                    print(
+                        f"oc-box: Experimental host opening is off ({reason}).",
+                        flush=True,
+                    )
+
+    if (
+        image_preview
+        and interactive
+        and arguments
+        and arguments[0] == box.CONTAINER_OPENCODE
+    ):
+        # This is deliberately not the host CLI snapshot or saved cli.json.
+        # Native UI writes to unrelated preferences must retain their base image
+        # values. Additional TUI clients inherit only this owner's boolean.
+        names["OPENCODE_CLI_CONFIG_CONTENT"] = json.dumps(
+            {
+                "prompt": {"image_preview": True},
+                "session": {"image_preview": True},
+            }
+        )
     term = os.environ.get("TERM", "xterm-256color")
     names["TERM"] = (
         term
@@ -186,8 +616,91 @@ def client_command(box, data, connection, arguments, *, interactive=False):
         else "xterm-256color"
     )
     bridge = "import os,sys,json; env=json.loads(sys.argv[1]); env['OPENCODE_PASSWORD']=os.environ['OPENCODE_PASSWORD']; os.execvpe(sys.argv[2],sys.argv[2:],env)"
-    command.extend(["python3", "-c", bridge, json.dumps(names), *arguments])
-    return box.ContainerCommand(command, env)
+    command.extend(["python3", "-I", "-S", "-c", bridge, json.dumps(names), *arguments])
+    result = box.ContainerCommand(command, env)
+    if preview_host_open is not None:
+        result.preview_host_open = preview_host_open
+    return result
+
+
+def tab_inventory(box, data, connection, *, timeout=4):
+    """Read admission metadata through the existing providerless client only."""
+    if connection.get("workspace") != data["id"]:
+        raise box.BoxError("Native tab inventory does not match the workspace.")
+    validate_endpoint(connection)
+    command = client_command(
+        box,
+        data,
+        connection,
+        [
+            "python3",
+            "-I",
+            "-S",
+            "-B",
+            "-c",
+            (box.PACKAGE / "opencode_v2_io.py").read_text(),
+            "sessions",
+            box.CONTAINER_OPENCODE,
+        ],
+    )
+    result = box.run(
+        command,
+        input=json.dumps(
+            {
+                "directory": box.container_project(data),
+                "endpoint": {key: connection[key] for key in ("url", "password")},
+            }
+        ),
+        capture=True,
+        private=True,
+        timeout=timeout,
+    )
+    inventory = json.loads(result.stdout)
+    if not isinstance(inventory, list):
+        raise box.BoxError("Invalid native tab inventory.")
+    return inventory
+
+
+def web_session_catalog(box, data, connection, members, *, timeout=4):
+    """Explicit chooser only: same private service, membership + native GET.
+
+    Unlike tab_inventory this permits already-open worktree/moved/archived/child
+    IDs. It must not be used by automatic owner selection or history sync.
+    """
+    if connection.get("workspace") != data["id"]:
+        raise box.BoxError("Web session catalog does not match the workspace.")
+    validate_endpoint(connection)
+    command = client_command(
+        box,
+        data,
+        connection,
+        [
+            "python3",
+            "-I",
+            "-S",
+            "-B",
+            "-c",
+            (box.PACKAGE / "opencode_v2_io.py").read_text(),
+            "web-sessions",
+            box.CONTAINER_OPENCODE,
+        ],
+    )
+    result = box.run(
+        command,
+        input=json.dumps(
+            {
+                "members": list(members),
+                "endpoint": {key: connection[key] for key in ("url", "password")},
+            }
+        ),
+        capture=True,
+        private=True,
+        timeout=timeout,
+    )
+    inventory = json.loads(result.stdout)
+    if not isinstance(inventory, list):
+        raise box.BoxError("Invalid private web session catalog.")
+    return inventory
 
 
 def api(box, data, connection, method, target, value=None, *, timeout=60):
@@ -223,22 +736,147 @@ def wait_history(box, data, connection, *, timeout=30, interval=0.2):
     accepting a single observation across that handoff. This does not certify
     transcript completeness: user shell fibers and unsettled projected messages
     need a separate check in the export path. Persistent PTYs are not activity.
-    Timeout diagnostics contain only the phase and the last fully validated pair
-    of inventory counts, never native identifiers, commands, responses or errors.
+    Timeout diagnostics contain the phase, the last fully validated status/kind
+    counts and aggregate timings of existing queries, never native identifiers,
+    commands, responses or errors. Timings include native CLI transport overhead;
+    they do not distinguish live jobs from retained native records.
+    Stable native 2.3.x may route retained shell/subagent jobs to a guarded
+    unregistered post-stop reader; older/unknown versions retain shell-only hints.
     """
+    if __package__:
+        from . import history_reader
+    else:
+        import history_reader
 
     phase = "foreground-query"
     observation = "unavailable"
-    shell_pairs = 0
+    kind_observation = "unavailable"
+    last_counts = {}
+    profile = history_reader.snapshot_profile(data.get("opencode_version"))
+    kinds = history_reader.SNAPSHOT_JOB_KINDS.get(profile, frozenset(("shell",)))
+    insufficient = (
+        "insufficient-job-observations"
+        if "subagent" in kinds
+        else "insufficient-shell-observations"
+    )
+    job_pairs = 0
+    foreground_pairs = 0
+    foreground_observed = False
+    compatibility_reason = None
+    recovery_reason = insufficient
+    complete_pairs = 0
+    last_complete = None
+    last_query = "unavailable"
+    last_query_budget = None
+    last_query_outcome = "unavailable"
+    queries = {
+        name: {"count": 0, "total": 0.0, "max": 0.0}
+        for name in ("foreground-query", "background-query")
+    }
+
+    def timing_diagnostic():
+        def count(value):
+            return str(value) if value < 10000 else "9999+"
+
+        def duration(value):
+            if value is None:
+                return "unavailable"
+            return f"{max(0, value):.3f}s" if value < 10000 else "9999+s"
+
+        summary = "; ".join(
+            f"{name}-queries={count(query['count'])}, "
+            f"total={duration(query['total'])}, max={duration(query['max'])}"
+            for name in ("foreground", "background")
+            for query in (queries[name + "-query"],)
+        )
+        age = None if last_complete is None else time.monotonic() - last_complete
+        metrics = {
+            "complete_pairs": min(complete_pairs, 9999),
+            **last_counts,
+        }
+        for name in ("foreground", "background"):
+            query = queries[name + "-query"]
+            metrics[name + "_queries"] = min(query["count"], 9999)
+            for aggregate in ("total", "max"):
+                metrics[name + "_" + aggregate + "_ms"] = int(
+                    max(0, min(query[aggregate], 9999)) * 1000
+                )
+        for name, value in (
+            ("remaining_ms", last_query_budget),
+            ("last_complete_age_ms", age),
+        ):
+            if value is not None:
+                metrics[name] = int(max(0, min(value, 9999)) * 1000)
+        lifecycle_output.record(
+            "history.wait",
+            level="debug",
+            stage=phase,
+            reason="timeout",
+            outcome="failure",
+            metrics=metrics,
+        )
+        return (
+            f"History wait timing: complete-pairs={count(complete_pairs)}; {summary}; "
+            f"last-query={last_query}, remaining-at-start={duration(last_query_budget)}, "
+            f"outcome={last_query_outcome}; last-complete-age={duration(age)}."
+        )
+
+    def record_query(started, outcome):
+        nonlocal last_query_outcome
+        elapsed = max(0, time.monotonic() - started)
+        query = queries[last_query]
+        query["count"] += 1
+        query["total"] += elapsed
+        query["max"] = max(query["max"], elapsed)
+        last_query_outcome = outcome
 
     def fail(category):
         if category == "activity-timeout":
-            raise box.HistoryWaitTimeout(
+            diagnostic = (
                 f"History wait timeout: phase={phase}; "
-                f"last complete observation: {observation}.",
-                recovery_eligible=shell_pairs >= 2,
-            ) from None
-        raise box.BoxError(f"OpenCode 2.x history wait failed ({category}).") from None
+                f"last complete job kinds: {kind_observation}; "
+                f"last complete observation: {observation}."
+            )
+            timing = timing_diagnostic()
+            # These strings contain only the fixed query phases and validated
+            # counts above, never a native payload or an exception's text.
+            lifecycle_output.fixed_detail("debug", diagnostic)
+            lifecycle_output.fixed_detail("debug", timing)
+            error = box.HistoryWaitTimeout(
+                diagnostic,
+                recovery_eligible=job_pairs >= 2 or foreground_pairs >= 2,
+                recovery_reason=recovery_reason,
+                timing_diagnostic=timing,
+                interrupted_foreground=foreground_observed,
+            )
+            # Keep the deadline and routing diagnostics; a native response
+            # decode failure is still a known compatibility refusal.
+            if compatibility_reason is not None:
+                error.history_compatibility_category = compatibility_reason
+            raise error from None
+        error = box.BoxError(f"OpenCode 2.x history wait failed ({category}).")
+        error.interrupted_foreground = foreground_observed
+        error.history_retryable = (
+            category == "activity-api-failed" and compatibility_reason is None
+        )
+        if category in ("invalid-active-response", "invalid-jobs-response"):
+            error.history_compatibility_category = category
+        elif compatibility_reason is not None:
+            error.history_compatibility_category = compatibility_reason
+        lifecycle_output.record(
+            "history.wait",
+            level="debug",
+            stage=phase,
+            reason=(
+                "schema"
+                if getattr(error, "history_compatibility_category", None) is not None
+                else "transport"
+                if category == "activity-api-failed"
+                else "refused"
+            ),
+            outcome="failure",
+        )
+        raise error from None
 
     if (
         not isinstance(timeout, (int, float))
@@ -283,13 +921,17 @@ def wait_history(box, data, connection, *, timeout=30, interval=0.2):
         return value
 
     def request(target):
-        nonlocal phase, shell_pairs
+        nonlocal phase, job_pairs, foreground_pairs, recovery_reason
+        nonlocal last_query, last_query_budget
+        nonlocal foreground_observed, compatibility_reason
         budget = remaining()
         phase = (
             "foreground-query"
             if target == "/api/session/active"
             else "background-query"
         )
+        last_query, last_query_budget = phase, budget
+        started = time.monotonic()
         try:
             result = api(
                 box,
@@ -305,27 +947,60 @@ def wait_history(box, data, connection, *, timeout=30, interval=0.2):
             # deadline category, but a known non-timeout failure invalidates the
             # optional snapshot hint even when the clock also expired. run()
             # retains subprocess.TimeoutExpired as the private BoxError cause.
-            if not isinstance(error, subprocess.TimeoutExpired) and not isinstance(
+            timed_out = isinstance(error, subprocess.TimeoutExpired) or isinstance(
                 error.__cause__, subprocess.TimeoutExpired
-            ):
-                shell_pairs = 0
+            )
+            record_query(started, "subprocess-timeout" if timed_out else "failed")
+            if isinstance(error, ValueError):
+                compatibility_reason = (
+                    "invalid-active-response"
+                    if target == "/api/session/active"
+                    else "invalid-jobs-response"
+                )
+            if not timed_out:
+                job_pairs = 0
+                foreground_pairs = 0
+                recovery_reason = "activity-api-failed"
             remaining()
             fail("activity-api-failed")
+        record_query(started, "returned")
         value = (
             active_items(result)
             if target == "/api/session/active"
             else job_items(result)
         )
+        if target == "/api/session/active" and value is not None:
+            # Keep execution outcome separate from authorization counters. A
+            # later API error cannot prove previously observed work completed.
+            foreground_observed = bool(value)
+        if value is None or (
+            not value
+            if target == "/api/session/active"
+            else any(job["kind"] not in kinds for job in value)
+        ):
+            # A foreground-interruption hint also needs consecutive complete
+            # observations, and must not survive contradictory partial replies.
+            foreground_pairs = 0
         if value is None or (
             bool(value)
             if target == "/api/session/active"
-            else not value or any(job["kind"] != "shell" for job in value)
+            else not value or any(job["kind"] not in kinds for job in value)
         ):
             # A late successful response can contradict the last complete pair.
             # Validate/reset BEFORE checking the deadline; it must never leave a
             # stale routing hint behind. A real request timeout cannot manufacture
             # a qualifying pair, but does not erase prior validated observations.
-            shell_pairs = 0
+            job_pairs = 0
+            if value is None:
+                recovery_reason = (
+                    "invalid-active-response"
+                    if target == "/api/session/active"
+                    else "invalid-jobs-response"
+                )
+            elif target == "/api/session/active":
+                recovery_reason = "foreground-active"
+            else:
+                recovery_reason = "jobs-empty" if not value else "non-shell-jobs"
         remaining()
         return value
 
@@ -348,15 +1023,36 @@ def wait_history(box, data, connection, *, timeout=30, interval=0.2):
             f"{name}={value if value < 10000 else '9999+'}"
             for name, value in counts.items()
         )
+        kind_counts = {
+            kind: sum(job["kind"] == kind for job in jobs)
+            for kind in ("shell", "subagent", "image")
+        }
+        kind_observation = ", ".join(
+            f"{kind}={count if count < 10000 else '9999+'}"
+            for kind, count in kind_counts.items()
+        )
+        last_counts = {
+            name.replace("-", "_"): min(count, 9999)
+            for name, count in (counts | kind_counts).items()
+        }
+        complete_pairs += 1
+        last_complete = time.monotonic()
         # This requests only a post-STOP snapshot, never a live readiness waiver.
         # Durable shell rows can hydrate as running on the next owner. The
         # ordinary timeout already stops genuine pending work too; recovery must
         # preserve that failure/interruption result, irrespective of job status.
-        shell_pairs = (
-            shell_pairs + 1
-            if not active and jobs and all(job["kind"] == "shell" for job in jobs)
+        job_pairs = (
+            job_pairs + 1
+            if not active and jobs and all(job["kind"] in kinds for job in jobs)
             else 0
         )
+        foreground_pairs = (
+            foreground_pairs + 1
+            if profile == "2.3" and active and all(job["kind"] in kinds for job in jobs)
+            else 0
+        )
+        if job_pairs:
+            recovery_reason = insufficient
         quiet = quiet + 1 if not active and not jobs else 0
         if quiet == 2:
             return
@@ -365,8 +1061,12 @@ def wait_history(box, data, connection, *, timeout=30, interval=0.2):
 
 
 class Owner:
-    def __init__(self, box, path, data):
+    def __init__(self, box, path, data, *, image_preview=False, ui_bridge=False):
+        if type(image_preview) is not bool:
+            raise box.BoxError("Invalid private workspace image-preview setting.")
         self.box, self.path, self.data = box, path, data
+        self.image_preview = image_preview
+        self.ui_bridge = ui_bridge is True
         self.address = socket_path(box, data)
         self.clients = 0
         self.condition = threading.Condition()
@@ -428,6 +1128,21 @@ class Owner:
                     )
             self.connection = validate_endpoint(json.loads(output.split(b"\n", 1)[0]))
             self.connection["workspace"] = self.data["id"]
+            self.connection["image_preview"] = self.image_preview
+            if __package__:
+                from . import ui_state
+            else:
+                import ui_state
+            self.connection["ui_state"] = (
+                {
+                    "available": True,
+                    "generation": secrets.token_hex(16),
+                    "ownerClient": secrets.token_hex(16),
+                }
+                if self.ui_bridge
+                and ui_state.available(box, self.data, self.connection)
+                else {"available": False}
+            )
             self.token = CONNECTION.set(self.connection)
             self.listener = socket.socket(socket.AF_UNIX)
             self.listener.bind(str(self.address))
@@ -443,10 +1158,48 @@ class Owner:
             raise
 
     def publish(self, session):
-        if not self.box.valid_session_id(session):
+        if session is not None and not self.box.valid_session_id(session):
             raise self.box.BoxError("Invalid live workspace session ID.")
         with self.condition:
             self.session, self.ready = session, True
+
+    def default_session(self):
+        """Recheck persisted open membership without inventing an active tab."""
+        if __package__:
+            from . import history_recovery, native_tabs
+        else:
+            import history_recovery
+            import native_tabs
+
+        with self.condition:
+            previous = self.session
+        if self.data.get("opencode_version") not in native_tabs.AUTO_RESUME_RELEASES:
+            return previous
+        try:
+            with history_recovery.budget(4):
+                snapshot = native_tabs.inspect(
+                    self.box, self.data, connection=self.connection
+                )
+                if snapshot.status == "invalid" or (
+                    snapshot.status == "valid" and not snapshot.tabs
+                ):
+                    return None
+                inventory = tab_inventory(self.box, self.data, self.connection)
+                return native_tabs.revalidate(
+                    snapshot,
+                    inventory,
+                    previous,
+                    directory=self.box.container_project(self.data),
+                )
+        except (
+            self.box.BoxError,
+            native_tabs.TabError,
+            history_recovery.RecoveryError,
+            OSError,
+            ValueError,
+            subprocess.SubprocessError,
+        ):
+            return None
 
     def serve(self):
         assert self.listener is not None
@@ -483,22 +1236,31 @@ class Owner:
                         return
                     if request.get("action") not in ("info", "attach"):
                         return
-                    if request["action"] == "attach":
-                        self.clients += 1
-                        held = True
+                    # Even an info refresh owns a temporary lease across its
+                    # metadata I/O. Only attach retains it after the reply.
+                    self.clients += 1
+                    held = True
+                selected = self.default_session()
+                with self.condition:
+                    if self.closing or self.child.poll() is not None:
+                        stream.sendall(
+                            b'{"error":"Workspace service is closing; retry after startup."}\n'
+                        )
+                        return
+                    self.session = selected
                 stream.sendall(
                     (
                         json.dumps(
                             {
                                 **self.connection,
-                                "session": self.session,
+                                "session": selected,
                                 "version": self.data["opencode_version"],
                             }
                         )
                         + "\n"
                     ).encode()
                 )
-                if held:
+                if request["action"] == "attach":
                     stream.settimeout(0.5)
                     while not self.closing and self.child.poll() is None:
                         try:
@@ -518,10 +1280,22 @@ class Owner:
         assert self.child is not None
         with self.condition:
             if self.clients:
-                print(
-                    "oc-box: Attached web/terminal clients are still active; waiting before history sync and container stop. Close those clients or use 'oc-box stop'.",
-                    flush=True,
-                )
+                if lifecycle_output.concise():
+                    lifecycle_output.record(
+                        "lifecycle.notice",
+                        level="info",
+                        stage="shutdown",
+                        reason="holder-active",
+                    )
+                    print(
+                        "oc-box: Waiting for attached clients. Close them to finish shutdown, or use 'oc-box stop'.",
+                        flush=True,
+                    )
+                else:
+                    print(
+                        "oc-box: Attached web/terminal/file-sharing clients are still active; waiting before history sync and container stop. Close those clients or use 'oc-box stop'.",
+                        flush=True,
+                    )
             while self.clients and self.child.poll() is None:
                 self.condition.wait(timeout=0.2)
             self.closing = True
@@ -575,7 +1349,11 @@ def attach(box, path, data):
         if (
             connection.get("workspace") != data["id"]
             or connection.get("version") != data.get("opencode_version")
-            or not box.valid_session_id(connection.get("session"))
+            or "session" not in connection
+            or (
+                connection["session"] is not None
+                and not box.valid_session_id(connection["session"])
+            )
         ):
             raise box.BoxError(
                 "Live service does not match this workspace/version/session."
@@ -613,9 +1391,101 @@ def relay_command(box, data, port):
     )
 
 
+class NativeResponseHeaders:
+    """Bounded initial HTTP headers, then opaque streaming bytes.
+
+    Gateway classifies only the first request on a socket. Final non-upgrade
+    replies therefore forbid browser connection reuse, including after pairing.
+    This is not body framing, pipelining support or a per-request dispatcher.
+    """
+
+    LIMIT = 65536
+
+    def __init__(self, pairing_route=None):
+        self.pending = bytearray()
+        self.header_bytes = 0
+        self.complete = False
+        self.pairing_route = pairing_route
+
+    def feed(self, data):
+        if self.complete:
+            return data
+        # Production feeds at most one 64-KiB pipe read. Body bytes sharing the
+        # final header read are immediately emitted, never accumulated further.
+        self.pending.extend(data)
+        output = bytearray()
+        while not self.complete:
+            boundary = self.pending.find(b"\r\n\r\n")
+            if boundary < 0:
+                if self.header_bytes + len(self.pending) > self.LIMIT:
+                    raise ValueError("Native HTTP response headers exceed the limit.")
+                break
+            boundary += 4
+            self.header_bytes += boundary
+            if self.header_bytes > self.LIMIT:
+                raise ValueError("Native HTTP response headers exceed the limit.")
+            head = bytes(self.pending[:boundary])
+            del self.pending[:boundary]
+            fields = head[:-4].split(b"\r\n")
+            status = re.fullmatch(
+                rb"HTTP/1\.[01] ([1-9][0-9]{2})(?: [^\r\n]*)?", fields[0]
+            )
+            if status is None:
+                raise ValueError("Invalid native HTTP response status.")
+            status = int(status[1])
+            if 100 <= status < 200:
+                output.extend(head)
+                self.complete = status == 101
+            else:
+                rewritten = [fields[0]]
+                paired = False
+                for field in fields[1:]:
+                    name, separator, value = field.partition(b":")
+                    if not separator:
+                        raise ValueError("Invalid native HTTP response header.")
+                    name = name.lower()
+                    if name in (b"connection", b"keep-alive"):
+                        continue
+                    if (
+                        self.pairing_route is not None
+                        and not paired
+                        and name == b"location"
+                        and value.strip() == b"/"
+                    ):
+                        field = b"Location: " + self.pairing_route().encode()
+                        paired = True
+                    rewritten.append(field)
+                rewritten.append(b"Connection: close")
+                output.extend(b"\r\n".join(rewritten) + b"\r\n\r\n")
+                self.complete = True
+            if self.complete:
+                output.extend(self.pending)
+                self.pending.clear()
+        return bytes(output)
+
+
 class Gateway:
-    def __init__(self, box, data, connection, port=0):
+    # Trusted first-party extension hook; never populated by browser input.
+    shell_addon_scripts = ()
+
+    def __init__(
+        self,
+        box,
+        data,
+        connection,
+        port=0,
+        *,
+        attachments=False,
+        shell_addon_scripts=None,
+        selection_snapshot_reader=None,
+        workspace_layout=False,
+    ):
         self.box, self.data, self.connection, self.port = box, data, connection, port
+        self.attachments = attachments
+        if shell_addon_scripts is not None:
+            self.shell_addon_scripts = shell_addon_scripts
+        self.selection_snapshot_reader = selection_snapshot_reader
+        self.workspace_layout = workspace_layout
         self.closed = threading.Event()
         self.children = set()
         self.lock = threading.Lock()
@@ -674,12 +1544,29 @@ class Gateway:
                     headers.extend(data)
                 if b"\r\n\r\n" not in headers:
                     return
-                pairing = bytes(headers).startswith(b"GET /auth/connect/")
+                if self.attachments:
+                    if __package__:
+                        from . import web_attachments
+                    else:
+                        import web_attachments
+                    if web_attachments.matches(headers):
+                        web_attachments.serve(stream, headers, child, self.url)
+                        return
+                if __package__:
+                    from . import web_sessions
+                else:
+                    import web_sessions
+                if web_sessions.respond(self, stream, child, bytes(headers)):
+                    return
+                response = NativeResponseHeaders(
+                    self.session_route
+                    if bytes(headers).startswith(b"GET /auth/connect/")
+                    else None
+                )
                 child.stdin.write(headers)
                 child.stdin.flush()
                 stream.settimeout(None)
                 readers = [stream, child.stdout]
-                response = bytearray()
                 while not self.closed.is_set():
                     ready, _, _ = select.select(readers, [], [], 0.2)
                     for item in ready:
@@ -693,21 +1580,7 @@ class Gateway:
                             data = os.read(child.stdout.fileno(), 65536)
                             if not data:
                                 return
-                            if pairing:
-                                response.extend(data)
-                                if b"\r\n\r\n" not in response:
-                                    if len(response) > 65536:
-                                        return
-                                    continue
-                                route = self.session_route()
-                                data = re.sub(
-                                    rb"(?im)^location: /\r$",
-                                    b"location: " + route.encode() + b"\r",
-                                    bytes(response),
-                                    count=1,
-                                )
-                                pairing = False
-                            stream.sendall(data)
+                            stream.sendall(response.feed(data))
             except (OSError, ValueError):
                 pass
             finally:
@@ -727,8 +1600,22 @@ class Gateway:
                 self.capacity.release()
 
     def session_route(self):
-        encoded = base64.urlsafe_b64encode(self.url.encode()).decode().rstrip("=")
-        return "/server/" + encoded + "/session/" + self.connection["session"]
+        # Native browser tabs are client-local, not the native TUI's open tabs.
+        if __package__:
+            from . import web_sessions
+        else:
+            import web_sessions
+        return web_sessions.INDEX
+
+    def native_session_route(self, ident):
+        """A selected native row, never the default chooser/entry route."""
+        if not self.box.valid_session_id(ident):
+            raise self.box.BoxError("Invalid native web session ID.")
+        if __package__:
+            from . import web_sessions
+        else:
+            import web_sessions
+        return web_sessions.native_session_route(self.url, ident)
 
     def __exit__(self, *_):
         self.closed.set()
@@ -747,7 +1634,39 @@ class Gateway:
 
 
 def web_session(box, data, connection, args):
-    with Gateway(box, data, connection, args.port) as gateway:
+    if __package__:
+        from . import ui_state
+    else:
+        import ui_state
+    options = {"selection_snapshot_reader": ui_state.read_snapshot}
+    if getattr(args, "workspace_layout", False):
+        options["workspace_layout"] = True
+    if getattr(args, "attachments", False):
+        if __package__:
+            from . import web_attachments
+        else:
+            import web_attachments
+        version = connection.get("version")
+        if version not in web_attachments.SUPPORTED:
+            raise box.BoxError(
+                "The browser attachment adapter requires native OpenCode 2.2.6 or 2.3.0."
+            )
+        info = api(box, data, connection, "GET", "/api/info")
+        if not isinstance(info, dict) or info.get("version") != version:
+            raise box.BoxError(
+                "Browser attachment adapter native version verification failed."
+            )
+        options["attachments"] = True
+        options["shell_addon_scripts"] = (web_attachments.SCRIPT,)
+    override = getattr(args, "web_session", None)
+    if override is not None:
+        if __package__:
+            from . import web_sessions
+        else:
+            import web_sessions
+        web_sessions.explicit_session(box, data, connection, override)
+        connection = {**connection, "web_session_override": override}
+    with Gateway(box, data, connection, args.port, **options) as gateway:
         pair = api(box, data, connection, "POST", "/api/pair")
         if not isinstance(pair.get("code"), str) or not re.fullmatch(
             r"[A-Za-z0-9_-]+", pair["code"]
@@ -755,9 +1674,7 @@ def web_session(box, data, connection, args):
             raise box.BoxError("Invalid native OpenCode browser pairing response.")
         link = gateway.url + "/auth/connect/" + pair["code"]
         print(
-            "oc-box: OpenCode web session "
-            + connection["session"]
-            + "\n"
+            "oc-box: OpenCode web workspace session index\n"
             + link
             + "\nThis one-use link grants access to this workspace service. Keep this command open; Ctrl-C closes web access.",
             flush=True,
@@ -818,9 +1735,18 @@ def preflight_port(port):
 
 
 def web_parser():
+    if __package__:
+        from .log_config import add_launch_arguments
+    else:
+        from log_config import add_launch_arguments
+
     result = argparse.ArgumentParser(
         prog="oc-box web",
         description="Open the native web UI on the private V2 workspace service; attach to a running session or own a new foreground lease.",
+        epilog=(
+            "Run on the host with OpenCode 2.x. Keep the command open while using "
+            "the loopback browser relay. Sign in with the native one-use link."
+        ),
     )
     group = result.add_mutually_exclusive_group()
     group.add_argument(
@@ -828,21 +1754,38 @@ def web_parser():
         type=Path,
         help="host project directory (default: current directory)",
     )
-    group.add_argument("--workspace", help="existing workspace ID")
+    group.add_argument("--workspace", metavar="ID", help="existing workspace ID")
+    result.add_argument(
+        "--session",
+        metavar="ID",
+        help="explicit existing private-service conversation ID; overrides the launcher selection",
+    )
     result.add_argument(
         "--port",
         type=int,
+        metavar="N",
         default=0,
-        help="host loopback browser relay port; default selects a free port",
+        help="host loopback browser relay port, 1..65535; 0 (default) selects a free port",
     )
     result.add_argument(
         "--no-open",
         action="store_true",
-        help="print the pairing link without opening a browser",
+        help="print the pairing link without opening a browser; keep the relay running",
+    )
+    result.add_argument(
+        "--attachments",
+        action="store_true",
+        help="opt in to the visible browser File-drop adapter (native 2.2.6/2.3.0 only; no automatic Send)",
+    )
+    result.add_argument(
+        "--workspace-layout",
+        action="store_true",
+        help="opt in to the experimental browser workspace layouts",
     )
     result.add_argument(
         "--no-vault",
         action="store_true",
         help="owning V2 launch only: skip vault use once; refused when attaching",
     )
+    add_launch_arguments(result)
     return result

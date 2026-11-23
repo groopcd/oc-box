@@ -1,4 +1,4 @@
-"""Linux anonymous-memory files for private subprocess output and credentials.
+"""Linux anonymous-memory files and immutable descriptor seals.
 
 Never substitute a disk-backed temporary file. The libc compatibility path is
 only for Python builds without the native binding, not failed native calls.
@@ -44,6 +44,34 @@ def create(name: str) -> int:
         code = failure_errno or errno.EIO
         raise OSError(code, os.strerror(code))
     return fd
+
+
+def _file_seals():
+    if sys.platform != "linux":
+        raise OSError(errno.ENOSYS, "Linux file sealing is unavailable.")
+    import fcntl
+
+    # Some Python builds omit these names. The Linux UAPI (linux/fcntl.h)
+    # fixes ADD/GET at F_LINUX_SPECIFIC_BASE (1024) + 9/+10 and the bits below.
+    required = (
+        getattr(fcntl, "F_SEAL_SEAL", 0x0001)
+        | getattr(fcntl, "F_SEAL_SHRINK", 0x0002)
+        | getattr(fcntl, "F_SEAL_GROW", 0x0004)
+        | getattr(fcntl, "F_SEAL_WRITE", 0x0008)
+    )
+    return fcntl, required
+
+
+def seal(fd: int) -> None:
+    """Prevent writes, resizing and further seal changes; propagate kernel errors."""
+    fcntl, required = _file_seals()
+    fcntl.fcntl(fd, getattr(fcntl, "F_ADD_SEALS", 1033), required)
+
+
+def is_sealed(fd: int) -> bool:
+    """Check all four required seals; propagate kernel errors."""
+    fcntl, required = _file_seals()
+    return fcntl.fcntl(fd, getattr(fcntl, "F_GET_SEALS", 1034)) & required == required
 
 
 def check() -> None:

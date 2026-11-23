@@ -14,6 +14,7 @@ class ChannelInstallerTests(unittest.TestCase):
         with (
             tempfile.TemporaryDirectory() as work,
             patch.dict(os.environ, {"XDG_CONFIG_HOME": work}),
+            patch.object(Path, "home", return_value=Path(work) / "home"),
         ):
             build = {"version": "1.6.70+gabcdef0"}
             with (
@@ -43,6 +44,7 @@ class ChannelInstallerTests(unittest.TestCase):
         with (
             tempfile.TemporaryDirectory() as work,
             patch.dict(os.environ, {"XDG_CONFIG_HOME": work}),
+            patch.object(Path, "home", return_value=Path(work) / "home"),
         ):
             target = Path(work) / "oc-box/config.json"
             target.parent.mkdir()
@@ -64,6 +66,7 @@ class ChannelInstallerTests(unittest.TestCase):
         with (
             tempfile.TemporaryDirectory() as work,
             patch.dict(os.environ, {"XDG_CONFIG_HOME": work}),
+            patch.object(Path, "home", return_value=Path(work) / "home"),
         ):
             channels.remember_channel("devel")
             before = channels.config_path().read_bytes()
@@ -97,6 +100,34 @@ class ChannelInstallerTests(unittest.TestCase):
             self.assertIn(
                 "workspace/session state is not rolled back", output.getvalue()
             )
+
+    def test_development_installer_retains_explicit_optional_features(self):
+        with (
+            tempfile.TemporaryDirectory() as work,
+            patch.dict(os.environ, {"XDG_CONFIG_HOME": work}),
+            patch.object(Path, "home", return_value=Path(work) / "home"),
+            patch.object(
+                installer,
+                "get_version_info",
+                return_value={"version": "1.7.99.dev0+gabcdef0"},
+            ),
+            patch.object(installer, "install") as install,
+        ):
+            self.assertEqual(
+                installer.main(
+                    [
+                        "--devel",
+                        "--release-version",
+                        "1.7.99.dev0",
+                        "--with-tui",
+                        "--with-vault",
+                    ]
+                ),
+                0,
+            )
+            self.assertTrue(install.call_args.kwargs["with_tui"])
+            self.assertTrue(install.call_args.kwargs["with_vault"])
+            self.assertEqual(channels.selected_channel(), "devel")
 
 
 if __name__ == "__main__":

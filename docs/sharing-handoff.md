@@ -1,18 +1,9 @@
 # Temporary host-folder sharing: integration handoff
 
-> **Development-only source scope.** Stable `master` does not contain the sharing
-> runtime described here. Harness work requires a
-> [`devel` source checkout](https://github.com/groopcd/oc-box/tree/devel) containing
-> the [sharing harness](https://github.com/groopcd/oc-box/blob/devel/tools/test_sharing_podman.py),
-> or the exact historical checkout explicitly pinned below for a historical probe.
-> This default-branch documentation copy is not authorization to merge development
-> runtime into `master`, publish it, or execute another host run.
-
 > **Historical integration record.** The branch ownership and merge instructions
 > below belong to that handoff, not a new authorization for the current checkout.
 > For usage, see [host-file workflows](guides/host-files.md); for current evidence
-> boundaries, see [project status](project-status.md) and
-> [development Testing](https://github.com/groopcd/oc-box/blob/devel/docs/testing.md).
+> boundaries, see [project status](project-status.md) and [Testing](testing.md).
 
 ## Ownership and merge
 
@@ -93,10 +84,6 @@ Even `scanner_category: ok` remains `acceptance: false`, not a retroactive PASS.
 
 Before final publication, obtain a **fresh complete sharing report on the actual
 frozen integrated candidate**, using the current source-pinned sharing harness:
-
-The historical command below runs from a `devel` harness checkout's root on the
-external host, not from stable `master`; source selection remains the release
-owner's separate decision.
 
 ```bash
 uv run --isolated --no-project --python /usr/bin/python3 --with cryptography \

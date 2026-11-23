@@ -2,6 +2,8 @@ import contextlib
 import io
 import json
 from pathlib import Path
+import subprocess
+import sys
 import tarfile
 import tempfile
 import unittest
@@ -18,13 +20,18 @@ APP = Path(__file__).resolve().parents[1]
 class PackagingTests(unittest.TestCase):
     def test_archive_validation_requires_sync_runtime_docs_and_regressions(self):
         build = {
-            "version": "1.6.1+gabcdef0",
-            "distribution_version": "1.6.1",
+            "version": "1.7.1.dev0+gabcdef0",
+            "distribution_version": "1.7.1.dev0",
             "commit": "abcdef0" * 5 + "abcde",
             "commit_count": 30,
-            "release_channel": "stable",
+            "release_channel": "devel",
             "dirty": False,
         }
+        version = build["distribution_version"]
+        version_source = (
+            'VERSION_SERIES = "1.7"\nRELEASE_CHANNEL = "devel"\n'
+            "VERSION_BASE_COMMIT_COUNT = 29\n"
+        )
         wheel_names = {
             "oc_box/" + name
             for name in (
@@ -33,6 +40,9 @@ class PackagingTests(unittest.TestCase):
                 installation.COMPLETION_FILE,
                 "build-info.json",
                 "distribution.json",
+                "update_channels.py",
+                "package_updates.py",
+                "docs/update-channels.md",
             )
         }
         source_names = {
@@ -44,11 +54,26 @@ class PackagingTests(unittest.TestCase):
             "completions/oc-box",
             "build-info.json",
             "PKG-INFO",
+            # Synthetic archives exercise membership independently of whether
+            # the parallel updater/CLI ports have been integrated into checkout.
+            "tests/test_update_channels.py",
+            "tests/test_channel_updater.py",
+            "tests/test_channel_installer.py",
+            "tests/test_channel_bootstrap.py",
+            "tests/test_package_updates.py",
+            "tests/test_upgrade_cli.py",
+            "src/oc_box/update_channels.py",
+            "src/oc_box/package_updates.py",
+            "src/oc_box/oc-box-mark.svg",
+            "src/oc_box/oc-box-mark.png",
+            "docs/mockups/web-manager.html",
+            *("src/oc_box/" + name for name in check_package._WEB_RUNTIME_FILES),
             *(
                 path.relative_to(APP).as_posix()
                 for directory in ("src", "tests", "tools", "docs")
                 for path in (APP / directory).rglob("*")
-                if path.suffix in (".py", ".js", ".mjs", ".md", ".1", ".texi", ".info")
+                if path.suffix
+                in (".py", ".js", ".tsx", ".mjs", ".md", ".1", ".texi", ".info")
             ),
         }
         cases = (
@@ -61,12 +86,49 @@ class PackagingTests(unittest.TestCase):
                     "opencode_compat.py",
                     "opencode_v2_io.py",
                     "workspace_service.py",
+                    "web_attachments.py",
+                    "web_attachments.js",
+                    *check_package._WEB_RUNTIME_FILES,
+                    "oc-box-mark.png",
                     "version_info.py",
                     "build-info.json",
                     "distribution.json",
                     "workspace_control.py",
                     "history_reader.py",
                     "history_recovery.py",
+                    "native_tabs.py",
+                    "ui_state.py",
+                    "ui_state_memory.js",
+                    "ui_state_rpc.js",
+                    "ui_state_server.js",
+                    "ui_state_tui.js",
+                    "file_preview.py",
+                    "file_preview_io.py",
+                    "file_preview_tui.tsx",
+                    "file_preview_png.py",
+                    "file_preview_host.py",
+                    "file_open_formats.py",
+                    "sharing.py",
+                    "attachments.py",
+                    "attachment_io.py",
+                    "host_drop.py",
+                    "host_drop_io.py",
+                    "host_drop_input.py",
+                    "workspace_preferences.py",
+                    "activity_log.py",
+                    "tui_app.py",
+                    "tui_terminal.py",
+                    "tui_clipboard.py",
+                    "tui_storage.py",
+                    "tui_operations.py",
+                    "tui_management.py",
+                    "tui_notifications.py",
+                    "session_backups.py",
+                    "update_channels.py",
+                    "package_updates.py",
+                    "docs/update-channels.md",
+                    "docs/web-shell.md",
+                    "docs/tui.md",
                     "docs/cli.md",
                     "docs/opencode-2.md",
                     "docs/oc-box.1",
@@ -77,12 +139,72 @@ class PackagingTests(unittest.TestCase):
             *(
                 ("sdist", name)
                 for name in (
+                    "src/oc_box/oc-box-mark.svg",
+                    "src/oc_box/oc-box-mark.png",
                     "tests/test_session_sync.py",
+                    "tests/test_web_attachments.py",
+                    "tests/web_attachments_browser.mjs",
+                    "tests/web_attachments_shell_dom.mjs",
+                    "tests/smoke_web_attachments_v2.py",
+                    "tests/test_native_tabs.py",
+                    "tests/test_native_tab_routing.py",
+                    "tests/test_web_sessions.py",
+                    "tests/web_sessions_dom.mjs",
+                    "tests/smoke_web_sessions_v2.py",
+                    "tests/test_web_layout_runtime.mjs",
+                    "tests/smoke_web_layout_browser.py",
+                    "docs/mockups/web-manager.html",
+                    *(
+                        "src/oc_box/" + name
+                        for name in check_package._WEB_RUNTIME_FILES
+                    ),
+                    "tests/smoke_native_tabs_v2.py",
+                    "tests/smoke_native_preferences_v2.py",
+                    "tests/smoke_image_preview_preferences_v2.py",
+                    "tests/test_sync_config_preferences.py",
+                    "tests/test_history_source_lease.py",
+                    "tests/test_release_announcement_workflows.py",
+                    "tests/test_update_channels.py",
+                    "tests/test_channel_updater.py",
+                    "tests/test_channel_installer.py",
+                    "tests/test_channel_bootstrap.py",
+                    "tests/test_package_updates.py",
+                    "tests/test_upgrade_cli.py",
+                    "src/oc_box/update_channels.py",
+                    "src/oc_box/package_updates.py",
+                    "src/oc_box/version_info.py",
+                    "tools/check_release.py",
+                    "tools/check_release_artifacts.py",
+                    "tests/test_release_channels.py",
+                    "tests/test_release_artifacts.py",
                     "tests/test_workspace_control.py",
                     "tests/test_history_reader.py",
                     "tests/test_history_recovery.py",
                     "tests/smoke_history_recovery_v2.py",
+                    "tests/smoke_history_subagent_recovery_v2.py",
                     "src/oc_box/private_memory.py",
+                    "src/oc_box/ui_state.py",
+                    "src/oc_box/ui_state_memory.js",
+                    "src/oc_box/ui_state_rpc.js",
+                    "src/oc_box/ui_state_server.js",
+                    "src/oc_box/ui_state_tui.js",
+                    "src/oc_box/file_preview.py",
+                    "src/oc_box/file_preview_io.py",
+                    "src/oc_box/file_preview_tui.tsx",
+                    "src/oc_box/file_preview_png.py",
+                    "src/oc_box/file_preview_host.py",
+                    "src/oc_box/file_open_formats.py",
+                    "tests/test_file_preview.py",
+                    "tests/test_file_preview_io.py",
+                    "tests/test_file_preview_png.py",
+                    "tests/test_file_preview_host.py",
+                    "tests/test_file_open_formats.py",
+                    "tests/test_file_open_relay.py",
+                    "tests/smoke_file_preview_v2.py",
+                    "tests/test_ui_state.py",
+                    "tests/ui_state_fixture.mjs",
+                    "tests/smoke_ui_state_v2.py",
+                    "docs/ui-state.md",
                     "src/oc_box/workspace_control.py",
                     "src/oc_box/history_reader.py",
                     "src/oc_box/history_recovery.py",
@@ -92,9 +214,36 @@ class PackagingTests(unittest.TestCase):
                     "tests/test_ci_ubuntu_apt.py",
                     "tests/smoke_session_sync_v2.py",
                     "tests/smoke_v2.py",
-                    "tools/check_release.py",
-                    "tests/test_release_channels.py",
-                    "src/oc_box/version_info.py",
+                    "tests/smoke_tui_v2.py",
+                    "tests/test_sharing.py",
+                    "tests/test_attachments.py",
+                    "tests/test_attachment_io.py",
+                    "tests/test_host_drop.py",
+                    "tests/test_host_drop_io.py",
+                    "tests/test_host_drop_input.py",
+                    "tests/test_workspace_preferences.py",
+                    "tests/test_host_drop_preferences.py",
+                    "tests/smoke_host_drop_v2.py",
+                    "tests/smoke_attachments_v2.py",
+                    "src/oc_box/attachments.py",
+                    "src/oc_box/attachment_io.py",
+                    "src/oc_box/host_drop.py",
+                    "src/oc_box/host_drop_io.py",
+                    "src/oc_box/host_drop_input.py",
+                    "src/oc_box/workspace_preferences.py",
+                    "tests/test_sharing_transport.py",
+                    "tests/smoke_sharing_v2.py",
+                    "tests/smoke_session_backups_v2.py",
+                    "tests/smoke_session_backup_transport_v2.py",
+                    "tests/test_tui_management.py",
+                    "tests/test_tui_loading.py",
+                    "tests/test_tui_delete_notifications.py",
+                    "tests/test_tui_notifications.py",
+                    "tests/test_tui_operation_results.py",
+                    "tests/test_tui_operations.py",
+                    "tests/test_tui_storage.py",
+                    "tests/test_session_backups.py",
+                    "tests/test_interactive_host_service_port.py",
                 )
             ),
         )
@@ -102,40 +251,35 @@ class PackagingTests(unittest.TestCase):
             prefix="oc-box-package-archives-"
         ) as temporary:
             directory = Path(temporary)
-            wheel = directory / "oc_box-1.6.1-py3-none-any.whl"
-            source = directory / "oc_box-1.6.1.tar.gz"
+            wheel = directory / f"oc_box-{version}-py3-none-any.whl"
+            source = directory / f"oc_box-{version}.tar.gz"
             for kind, omitted in cases:
                 with self.subTest(kind=kind, omitted=omitted):
                     with zipfile.ZipFile(wheel, "w") as archive:
                         archive.writestr(
-                            "oc_box-1.6.1.dist-info/METADATA",
-                            "Name: oc-box\nVersion: 1.6.1\nRequires-Python: >=3.10\n"
+                            f"oc_box-{version}.dist-info/METADATA",
+                            f"Name: oc-box\nVersion: {version}\nRequires-Python: >=3.10\n"
                             "License-Expression: GPL-3.0-or-later\n"
-                            'Requires-Dist: cryptography>=44; extra == "vault"\n',
+                            'Requires-Dist: cryptography>=44; extra == "vault"\n'
+                            'Requires-Dist: textual<9,>=8.2.8; extra == "tui"\n'
+                            'Requires-Dist: pyte<0.9,>=0.8.2; extra == "tui"\n',
                         )
                         for name in sorted(wheel_names):
                             if kind != "wheel" or name != omitted:
-                                contents = ""
+                                content = ""
                                 if name.endswith("build-info.json"):
-                                    contents = json.dumps(build)
+                                    content = json.dumps(build)
                                 elif name == "oc_box/version_info.py":
-                                    contents = (
-                                        'VERSION_SERIES = "1.6"\n'
-                                        'RELEASE_CHANNEL = "stable"\n'
-                                        "VERSION_BASE_COMMIT_COUNT = 29\n"
-                                    )
+                                    content = version_source
                                 elif name == "oc_box/distribution.json":
-                                    contents = json.dumps(
+                                    content = json.dumps(
                                         {
                                             "installer": "python-package",
                                             "name": "oc-box",
-                                            "version": "1.6.1",
+                                            "version": version,
                                         }
                                     )
-                                archive.writestr(
-                                    name,
-                                    contents,
-                                )
+                                archive.writestr(name, content)
                     with tarfile.open(source, "w:gz") as archive:
                         for name in sorted(source_names):
                             if kind != "sdist" or name != omitted:
@@ -149,14 +293,12 @@ class PackagingTests(unittest.TestCase):
                                         }
                                     ).encode()
                                 elif name == "src/oc_box/version_info.py":
-                                    content = (
-                                        b'VERSION_SERIES = "1.6"\n'
-                                        b'RELEASE_CHANNEL = "stable"\n'
-                                        b"VERSION_BASE_COMMIT_COUNT = 29\n"
-                                    )
+                                    content = version_source.encode()
                                 elif name == "PKG-INFO":
-                                    content = b"Name: oc-box\nVersion: 1.6.1\n"
-                                member = tarfile.TarInfo("oc_box-1.6.1/" + name)
+                                    content = (
+                                        f"Name: oc-box\nVersion: {version}\n".encode()
+                                    )
+                                member = tarfile.TarInfo(f"oc_box-{version}/" + name)
                                 member.size = len(content)
                                 archive.addfile(member, io.BytesIO(content))
                     if omitted is None:
@@ -227,6 +369,7 @@ class PackagingTests(unittest.TestCase):
 
     def test_console_entrypoint_preserves_readable_error_and_interrupt_handling(self):
         with (
+            patch.object(sys, "argv", ["oc-box"]),
             patch.object(
                 oc_box, "main", side_effect=oc_box.BoxError("fixture failure")
             ),
@@ -234,7 +377,10 @@ class PackagingTests(unittest.TestCase):
         ):
             self.assertEqual(oc_box.entrypoint(), 1)
         self.assertEqual(output.getvalue(), "oc-box: fixture failure\n")
-        with patch.object(oc_box, "main", side_effect=KeyboardInterrupt):
+        with (
+            patch.object(sys, "argv", ["oc-box"]),
+            patch.object(oc_box, "main", side_effect=KeyboardInterrupt),
+        ):
             self.assertEqual(oc_box.entrypoint(), 130)
 
     def test_package_metadata_and_workflow_keep_both_distribution_channels(self):
@@ -243,18 +389,61 @@ class PackagingTests(unittest.TestCase):
         self.assertIn('license = "GPL-3.0-or-later"', metadata)
         self.assertIn('requires-python = ">=3.10"', metadata)
         self.assertIn('vault = ["cryptography>=44"]', metadata)
+        self.assertIn('tui = ["textual>=8.2.8,<9", "pyte>=0.8.2,<0.9"]', metadata)
         workflow = (APP / ".github/workflows/publish.yml").read_text()
         self.assertIn("name: pypi", workflow)
         self.assertIn("id-token: write", workflow)
         self.assertIn("persist-credentials: false", workflow)
         self.assertIn("fetch-depth: 0", workflow)
         self.assertIn("tools/check_package.py dist", workflow)
+        self.assertIn("tools/check_package.py dist --with-vault --with-tui", workflow)
+        self.assertIn("python tools/release_python_deps.py", workflow)
+        self.assertIn("--upgrade -r", workflow)
+        self.assertIn("--mirror azure --force-ipv4", workflow)
         self.assertIn("default: false", workflow)
         self.assertNotIn("PYPI_TOKEN", workflow)
         self.assertNotIn("PERSONAL_GITHUB_TOKEN", workflow)
         self.assertIn(
             "https://github.com/groopcd/oc-box.git", (APP / "install.sh").read_text()
         )
+
+    @unittest.skipIf(sys.version_info < (3, 11), "release tool uses stdlib tomllib")
+    def test_release_dependency_generator_reads_optional_extras(self):
+        resolved_inputs = subprocess.run(
+            [sys.executable, "tools/release_python_deps.py"],
+            cwd=APP,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        ).stdout.splitlines()
+        self.assertIn("textual>=8.2.8,<9", resolved_inputs)
+        self.assertIn("pyte>=0.8.2,<0.9", resolved_inputs)
+
+    @unittest.skipIf(sys.version_info < (3, 11), "release tool uses stdlib tomllib")
+    def test_release_dependency_generator_rejects_non_index_inputs(self):
+        with tempfile.TemporaryDirectory() as work:
+            manifest = Path(work) / "pyproject.toml"
+            for requirement in (
+                "demo @ https://example.invalid/demo.whl",
+                "-r /tmp/other",
+            ):
+                with self.subTest(requirement=requirement):
+                    manifest.write_text(
+                        '[build-system]\nrequires=["wheel"]\n'
+                        "[project.optional-dependencies]\nvault=["
+                        + json.dumps(requirement)
+                        + "]\n"
+                    )
+                    result = subprocess.run(
+                        [sys.executable, "tools/release_python_deps.py", str(manifest)],
+                        cwd=APP,
+                        capture_output=True,
+                        text=True,
+                        timeout=10,
+                    )
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertNotIn(requirement, result.stdout + result.stderr)
 
 
 if __name__ == "__main__":

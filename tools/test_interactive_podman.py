@@ -1,22 +1,28 @@
 #!/usr/bin/env python3
-"""Bounded, opt-in HOST-only manual TUI/web/persistent-shell observation.
+"""Bounded, opt-in HOST-only manual manager/TUI/web/persistent-shell observation.
 
 Start a FRESH synthetic owner on an unprivileged host terminal:
   python3 -B tools/test_interactive_podman.py start --work-dir /path/to/fixtures \
-      --opencode-v2 /path/to/unmodified/opencode-2.2.6
-Use only the printed exact --fixture root for secondary tui/terminal/web/stop.
+      --opencode-v2 /path/to/unmodified/opencode-2.3.0 --native-version 2.3.0
+The default is the exact 2.2.6 profile.
+Use only the printed exact --fixture root for secondary manager/tui/terminal/web/stop.
+Manager opens the actual Textual dashboard without a monitoring client lease;
+install optional textual/pyte dependencies in the helper's Python environment.
 No replay, resume, cleanup, real credentials or automatic manual-UI acceptance.
 """
 
 import argparse
 import contextlib
 import hashlib
+import json
 import os
 from pathlib import Path
 import re
 import secrets
 import shlex
 import shutil
+import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -31,10 +37,19 @@ from tools import test_global_vault_podman as fixture
 
 box = fixture.box
 FORMAT = "oc-box-interactive-only-host-observation"
-MODES = ("start", "tui", "terminal", "web", "stop")
+MODES = ("start", "manager", "tui", "terminal", "web", "stop")
 FIXTURE_PREFIXES = (fixture.PREFIX, "oc-box-live-v2-", "oc-box-live-backup-")
 FIXTURE_MARKERS = ("fixture.json", "interactive.json", "fixture-ids.json")
 MARKERS = frozenset((fixture.SHELL_MARKER, fixture.MCP_MARKER, fixture.TOOL_MARKER))
+HOST_SERVICE_FORMAT = "oc-box-interactive-private-host-service-port"
+HOST_SERVICE_MARKER = "host-service-port.json"
+HOST_SERVICE_CONFIG = "host-config-2/opencode/service.json"
+HOST_SERVICE_REGISTRATION = "host-state-2/opencode/service.json"
+HOST_SERVICE_MAX_BYTES = 65536
+# This list is narrower than general launcher compatibility and must not grow
+# with the shared fixture profiles without a separate host-service schema audit.
+DEFAULT_NATIVE_VERSION = "2.2.6"
+NATIVE_VERSIONS = (DEFAULT_NATIVE_VERSION, "2.3.0")
 ERROR_CATEGORIES = frozenset(
     {
         "host-only",
@@ -49,9 +64,12 @@ ERROR_CATEGORIES = frozenset(
         "native-executable",
         "native-podman",
         "native-selector",
+        "native-profile",
+        "native-version",
         "native-changed",
         "workspace-allowlist",
         "live-owner-required",
+        "manager-unavailable",
         "provider-contract",
         "provider-cleanup-timeout",
         "runtime-boot-current",
@@ -72,6 +90,14 @@ ERROR_CATEGORIES = frozenset(
         "published-ports",
         "resource-mounts",
         "interactive-config",
+        "host-service-existing",
+        "host-service-selector",
+        "host-service-environment",
+        "host-service-port",
+        "host-service-setter",
+        "host-service-marker",
+        "host-service-config",
+        "host-service-registration",
     }
 )
 
@@ -104,8 +130,8 @@ def parser():
     )
     value.add_argument(
         "--native-version",
-        choices=fixture.NATIVE_VERSIONS,
-        default=fixture.NATIVE_VERSION,
+        choices=NATIVE_VERSIONS,
+        default=DEFAULT_NATIVE_VERSION,
         help="Exact profile; secondary clients must select the original owner's version",
     )
     value.add_argument(
@@ -218,8 +244,14 @@ def fresh_parent(path):
     return parent
 
 
-def write_metadata(root, source, binary, *, native_version=fixture.NATIVE_VERSION):
-    fixture.require(native_version in fixture.NATIVE_VERSIONS, "native-selector")
+def write_metadata(root, source, binary, *, native_version=DEFAULT_NATIVE_VERSION):
+    fixture.require(native_version in NATIVE_VERSIONS, "native-selector")
+    native = {
+        "version": native_version,
+        "path": str(binary),
+        "sha256": file_hash(binary),
+        "interpreter": sys.executable,
+    }
     fixture.write_json_new(
         root / "interactive.json",
         {
@@ -227,18 +259,221 @@ def write_metadata(root, source, binary, *, native_version=fixture.NATIVE_VERSIO
             "version": 1,
             "projects": ["source-a"],
             "source": source,
-            "native": {
-                "version": native_version,
-                "path": str(binary),
-                "sha256": file_hash(binary),
-                "interpreter": sys.executable,
-            },
+            "native": native,
         },
     )
+    return native
 
 
-def validate_interactive(root, source, *, native_version=fixture.NATIVE_VERSION):
-    """File-only validation, including the full helper's selector/registry guards."""
+def private_host_service_json(root, relative):
+    """Bounded private metadata only; never return it to reports or diagnostics."""
+    path = fixture.safe_path(root, relative)
+    with os.fdopen(
+        os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), "rb"
+    ) as stream:
+        info = os.fstat(stream.fileno())
+        fixture.require(
+            stat.S_ISREG(info.st_mode)
+            and info.st_uid == os.getuid()
+            and stat.S_IMODE(info.st_mode) == 0o600
+            and info.st_nlink == 1
+            and info.st_size <= HOST_SERVICE_MAX_BYTES,
+            "unsafe-metadata",
+        )
+        content = stream.read(HOST_SERVICE_MAX_BYTES + 1)
+    fixture.require(len(content) <= HOST_SERVICE_MAX_BYTES, "unsafe-metadata")
+    try:
+        return json.loads(content)
+    except (ValueError, UnicodeError):
+        raise fixture.FixtureError("unsafe-metadata") from None
+
+
+def private_host_service_roots(root):
+    for relative in (
+        "",
+        "bin",
+        "host-home",
+        *("host-" + n + "-2" for n in ("config", "data", "state", "cache")),
+    ):
+        path = fixture.no_symlinks(root / relative)
+        info = path.stat()
+        fixture.require(
+            stat.S_ISDIR(info.st_mode)
+            and info.st_uid == os.getuid()
+            and stat.S_IMODE(info.st_mode) == 0o700,
+            "unsafe-metadata",
+        )
+
+
+def host_service_port_valid(port):
+    # Kernel-selected ephemeral ports must not fall back to native's default.
+    return type(port) is int and 1024 <= port <= 65535 and port != 49374
+
+
+def host_service_metadata(
+    root, source, binary, port, *, native_version=DEFAULT_NATIVE_VERSION
+):
+    return {
+        "format": HOST_SERVICE_FORMAT,
+        "version": 1,
+        "source": source,
+        "hostname": "127.0.0.1",
+        "port": port,
+        "native_version": native_version,
+        "native_sha256": file_hash(binary),
+        "wrapper_sha256": file_hash(root / "bin/opencode"),
+        "profile": {
+            "home": "host-home",
+            "data": "host-data-2",
+            "config": HOST_SERVICE_CONFIG,
+            "registration": HOST_SERVICE_REGISTRATION,
+        },
+    }
+
+
+def validate_host_service_port(
+    root, source, binary, *, native_version=DEFAULT_NATIVE_VERSION
+):
+    """File-only selector validation; no discovery, repair or service shutdown.
+
+    The 2.3.0 release CLI's isolated setter and bundled registration writer
+    were checked separately: they use the same paths and emit the same fields
+    as 2.2.6. Both bind 127.0.0.1 with hostname omitted. The fixture refuses
+    service control settings and tolerates only native's later opaque
+    authentication addition to config.
+    """
+    fixture.require(native_version in NATIVE_VERSIONS, "native-selector")
+    private_host_service_roots(root)
+    marker = private_host_service_json(root, HOST_SERVICE_MARKER)
+    port = marker.get("port") if isinstance(marker, dict) else None
+    fixture.require(host_service_port_valid(port), "host-service-port")
+    fixture.require(
+        type(marker.get("version")) is int
+        and marker
+        == host_service_metadata(
+            root, source, binary, port, native_version=native_version
+        ),
+        "host-service-marker",
+    )
+    config = private_host_service_json(root, HOST_SERVICE_CONFIG)
+    fixture.require(
+        isinstance(config, dict)
+        and set(config) in ({"port"}, {"port", "password"})
+        and type(config.get("port")) is int
+        and config["port"] == port
+        and (
+            "password" not in config
+            or isinstance(config["password"], str)
+            and 0 < len(config["password"]) <= 4096
+        ),
+        "host-service-config",
+    )
+    registration = fixture.no_symlinks(root / HOST_SERVICE_REGISTRATION)
+    if registration.exists():
+        record = private_host_service_json(root, HOST_SERVICE_REGISTRATION)
+        fixture.require(
+            isinstance(record, dict)
+            and set(record) == {"id", "pid", "url", "version", "password"}
+            and isinstance(record.get("id"), str)
+            and 0 < len(record["id"]) <= 256
+            and type(record.get("pid")) is int
+            and record["pid"] > 1
+            and record.get("url") == "http://127.0.0.1:" + str(port)
+            and record.get("version") == native_version
+            and isinstance(record.get("password"), str)
+            and 0 < len(record["password"]) <= 4096,
+            "host-service-registration",
+        )
+    return port
+
+
+def prepare_host_service_port(
+    root, source, binary, *, native_version=DEFAULT_NATIVE_VERSION
+):
+    """Set one fresh profile's supported native port; never start its service.
+
+    The reservation closes after configuration, before any future UI Connect.
+    A later release-to-bind collision must fail, not retry another port, fall
+    back to 49374 or stop an unknown listener. No existing profile is reused.
+    """
+    fixture.require(native_version in NATIVE_VERSIONS, "native-selector")
+    private_host_service_roots(root)
+    for relative in (
+        HOST_SERVICE_CONFIG,
+        HOST_SERVICE_REGISTRATION,
+        HOST_SERVICE_MARKER,
+    ):
+        path = fixture.no_symlinks(root / relative)
+        fixture.require(not path.exists(), "host-service-existing")
+    wrapper = fixture.safe_path(root, "bin/opencode")
+    info = wrapper.stat()
+    fixture.require(
+        info.st_uid == os.getuid()
+        and info.st_nlink == 1
+        and stat.S_IMODE(info.st_mode) == 0o700
+        and wrapper.read_text() == fixture.native_wrapper_source()
+        and private_host_service_json(root, "executables.json") == {"2": str(binary)},
+        "host-service-selector",
+    )
+    # Same positive maintenance allowlist used by host catalog discovery, from
+    # the existing isolated fixture context (including its temporary placement).
+    env = box.maintenance_host_env()
+    fixture.require(
+        env.get("HOME") == str(root / "host-home")
+        and all(
+            env.get("XDG_" + n.upper() + "_HOME") == str(root / n)
+            for n in ("config", "data", "state", "cache")
+        )
+        and env.get("PATH", "").startswith(str(root / "bin") + ":"),
+        "host-service-environment",
+    )
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as reservation:
+        reservation.set_inheritable(False)
+        reservation.bind(("127.0.0.1", 0))
+        address, port = reservation.getsockname()
+        fixture.require(
+            address == "127.0.0.1" and host_service_port_valid(port),
+            "host-service-port",
+        )
+        try:
+            box.run(
+                [str(wrapper), "service", "set", "port", str(port)],
+                env=env,
+                cwd=root / "source-a",
+                stdin=subprocess.DEVNULL,
+                capture=True,
+                private=True,
+                timeout=15,
+            )
+        except (box.BoxError, OSError, subprocess.SubprocessError):
+            raise fixture.FixtureError("host-service-setter") from None
+        fixture.require(
+            not fixture.no_symlinks(root / HOST_SERVICE_REGISTRATION).exists(),
+            "host-service-registration",
+        )
+        fixture.write_json_new(
+            root / HOST_SERVICE_MARKER,
+            host_service_metadata(
+                root, source, binary, port, native_version=native_version
+            ),
+        )
+        return validate_host_service_port(
+            root, source, binary, native_version=native_version
+        )
+
+
+def interactive_workspace(root, native_version):
+    records = fixture.workspace_records(root)
+    fixture.require(set(records) == {"source-a"}, "workspace-allowlist")
+    path, data = records["source-a"]
+    fixture.require(data.get("opencode_version") == native_version, "native-version")
+    return path, data
+
+
+def validate_interactive(
+    root, source, *, native_version=DEFAULT_NATIVE_VERSION, include_native=False
+):
+    """Check all selectors and registry files, optionally returning report identity."""
     fixture.require(root.is_absolute(), "fixture-root")
     root = fixture.validate_fixture(root, allow_unrecorded=True)
     metadata = fixture.private_json(root, "interactive.json")
@@ -261,7 +496,7 @@ def validate_interactive(root, source, *, native_version=fixture.NATIVE_VERSION)
         isinstance(native, dict)
         and set(native) == {"version", "path", "sha256", "interpreter"}
         and native["version"] == native_version
-        and native["version"] in fixture.NATIVE_VERSIONS
+        and native_version in NATIVE_VERSIONS
         and isinstance(native["path"], str)
         and Path(native["path"]).is_absolute()
         and isinstance(native["interpreter"], str)
@@ -271,7 +506,9 @@ def validate_interactive(root, source, *, native_version=fixture.NATIVE_VERSION)
     binary = native_binary(Path(native["path"]))
     fixture.recorded_native(root, expected=native_version, binary=binary, verify=True)
     fixture.require(
-        not binary.is_relative_to(root) and file_hash(binary) == native["sha256"],
+        not binary.is_relative_to(root)
+        and str(binary) == native["path"]
+        and file_hash(binary) == native["sha256"],
         "native-changed",
     )
     fixture.require(
@@ -284,14 +521,14 @@ def validate_interactive(root, source, *, native_version=fixture.NATIVE_VERSION)
         and os.access(wrapper, os.X_OK),
         "native-selector",
     )
-    records = fixture.workspace_records(root)
-    fixture.require(set(records) == {"source-a"}, "workspace-allowlist")
+    validate_host_service_port(root, source, binary, native_version=native_version)
+    _, data = interactive_workspace(root, native_version)
     for name in ("config", "data", "state", "cache"):
         fixture.safe_path(root, "host-" + name + "-2", directory=True)
     fixture.require(
         fixture.private_json(root, "config/oc-box/config.json")
         == {
-            "default_distro": records["source-a"][1]["distro"],
+            "default_distro": data["distro"],
             "pass_env": [fixture.PASS_ENV],
             "auto_update": False,
         },
@@ -318,7 +555,7 @@ def validate_interactive(root, source, *, native_version=fixture.NATIVE_VERSION)
         == '{"type":"module","main":"index.js"}\n',
         "interactive-config",
     )
-    return root, binary
+    return (root, binary, native) if include_native else (root, binary)
 
 
 def provider_state():
@@ -390,38 +627,34 @@ def report_value(mode, source, outcome, category, code, state=None, secondary=()
     return result
 
 
-def save_report(root, mode, source, outcome, category, code, state=None, secondary=()):
+def save_report(
+    root, mode, source, outcome, category, code, state=None, secondary=(), *, native=None
+):
     path = root / ("interactive-" + mode + "-" + secrets.token_hex(8) + "-report.json")
     value = report_value(mode, source, outcome, category, code, state, secondary)
-    # Native identity is immutable per owner; do not infer it from this client's
-    # defaults or relabel manual observations as native acceptance.
-    metadata = fixture.safe_path(root, "interactive.json", optional=True)
-    if metadata.exists():
-        value["native"] = fixture.private_json(root, "interactive.json")["native"]
+    if native is not None:
+        # Use the original identity, not mutable metadata after a UI window.
+        value["native"] = native
     fixture.write_json_new(path, value)
     print("Interactive-only report: " + str(path), flush=True)
 
 
-def print_commands(root, *, native_version=fixture.NATIVE_VERSION):
+def print_commands(root, *, native_version=DEFAULT_NATIVE_VERSION):
     command = shlex.join([sys.executable, "-B", str(Path(__file__).resolve())])
     print("Retained interactive-only root: " + str(root), flush=True)
     print("Wait for the owning TUI to be ready; in other HOST terminals:", flush=True)
-    for mode in ("tui", "terminal", "web", "stop"):
-        print(
-            "  "
-            + command
-            + " "
-            + mode
-            + " --fixture "
-            + shlex.quote(str(root))
-            + " --native-version "
-            + native_version,
-            flush=True,
+    for mode in MODES[1:]:
+        options = shlex.join(
+            [mode, "--fixture", str(root), "--native-version", native_version]
         )
+        print("  " + command + " " + options, flush=True)
     print(
         "Use Build only, with one or two short synthetic prompts (12 provider requests total per owner window). "
         "Expect shell/MCP/permission-tool markers; no Plan/deny conversation support. "
         "Ctrl-] detaches the persistent shell; close attached clients before the owner. "
+        "Manager needs optional textual/pyte dependencies; monitoring takes no client lease. "
+        "Use explicit workspace Connect/terminal actions for leases; host sessions use only this fixture's private store. "
+        "Its host catalog port is reserved only during setup; the fixture never picks another port or falls back to the default. "
         "Web prints a private one-use pairing URL: open it manually, never share/record it. "
         "No vault prompt or operator credentials are needed. Manual UI observations are NOT automatically passed.",
         flush=True,
@@ -442,6 +675,7 @@ def own(args, source):
     root.chmod(0o700)
     print_commands(root, native_version=args.native_version)
     state = provider_state()
+    native = None
     outcome, category, code = "failed", "preparation", 1
     primary_failure = False
     secondary = []
@@ -465,10 +699,16 @@ def own(args, source):
                 with fixture.private_output():
                     stack.enter_context(fixture.temporary_location(root, args.temp_dir))
                     fixture.validate_store(root)
-                    fixture.prepare_native_cli(
-                        root, binary, native_version=args.native_version
+                    try:
+                        fixture.prepare_native_cli(
+                            root, binary, native_version=args.native_version
+                        )
+                    except ValueError:
+                        raise fixture.FixtureError("native-version") from None
+                    native = write_metadata(
+                        root, source, binary, native_version=args.native_version
                     )
-                    write_metadata(
+                    prepare_host_service_port(
                         root, source, binary, native_version=args.native_version
                     )
                     port = stack.enter_context(provider(state))
@@ -494,13 +734,8 @@ def own(args, source):
                 # Preserve the first UI failure if journal/shutdown also fails.
                 with fixture.private_output():
                     try:
-                        records = fixture.workspace_records(root)
-                        fixture.require(
-                            set(records) == {"source-a"}, "workspace-allowlist"
-                        )
-                        fixture.verify_owned_resources(
-                            root, records["source-a"][1], stopped=True
-                        )
+                        _, data = interactive_workspace(root, args.native_version)
+                        fixture.verify_owned_resources(root, data, stopped=True)
                         fixture.record_ids(root)
                     except BaseException as error:
                         failure(error)
@@ -513,7 +748,17 @@ def own(args, source):
     except BaseException as error:
         failure(error)
     finally:
-        save_report(root, "start", source, outcome, category, code, state, secondary)
+        save_report(
+            root,
+            "start",
+            source,
+            outcome,
+            category,
+            code,
+            state,
+            secondary,
+            native=native,
+        )
     print(
         "interactive fixture: outcome="
         + outcome
@@ -529,8 +774,8 @@ def attach(args, source):
     # All checks before engine access are file-only. In-flight owners may not
     # have populated fixture-ids.json yet; record only after full resource proof.
     with fixture.private_output():
-        root, binary = validate_interactive(
-            args.fixture, source, native_version=args.native_version
+        root, binary, native = validate_interactive(
+            args.fixture, source, native_version=args.native_version, include_native=True
         )
         fixture.require_runtime_boot(root)
     outcome, category, code = "failed", "validation", 1
@@ -539,12 +784,13 @@ def attach(args, source):
             with fixture.temporary_location(root):
                 with fixture.private_output():
                     fixture.validate_store(root, allow_unrecorded=True)
-                    fixture.check_native_version(
-                        root, binary, "2", expected=args.native_version
-                    )
-                    records = fixture.workspace_records(root)
-                    fixture.require(set(records) == {"source-a"}, "workspace-allowlist")
-                    path, data = records["source-a"]
+                    try:
+                        fixture.check_native_version(
+                            root, binary, "2", expected=args.native_version
+                        )
+                    except ValueError:
+                        raise fixture.FixtureError("native-version") from None
+                    path, data = interactive_workspace(root, args.native_version)
                     info = fixture.verify_owned_resources(root, data)
                     fixture.require(
                         info["State"].get("Running") is True
@@ -556,12 +802,23 @@ def attach(args, source):
                         "live-owner-required",
                     )
                     fixture.record_ids(root)
-                # Dispatch only native clients against this authenticated
-                # connection, NEVER owner-capable box.main. A stop/service
-                # failure can invalidate even a held lease; its client must
-                # fail rather than falling through to owning startup/unlock.
-                with fixture.workspace_service.attach(box, path, data) as connection:
-                    if args.mode == "tui":
+                # The dashboard monitors without an outer client lease. Its
+                # explicit workspace Connect/terminal actions take their own.
+                # Native clients use authenticated attach, NEVER owner-capable
+                # box.main or fallback startup/unlock after a service failure.
+                client = (
+                    contextlib.nullcontext()
+                    if args.mode == "manager"
+                    else fixture.workspace_service.attach(box, path, data)
+                )
+                with client as connection:
+                    if args.mode == "manager":
+                        try:
+                            from oc_box import tui
+                        except ImportError:
+                            raise fixture.FixtureError("manager-unavailable") from None
+                        code = tui.cli(box, ["--workspace", data["id"]])
+                    elif args.mode == "tui":
                         command = fixture.workspace_service.client_command(
                             box,
                             data,
@@ -628,7 +885,7 @@ def attach(args, source):
     except BaseException as error:
         outcome, category, code = error_outcome(error)
     finally:
-        save_report(root, args.mode, source, outcome, category, code)
+        save_report(root, args.mode, source, outcome, category, code, native=native)
     print(
         "interactive fixture: outcome="
         + outcome

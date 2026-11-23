@@ -1,7 +1,7 @@
 """Bounded native V2 history-reader checks, never Podman lifecycle acceptance.
 
 Run with python3 -B tests/smoke_history_recovery_v2.py --opencode /path/to/opencode.
-Use unmodified 2.2.6, 2.2.7 and 2.3.0 in separate runs. All stores/provider responses are
+Use unmodified 2.2.6, 2.2.7 or a stable 2.3.x release. All stores/provider responses are
 synthetic. Only the Podman exec boundary is replaced by local processes; reader
 leases, CLI/API transport, host guards, exports/imports and verification stay real.
 
@@ -259,11 +259,58 @@ class LocalExec:
         return self.popen(command, *args, **kwargs)
 
 
+def scheduler_layout(connection):
+    """Select exactly one known native layout, independently of Reader's guard."""
+    tables = connection.execute(
+        "SELECT name, type FROM sqlite_master WHERE name IN ('schedule', 'automation')"
+    ).fetchall()
+    require(
+        len(tables) == 1 and tables[0][1] == "table",
+        "Native fixture scheduler layout was missing or ambiguous.",
+    )
+    table = tables[0][0]
+    text = "id session_id name action tz status last_message_id last_outcome state"
+    integer = "next_due_at run_count failures retry_at time_created time_updated"
+    required = "action tz status run_count failures time_created time_updated"
+    if table == "schedule":
+        text += " check when"
+        integer += " ends_at remaining_runs checks last_fired_at"
+        required += " when checks"
+    else:
+        text += " project_id directory trigger last_output event_position"
+        integer += " expires_at last_run_at"
+        required += " project_id directory name trigger"
+    expected = {
+        **dict.fromkeys(text.split(), "TEXT"),
+        **dict.fromkeys(integer.split(), "INTEGER"),
+    }
+    required = set(required.split())
+    columns = {
+        row[1]: row for row in connection.execute(f'PRAGMA table_xinfo("{table}")')
+    }
+    require(
+        set(columns) == set(expected)
+        and all(
+            row[2].upper() == expected[name]
+            and bool(row[3]) == (name in required)
+            and bool(row[5]) == (name == "id")
+            and row[6] == 0
+            for name, row in columns.items()
+        ),
+        "Native fixture scheduler schema changed.",
+    )
+    return table
+
+
 def rows(database, table):
+    # "schedule" remains the logical scheduler name in preservation assertions.
     require(table in ("job", "schedule"), "Unexpected fixture metadata table.")
     with contextlib.closing(
         sqlite3.connect(database.as_uri() + "?mode=ro", uri=True, timeout=1)
     ) as connection:
+        connection.execute("PRAGMA query_only=ON")
+        if table == "schedule":
+            table = scheduler_layout(connection)
         return connection.execute(f'SELECT * FROM "{table}" ORDER BY id').fetchall()
 
 
@@ -274,42 +321,98 @@ def persisted_history(database):
     ) as connection:
         connection.execute("PRAGMA query_only=ON")
         connection.execute("BEGIN")
+        scheduler = scheduler_layout(connection)
         return {
-            table: sorted(
-                connection.execute(f'SELECT * FROM "{table}"').fetchall(), key=repr
-            )
-            for table in ("job", "schedule", "session_message", "session_part")
+            "scheduler_layout": scheduler,
+            **{
+                logical: sorted(
+                    connection.execute(f'SELECT * FROM "{table}"').fetchall(),
+                    key=repr,
+                )
+                for logical, table in (
+                    ("job", "job"),
+                    ("schedule", scheduler),
+                    ("session_message", "session_message"),
+                    ("session_part", "session_part"),
+                )
+            },
         }
 
 
 @contextlib.contextmanager
 def durable_schedule(database, ident, status, *, wal):
-    """Only add a test schedule to native's schema; never fabricate/edit jobs."""
+    """Add one test scheduler row to native's schema; never fabricate/edit jobs."""
     require(rows(database, "schedule") == [], "Synthetic scheduler was not empty.")
     with contextlib.closing(sqlite3.connect(database, timeout=1)) as connection:
+        scheduler = scheduler_layout(connection)
         if wal:
             require(
                 connection.execute("PRAGMA journal_mode=WAL").fetchone() == ("wal",),
                 "Native fixture could not retain a committed schedule WAL.",
             )
             connection.execute("PRAGMA wal_autocheckpoint=0")
-        connection.execute(
-            'INSERT INTO schedule (id, session_id, action, "when", tz, status, '
-            "next_due_at, last_message_id, time_created, time_updated) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                "sch_fixture_history_recovery",
-                ident,
-                json.dumps({"prompt": "SYNTHETIC_NEVER_EXECUTE"}),
-                json.dumps({"type": "in", "in": "1 hour"}),
-                "UTC",
-                status,
-                4_102_444_800_000,
-                "msg_fixture_recovery",
-                1,
-                1,
-            ),
+        scheduler_id = (
+            "sch_fixture_history_recovery"
+            if scheduler == "schedule"
+            else "aut_fixture_history_recovery"
         )
+        if scheduler == "schedule":
+            connection.execute(
+                'INSERT INTO schedule (id, session_id, action, "when", tz, status, '
+                "next_due_at, last_message_id, time_created, time_updated) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    scheduler_id,
+                    ident,
+                    json.dumps({"prompt": "SYNTHETIC_NEVER_EXECUTE"}),
+                    json.dumps({"type": "in", "in": "1 hour"}),
+                    "UTC",
+                    status,
+                    4_102_444_800_000,
+                    "msg_fixture_recovery",
+                    1,
+                    1,
+                ),
+            )
+        else:
+            owner = connection.execute(
+                "SELECT project_id, directory FROM session_v2 WHERE id = ?", (ident,)
+            ).fetchall()
+            require(
+                len(owner) == 1
+                and all(isinstance(value, str) and value for value in owner[0])
+                and Path(owner[0][1]).is_absolute(),
+                "Synthetic automation lacked its retained native session placement.",
+            )
+            connection.execute(
+                "INSERT INTO automation (id, project_id, session_id, directory, name, "
+                "trigger, tz, action, status, next_due_at, run_count, failures, "
+                "last_message_id, time_created, time_updated) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    scheduler_id,
+                    owner[0][0],
+                    ident,
+                    owner[0][1],
+                    "Synthetic history recovery refusal",
+                    json.dumps({"type": "at", "at": "2100-01-01T00:00:00.000Z"}),
+                    "UTC",
+                    json.dumps(
+                        {
+                            "type": "prompt",
+                            "prompt": "SYNTHETIC_NEVER_EXECUTE",
+                            "to": {"session": ident},
+                        }
+                    ),
+                    status,
+                    4_102_444_800_000,
+                    0,
+                    0,
+                    "msg_fixture_recovery",
+                    1,
+                    1,
+                ),
+            )
         connection.commit()
         try:
             if wal:
@@ -322,7 +425,7 @@ def durable_schedule(database, ident, status, *, wal):
             # Fixture-authored schedules only. Production is never allowed to
             # remove scheduler rows, and neither fixture nor reader edits jobs.
             connection.execute(
-                "DELETE FROM schedule WHERE id = ?", ("sch_fixture_history_recovery",)
+                f'DELETE FROM "{scheduler}" WHERE id = ?', (scheduler_id,)
             )
             connection.commit()
 
@@ -359,10 +462,14 @@ def exercise(binary, root):
     host_env.pop("OPENCODE_DB")  # The host guard must discover native's DEFAULT DB.
     release = compat.version(bounded([binary, "--version"], source_env, project))
     require(
-        release in history_reader.SUPPORTED,
-        "Fixture requires an audited native version.",
+        history_reader.snapshot_profile(release) is not None,
+        "Fixture requires a supported native storage profile.",
     )
-    profile = "producer-sigkill" if release == "2.3.0" else "reload-retained-cancelled"
+    profile = (
+        "producer-sigkill"
+        if history_reader.snapshot_profile(release) == "2.3"
+        else "reload-retained-cancelled"
+    )
     bounded(["git", "init", "--quiet"], source_env, project)
     data = {
         "id": "c" * 32,
@@ -716,6 +823,7 @@ def exercise(binary, root):
                 host_db.is_relative_to(Path(host_env["XDG_DATA_HOME"])),
                 "Destination escaped its private store.",
             )
+            host_scheduler_layout = persisted_history(host_db)["scheduler_layout"]
             for status, wal in SCHEDULE_CASES:
                 with durable_schedule(
                     host_db, state["host_sessions"][ident], status, wal=wal
@@ -794,6 +902,8 @@ def exercise(binary, root):
     )
     print(
         f"PROFILE: {profile}; live-timeout=1; producer-stopped-reaped=1; "
+        f"source-scheduler-layout={persisted['scheduler_layout']}; "
+        f"destination-scheduler-layout={host_scheduler_layout}; "
         f"post-stop-jobs={len(job_rows)}; post-stop-schedules=0; "
         "durable-jobs-schedules-transcripts-unchanged=1; "
         f"source-schedule-refusals={len(SCHEDULE_CASES)}; "
