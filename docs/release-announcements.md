@@ -176,7 +176,8 @@ immutable release tag, not moving branch HEAD.
 
 To skip the entire LinkedIn job for one release (including its devel preview),
 put the exact standalone line `<!-- linkedin:skip -->` in the release body
-**before publishing**. For a manual existing-release `publish=true` dispatch,
+**before publishing**. The earlier stable marker `<!-- oc-box: skip-linkedin -->`
+is also honored. For a manual existing-release `publish=true` dispatch,
 select **skip_linkedin** instead; it defaults to `false`. Neither opt-out changes
 PyPI publication or the separate manual announcement approval requirements.
 Manual publication does not receive the release-event body, so use its explicit

@@ -187,6 +187,13 @@ jobs:
         run: >-
           python3 -B tools/test_v2_lifecycle_native.py --native-version 2.3.0
           --opencode-v2 "$RUNNER_TEMP/opencode-v2-native-2-3/node_modules/.bin/opencode"
+      - name: Offline exact 2.3.0 global-vault host helpers
+        run: |
+          python3 -m venv "$RUNNER_TEMP/v23-vault-tests"
+          "$RUNNER_TEMP/v23-vault-tests/bin/python" -m pip install 'cryptography>=44'
+          "$RUNNER_TEMP/v23-vault-tests/bin/python" -B tests/smoke_global_vault_host_helpers.py \
+            --native-version 2.3.0 \
+            --opencode-v2 "$RUNNER_TEMP/opencode-v2-native-2-3/node_modules/.bin/opencode"
 
   opencode-v2-current-web-tabs:
     runs-on: ubuntu-latest
@@ -213,6 +220,10 @@ jobs:
       - name: Native host credential round trip on current stable OpenCode 2.x
         run: >-
           python3 -B tests/smoke_host_backup_auth_v2.py
+          --opencode "$RUNNER_TEMP/opencode-v2-web/node_modules/@opencode/cli-linux-x64/bin/opencode"
+      - name: Native host archive sync on current stable OpenCode 2.x
+        run: >-
+          python3 -B tests/smoke_session_sync_v2.py
           --opencode "$RUNNER_TEMP/opencode-v2-web/node_modules/@opencode/cli-linux-x64/bin/opencode"
 
   opencode-v2-runtime-upgrade:

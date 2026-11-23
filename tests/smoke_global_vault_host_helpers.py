@@ -320,7 +320,7 @@ def main(argv=None):
         (root / "bin/podman").chmod(0o700)
 
         with fixture.private_output(), patch.dict(os.environ, isolated, clear=True):
-            fixture.prepare_root(root, "tumbleweed")
+            fixture.prepare_root(root, "tumbleweed", profiled=True)
             phase = "HOST_SEED"
             fixture.prepare_native_cli(root, binary, native_version=args.native_version)
             # Exact helper: direct native binary + native_env(root, '2') +

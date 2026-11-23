@@ -123,6 +123,13 @@ class AnnouncementWorkflowTests(unittest.TestCase):
                 False,
             ),
             (
+                "release-legacy-stable-skip",
+                "github.event.release.tag_name",
+                "## Highlights\n\n<!-- oc-box: skip-linkedin -->\n",
+                "",
+                False,
+            ),
+            (
                 "release-unrelated-marker",
                 "github.event.release.tag_name",
                 "<!-- linkedin-image:readme-tui -->",

@@ -261,6 +261,7 @@ jobs:
     if: >-
       !inputs.skip_linkedin &&
       !contains(github.event.release.body || '', '<!-- linkedin:skip -->') &&
+      !contains(github.event.release.body || '', '<!-- oc-box: skip-linkedin -->') &&
       (endsWith(github.event.release.tag_name || inputs.release_tag, '.dev0') ||
        vars.LINKEDIN_ANNOUNCEMENTS == 'true') &&
       needs.publish.result == 'success' &&

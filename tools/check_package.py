@@ -324,6 +324,7 @@ def check_archives(directory):
             "tools/check_release_artifacts.py",
             "tests/test_release_artifacts.py",
             "tests/test_native_host_profile.py",
+            "tests/test_native_recovery_process.py",
             "tests/test_native_smoke_profiles.py",
             "tests/test_v2_only_host_fixture.py",
             "tools/native_host_profile.py",

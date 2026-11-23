@@ -133,11 +133,44 @@ class GlobalVaultHostFixtureTests(unittest.TestCase):
 
     def test_legacy_evidence_cannot_be_promoted_to_current_profile(self):
         self.retained_source()
+        self.assertEqual(
+            fixture.recorded_native(self.root, verify=True), {"version": "2.2.6"}
+        )
         with self.assertRaisesRegex(fixture.FixtureError, "native-profile"):
             fixture.validate_source_retry(self.root, native_version="2.3.0")
         self.assertFalse((self.root / "native-profile.json").exists())
 
+    def test_profiled_empty_fixture_refuses_missing_or_removed_identity(self):
+        root = self.parent / (fixture.PREFIX + "profiled")
+        root.mkdir(mode=0o700)
+        fixture.prepare_root(root, "tumbleweed", profiled=True)
+        self.assertEqual(fixture.fixture_format(root), 2)
+        profile = root / "native-profile.json"
+        binary = Path(sys.executable).resolve()
+        with patch.object(box, "run") as run:
+            for retry in (False, True):
+                if retry:
+                    fixture.write_json_new(
+                        profile, fixture.native_identity(binary, "2.2.6")
+                    )
+                    self.assertEqual(
+                        fixture.recorded_native(root, verify=True)["version"],
+                        "2.2.6",
+                    )
+                    profile.unlink()
+                for expected in (None, "2.2.6", "2.3.0"):
+                    with (
+                        self.subTest(retry=retry, expected=expected),
+                        self.assertRaisesRegex(fixture.FixtureError, "native-profile"),
+                    ):
+                        fixture.recorded_native(root, expected=expected, verify=True)
+        run.assert_not_called()
+        self.assertFalse(profile.exists())
+
     def setUp(self):
+        # Initialize tempfile's process-wide default before installing the
+        # fixture's disposable TMPDIR; later tests must not inherit that path.
+        tempfile.gettempdir()
         preferred = Path("/tmp/opencode")
         temporary = tempfile.TemporaryDirectory(
             prefix="oc-box-gv-fixture-unit-",
@@ -422,6 +455,7 @@ class GlobalVaultHostFixtureTests(unittest.TestCase):
             fixture.validate_fixture(self.root)
 
     def test_restored_provenance_is_independent_of_uuid_directory_order(self):
+        self.complete_fixture_metadata()
         _, source = self.record("source-a", "f" * 32)
         _, restored = self.record("restored-full", "0" * 32, origin=source["id"])
         records = fixture.workspace_records(self.root)
@@ -435,6 +469,7 @@ class GlobalVaultHostFixtureTests(unittest.TestCase):
             fixture.workspace_records(self.root)
 
     def test_registry_cannot_select_a_real_project_or_selected_credential_policy(self):
+        self.complete_fixture_metadata()
         path, data = self.record("source-a", "a" * 32)
         invalid = copy.deepcopy(data)
         invalid["project"] = str(self.parent)

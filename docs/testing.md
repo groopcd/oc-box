@@ -103,8 +103,15 @@ and MCP dependency graphs; no private dependency names are sent to npm audit.
 The launcher still matches the exact host OpenCode version rather than
 silently switching the workspace to whatever npm currently labels latest.
 
+The latest-stable-2.x web job also runs the production session archive sync
+fixture against the resolved native executable. This covers scoped native
+exports/imports, retained and pending history, and actual quiet detection
+after a held shell. It uses synthetic databases and substituted transport,
+not rootless Podman.
+
 The exact OpenCode 2.3.0 V2-only CI job also runs the native smoke and the
-offline native contract for `tools/test_v2_lifecycle_podman.py`. That host
+offline native contracts for `tools/test_v2_lifecycle_podman.py` and the
+exact-version global-vault helpers. The lifecycle host
 runner separately covers encrypted full and portable restores, refusal before
 destructive actions, retained sessions and reset on disposable rootless Podman
 state. The CI job neither requires OpenCode 1.x nor exercises those live

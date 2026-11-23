@@ -568,6 +568,22 @@ def expected_storage(root):
     )
 
 
+def fixture_format(root):
+    value = private_json(root, "fixture.json")
+    require(
+        isinstance(value, dict)
+        and type(value.get("version")) is int
+        and value["version"] in (1, 2)
+        and value == {
+            "format": FORMAT,
+            "version": value["version"],
+            "projects": list(PROJECTS),
+        },
+        "fixture-format",
+    )
+    return value["version"]
+
+
 def validate_fixture(root, *, allow_unrecorded=False):
     """Pure fixture metadata/path checks; no Podman, vault or native operations."""
     root = no_symlinks(root)
@@ -575,11 +591,7 @@ def validate_fixture(root, *, allow_unrecorded=False):
     info = root.stat()
     require(info.st_uid == os.getuid() and not info.st_mode & 0o077, "fixture-root")
     root = root.resolve(strict=True)
-    require(
-        private_json(root, "fixture.json")
-        == {"format": FORMAT, "version": 1, "projects": list(PROJECTS)},
-        "fixture-format",
-    )
+    fixture_format(root)
     for relative in (
         "host-home",
         "config",
@@ -773,7 +785,7 @@ def validate_store(root, *, allow_unrecorded=False):
             validate_store_info(root, json.loads(result.stdout), env["TMPDIR"])
 
 
-def prepare_root(root, distro):
+def prepare_root(root, distro, *, profiled=False):
     for relative in (
         "host-home",
         "config/opencode",
@@ -796,7 +808,7 @@ def prepare_root(root, distro):
     (root / "config/containers/containers.conf").write_text(containers_config(root))
     write_json_new(
         root / "fixture.json",
-        {"format": FORMAT, "version": 1, "projects": list(PROJECTS)},
+        {"format": FORMAT, "version": 2 if profiled else 1, "projects": list(PROJECTS)},
     )
     write_json_new(root / "fixture-ids.json", {})
     write_json_new(
@@ -859,7 +871,12 @@ def recorded_native(root, *, expected=None, binary=None, verify=False):
     """Read immutable new-run identity; old evidence remains explicitly legacy."""
     path = safe_path(root, "native-profile.json", optional=True)
     if not path.exists():
-        require(expected in (None, NATIVE_VERSION), "native-profile")
+        # A failed or partially initialized new run must never be treated
+        # as pre-profile evidence, even if its registry is still empty.
+        require(
+            fixture_format(root) == 1 and expected in (None, NATIVE_VERSION),
+            "native-profile",
+        )
         return {"version": NATIVE_VERSION}
     value = private_json(root, "native-profile.json")
     require(
@@ -1183,9 +1200,14 @@ def make_provider(state):
 def workspace_records(root):
     """Validate all registry paths before any resource inspection/removal."""
     directory = safe_path(root, "registry/workspaces", directory=True)
+    folders = sorted(directory.iterdir())
+    if not folders:
+        # Fresh initialization can fail before native selection. There are no
+        # IDs to record then; retained entrypoints still require the profile.
+        return {}
     version = recorded_native(root)["version"]
     records = {}
-    for folder in sorted(directory.iterdir()):
+    for folder in folders:
         require(
             re.fullmatch(r"[0-9a-f]{32}", folder.name) is not None,
             "workspace-allowlist",
@@ -3472,7 +3494,7 @@ def main(argv=None):
         print("Retained root: " + str(root), file=output)
         phase = "fixture-preparation"
         with private_output():
-            prepare_root(root, args.distro)
+            prepare_root(root, args.distro, profiled=True)
             prepare_podman_cli(root, native_podman)
             with (
                 patch.dict(os.environ, isolated_env(root), clear=True),

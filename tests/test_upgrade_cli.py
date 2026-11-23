@@ -87,6 +87,34 @@ class UpgradeCliTests(unittest.TestCase):
         self.settings.assert_not_called()
         self.upgrade.assert_not_called()
 
+    def test_channel_selectors_refuse_unrelated_workspace_options(self):
+        for channel in ("--stable", "--devel"):
+            for options in (
+                ["--project", "/tmp/example-project"],
+                ["--workspace", "example-id"],
+                ["--new"],
+                ["--status"],
+                ["--no-vault"],
+                ["--maintenance"],
+            ):
+                with self.subTest(channel=channel, options=options):
+                    with self.assertRaises(box.BoxError):
+                        box.main(["upgrade", channel, *options])
+        self.packaged.assert_not_called()
+        self.settings.assert_not_called()
+        self.upgrade.assert_not_called()
+
+    def test_ambiguous_package_owner_refusal_never_falls_back_to_github(self):
+        self.packaged.return_value = True
+        self.upgrade.side_effect = updater.UpdateError("Package owner is ambiguous.")
+        with self.assertRaisesRegex(box.BoxError, "Package owner is ambiguous"):
+            box.main(["upgrade", "--stable"])
+        self.upgrade.assert_called_once_with(
+            box.APP, check=False, channel="stable", with_vault=False, with_tui=False
+        )
+        self.settings.assert_not_called()
+        self.message.assert_not_called()
+
     def test_root_and_container_refuse_before_owner_detection(self):
         for container, uid, message in (
             ("1", 1000, "on the host"),
