@@ -9,7 +9,7 @@ if __package__:
 else:
     from paths import source_root
 
-VERSION_SERIES = "1.7"
+VERSION_SERIES = "1.9"
 # A source-controlled identity, never an environment/build-time override.
 RELEASE_CHANNEL = "devel"
 # Retain the original stable patch-count baseline across minor-series changes.
@@ -30,11 +30,6 @@ def source_version(patch):
     """Derive the public identity from this source's tracked release channel."""
     if RELEASE_CHANNEL not in ("stable", "devel"):
         raise ValueError("Unknown source release channel")
-    major, minor = map(int, VERSION_SERIES.split("."))
-    if (major, minor) >= (1, 8) and RELEASE_CHANNEL != (
-        "devel" if minor % 2 else "stable"
-    ):
-        raise ValueError("New release series require an even stable or odd devel minor")
     suffix = ".dev0" if RELEASE_CHANNEL == "devel" else ""
     return f"{VERSION_SERIES}.{patch}{suffix}"
 

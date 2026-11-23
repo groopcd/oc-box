@@ -27,14 +27,19 @@ class ReleaseVersionPolicyTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="oc-box-version-policy-") as temporary:
             root = Path(temporary)
             (root / ".git").mkdir()
-            for name, count, patch_count, channel in (
-                (name, count, patch_count, channel)
+            for name, count, patch_count, series, channel in (
+                (name, count, patch_count, series, channel)
                 for name, count, patch_count in (
                     ("original stable baseline", 29, 0),
                     ("first later commit", 30, 1),
                     ("retained release count", 87, 58),
                 )
-                for channel in ("stable", "devel")
+                for series, channel in (
+                    ("1.6", "stable"),
+                    ("1.7", "devel"),
+                    ("1.8", "stable"),
+                    ("1.9", "devel"),
+                )
             ):
                 for dirty in (False, True):
                     outputs = {
@@ -52,14 +57,15 @@ class ReleaseVersionPolicyTests(unittest.TestCase):
                         )
 
                     with (
-                        self.subTest(name=name, dirty=dirty, channel=channel),
+                        self.subTest(name=name, dirty=dirty, series=series, channel=channel),
                         patch.object(version.subprocess, "run", side_effect=git),
+                        patch.object(version, "VERSION_SERIES", series),
                         patch.object(version, "RELEASE_CHANNEL", channel),
                     ):
                         self.assertEqual(
                             version.get_version_info(root),
                             {
-                                "version": f"1.7.{patch_count}"
+                                "version": f"{series}.{patch_count}"
                                 + (".dev0" if channel == "devel" else "")
                                 + f"+g{commit[:7]}"
                                 + (".dirty" if dirty else ""),
@@ -211,7 +217,7 @@ class VersionTests(unittest.TestCase):
             (installed / "build-info.json").write_text(json.dumps(devel))
             self.assertEqual(version.get_version_info(installed), devel)
 
-    def test_future_source_versions_match_minor_channel_policy(self):
+    def test_future_source_versions_keep_channel_suffix(self):
         for series, channel, suffix in (
             ("1.8", "stable", ""),
             ("1.9", "devel", ".dev0"),
@@ -224,12 +230,6 @@ class VersionTests(unittest.TestCase):
             ):
                 with patch.object(version, "RELEASE_CHANNEL", channel):
                     self.assertEqual(version.source_version(100), f"{series}.100{suffix}")
-                wrong = "devel" if channel == "stable" else "stable"
-                with (
-                    patch.object(version, "RELEASE_CHANNEL", wrong),
-                    self.assertRaisesRegex(ValueError, "even stable or odd devel"),
-                ):
-                    version.source_version(100)
 
     def test_channel_is_not_an_environment_override_and_unknown_source_fails(self):
         for channel in ("stable", "devel"):

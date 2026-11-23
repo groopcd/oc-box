@@ -467,17 +467,18 @@ without modifying the parent environment. Verify `gh api user` reports
 `groopcd` before publishing. Pass Git credential helpers per command rather
 than storing tokens or changing global authentication settings.
 
-Development version `1.7.N.dev0+gHASH` is derived from the full Git history, with N the commit
-count minus the 1.0.0 baseline (29); every later commit advances N automatically.
-The 1.5, 1.6 and 1.7 series deliberately retain this baseline; do not reset the patch
-count or rewrite embedded 0.1/1.0/1.5/1.6 identities when preparing a release.
+Starting with 1.8, stable series use an even minor and development series use an
+odd minor (1.8/1.9, 2.0/2.1, 2.2/2.3). The development identity is
+`1.9.N.dev0+gHASH`, with N derived from the full Git commit count minus the 1.0.0
+baseline (29). Do not reset the patch count or rewrite historical embedded
+identities. The parity rule does not retroactively classify published versions.
 Keep the absolute `commit_count` for old updater compatibility, require full
 history, and fast-forward tested development releases into `devel`, never
 `master`. Stable final releases remain on `master`. The installer
 embeds the source identity in its private `build-info.json`. Original project
 code/documentation is GPL-3.0-or-later;
 retain LICENSE and NOTICE when distributing/installing it.
-PyPI uses the public `1.7.N.dev0` development version; retain the full `+gHASH` identity in package
+PyPI uses the public `1.9.N.dev0` development version; retain the full `+gHASH` identity in package
 resources. Python-package installations upgrade through pipx/uv/pip, never the
 GitHub self-updater. Preserve the normal curl/GitHub update path in parallel.
 
