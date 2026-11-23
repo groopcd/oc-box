@@ -1886,10 +1886,12 @@ def run(root, binary, distro, report=None, *, native_version=NATIVE_VERSION):
 
         report.checks = []
     validate_store(root)  # No workspace/resource use is allowed before this proof.
+    # --opencode-v2 can point outside PATH. Install its verified, isolated
+    # selector before the launch dependency probe looks for "opencode".
+    prepare_native_cli(root, binary, native_version=native_version)
     box.check_backend(feature="launch")
     crypto.tools()
     vault.crypto()
-    prepare_native_cli(root, binary, native_version=native_version)
     report("private-store-native-version")
     report("native-host-seed")
     baseline = seed_native_history(root, binary)
