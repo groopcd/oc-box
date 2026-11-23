@@ -370,18 +370,32 @@ def source_snapshot(source, expected):
         tree = ast.parse(version_source)
     except (SyntaxError, ValueError):
         raise Refusal("clean-source-required") from None
+    legacy = {"1.6", "1.7"}
+    channel_series = {"1.8": "stable", "1.9": "devel"}
     names = {"VERSION_SERIES", "VERSION_BASE_COMMIT_COUNT"}
+    channel_name = "RELEASE_CHANNEL"
     declarations = {
         node.targets[0].id: node.value.value
         for node in tree.body
         if isinstance(node, ast.Assign)
         and len(node.targets) == 1
         and isinstance(node.targets[0], ast.Name)
-        and node.targets[0].id in names
+        and node.targets[0].id in names | {channel_name}
         and isinstance(node.value, ast.Constant)
     }
+    series = declarations.get("VERSION_SERIES")
     require(
-        declarations.keys() == names
+        isinstance(series, str) and series in legacy | channel_series.keys(),
+        "clean-source-required",
+    )
+    if series in channel_series:
+        names.add(channel_name)
+        require(
+            declarations.get(channel_name) == channel_series[series],
+            "clean-source-required",
+        )
+    require(
+        names <= declarations.keys()
         and all(
             sum(
                 isinstance(node, ast.Name)
@@ -392,15 +406,15 @@ def source_snapshot(source, expected):
             == 1
             for name in names
         )
-        and declarations["VERSION_SERIES"] in ("1.6", "1.7")
         and type(declarations["VERSION_BASE_COMMIT_COUNT"]) is int
         and declarations["VERSION_BASE_COMMIT_COUNT"] == 29,
         "clean-source-required",
     )
+    suffix = ".dev0" if channel_series.get(series) == "devel" else ""
     return {
         "commit": expected,
         "commit_count": count,
-        "version": f"{declarations['VERSION_SERIES']}.{count - 29}+g{expected[:7]}",
+        "version": f"{series}.{count - 29}{suffix}+g{expected[:7]}",
         "dirty": False,
         "sha256": hashes,
     }
@@ -562,8 +576,8 @@ def result(
     require(
         identity["version"]
         in (
-            f"{series}.{identity['commit_count'] - 29}+g{identity['commit'][:7]}"
-            for series in ("1.6", "1.7")
+            f"{series}.{identity['commit_count'] - 29}{suffix}+g{identity['commit'][:7]}"
+            for series, suffix in (("1.6", ""), ("1.7", ""), ("1.8", ""), ("1.9", ".dev0"))
         ),
         "report-schema",
     )

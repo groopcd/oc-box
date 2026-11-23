@@ -134,18 +134,24 @@ class SessionHistoryHostFixtureTests(unittest.TestCase):
             source.assert_not_called()
 
     def test_source_snapshot_hashes_git_owned_runtime_and_donors(self):
-        for name, series in (("retained source", "1.6"), ("release source", "1.7")):
-            self.source_files(
-                f'VERSION_SERIES = "{series}"\nVERSION_BASE_COMMIT_COUNT = 29\n'.encode()
-            )
+        for series, channel, suffix in (
+            ("1.6", None, ""),
+            ("1.7", "devel", ""),
+            ("1.8", "stable", ""),
+            ("1.9", "devel", ".dev0"),
+        ):
+            declarations = f'VERSION_SERIES = "{series}"\nVERSION_BASE_COMMIT_COUNT = 29\n'
+            if channel:
+                declarations += f'RELEASE_CHANNEL = "{channel}"\n'
+            self.source_files(declarations.encode())
             with (
-                self.subTest(name=name),
+                self.subTest(series=series),
                 patch.object(runner, "git", side_effect=self.git),
                 patch.object(runner.importlib, "import_module") as imports,
             ):
                 identity = runner.source_snapshot(self.source, self.commit)
                 self.assertEqual(
-                    identity["version"], series + ".51+g" + self.commit[:7]
+                    identity["version"], series + ".51" + suffix + "+g" + self.commit[:7]
                 )
                 self.assertEqual(identity["commit_count"], 80)
                 self.assertEqual(identity["commit"], self.commit)
@@ -165,7 +171,11 @@ class SessionHistoryHostFixtureTests(unittest.TestCase):
         cases = {
             "missing series": baseline,
             "missing baseline": series,
-            "unknown series": b'VERSION_SERIES = "1.8"\n' + baseline,
+            "unknown series": b'VERSION_SERIES = "1.10"\nRELEASE_CHANNEL = "stable"\n' + baseline,
+            "missing channel for new series": b'VERSION_SERIES = "1.8"\n' + baseline,
+            "stable channel for odd minor": b'VERSION_SERIES = "1.9"\nRELEASE_CHANNEL = "stable"\n' + baseline,
+            "dynamic channel for new series": b'VERSION_SERIES = "1.9"\nRELEASE_CHANNEL = str("devel")\n' + baseline,
+            "duplicate channel for new series": b'VERSION_SERIES = "1.9"\nRELEASE_CHANNEL = "devel"\nRELEASE_CHANNEL = "devel"\n' + baseline,
             "legacy series": b'VERSION_SERIES = "1.5"\n' + baseline,
             "patch in series": b'VERSION_SERIES = "1.7.0"\n' + baseline,
             "numeric series": b"VERSION_SERIES = 1.7\n" + baseline,
@@ -579,9 +589,9 @@ class SessionHistoryHostFixtureTests(unittest.TestCase):
             "dirty": False,
             "sha256": {"src/oc_box/version_info.py": "c" * 64},
         }
-        for name, series in (("retained report", "1.6"), ("release report", "1.7")):
-            identity["version"] = series + ".51+g" + self.commit[:7]
-            with self.subTest(name=name):
+        for series, suffix in (("1.6", ""), ("1.7", ""), ("1.8", ""), ("1.9", ".dev0")):
+            identity["version"] = series + ".51" + suffix + "+g" + self.commit[:7]
+            with self.subTest(series=series):
                 report = runner.result(
                     dict.fromkeys(runner.CHECKS, True),
                     identity,
@@ -593,22 +603,25 @@ class SessionHistoryHostFixtureTests(unittest.TestCase):
                 self.assertEqual(report["status"], "PASS")
                 self.assertEqual(report["source_identity"], identity)
 
-    def test_report_source_identity_refusal_matrix_is_strict_for_both_series(self):
-        for series in ("1.6", "1.7"):
+    def test_report_source_identity_refusal_matrix_is_strict(self):
+        for series, suffix in (("1.6", ""), ("1.7", ""), ("1.8", ""), ("1.9", ".dev0")):
             identity = {
                 "commit": self.commit,
                 "commit_count": 80,
-                "version": series + ".51+g" + self.commit[:7],
+                "version": series + ".51" + suffix + "+g" + self.commit[:7],
                 "dirty": False,
                 "sha256": {"src/oc_box/version_info.py": "c" * 64},
             }
             cases = {
-                "unknown series": {"version": "1.8.51+g" + self.commit[:7]},
+                "unknown series": {"version": "1.10.51+g" + self.commit[:7]},
                 "legacy series": {"version": "1.5.51+g" + self.commit[:7]},
                 "missing version": {"version": None},
-                "wrong patch": {"version": series + ".50+g" + self.commit[:7]},
-                "padded patch": {"version": series + ".051+g" + self.commit[:7]},
-                "wrong short hash": {"version": series + ".51+g" + "a" * 7},
+                "wrong patch": {"version": series + ".50" + suffix + "+g" + self.commit[:7]},
+                "padded patch": {"version": series + ".051" + suffix + "+g" + self.commit[:7]},
+                "wrong short hash": {"version": series + ".51" + suffix + "+g" + "a" * 7},
+                "wrong channel suffix": {
+                    "version": series + ".51" + ("" if suffix else ".dev0") + "+g" + self.commit[:7],
+                },
                 "dirty suffix": {"version": identity["version"] + ".dirty"},
                 "short commit": {"commit": self.commit[:7]},
                 "non-hex commit": {"commit": "z" * 40},

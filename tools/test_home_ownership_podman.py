@@ -266,8 +266,8 @@ def validate_purpose(root, current):
         and original["commit_count"] > 29
         and original["version"]
         in (
-            f"{series}.{original['commit_count'] - 29}+g{original['commit'][:7]}"
-            for series in ("1.6", "1.7")
+            f"{series}.{original['commit_count'] - 29}{suffix}+g{original['commit'][:7]}"
+            for series, suffix in (("1.6", ""), ("1.7", ""), ("1.8", ""), ("1.9", ".dev0"))
         )
         and source["audited_sha256"] == current["audited_sha256"],
         "source-compatibility",

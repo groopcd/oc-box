@@ -338,16 +338,18 @@ class HomeOwnershipHostFixtureTests(unittest.TestCase):
         self.command.assert_not_called()
 
     def test_retained_source_series_matrix_requires_identical_audited_hashes(self):
-        for name, retained_series, current_series in (
-            ("retained 1.6", "1.6", "1.6"),
-            ("1.6 evidence on 1.7 invocation", "1.6", "1.7"),
-            ("release 1.7", "1.7", "1.7"),
+        for name, retained_series, current_series, suffix in (
+            ("retained 1.6", "1.6", "1.6", ""),
+            ("1.6 evidence on 1.7 invocation", "1.6", "1.7", ""),
+            ("release 1.7", "1.7", "1.7", ""),
+            ("release 1.8", "1.8", "1.8", ""),
+            ("release 1.9", "1.9", "1.9", ".dev0"),
         ):
             data = copy.deepcopy(self.purpose)
-            data["source"]["identity"]["version"] = retained_series + ".47+gcd912d9"
+            data["source"]["identity"]["version"] = retained_series + ".47" + suffix + "+gcd912d9"
             current = copy.deepcopy(self.current)
             current["identity"].update(
-                version=current_series + ".48+g" + "b" * 7,
+                version=current_series + ".48" + suffix + "+g" + "b" * 7,
                 commit="b" * 40,
                 commit_count=77,
             )
@@ -367,16 +369,19 @@ class HomeOwnershipHostFixtureTests(unittest.TestCase):
         self.box_run.assert_not_called()
         self.command.assert_not_called()
 
-    def test_retained_source_identity_refusal_matrix_is_strict_for_both_series(self):
-        for series in ("1.6", "1.7"):
+    def test_retained_source_identity_refusal_matrix_is_strict(self):
+        for series, suffix in (("1.6", ""), ("1.7", ""), ("1.8", ""), ("1.9", ".dev0")):
             cases = {
-                "unknown series": {"version": "1.8.47+gcd912d9"},
+                "unknown series": {"version": "1.10.47+gcd912d9"},
                 "legacy series": {"version": "1.5.47+gcd912d9"},
                 "missing version": {"version": None},
-                "wrong patch": {"version": series + ".48+gcd912d9"},
-                "padded patch": {"version": series + ".047+gcd912d9"},
-                "wrong short hash": {"version": series + ".47+g" + "a" * 7},
-                "dirty suffix": {"version": series + ".47+gcd912d9.dirty"},
+                "wrong patch": {"version": series + ".48" + suffix + "+gcd912d9"},
+                "padded patch": {"version": series + ".047" + suffix + "+gcd912d9"},
+                "wrong short hash": {"version": series + ".47" + suffix + "+g" + "a" * 7},
+                "dirty suffix": {"version": series + ".47" + suffix + "+gcd912d9.dirty"},
+                "wrong channel suffix": {
+                    "version": series + ".47" + ("" if suffix else ".dev0") + "+gcd912d9",
+                },
                 "short commit": {"commit": "cd912d9"},
                 "non-hex commit": {"commit": "z" * 40},
                 "uppercase commit": {"commit": "B" * 40},
@@ -389,7 +394,7 @@ class HomeOwnershipHostFixtureTests(unittest.TestCase):
             }
             for name, change in cases.items():
                 data = copy.deepcopy(self.purpose)
-                data["source"]["identity"].update(version=series + ".47+gcd912d9")
+                data["source"]["identity"].update(version=series + ".47" + suffix + "+gcd912d9")
                 data["source"]["identity"].update(change)
                 self.rewrite("home-component.json", data)
                 with (
@@ -402,11 +407,11 @@ class HomeOwnershipHostFixtureTests(unittest.TestCase):
         self.box_run.assert_not_called()
         self.command.assert_not_called()
 
-    def test_both_retained_series_keep_private_metadata_ownership_guards(self):
+    def test_supported_series_keep_private_metadata_ownership_guards(self):
         marker = self.root / "home-component.json"
-        for series in ("1.6", "1.7"):
+        for series, suffix in (("1.6", ""), ("1.7", ""), ("1.8", ""), ("1.9", ".dev0")):
             data = copy.deepcopy(self.purpose)
-            data["source"]["identity"]["version"] = series + ".47+gcd912d9"
+            data["source"]["identity"]["version"] = series + ".47" + suffix + "+gcd912d9"
             self.rewrite("home-component.json", data)
             marker.chmod(0o644)
             with (
