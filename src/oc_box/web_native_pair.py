@@ -80,7 +80,7 @@ def _cookie_name(authority):
 class NativeCookie:
     """Private upstream credential, not a browser cookie or an admission grant."""
 
-    __slots__ = ("_binding", "_scope", "_value", "_owner_current")
+    __slots__ = ("_binding", "_owner_current", "_scope", "_value")
 
     def __init__(self, binding, endpoint, authority, value, *, owner_current):
         if (
@@ -397,5 +397,5 @@ def pair_cookie(box, data, connection, *, origin, binding, owner_current):
 if __name__ == "__main__":
     try:
         _worker(*sys.argv[1:])
-    except Exception:  # Worker refusal must not print native data or tracebacks.
+    except Exception:  # noqa: BLE001 - worker refusal must not print native data or tracebacks.
         sys.exit(1)
