@@ -13,6 +13,7 @@ import struct
 import sys
 import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from tools import test_v2_lifecycle_podman as fixture
@@ -567,7 +568,6 @@ class V2OnlyHostFixtureTests(unittest.TestCase):
                 }
                 path = root / ("metadata-" + ident + ".json")
                 records[name] = (path, data)
-                transcripts[ident] = copy.deepcopy(baseline)
                 (project / box.MARKER).write_text(ident)
                 return path, data
 
@@ -575,9 +575,21 @@ class V2OnlyHostFixtureTests(unittest.TestCase):
                 passwords.append(password)
 
             def launch(arguments):
+                ident = arguments[arguments.index("--workspace") + 1]
                 data = next(
-                    data for _, data in records.values() if data["id"] == arguments[-1]
+                    data for _, data in records.values() if data["id"] == ident
                 )
+                if not launches:
+                    self.assertEqual(
+                        arguments,
+                        [
+                            "start", "--workspace", ident,
+                            "--import-session", baseline["info"]["id"],
+                        ],
+                    )
+                    transcripts[ident] = copy.deepcopy(baseline)
+                else:
+                    self.assertNotIn("--import-session", arguments)
                 launches.append((arguments[0], Path(data["project"]).name))
                 password = fixture.vault.hidden()
                 if password != passwords[0]:
@@ -1255,6 +1267,45 @@ except namespace['SourceError'] as error:
         self.assertIsNone(fixture._CLI_SOURCE)
         with self.assertRaisesRegex(fixture.SourceError, "cli-preflight-required"):
             fixture.source_identity()
+
+    def test_external_source_requires_an_exact_separate_isolated_fresh_run(self):
+        commit = self.git("rev-parse", "HEAD").decode().strip()
+        args = ["--source", str(self.root), "--expect-commit", commit]
+        with patch.object(fixture.sys, "flags", SimpleNamespace(isolated=0)):
+            self.assertEqual(fixture._external_source([]), (fixture.RUNNER_ROOT, None))
+            with self.assertRaisesRegex(fixture.SourceError, "source-arguments"):
+                fixture._external_source(args)
+        with (
+            patch.object(fixture.sys, "flags", SimpleNamespace(isolated=1)),
+            patch.object(fixture.sys, "dont_write_bytecode", True),
+        ):
+            self.assertEqual(fixture._external_source(args), (self.root, commit))
+            for bad in (
+                args[:2],
+                args[2:],
+                [*args, "--cleanup", "/retained"],
+                ["--source", "relative", *args[2:]],
+                [*args[:2], "--expect-commit", "a" * 7],
+            ):
+                with self.subTest(bad=bad), self.assertRaisesRegex(
+                    fixture.SourceError, "source-arguments"
+                ):
+                    fixture._external_source(bad)
+            with self.assertRaisesRegex(fixture.SourceError, "runner-placement"):
+                fixture._external_source(
+                    ["--source", str(fixture.RUNNER_ROOT), *args[2:]]
+                )
+
+    def test_expected_source_mismatch_refuses_before_import_or_cache(self):
+        with (
+            patch.object(fixture, "_early_host_guard"),
+            patch.object(fixture, "_source_import_guard") as guard,
+            patch.object(fixture.tempfile, "TemporaryDirectory") as cache,
+            self.assertRaisesRegex(fixture.SourceError, "source-changed"),
+        ):
+            fixture._prepare_cli_imports(self.root, expected_commit="f" * 40)
+        guard.assert_not_called()
+        cache.assert_not_called()
 
     def test_early_host_guard_precedes_git_bytecode_or_project_import_setup(self):
         with (

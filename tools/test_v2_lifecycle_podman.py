@@ -17,6 +17,9 @@ Git, a reviewed full-history checkout and no concurrent checkout writers. Invoke
 this script directly, not through an unchecked package entrypoint. Before project
 imports it rejects dirty/untracked source, checks tracked HEAD blobs and isolates
 bytecode. Ordinary library imports establish no host-acceptance binding.
+An external runner may select a separate frozen runtime with
+--source and --expect-commit, using python -I -B. Each checkout is audited
+independently. This mode is for fresh fixtures, not retained cleanup.
 """
 
 import sys
@@ -48,8 +51,10 @@ import tempfile
 import types
 from unittest.mock import patch
 
-APP = Path(__file__).resolve().parents[1]
+RUNNER_ROOT = Path(__file__).resolve().parents[1]
+APP = RUNNER_ROOT
 _CLI_SOURCE = None
+_CLI_RUNNER = None
 _CLI_CACHE = None
 _SOURCE_REQUIRED = frozenset(
     {
@@ -228,10 +233,14 @@ def _source_import_guard(source, tracked):
                 )
 
 
-def _prepare_cli_imports(source):
+def _prepare_cli_imports(source, *, expected_commit=None):
     global _CLI_CACHE
     _early_host_guard()  # Before Git, project import, placement or native/engine calls.
     identity = _source_snapshot(source)
+    _source_require(
+        expected_commit is None or identity["commit"] == expected_commit,
+        "source-changed",
+    )
     _source_import_guard(source, identity["sha256"])
     _CLI_CACHE = tempfile.TemporaryDirectory(prefix="oc-box-v2-only-bytecode-")
     sys.dont_write_bytecode = True
@@ -250,9 +259,52 @@ def _prepare_cli_imports(source):
     return identity
 
 
+class SourceSelectors(argparse.ArgumentParser):
+    def error(self, message):
+        raise SourceError("source-arguments")
+
+
+def _external_source(argv):
+    parser = SourceSelectors(add_help=False, allow_abbrev=False)
+    parser.add_argument("--source", type=Path)
+    parser.add_argument("--expect-commit")
+    parser.add_argument("--cleanup", type=Path)
+    args, _ = parser.parse_known_args(argv)
+    if args.source is None and args.expect_commit is None:
+        return RUNNER_ROOT, None
+    _source_require(
+        bool(sys.flags.isolated)
+        and bool(sys.dont_write_bytecode)
+        and args.cleanup is None
+        and args.source is not None
+        and args.source.is_absolute()
+        and re.fullmatch(r"[0-9a-f]{40}", args.expect_commit or "") is not None,
+        "source-arguments",
+    )
+    source = _source_path(args.source)
+    _source_require(
+        not source.is_relative_to(RUNNER_ROOT)
+        and not RUNNER_ROOT.is_relative_to(source),
+        "runner-placement",
+    )
+    return source, args.expect_commit
+
+
+def _external_runner_identity():
+    checked = _source_snapshot(RUNNER_ROOT)
+    return {
+        "commit": checked["commit"],
+        "sha256": checked["sha256"]["tools/test_v2_lifecycle_podman.py"],
+    }
+
+
 if __name__ == "__main__":
     try:
-        _CLI_SOURCE = _prepare_cli_imports(APP)
+        _early_host_guard()
+        APP, _expected_commit = _external_source(sys.argv[1:])
+        if _expected_commit is not None:
+            _CLI_RUNNER = _external_runner_identity()
+        _CLI_SOURCE = _prepare_cli_imports(APP, expected_commit=_expected_commit)
     except BaseException as error:
         print(
             "V2-only lifecycle pre-import refusal: "
@@ -642,11 +694,15 @@ def source_identity():
         and build.get("dirty") is False,
         "source-version",
     )
-    return {
+    result = {
         "build": build,
         "sha256": checked["sha256"],
         "binding": "CLI pre-import HEAD blobs, clean full history, isolated bytecode; trusted interpreter/Git and no concurrent writers required",
     }
+    if _CLI_RUNNER is not None:
+        _source_require(_external_runner_identity() == _CLI_RUNNER, "runner-changed")
+        result["external_runner"] = _CLI_RUNNER
+    return result
 
 
 def new_report(version):
@@ -891,9 +947,21 @@ def run(root, binary, version, distro, report):
                     patch.object(vault, "hidden", return_value=password) as hidden,
                     patch.object(box, "run_tui", side_effect=owner),
                 ):
-                    safety.launcher(
-                        ["reset" if reset else "start", "--workspace", current["id"]]
-                    )
+                    arguments = [
+                        "reset" if reset else "start", "--workspace", current["id"]
+                    ]
+                    if stage == "first":
+                        seed = baseline["info"]["id"]
+                        require(
+                            name == "source-a"
+                            and not reset
+                            and box.valid_session_id(seed),
+                            "first-import",
+                        )
+                        # The seed is in the host DB, not the new workspace.
+                        # Reopen/restore/reset must resume, never re-import it.
+                        arguments.extend(("--import-session", seed))
+                    safety.launcher(arguments)
                 require(hidden.call_count == 1, "owning-unlock-count")
                 current_path, current = workspace_records(root)[name]
                 safety.verify_owned_resources(root, current, stopped=True)
@@ -1065,7 +1133,9 @@ class QuietParser(argparse.ArgumentParser):
 
 
 def main(argv=None):
-    parser = QuietParser(description=__doc__)
+    parser = QuietParser(description=__doc__, allow_abbrev=False)
+    parser.add_argument("--source", type=Path, help="frozen checkout for external runner")
+    parser.add_argument("--expect-commit", help="exact source SHA for external runner")
     parser.add_argument("--opencode-v2", type=Path)
     parser.add_argument("--native-version", choices=VERSIONS, default="2.3.0")
     parser.add_argument("--distro", choices=tuple(box.DISTROS), default="tumbleweed")
@@ -1078,6 +1148,15 @@ def main(argv=None):
     report = new_report(args.native_version)
     try:
         safety.host_guard()
+        if args.source is not None or args.expect_commit is not None:
+            require(
+                _CLI_RUNNER is not None
+                and _CLI_SOURCE is not None
+                and args.source == APP
+                and args.expect_commit == _CLI_SOURCE["commit"]
+                and args.cleanup is None,
+                "source-arguments",
+            )
         with safety.private_output():
             if args.cleanup:
                 require(
@@ -1114,7 +1193,30 @@ def main(argv=None):
         category = safety.safe_error_class(error)
         report["status"] = "failed"
         report["failure"] = category
-        print("V2-only lifecycle fixture failed: " + category + ".", file=sys.stderr)
+        # Refuse raw messages; admit only fixed categories from fixture checks.
+        fixed = {
+            "first-import",
+            "selected-session",
+            "private-owner",
+            "native-tools",
+            "native-history",
+            "attach-session",
+            "owning-unlock-count",
+            "stopped-session",
+            "host-vault-retention",
+            "launcher-exit",
+            "store-info-shape",
+            "source-changed",
+        }
+        detail = str(error) if isinstance(error, safety.FixtureError) else None
+        if detail in fixed:
+            report["failure_category"] = detail
+        print(
+            "V2-only lifecycle fixture failed: "
+            + (detail if detail in fixed else category)
+            + ".",
+            file=sys.stderr,
+        )
         return 130 if isinstance(error, KeyboardInterrupt) else 1
     finally:
         if root is not None:
