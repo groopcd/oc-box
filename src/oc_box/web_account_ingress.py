@@ -41,8 +41,7 @@ _RESPONSE_HEADERS = (
     ("Cross-Origin-Resource-Policy", "same-origin"),
     (
         "Content-Security-Policy",
-        "default-src 'none'; frame-ancestors 'none'; "
-        "base-uri 'none'; form-action 'none'",
+        "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
     ),
 )
 

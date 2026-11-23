@@ -159,6 +159,21 @@ class BrowserBootstrap:
             self._expire(monotonic())
             return self._accounts.pop(_digest(account_nonce), None) is not None
 
+    def paired_app_current(self, binding, app_nonce):
+        """Check that an app-side cookie belongs to an accepted live bootstrap."""
+        if (
+            type(binding) is not WebBinding
+            or binding != self._binding
+            or not _valid(app_nonce)
+        ):
+            return False
+        with self._lock:
+            self._expire(monotonic())
+            return not self._closed and any(
+                secrets.compare_digest(entry.app_nonce, app_nonce)
+                for entry in self._accounts.values()
+            )
+
     def expire(self):
         with self._lock:
             self._expire(monotonic())

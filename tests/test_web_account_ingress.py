@@ -16,7 +16,6 @@ from oc_box import (
     web_admission,
     web_handoff,
     web_local_origins,
-    web_named_headers,
     web_named_local,
     web_pake_flow,
 )
@@ -30,15 +29,6 @@ REFUSED = b'{"error":"Named sign-in refused."}'
 
 class AccountIngressTests(unittest.TestCase):
     def setUp(self):
-        # The sibling bootstrap change adds this production cookie to the gate.
-        # Keep these tests independently runnable on the original source base.
-        allow = patch.object(
-            web_named_headers,
-            "_COOKIE_NAMES",
-            web_named_headers._COOKIE_NAMES | {ACCOUNT_COOKIE},
-        )
-        allow.start()
-        self.addCleanup(allow.stop)
         self.origins = web_local_origins.LocalOrigins(account_port=10443)
         self.binding = web_admission.WebBinding(
             fixture.WORKSPACE, "synthetic-owner", self.origins.workspace.value

@@ -38,6 +38,8 @@ RUNTIME_FILES = (
     "web_named_local.py",
     "web_named_headers.py",
     "web_bootstrap.py",
+    "web_account_ingress.py",
+    "web_app_ingress.py",
     "web_accounts.py",
     "web_admission.py",
     "web_pake_flow.py",
