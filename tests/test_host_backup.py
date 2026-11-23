@@ -1,0 +1,652 @@
+"""Synthetic host migration; no Podman, native host service or real HOME."""
+
+import contextlib
+import io
+import json
+import os
+import shutil
+import sqlite3
+import tarfile
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import Mock, patch
+
+from oc_box import backup_crypto as crypto
+from oc_box import (
+    backups,
+    vault,
+)
+from oc_box import host_backup_auth as native_auth
+from oc_box import (
+    host_backup_payload as payload,
+)
+from oc_box import (
+    host_backup_restore as restore,
+)
+from oc_box import oc_box as box
+from oc_box import tui_operation_io
+from oc_box import tui_operations
+
+
+class HostBackupTests(unittest.TestCase):
+    def setUp(self):
+        work = tempfile.TemporaryDirectory(prefix="oc-box-host-backup-test-")
+        self.addCleanup(work.cleanup)
+        self.root = Path(work.name)
+        self.source = self.root / "source"
+        self.target = self.root / "target"
+
+    def profile(self, root):
+        return patch.dict(
+            os.environ,
+            {
+                "XDG_CONFIG_HOME": str(root / "config"),
+                "XDG_DATA_HOME": str(root / "data"),
+                "OC_BOX_STATE_HOME": str(root / "state"),
+                "OC_BOX_CONTAINER": "0",
+            },
+        )
+
+    @staticmethod
+    def write(path, content):
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        path.write_bytes(content)
+        path.chmod(0o600)
+
+    def test_capture_does_not_follow_links_or_read_native_database_and_caches(self):
+        with self.profile(self.source):
+            roots = payload.destinations()
+            cfg = roots[payload.OPENCODE_CONFIG]
+            auth = roots[payload.OPENCODE_AUTH]
+            self.write(cfg / "opencode.jsonc", b'// exact\n{"name":"synthetic"}')
+            self.write(cfg / "node_modules/skip", b"skipped cache")
+            self.write(auth / "opencode.db", b"not captured")
+            self.write(auth / "mcp-auth.json", b'{"synthetic":{}}')
+            snapshot = payload.capture()
+            self.assertEqual(
+                snapshot,
+                {
+                    (payload.OPENCODE_CONFIG, ""): None,
+                    (
+                        payload.OPENCODE_CONFIG,
+                        "opencode.jsonc",
+                    ): b'// exact\n{"name":"synthetic"}',
+                    (payload.OPENCODE_AUTH, "mcp-auth.json"): b'{"synthetic":{}}',
+                },
+            )
+            self.assertEqual(payload.decode(payload.encode(snapshot)), snapshot)
+            (cfg / "outside").symlink_to(auth / "opencode.db")
+            with self.assertRaises(payload.HostPayloadError):
+                payload.capture()
+
+    def test_schema_refuses_traversal_duplicates_and_unbound_native_children(self):
+        for entries in (
+            [[payload.OPENCODE_CONFIG, "../outside", "YQ=="]],
+            [[payload.OPENCODE_CONFIG, "orphan.js", "YQ=="]],
+            [[payload.OPENCODE_CONFIG, "", None]] * 2,
+            [[payload.OPENCODE_AUTH, "opencode.db", "YQ=="]],
+        ):
+            raw = json.dumps(
+                {"format": "oc-box-host", "version": 1, "entries": entries}
+            ).encode()
+            with (
+                self.subTest(entries=entries),
+                self.assertRaises(payload.HostPayloadError),
+            ):
+                payload.decode(raw)
+
+    def test_preflight_is_read_only_and_apply_never_replaces_a_late_file(self):
+        snapshot = {
+            (payload.OC_BOX_CONFIG, "config.json"): b'{"pass_env":["SYNTHETIC"]}\n',
+            (payload.OPENCODE_CONFIG, ""): None,
+            (payload.OPENCODE_CONFIG, "plugin.js"): b"// synthetic plugin",
+        }
+        with self.profile(self.target):
+            plan = restore.preflight(snapshot)
+            self.assertFalse(self.target.exists())
+            target = payload.destinations()[payload.OC_BOX_CONFIG] / "config.json"
+            self.write(target, b'{"settings":"existing"}')
+            with self.assertRaises(restore.HostRestoreError):
+                restore.apply(plan)
+            self.assertEqual(target.read_bytes(), b'{"settings":"existing"}')
+            self.assertFalse(payload.destinations()[payload.OPENCODE_CONFIG].exists())
+
+    def test_native_profile_requires_explicit_opt_in_and_refuses_existing_profile(self):
+        snapshot = {
+            (payload.OPENCODE_CONFIG, ""): None,
+            (payload.OPENCODE_CONFIG, "plugin"): None,
+            (payload.OPENCODE_CONFIG, "plugin/test.js"): b"// synthetic plugin",
+            (payload.OPENCODE_AUTH, "auth.json"): b'{"synthetic":"opaque"}',
+        }
+        with self.profile(self.target):
+            plan = restore.preflight(snapshot)
+            self.assertEqual(restore.apply(plan), 0)
+            self.assertFalse(self.target.exists())
+            # The review uses /dev/tty, not redirected stdin.
+            with (
+                patch.object(restore, "preflight", return_value=plan),
+                patch.object(backups.os, "open", side_effect=OSError),
+                self.assertRaisesRegex(crypto.BackupError, "controlling terminal"),
+            ):
+                backups._prepare_host_restore(snapshot, True)
+            self.assertFalse(self.target.exists())
+            plan = restore.preflight(snapshot, include_opencode=True)
+            self.assertEqual(restore.apply(plan, include_opencode=True), 2)
+            native = payload.destinations()
+            self.assertEqual(
+                (native[payload.OPENCODE_CONFIG] / "plugin/test.js").read_bytes(),
+                b"// synthetic plugin",
+            )
+            self.assertEqual(
+                (native[payload.OPENCODE_AUTH] / "auth.json").read_bytes(),
+                b'{"synthetic":"opaque"}',
+            )
+            with self.assertRaisesRegex(restore.HostRestoreError, "already exists"):
+                restore.preflight(snapshot, include_opencode=True)
+
+    def test_native_export_validation_and_conditional_destination(self):
+        stored = [
+            {
+                "id": "cred_synthetic",
+                "integrationID": "provider.example",
+                "label": "Synthetic",
+                "active": True,
+                "value": {"type": "key", "key": "opaque-synthetic"},
+            }
+        ]
+        canonical = native_auth.validate_native_export(json.dumps(stored).encode())
+        self.assertEqual(json.loads(canonical), stored)
+        with self.assertRaises(native_auth.NativeAuthError):
+            native_auth.validate_native_export(json.dumps(stored * 2).encode())
+        data = self.target / "data"
+        native_auth.check_native_destination(data)
+        self.assertFalse(data.exists())
+        self.write(data / "opencode/auth.json", b"{}")
+        native_auth.check_native_destination(data)
+        self.write(data / "opencode/opencode.db", b"untouched store")
+        with self.assertRaises(native_auth.NativeAuthError):
+            native_auth.check_native_destination(data)
+        self.assertEqual(
+            (data / "opencode/opencode.db").read_bytes(), b"untouched store"
+        )
+
+    def test_native_export_reader_refuses_a_replacement_after_dashboard_review(self):
+        source = self.root / "export.json"
+        self.write(source, b"[]")
+        info = source.stat()
+        reviewed = [
+            info.st_dev,
+            info.st_ino,
+            info.st_size,
+            info.st_mtime_ns,
+            info.st_ctime_ns,
+        ]
+        self.assertEqual(
+            native_auth.read_native_export(source, reviewed_identity=reviewed), b"[]"
+        )
+        source.rename(self.root / "earlier-export.json")
+        self.write(source, b"[]")
+        with (
+            patch.object(native_auth, "_read_export_stream") as read,
+            self.assertRaises(native_auth.NativeAuthError),
+        ):
+            native_auth.read_native_export(source, reviewed_identity=reviewed)
+        read.assert_not_called()
+
+    @unittest.skipUnless(
+        shutil.which("age") and shutil.which("age-keygen"), "age unavailable"
+    )
+    def test_dashboard_host_only_archive_inspects_and_waits_for_authenticated_review(
+        self,
+    ):
+        key = self.root / "identity"
+        self.write(key, crypto.small(["age-keygen"]))
+        recipient = crypto.small(["age-keygen", "-y", str(key)]).decode().strip()
+        archive = self.root / "dashboard-host.ocbox"
+        config = b'{"value":"synthetic-private-host-marker"}\n'
+        plugin = b"// synthetic native plugin"
+        interaction = Mock()
+        with (
+            self.profile(self.source),
+            patch.object(box, "check_backend") as backend,
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            roots = payload.destinations()
+            self.write(roots[payload.OC_BOX_CONFIG] / "config.json", config)
+            self.write(roots[payload.OPENCODE_CONFIG] / "plugins/fixture.js", plugin)
+            create = backups.parser_for("backup").parse_args(
+                [
+                    "--host",
+                    "--output",
+                    str(archive),
+                    "--recipient",
+                    recipient,
+                ]
+            )
+            create._reviewed_paths = {
+                "backup_parent": tui_operations.directory_identity(archive.parent)
+            }
+            backups.make_backup(box, create, interaction=interaction)
+            interaction.dispatched.assert_called_once_with()
+            interaction.reset_mock()
+            args = backups.parser_for("restore").parse_args(
+                [
+                    str(archive),
+                    "--host",
+                    "--include-opencode",
+                    "--identity",
+                    str(key),
+                ]
+            )
+            args._reviewed_paths = {
+                "backup_parent": tui_operations.directory_identity(archive.parent),
+                "backup_file": tui_operations.file_identity(archive),
+            }
+            with self.profile(self.target):
+                backups.inspect_backup(box, args, interaction=interaction)
+                preview = interaction.inspection.call_args.args[0]
+                self.assertEqual(
+                    tui_operation_io.metadata(preview),
+                    {
+                        "format": "host",
+                        "kind": "host",
+                        "host_component": True,
+                        "native_auth_export": False,
+                    },
+                )
+                self.assertFalse(self.target.exists())
+                interaction.reset_mock()
+                interaction.review.return_value = False
+                with self.assertRaises(KeyboardInterrupt):
+                    backups.restore_backup(box, args, interaction=interaction)
+                metadata = interaction.review.call_args.args[0]
+                self.assertTrue(tui_operation_io.metadata(metadata)["restore_opencode"])
+                self.assertEqual(metadata["host_files"], 2)
+                self.assertNotIn("synthetic-private-host-marker", json.dumps(metadata))
+                interaction.dispatched.assert_not_called()
+                self.assertFalse(self.target.exists())
+                interaction.reset_mock()
+                interaction.review.return_value = True
+                backups.restore_backup(box, args, interaction=interaction)
+                interaction.review.assert_called_once()
+                interaction.dispatched.assert_called_once()
+                result = tui_operation_io.metadata(
+                    interaction.inspection.call_args.args[0]
+                )
+                self.assertEqual(
+                    (result["status"], result["host_file_links"]), ("restored", 2)
+                )
+                roots = payload.destinations()
+                self.assertEqual(
+                    (roots[payload.OC_BOX_CONFIG] / "config.json").read_bytes(), config
+                )
+                self.assertEqual(
+                    (
+                        roots[payload.OPENCODE_CONFIG] / "plugins/fixture.js"
+                    ).read_bytes(),
+                    plugin,
+                )
+            backend.assert_not_called()
+
+            request = (
+                tui_operations.OperationController(box)
+                .prepare("workspace-inspect", backup=archive, identities=[key])
+                .request
+            )
+            actual_cli = backups.cli
+
+            def replace_after_child_validation(*args, **kwargs):
+                original = self.root / "original.ocbox"
+                archive.rename(original)
+                self.write(archive, original.read_bytes())
+                return actual_cli(*args, **kwargs)
+
+            with (
+                patch.object(
+                    backups, "cli", side_effect=replace_after_child_validation
+                ),
+                patch.object(backups.os, "geteuid", return_value=1000),
+                self.assertRaisesRegex(
+                    crypto.BackupError, "Reviewed backup file changed"
+                ),
+            ):
+                tui_operations.execute(box, request, interaction=Mock())
+
+    @unittest.skipUnless(
+        shutil.which("age") and shutil.which("age-keygen"), "age unavailable"
+    )
+    def test_dashboard_host_backup_output_replacement_during_key_prompt(self):
+        key = self.root / "identity"
+        self.write(key, crypto.small(["age-keygen"]))
+        recipient = crypto.small(["age-keygen", "-y", str(key)]).decode().strip()
+        parent = self.root / "output"
+        parent.mkdir()
+        archive = parent / "host.ocbox"
+        args = backups.parser_for("backup").parse_args(
+            ["--host", "--output", str(archive), "--recipient", recipient]
+        )
+        args._reviewed_paths = {
+            "backup_parent": tui_operations.directory_identity(parent)
+        }
+        generate = crypto.generate_key
+        interaction = Mock()
+
+        def move_after_key(*args, **kwargs):
+            result = generate(*args, **kwargs)
+            parent.rename(self.root / "earlier-output")
+            parent.mkdir()
+            return result
+
+        with (
+            self.profile(self.source),
+            patch.object(crypto, "generate_key", side_effect=move_after_key),
+            self.assertRaisesRegex(
+                crypto.BackupError, "Reviewed backup directory changed"
+            ),
+        ):
+            backups.make_backup(box, args, interaction=interaction)
+        interaction.dispatched.assert_not_called()
+        self.assertEqual(list(parent.iterdir()), [])
+        self.assertEqual(list((self.root / "earlier-output").iterdir()), [])
+
+    def test_auth_restore_uses_the_fresh_store_contract_not_a_version_allowlist(self):
+        rows = [
+            {
+                "id": "cred_synthetic",
+                "integrationID": "provider.synthetic",
+                "label": "Synthetic",
+                "active": True,
+                "value": {"type": "key", "key": "opaque-export-sentinel"},
+            }
+        ]
+        canonical = native_auth.validate_native_export(json.dumps(rows).encode())
+        cases = (
+            (b"opencode v2.8.9\n", None, None, "success", 1, 2),
+            (b"v2.0.0\n", "2.0.0", None, "success", 1, 2),
+            (b"opencode v2.8.9\n", "2.8.8", None, "native-version", 0, 0),
+            (b"opencode v2.8.9-rc.1\n", None, None, "native-version", 0, 0),
+            (b"opencode v3.0.0\n", None, None, "native-version", 0, 0),
+            (b"opencode v2.8.9\n", None, "preexisting", "native-operation", 0, 0),
+            (b"opencode v2.8.9\n", None, "before", "native-operation", 0, 1),
+            (b"opencode v2.8.9\n", None, "trigger", "native-operation", 0, 1),
+            (b"opencode v2.8.9\n", None, "after", "native-operation", 1, 1),
+            (b"opencode v2.8.9\n", None, "drift", "native-operation", 1, 1),
+            (b"opencode v2.8.9\n", None, "missing", "native-operation", 1, 1),
+            (b"opencode v2.8.9\n", None, "roundtrip", "native-operation", 1, 2),
+            (b"opencode v2.8.9\n", None, "verification-work", "native-operation", 1, 2),
+        )
+        for index, (
+            reported,
+            expected,
+            break_at,
+            outcome,
+            imports,
+            exports,
+        ) in enumerate(cases):
+            with self.subTest(reported=reported, expected=expected, break_at=break_at):
+                stage = self.root / str(index)
+                db = stage / "data/opencode/opencode.db"
+                db.parent.mkdir(parents=True)
+                if break_at == "preexisting":
+                    self.write(db, b"unexpected existing scratch file")
+                received, exported = [], []
+
+                def call(
+                    *args,
+                    payload=None,
+                    reported=reported,
+                    db=db,
+                    received=received,
+                    exported=exported,
+                    break_at=break_at,
+                    **_,
+                ):
+                    if args == ("--version",):
+                        return reported
+                    if args == ("debug", "paths", "db"):
+                        return os.fsencode(db) + b"\n"
+                    if args == ("auth", "export", "--standalone"):
+                        exported.append(True)
+                        if len(exported) == 1:
+                            with contextlib.closing(sqlite3.connect(db)) as sql:
+                                sql.execute("CREATE TABLE credential (id TEXT)")
+                                sql.execute("CREATE TABLE future_work (id TEXT)")
+                                if break_at == "before":
+                                    sql.execute(
+                                        "INSERT INTO future_work VALUES ('fixture')"
+                                    )
+                                if break_at == "trigger":
+                                    sql.execute(
+                                        "CREATE TRIGGER unexpected AFTER INSERT ON credential "
+                                        "BEGIN INSERT INTO future_work VALUES ('fixture'); END"
+                                    )
+                                sql.commit()
+                            db.chmod(0o600)
+                            return b"[]"
+                        if break_at == "verification-work":
+                            with contextlib.closing(sqlite3.connect(db)) as sql:
+                                sql.execute(
+                                    "INSERT INTO future_work VALUES ('fixture')"
+                                )
+                                sql.commit()
+                        return b"[]" if break_at == "roundtrip" else canonical
+                    self.assertEqual(args, ("auth", "import", "--standalone"))
+                    self.assertEqual(payload, canonical)
+                    received.append(True)
+                    with contextlib.closing(sqlite3.connect(db)) as sql:
+                        if break_at != "missing":
+                            sql.execute(
+                                "INSERT INTO credential VALUES ('cred_synthetic')"
+                            )
+                        if break_at == "after":
+                            sql.execute("INSERT INTO future_work VALUES ('fixture')")
+                        if break_at == "drift":
+                            sql.execute("CREATE TABLE unexpected_empty (id TEXT)")
+                        sql.commit()
+                    return b""
+
+                with (
+                    patch.object(native_auth, "_Native", return_value=Mock(call=call)),
+                    patch.object(native_auth, "_environment", return_value={}),
+                ):
+                    if outcome == "success":
+                        version, database = native_auth._stage_database(
+                            stage, "/native", rows, canonical, expected
+                        )
+                        self.assertTrue(version.startswith("2."))
+                        self.assertEqual(database, db.read_bytes())
+                    else:
+                        with self.assertRaises(native_auth.NativeAuthError) as error:
+                            native_auth._stage_database(
+                                stage, "/native", rows, canonical, expected
+                            )
+                        self.assertEqual(error.exception.reason, outcome)
+                self.assertEqual(len(received), imports)
+                self.assertEqual(len(exported), exports)
+
+    def test_native_database_publication_cannot_move_to_a_replaced_parent(self):
+        with self.profile(self.target):
+            root = payload.destinations()[payload.OPENCODE_AUTH]
+            root.mkdir(parents=True, mode=0o700)
+            plan = restore.preflight({}, include_opencode=True, native_database=True)
+            root.rename(root.with_name("previous"))
+            root.mkdir(mode=0o700)
+            with self.assertRaises(restore.HostRestoreError):
+                restore.apply(
+                    plan,
+                    include_opencode=True,
+                    native_database=b"SQLite format 3\0synthetic",
+                )
+            self.assertEqual(list(root.iterdir()), [])
+
+    def test_native_preparation_failure_precedes_workspace_and_host_activation(self):
+        manifest = {"kind": "full", "components": {"host.age": {}, "host-auth.age": {}}}
+        args = backups.parser_for("restore").parse_args(
+            [
+                "fixture.ocbox",
+                "--host",
+                "--include-opencode",
+                "--project",
+                str(self.target / "workspace"),
+            ]
+        )
+        with (
+            self.profile(self.target),
+            patch.object(box, "check_backend"),
+            patch.object(backups, "_workspace_destination", return_value=args.project),
+            patch.object(
+                crypto,
+                "opened",
+                return_value=contextlib.nullcontext(
+                    (manifest, self.root, b"synthetic")
+                ),
+            ),
+            patch.object(
+                crypto, "decrypt_bytes", side_effect=[payload.encode({}), b"[]"]
+            ),
+            patch.object(
+                backups,
+                "_prepare_host_restore",
+                return_value=(object(), "/native", self.target),
+            ),
+            patch.object(
+                native_auth,
+                "prepare_native_export",
+                side_effect=crypto.BackupError("synthetic native refusal"),
+            ),
+            patch.object(backups, "_restore_workspace") as workspace,
+            patch.object(backups, "_apply_host_restore") as host,
+        ):
+            with self.assertRaisesRegex(crypto.BackupError, "synthetic native refusal"):
+                backups.restore_backup(box, args)
+            workspace.assert_not_called()
+            host.assert_not_called()
+        self.assertFalse(self.target.exists())
+
+    @unittest.skipUnless(
+        shutil.which("age") and shutil.which("age-keygen"), "age unavailable"
+    )
+    def test_native_export_is_a_separately_encrypted_opt_in_component(self):
+        key = self.root / "identity"
+        self.write(key, crypto.small(["age-keygen"]))
+        recipient = crypto.small(["age-keygen", "-y", str(key)]).decode().strip()
+        source = self.root / "native-export.json"
+        private_export = [
+            {
+                "id": "cred_synthetic",
+                "integrationID": "provider.synthetic",
+                "label": "Synthetic",
+                "active": True,
+                "value": {"type": "key", "key": "opaque-export-sentinel"},
+            }
+        ]
+        self.write(source, json.dumps(private_export).encode())
+        archive = self.root / "host-with-auth.ocbox"
+        with (
+            self.profile(self.source),
+            contextlib.redirect_stdout(io.StringIO()) as output,
+        ):
+            args = backups.parser_for("backup").parse_args(
+                [
+                    "--host",
+                    "--opencode-auth-export",
+                    str(source),
+                    "--recipient",
+                    recipient,
+                    "--output",
+                    str(archive),
+                ]
+            )
+            backups.make_backup(box, args)
+            with crypto.opened(archive, [key]) as (manifest, staging, private):
+                self.assertEqual(
+                    set(manifest["components"]), {"host.age", "host-auth.age"}
+                )
+                self.assertEqual(
+                    json.loads(
+                        crypto.decrypt_bytes(staging / "host-auth.age", private)
+                    ),
+                    private_export,
+                )
+            args = backups.parser_for("restore").parse_args(
+                [
+                    str(archive),
+                    "--host",
+                    "--identity",
+                    str(key),
+                ]
+            )
+            with (
+                self.profile(self.target),
+                patch.object(
+                    backups,
+                    "host_auth",
+                    side_effect=AssertionError("native auth access"),
+                ),
+            ):
+                backups.restore_backup(box, args)
+            self.assertFalse(self.target.exists())
+            self.assertNotIn("opaque-export-sentinel", output.getvalue())
+        self.assertNotIn(b"opaque-export-sentinel", archive.read_bytes())
+
+    @unittest.skipUnless(
+        shutil.which("age") and shutil.which("age-keygen"), "age unavailable"
+    )
+    def test_real_host_archive_is_encrypted_and_restore_needs_no_workspace(self):
+        key = self.root / "identity"
+        self.write(key, crypto.small(["age-keygen"]))
+        recipient = crypto.small(["age-keygen", "-y", str(key)]).decode().strip()
+        archive = self.root / "host.ocbox"
+        config = (
+            b'{  "pass_env": ["SYNTHETIC_KEY"], "notes": "host-private-sentinel" }\n'
+        )
+        envelope = {
+            "format": vault.FORMAT,
+            "version": vault.VERSION,
+            "kdf": {**vault.KDF, "salt": vault.encode(b"s" * 16)},
+            "cipher": {"name": "AES-256-GCM", "nonce": vault.encode(b"n" * 12)},
+            "ciphertext": vault.encode(b"opaque encrypted vault bytes"),
+        }
+        vault_bytes = json.dumps(envelope, indent=3).encode()
+        with (
+            self.profile(self.source),
+            patch.object(box, "find_workspace") as workspace,
+            patch.object(box, "check_backend") as backend,
+            patch.object(vault, "unlock", side_effect=AssertionError("vault unlock")),
+            contextlib.redirect_stdout(io.StringIO()) as output,
+        ):
+            roots = payload.destinations()
+            self.write(roots[payload.OC_BOX_CONFIG] / "config.json", config)
+            self.write(roots[payload.VAULT] / "vault.json", vault_bytes)
+            self.write(roots[payload.OPENCODE_CONFIG] / "cli.json", b"{}\n")
+            args = backups.parser_for("backup").parse_args(
+                ["--host", "--output", str(archive), "--recipient", recipient]
+            )
+            backups.make_backup(box, args)
+            with crypto.opened(archive, [key]) as (manifest, _, _):
+                self.assertEqual(manifest["kind"], "host")
+                self.assertEqual(set(manifest["components"]), {"host.age"})
+            with tarfile.open(archive) as outer:
+                self.assertEqual(
+                    set(outer.getnames()), {"key.age", "manifest.age", "host.age"}
+                )
+            self.assertNotIn(b"host-private-sentinel", archive.read_bytes())
+            args = backups.parser_for("restore").parse_args(
+                [str(archive), "--host", "--identity", str(key)]
+            )
+            with self.profile(self.target):
+                backups.restore_backup(box, args)
+                roots = payload.destinations()
+                restored = roots[payload.OC_BOX_CONFIG] / "config.json"
+                self.assertEqual(restored.read_bytes(), config)
+                self.assertEqual(restored.stat().st_mode & 0o777, 0o600)
+                self.assertEqual(
+                    (roots[payload.VAULT] / "vault.json").read_bytes(), vault_bytes
+                )
+                self.assertFalse(roots[payload.OPENCODE_CONFIG].exists())
+                with self.assertRaises(restore.HostRestoreError):
+                    backups.restore_backup(box, args)
+            workspace.assert_not_called()
+            backend.assert_not_called()
+            self.assertNotIn("host-private-sentinel", output.getvalue())

@@ -52,26 +52,31 @@ def file_handle(fd):
     return None
 
 
+def snapshot_fd(fd):
+    """Read directory identity from an already pinned fd without reopening a path."""
+    stat = os.fstat(fd)
+    identity = [stat.st_dev, stat.st_ino]
+    handle = file_handle(fd)
+    if handle is None:
+        return identity, None
+    try:
+        fsid = os.fstatvfs(fd).f_fsid
+    except (AttributeError, OSError):
+        return identity, None
+    if not fsid:
+        return identity, None
+    return identity, {
+        "method": "linux-file-handle-v1",
+        "fsid": format(fsid, "x"),
+        "handle": handle,
+    }
+
+
 def snapshot(project):
     """Read inode, filesystem ID, and handle through the same directory fd."""
     fd = os.open(project, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW)
     try:
-        stat = os.fstat(fd)
-        identity = [stat.st_dev, stat.st_ino]
-        handle = file_handle(fd)
-        if handle is None:
-            return identity, None
-        try:
-            fsid = os.fstatvfs(fd).f_fsid
-        except (AttributeError, OSError):
-            return identity, None
-        if not fsid:
-            return identity, None
-        return identity, {
-            "method": "linux-file-handle-v1",
-            "fsid": format(fsid, "x"),
-            "handle": handle,
-        }
+        return snapshot_fd(fd)
     finally:
         os.close(fd)
 

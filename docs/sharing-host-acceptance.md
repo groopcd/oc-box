@@ -1,20 +1,9 @@
 # External host-sharing acceptance harness
 
-> **Development-only source scope.** Stable `master` does not contain this sharing
-> runtime or its harness. Use a
-> [`devel` harness checkout](https://github.com/groopcd/oc-box/tree/devel) containing
-> [`tools/test_sharing_podman.py`](https://github.com/groopcd/oc-box/blob/devel/tools/test_sharing_podman.py)
-> for current preparation; historical diagnostics retain the exact pinned
-> checkouts below. Commands and native fixtures are not instructions for stable
-> `master`. This documentation copy authorizes neither a runtime merge nor another
-> host execution or publication.
-
 > **Maintainer harness guide and source-scoped execution history.** For ordinary
 > sharing commands, use [host-file workflows](guides/host-files.md). Reports below
 > retain their original identities and outcomes; they are not automatic acceptance
-> of current branch HEAD. See
-> [development Testing](https://github.com/groopcd/oc-box/blob/devel/docs/testing.md)
-> for the evidence index.
+> of current branch HEAD. See [Testing](testing.md) for the evidence index.
 
 The harness was developed on a **separate branch** and is now included in the
 1.7 integration candidate. Its execution checkout and the tested runtime still
@@ -120,7 +109,7 @@ existing untracked evidence by using a fresh checkout, never deleting it to pass
 a cleanliness gate. Do not pull, edit, switch or replace binaries during a run.
 The work/temp parents must be outside both checkouts and all retained fixtures.
 
-From the `devel` harness repository root, on the host, not stable `master`:
+From the harness repository root, on the host:
 
 ```bash
 uv run --isolated --no-project --python /usr/bin/python3 --with cryptography \
@@ -190,8 +179,7 @@ report is inspected; source files and original reports are never disposable.
 
 ## Local preparation only
 
-From the `devel` harness checkout root, offline tests and real native helper
-rehearsals are:
+From this harness checkout, offline tests and real native helper rehearsals are:
 
 ```bash
 uv run --no-project --with-editable . --with cryptography python -B -m unittest discover -s tests -p 'test_sharing*py' -v

@@ -13,6 +13,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import textwrap
 
 if __package__:
     from . import private_memory
@@ -194,7 +195,10 @@ def host_distro(path=Path("/etc/os-release")):
 
 
 def package_names(distro, keys):
-    mapping = {**COMMON, **PACKAGES[distro]}
+    mapping = {
+        **COMMON,
+        **PACKAGES[distro],
+    }
     return sorted({mapping[key] for key in keys if key in mapping})
 
 
@@ -366,6 +370,7 @@ def require(feature):
 
 def report(selected=None):
     distro = host_distro()
+    in_container = os.environ.get("OC_BOX_CONTAINER") == "1"
     cache = {}
     features = []
     for name in selected or FEATURES:
@@ -377,6 +382,9 @@ def report(selected=None):
             available, detail = cache[key]
             results.append({"id": key, "available": available, "detail": detail})
         missing = [item["id"] for item in results if not item["available"]]
+        guidance = extra_guidance(missing)
+        packages = package_names(distro, missing) if distro else []
+        commands = install_commands(distro, missing)
         features.append(
             {
                 "id": name,
@@ -384,16 +392,14 @@ def report(selected=None):
                 "available": not missing,
                 "dependencies": results,
                 "missing": missing,
-                "packages": package_names(distro, missing) if distro else [],
-                "install_commands": install_commands(distro, missing),
-                "guidance": extra_guidance(missing),
+                "packages": packages,
+                "install_commands": commands,
+                "guidance": guidance,
             }
         )
     return {
         "schema_version": 1,
-        "scope": "current-container"
-        if os.environ.get("OC_BOX_CONTAINER") == "1"
-        else "host",
+        "scope": "current-container" if in_container else "host",
         "distro": distro,
         "features": features,
         "notes": [
@@ -410,24 +416,95 @@ def parser():
     result = argparse.ArgumentParser(
         prog="oc-box doctor",
         description="Read-only dependency report with feature-specific OS installation guidance.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=textwrap.fill(
+            "Features: " + ", ".join(FEATURES) + ".", width=78, break_on_hyphens=False
+        ),
     )
-    result.add_argument(
+    output = result.add_mutually_exclusive_group()
+    output.add_argument(
         "--json", action="store_true", help="emit a machine-readable dependency report"
+    )
+    output.add_argument(
+        "--table",
+        action="store_true",
+        help="show feature status and OS packages in tables",
     )
     result.add_argument(
         "--feature",
         action="append",
         choices=tuple(FEATURES),
-        help="check one feature; repeatable; default reports all features",
+        metavar="FEATURE",
+        help="check one feature; repeatable (default: report all, base exit status on launch)",
     )
     return result
+
+
+def _table(data, checked):
+    if __package__:
+        from . import cli_table
+    else:
+        import cli_table
+
+    rows = []
+    details = []
+    for feature in data["features"]:
+        name = feature["id"]
+        rows.append(
+            (
+                name,
+                "available" if feature["available"] else "unavailable",
+                ", ".join(feature["missing"]) or "-",
+                ", ".join(feature["packages"])
+                or (
+                    "unknown" if feature["missing"] and data["distro"] is None else "-"
+                ),
+            )
+        )
+        details.extend(
+            (name, "Missing/incompatible", item["detail"])
+            for item in feature["dependencies"]
+            if not item["available"]
+        )
+        details.extend(
+            (name, "Install on this OS", command)
+            for command in feature["install_commands"]
+        )
+        details.extend((name, "Guidance", line) for line in feature["guidance"])
+        if feature["missing"] and data["distro"] is None:
+            details.append(
+                (
+                    name,
+                    "Guidance",
+                    "Use the OS package manager for the listed providers.",
+                )
+            )
+    sections = [
+        cli_table.fields(
+            {
+                "Scope": data["scope"],
+                "Distro": data["distro"] or "unrecognized distro",
+                "Exit status checks": ", ".join(checked),
+            }
+        ),
+        cli_table.render(
+            ("FEATURE", "STATUS", "MISSING/INCOMPATIBLE", "OS PACKAGES"), rows
+        ),
+    ]
+    if details:
+        sections.append(cli_table.render(("FEATURE", "KIND", "DETAILS"), details))
+    sections.append(cli_table.render(("NOTES",), [(line,) for line in data["notes"]]))
+    return "\n\n".join(sections)
 
 
 def cli(argv):
     args = parser().parse_args(argv)
     data = report(args.feature)
+    checked = args.feature or ["launch"]
     if args.json:
         print(json.dumps(data, indent=2))
+    elif args.table:
+        print(_table(data, checked))
     else:
         print(
             f"Dependencies on {data['scope']} OS: {data['distro'] or 'unrecognized distro'}"
@@ -451,7 +528,6 @@ def cli(argv):
                     "  Unrecognized distro; use its package manager for the listed providers."
                 )
         print("\n" + "\n".join(data["notes"]))
-    checked = args.feature or ["launch"]
     return int(
         any(not item["available"] for item in data["features"] if item["id"] in checked)
     )

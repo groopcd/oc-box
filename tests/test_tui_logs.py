@@ -1,0 +1,621 @@
+import json
+import subprocess
+import sys
+import tempfile
+import time
+import unittest
+from dataclasses import FrozenInstanceError
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
+
+from oc_box import activity_log, log_config
+from oc_box import tui_logs as logs
+
+
+class LogBufferTests(unittest.TestCase):
+    def entry(
+        self,
+        message,
+        *,
+        timestamp="2026-11-10T12:00:00Z",
+        source="oc-box",
+        level="info",
+    ):
+        return logs.LogEntry(timestamp, source, level, message)
+
+    def test_case_insensitive_literal_search_covers_all_fields_and_source_filter(self):
+        buffer = logs.LogBuffer()
+        first = self.entry("Start [done].*")
+        second = self.entry("other", source="podman", level="warning")
+        buffer.append(first)
+        buffer.append(second)
+        for query in ("sTaRt", "[done].*", "OC-BOX", "2026-11-10", "INFO"):
+            with self.subTest(query=query):
+                self.assertIn(first, buffer.search(query))
+        self.assertEqual(buffer.search("WARNING"), [second])
+        self.assertEqual(buffer.search("", source="podman"), [second])
+        self.assertEqual(buffer.search("Start", source="podman"), [])
+        self.assertEqual(buffer.search("[missing]"), [])
+        self.assertEqual(buffer.search(None), [])
+
+    def test_raw_copy_checks_utf8_and_delimiters_before_collecting_the_rest(self):
+        first = logs.LogEntry("", "podman", "", "", "é")
+        second = logs.LogEntry("", "podman", "", "", "λ")
+        self.assertEqual(logs.raw_copy_text([first, second], 5), "é\nλ")
+
+        def overflow():
+            yield first
+            yield second
+            self.fail("Copy inspected more lines after exceeding the byte cap")
+
+        self.assertIsNone(logs.raw_copy_text(overflow(), 4))
+
+    def test_following_does_not_change_or_narrow_retained_search_data(self):
+        buffer = logs.LogBuffer(max_entries=3)
+        buffer.replace(
+            "podman",
+            [
+                self.entry("first", source="podman"),
+                self.entry("match", source="podman"),
+            ],
+        )
+        self.assertEqual([entry.message for entry in buffer.search("match")], ["match"])
+        buffer.append(self.entry("new unrelated line", source="podman"))
+        self.assertEqual(
+            [entry.message for entry in buffer.search("match")],
+            ["match"],
+        )
+        self.assertEqual(
+            [entry.message for entry in buffer.search("")],
+            ["first", "match", "new unrelated line"],
+        )
+        buffer.append(self.entry("fourth", source="podman"))
+        self.assertEqual(
+            [entry.message for entry in buffer.search()],
+            ["match", "new unrelated line", "fourth"],
+        )
+
+    def test_replace_does_not_duplicate_snapshots_or_erase_other_sources(self):
+        buffer = logs.LogBuffer(max_entries=4)
+        own = self.entry("local")
+        buffer.append(own)
+        buffer.replace("podman", [self.entry("old", source="ignored")])
+        replacement = [
+            self.entry("new one", source="ignored"),
+            self.entry("new two", source="ignored"),
+        ]
+        buffer.replace("podman", replacement)
+        buffer.replace("podman", replacement)
+        self.assertEqual(
+            [entry.message for entry in buffer.search()],
+            ["local", "new one", "new two"],
+        )
+        self.assertEqual(
+            [entry.source for entry in buffer.search(source="podman")],
+            ["podman", "podman"],
+        )
+        buffer.replace("podman", [])
+        self.assertEqual(buffer.search(), [own])
+
+    def test_global_retention_bound_generator_tail_and_source_count_bound(self):
+        buffer = logs.LogBuffer(max_entries=3)
+        buffer.replace("podman", (self.entry(str(index)) for index in range(100)))
+        self.assertEqual(
+            [entry.message for entry in buffer.search()], ["97", "98", "99"]
+        )
+        buffer.append(self.entry("latest", source="oc-box"))
+        self.assertEqual(
+            [entry.message for entry in buffer.search()], ["98", "99", "latest"]
+        )
+        with patch.object(logs, "_MAX_SOURCES", 2):
+            buffer.append(self.entry("third source", source="third"))
+        self.assertEqual(
+            [entry.message for entry in buffer.search()], ["latest", "third source"]
+        )
+        self.assertLessEqual(len(buffer._sources), 2)
+
+    def test_refresh_refills_evicted_rows_without_oscillating_under_pressure(self):
+        buffer = logs.LogBuffer(max_entries=3)
+        private = [self.entry("private first"), self.entry("private last")]
+        podman = [self.entry("podman first"), self.entry("podman last")]
+        self.assertTrue(buffer.refresh("oc-box", private))
+        buffer.replace("old source", [self.entry(str(i)) for i in range(3)])
+        self.assertFalse(buffer.search(source="oc-box"))
+        self.assertTrue(buffer.refresh("oc-box", private))
+        self.assertEqual(buffer.search(source="oc-box"), private)
+        self.assertTrue(buffer.refresh("podman", podman, preserve=("oc-box",)))
+        self.assertEqual(
+            [e.message for e in buffer.search(source="podman")], ["podman last"]
+        )
+        for _ in range(2):
+            self.assertFalse(buffer.refresh("oc-box", private))
+            self.assertFalse(buffer.refresh("podman", podman, preserve=("oc-box",)))
+            self.assertEqual(len(buffer.search()), 3)
+        self.assertTrue(buffer.refresh("oc-box", []))
+        self.assertTrue(buffer.refresh("podman", podman, preserve=("oc-box",)))
+        self.assertEqual(
+            [e.message for e in buffer.search(source="podman")],
+            ["podman first", "podman last"],
+        )
+
+    def test_timestamp_order_is_stable_and_returns_independent_list(self):
+        buffer = logs.LogBuffer()
+        late = self.entry("late", timestamp="2026-11-10T12:01:00Z")
+        early = self.entry("early", timestamp="2026-11-10T12:00:00Z")
+        tied = self.entry("tied", timestamp=early.timestamp, source="podman")
+        for entry in (late, early, tied):
+            buffer.append(entry)
+        result = buffer.search()
+        self.assertEqual(result, [early, tied, late])
+        result.clear()
+        self.assertEqual(buffer.search(), [early, tied, late])
+        with self.assertRaises(FrozenInstanceError):
+            late.message = "changed"
+
+    def test_invalid_buffer_inputs_do_not_replace_existing_tail(self):
+        for value in (0, -1, True, 10001, 1.0, "2000"):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                logs.LogBuffer(value)
+        buffer = logs.LogBuffer()
+        original = self.entry("retained")
+        buffer.append(original)
+        with self.assertRaises(TypeError):
+            buffer.replace("oc-box", [self.entry("new"), "not an entry"])
+        self.assertEqual(buffer.search(), [original])
+        with self.assertRaises(TypeError):
+            buffer.append("not an entry")
+
+    def test_timestamp_order_normalizes_timezones_and_fraction_precision(self):
+        buffer = logs.LogBuffer()
+        late = self.entry("late", timestamp="2026-11-10T12:00:00.123000001Z")
+        early = self.entry("early", timestamp="2026-11-10T13:00:00.123+01:00")
+        equivalent = self.entry(
+            "equivalent", timestamp="2026-11-10T12:00:00.123000000Z"
+        )
+        for entry in (late, early, equivalent):
+            buffer.append(entry)
+        self.assertEqual(buffer.search(), [early, equivalent, late])
+
+    def test_source_order_and_minimum_severity_are_independent_of_table_sort(self):
+        buffer = logs.LogBuffer()
+        newer = self.entry("Zulu", timestamp="2026-11-10T12:01:00Z", level="debug")
+        older = self.entry(
+            "alpha", timestamp="2026-11-10T13:00:00+01:00", level="error"
+        )
+        unknown = self.entry("unknown", timestamp="", source="podman", level="")
+        warning = self.entry("Warning", source="podman", level="warning")
+        for entry in (newer, older, unknown, warning):
+            buffer.append(entry)
+        raw = buffer.search(source_order=True)
+        self.assertEqual(raw, [newer, older, unknown, warning])
+        self.assertEqual(
+            logs.sort_entries(raw, "timestamp"), [older, warning, newer, unknown]
+        )
+        self.assertEqual(
+            logs.sort_entries(raw, "level", True), [older, warning, newer, unknown]
+        )
+        self.assertEqual(
+            logs.sort_entries(raw, "message"), [older, unknown, warning, newer]
+        )
+        self.assertEqual(
+            buffer.search(level="info", source_order=True), [older, warning]
+        )
+        self.assertEqual(
+            buffer.search(level="debug", source_order=True), [newer, older, warning]
+        )
+        self.assertEqual(buffer.search("UNKNOWN", source_order=True), [unknown])
+
+    def test_terminal_controls_and_field_sizes_are_sanitized(self):
+        buffer = logs.LogBuffer()
+        buffer.append(
+            logs.LogEntry(
+                "\x1b[31m2026\x1b[0m\r",
+                "oc-box\x00",
+                "info\u202e",
+                "\x1b]0;title\x07\x1b[31mred\x1b[0m\r\b\x00\u202e\x9b32m green\ttext",
+            )
+        )
+        entry = buffer.search()[0]
+        self.assertEqual(
+            (entry.timestamp, entry.source, entry.level), ("2026", "oc-box", "info")
+        )
+        self.assertEqual(entry.message, "red green text")
+        buffer.replace("podman", [self.entry("x" * 10000)])
+        self.assertLessEqual(
+            len(buffer.search(source="podman")[0].message), logs._MAX_MESSAGE_CHARS + 1
+        )
+
+    def test_common_credentials_redacted_before_display_or_search(self):
+        values = [
+            ("Authorization: Bearer synthetic-header-value", "synthetic-header-value"),
+            ('"Authorization": "Basic synthetic-basic-value"', "synthetic-basic-value"),
+            ("Bearer synthetic-bearer-value", "synthetic-bearer-value"),
+            ("PERSONAL_GITHUB_TOKEN=synthetic-token-value", "synthetic-token-value"),
+            ("api_key='synthetic-key-value'", "synthetic-key-value"),
+            ('"apiKey": "synthetic-json-value"', "synthetic-json-value"),
+            ("password=synthetic-password-value", "synthetic-password-value"),
+            (
+                "https://user:synthetic-url-password@example.invalid/",
+                "synthetic-url-password",
+            ),
+            (
+                "https://example.invalid/?access_token=synthetic-query-value&ok=true",
+                "synthetic-query-value",
+            ),
+            ("ghp_SYNTHETIC_GITHUB_TOKEN", "ghp_SYNTHETIC_GITHUB_TOKEN"),
+            ("github_pat_SYNTHETIC_GITHUB_TOKEN", "github_pat_SYNTHETIC_GITHUB_TOKEN"),
+            ("sk-synthetic-openai-token", "sk-synthetic-openai-token"),
+            ("hf_SYNTHETICTOKEN", "hf_SYNTHETICTOKEN"),
+            ("xoxb-synthetic-slack-token", "xoxb-synthetic-slack-token"),
+            ("eyJsynthetic.payload.signature", "eyJsynthetic.payload.signature"),
+        ]
+        buffer = logs.LogBuffer()
+        for message, secret in values:
+            with self.subTest(message=message):
+                buffer.replace("podman", [self.entry(message)])
+                entry = buffer.search()[0]
+                self.assertNotIn(secret, entry.message)
+                self.assertIn("[REDACTED]", entry.message)
+                self.assertEqual(buffer.search(secret), [])
+                buffer.replace("podman", [entry])
+                self.assertEqual(buffer.search()[0], entry)
+        # Arbitrary prose secrets are not detectable. This is intentionally not
+        # a promise of general secret removal.
+        buffer.replace("podman", [self.entry("unrecognizable synthetic prose")])
+        self.assertIn("unrecognizable synthetic prose", buffer.search()[0].message)
+
+
+class ActivityEntriesTests(unittest.TestCase):
+    def test_activity_snapshot_uses_one_policy_to_identify_and_read_records(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            policy_a, policy_b = (
+                log_config._policy({"logs": {"directory": temporary + "/" + name}})
+                for name in ("journal-a", "journal-b")
+            )
+            for policy, event in (
+                (policy_a, "history.wait"),
+                (policy_b, "session.archived"),
+            ):
+                with patch.object(activity_log, "_policy", return_value=policy):
+                    self.assertTrue(activity_log.record_event(event))
+
+            # A second policy load could choose B before an observer sees A
+            # again. Path and records must come from the one policy selected.
+            with patch.object(
+                activity_log, "_policy", side_effect=[policy_a, policy_b, policy_a]
+            ) as load:
+                path, entries = logs.activity_snapshot()
+                load.assert_called_once_with()
+            self.assertEqual(path, policy_a.directory / "activity.jsonl")
+            self.assertEqual([entry.message for entry in entries], ["history.wait"])
+
+    def test_validated_activity_metadata_and_failure_levels(self):
+        with tempfile.TemporaryDirectory(prefix="oc-box-log-render-") as temporary:
+            root = Path(temporary) / "state"
+            self.assertTrue(
+                activity_log.record_event(
+                    "command.started", command="start", workspace="a" * 32, root=root
+                )
+            )
+            self.assertTrue(
+                activity_log.record_event(
+                    "command.failed",
+                    command="start",
+                    outcome="failure",
+                    exit_code=1,
+                    duration_ms=25,
+                    root=root,
+                )
+            )
+            self.assertTrue(
+                activity_log.record_event(
+                    "session.archived", workspace="b" * 32, root=root
+                )
+            )
+            entries = logs.activity_entries(root)
+            self.assertEqual(len(entries), 3)
+            self.assertTrue(all(entry.source == "oc-box" for entry in entries))
+            self.assertEqual(
+                [entry.level for entry in entries], ["info", "error", "info"]
+            )
+            self.assertEqual(
+                entries[1].message,
+                "command.failed command=start outcome=failure exit_code=1 duration_ms=25",
+            )
+            self.assertEqual(logs.activity_entries(root, limit=1), entries[-1:])
+            self.assertEqual(logs.activity_entries(root / "missing"), [])
+
+    def test_structured_history_is_rendered_and_searchable_with_shared_level(self):
+        with tempfile.TemporaryDirectory(prefix="oc-box-log-render-") as temporary:
+            root = Path(temporary) / "state"
+            self.assertTrue(
+                activity_log.record_event(
+                    "history.wait",
+                    command="stop",
+                    outcome="failure",
+                    level="warn",
+                    stage="history-wait",
+                    reason="timeout",
+                    metrics={
+                        "remaining_ms": 0,
+                        "jobs_running": 1,
+                        "foreground_queries": 3,
+                    },
+                    root=root,
+                )
+            )
+            [record] = activity_log.read_events(root)
+            [entry] = logs.activity_entries(root)
+            self.assertEqual(entry.level, "warn")
+            self.assertEqual(
+                entry.message,
+                "history.wait command=stop stage=history-wait outcome=failure "
+                "reason=timeout foreground_queries=3 jobs_running=1 remaining_ms=0",
+            )
+            self.assertEqual(entry.message, activity_log.format_event(record))
+            buffer = logs.LogBuffer()
+            buffer.append(entry)
+            self.assertEqual(json.loads(buffer.search()[0].raw_line()), record)
+            for query in ("WARN", "reason=time", "jobs_running=1"):
+                self.assertEqual(buffer.search(query), [entry])
+
+    def test_mirror_admits_only_safe_activity_fields_and_uses_bounded_default_reader(
+        self,
+    ):
+        record = {"event": "history.wait", "timestamp": "2026-11-10T12:00:00.000Z"}
+        invalid = {**record, "_CMDLINE": "synthetic arbitrary journal metadata"}
+        with patch.object(
+            logs.journal_output, "read_events", return_value=[invalid, record]
+        ) as read:
+            [entry] = logs.journal_entries()
+        read.assert_called_once_with(limit=logs.JOURNAL_LIMIT, level=None)
+        self.assertEqual((entry.source, entry.level), (logs.JOURNAL_SOURCE, "debug"))
+        self.assertEqual(json.loads(entry.raw_line()), record)
+        with (
+            patch.object(
+                logs.journal_output,
+                "read_events",
+                side_effect=logs.journal_output.JournalError("missing-tool"),
+            ),
+            patch.object(logs.activity_log, "read_events") as read_private,
+            self.assertRaises(logs.journal_output.JournalError),
+        ):
+            logs.journal_entries()
+        read_private.assert_not_called()
+
+
+class PodmanEntriesTests(unittest.TestCase):
+    def setUp(self):
+        self.data = {"id": "a" * 32, "container": "synthetic-managed-name"}
+        self.env = {"PATH": "/synthetic/runtime", "HOME": "/synthetic/home"}
+        self.info = {
+            "Id": "b" * 64,
+            "Config": {"Labels": {"io.oc-box.workspace": self.data["id"]}},
+        }
+        self.box = SimpleNamespace(
+            maintenance_host_env=Mock(return_value=self.env),
+            inspect_owned=Mock(return_value=self.info),
+        )
+
+    def test_owned_immutable_id_maintenance_environment_and_timestamp_parsing(self):
+        text = "2026-11-10T12:00:00.123456789Z first\n2026-11-10T12:00:01+00:00 Authorization: Bearer synthetic-secret\nuntimed\n"
+        with patch.object(
+            logs, "_podman_output", return_value=(text, False)
+        ) as capture:
+            entries = logs.podman_entries(self.box, self.data, tail=2)
+        self.box.inspect_owned.assert_called_once_with(self.data, env=self.env)
+        capture.assert_called_once_with(
+            ["logs", "--timestamps", "--tail", "2", "b" * 64], self.env
+        )
+        self.assertEqual(len(entries), 2)
+        self.assertEqual(entries.container_id, self.info["Id"])
+        self.assertEqual(entries[0].timestamp, "2026-11-10T12:00:01+00:00")
+        self.assertEqual(entries[1].timestamp, "")
+        self.assertNotIn("synthetic-secret", str(entries))
+        self.assertTrue(all(entry.source == "podman" for entry in entries))
+        self.assertEqual([entry.level for entry in entries], ["", ""])
+        self.assertEqual(
+            entries[0].raw_line(), "2026-11-10T12:00:01+00:00 Authorization: [REDACTED]"
+        )
+        self.assertEqual(entries[1].raw_line(), "untimed")
+
+    def test_raw_keeps_sanitized_source_spacing_and_omits_incomplete_byte_fragment(
+        self,
+    ):
+        line = "2026-11-10T12:00:00Z    \x1b[31mliteral [red]\x1b[0m  "
+        output = (
+            line + "\n2026-02-31T12:00:00Z invalid date\nincomplete password=sensitive"
+        )
+        with patch.object(logs, "_podman_output", return_value=(output, True)):
+            entries = logs.podman_entries(self.box, self.data)
+        self.assertEqual(
+            [entry.raw_line() for entry in entries],
+            [
+                "2026-11-10T12:00:00Z    literal [red]  ",
+                "2026-02-31T12:00:00Z invalid date",
+                "Podman log output truncated (byte limit).",
+            ],
+        )
+        self.assertEqual(entries[1].timestamp, "")
+
+    def test_lf_frames_keep_control_separated_credentials_in_the_same_record(self):
+        credentials = [
+            "Authorization:\u2028Bearer synthetic-private",
+            "Autho\u2029rization: Bearer synthetic-private",
+            "password\v=\fsynthetic-private",
+            "toke\x85n=synthetic-private",
+            "Bearer\x1b[31msynthetic-private",
+            "password=\x1b]0;title\x07synthetic-private",
+            "pass\u00a0word=synthetic-private",
+            "password=first\rsynthetic-private",
+            "Bear\ter synthetic-private",
+        ]
+        lines = [
+            f"2026-11-10T12:00:{i:02}Z {text}"
+            for i, text in enumerate(
+                ["first safe line", *credentials, "last safe line"]
+            )
+        ]
+        # CRLF is an actual LF record, unlike an embedded CR or C1/Unicode
+        # line separator. Tail limits count producer records, not fragments.
+        with patch.object(
+            logs, "_podman_output", return_value=("\r\n".join(lines) + "\r\n", False)
+        ):
+            entries = logs.podman_entries(self.box, self.data, tail=len(lines))
+        self.assertEqual(len(entries), len(lines))
+        self.assertEqual(entries[0].raw_line(), lines[0])
+        self.assertEqual(entries[-1].raw_line(), lines[-1])
+        self.assertEqual([entry.level for entry in entries], [""] * len(lines))
+        for i, entry in enumerate(entries[1:-1], 1):
+            self.assertEqual(entry.timestamp, f"2026-11-10T12:00:{i:02}Z")
+            self.assertEqual(entry.message, "[REDACTED]")
+            self.assertEqual(entry.raw_line(), entry.timestamp + " [REDACTED]")
+
+    def test_normal_ownership_helper_uses_only_readonly_inspection(self):
+        from oc_box import oc_box as box
+
+        result = subprocess.CompletedProcess([], 0, json.dumps([self.info]), "")
+        with (
+            patch.object(box, "maintenance_host_env", return_value=self.env),
+            patch.object(box, "podman", return_value=result) as podman,
+            patch.object(
+                logs, "_podman_output", return_value=("synthetic line", False)
+            ) as capture,
+        ):
+            entries = logs.podman_entries(box, self.data)
+        podman.assert_called_once_with(
+            "container",
+            "inspect",
+            self.data["container"],
+            capture=True,
+            check=False,
+            env=self.env,
+        )
+        self.assertEqual(capture.call_args.args[0][-1], self.info["Id"])
+        self.assertEqual(entries[0].message, "synthetic line")
+
+    def test_invalid_ids_ownership_and_malformed_inspection_never_fetch_logs(self):
+        cases = [
+            {**self.info, "Id": "container-name"},
+            {**self.info, "Id": "b" * 12},
+            {**self.info, "Id": "b" * 64 + "\n"},
+            {**self.info, "Config": {"Labels": {"io.oc-box.workspace": "c" * 32}}},
+            {**self.info, "Config": {}},
+            {**self.info, "Config": []},
+            [],
+        ]
+        with patch.object(logs, "_podman_output") as capture:
+            for value in cases:
+                with self.subTest(value=value):
+                    self.box.inspect_owned.return_value = value
+                    entries = logs.podman_entries(self.box, self.data)
+                    self.assertEqual(entries[0].message, "Podman logs unavailable.")
+            capture.assert_not_called()
+        self.box.inspect_owned.reset_mock()
+        for data in ({"id": "not-an-id"}, {"id": "a" * 32 + "\n"}, {}, None):
+            self.assertEqual(
+                logs.podman_entries(self.box, data)[0].message,
+                "Podman logs unavailable.",
+            )
+        self.box.inspect_owned.assert_not_called()
+
+    def test_absent_container_and_invalid_tail_have_no_log_or_lifecycle_commands(self):
+        self.box.inspect_owned.return_value = None
+        with patch.object(logs, "_podman_output") as capture:
+            self.assertEqual(logs.podman_entries(self.box, self.data), [])
+            for tail in (0, -1, True, "500"):
+                self.assertEqual(
+                    logs.podman_entries(self.box, self.data, tail=tail), []
+                )
+            capture.assert_not_called()
+        self.assertEqual(self.box.inspect_owned.call_count, 1)
+
+    def test_backend_errors_never_expose_exception_or_error_output(self):
+        private = "synthetic-private-backend-error"
+        self.box.inspect_owned.side_effect = RuntimeError(private)
+        with patch.object(logs, "_podman_output") as capture:
+            self.assertEqual(
+                logs.podman_entries(self.box, self.data), logs._unavailable()
+            )
+            capture.assert_not_called()
+        self.box.inspect_owned.side_effect = None
+        with patch.object(logs, "_podman_output", side_effect=RuntimeError(private)):
+            entries = logs.podman_entries(self.box, self.data)
+        self.assertEqual(entries, logs._unavailable())
+        self.assertNotIn(private, str(entries))
+
+    def test_requested_tail_is_capped_and_byte_truncation_is_explicit(self):
+        with patch.object(
+            logs, "_podman_output", return_value=("line", True)
+        ) as capture:
+            entries = logs.podman_entries(self.box, self.data, tail=1000000)
+        self.assertEqual(capture.call_args.args[0][-2], "10000")
+        self.assertEqual(entries[-1].level, "warning")
+        self.assertEqual(
+            entries[-1].message, "Podman log output truncated (byte limit)."
+        )
+
+
+class PodmanPipeTests(unittest.TestCase):
+    """Use synthetic child processes only, never Podman or real home/log files."""
+
+    def run_script(self, script, *, limit=1024 * 1024, timeout=3):
+        real_popen = subprocess.Popen
+        calls = []
+
+        def synthetic_popen(arguments, **kwargs):
+            calls.append((arguments, kwargs))
+            return real_popen([sys.executable, "-c", script], **kwargs)
+
+        with (
+            patch.object(logs.subprocess, "Popen", side_effect=synthetic_popen),
+            patch.object(logs, "_MAX_OUTPUT_BYTES", limit),
+            patch.object(logs, "_PODMAN_TIMEOUT", timeout),
+        ):
+            result = logs._podman_output(
+                ["logs", "--timestamps", "--tail", "5", "b" * 64], {}
+            )
+        return result, calls
+
+    def test_pipe_only_capture_preserves_stderr_log_content_and_replaces_bad_utf8(self):
+        (output, truncated), calls = self.run_script(
+            "import os; os.write(1, b'first\\n'); os.write(2, b'second\\xff\\n')"
+        )
+        self.assertEqual(output, "first\nsecond\ufffd\n")
+        self.assertFalse(truncated)
+        arguments, options = calls[0]
+        self.assertEqual(arguments[:2], ["podman", "logs"])
+        self.assertEqual(
+            options,
+            {
+                "stdin": subprocess.DEVNULL,
+                "stdout": subprocess.PIPE,
+                "stderr": subprocess.STDOUT,
+                "env": {},
+            },
+        )
+
+    def test_output_is_byte_bounded_even_for_one_unterminated_line(self):
+        (output, truncated), _ = self.run_script(
+            "import os; os.write(1, b'x' * 1000000)", limit=4096
+        )
+        self.assertEqual(len(output), 4096)
+        self.assertTrue(truncated)
+
+    def test_timeout_and_failure_do_not_return_private_partial_output(self):
+        started = time.monotonic()
+        with self.assertRaises(logs._LogUnavailable):
+            self.run_script(
+                "import os, time; os.write(2, b'synthetic-private-error'); time.sleep(20)",
+                timeout=0.1,
+            )
+        self.assertLess(time.monotonic() - started, 3)
+        with self.assertRaises(logs._LogUnavailable):
+            self.run_script(
+                "import os; os.write(2, b'synthetic-private-error'); raise SystemExit(4)"
+            )
+
+
+if __name__ == "__main__":
+    unittest.main()

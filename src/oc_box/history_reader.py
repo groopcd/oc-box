@@ -23,11 +23,19 @@ import tempfile
 import time
 
 CURRENT = contextvars.ContextVar("oc_box_history_reader", default=None)
-# Exact audited native versions only. 2.2.x retains cancelled reload jobs; 2.3.0
-# drains reload jobs but can retain a running shell after producer termination.
-# Both profiles require the same non-executing reader and unchanged durable jobs;
-# neither is a live-readiness exception or a claim of whole-container acceptance.
-SUPPORTED = frozenset(("2.2.6", "2.2.7", "2.3.0"))
+EXPORTS = contextvars.ContextVar("oc_box_history_exports", default=None)
+# Legacy 2.2.6/2.2.7 and the stable 2.3.x storage profile only. Series membership
+# selects guards, never bypasses them: incompatible schemas/recovery forms refuse.
+# The 2.3 profile is ONLY for unregistered serve --stdio, not managed-service
+# restart continuity. Images have no native non-execution canary.
+# Neither profile waives live readiness or establishes whole-container acceptance.
+SNAPSHOT_JOB_KINDS = {
+    "2.2": frozenset(("shell",)),
+    "2.3": frozenset(("shell", "subagent")),
+}
+MAX_JOB_ROWS = 10000
+MAX_JOB_RECOVERY_BYTES = 65536
+MAX_JOB_METADATA_BYTES = 8 * 1024 * 1024
 MAX_CONTROL = 16384
 MAX_PAYLOAD = 131072
 PATH = "/opt/oc-box/runtime/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
@@ -39,6 +47,12 @@ GUARD_CATEGORIES = frozenset(
         "database-invalid",
         "schedule-schema",
         "schedule-present",
+        "job-schema",
+        "job-metadata",
+        "job-kind",
+        "job-limit",
+        "legacy-jobs",
+        "deadline",
         "system-config",
         "unsupported-version",
     )
@@ -61,6 +75,9 @@ CATEGORIES = GUARD_CATEGORIES | frozenset(
         "foreground-active",
         "active-query",
         "reader-source",
+        "history-command",
+        "history-response",
+        "history-cleanup",
     )
 )
 
@@ -88,9 +105,24 @@ def current():
     return CURRENT.get()
 
 
+def snapshot_profile(version):
+    """Select a guarded storage contract, not an assurance of native acceptance.
+
+    Only canonical stable versions qualify; prereleases, build suffixes and
+    unknown minor/major series must not inherit the 2.3 contract.
+    """
+    if not isinstance(version, str):
+        return None
+    if re.fullmatch(r"2\.3\.(?:0|[1-9][0-9]*)", version):
+        return "2.3"
+    if version in ("2.2.6", "2.2.7"):
+        return "2.2"
+    return None
+
+
 def _check_version(output, expected):
     match = re.fullmatch(r"(?:opencode\s+)?v?([12]\.\d+\.\d+)", output.strip())
-    if not match or match[1] != expected or expected not in SUPPORTED:
+    if not match or match[1] != expected or snapshot_profile(expected) is None:
         raise Refusal("unsupported-version")
 
 
@@ -101,14 +133,313 @@ def _budget(remaining, maximum):
     return min(value, maximum)
 
 
-def _check_database(path, *, allow_missing=False, timeout=1):
-    """Inspect scheduler metadata only, without creating or migrating a DB.
+def _table_schema(connection, name, expected, category):
+    """Recognize a complete audited layout, never a view or unknown extension."""
+    if connection.execute(
+        "SELECT type FROM sqlite_master WHERE name = ?", (name,)
+    ).fetchall() != [("table",)]:
+        raise Refusal(category)
+    columns = {
+        row[1]: row for row in connection.execute("PRAGMA table_xinfo('" + name + "')")
+    }
+    if set(columns) != set(expected) or any(
+        columns[key][2].upper() != kind
+        or bool(columns[key][5]) != primary
+        or (required is not None and bool(columns[key][3]) != required)
+        or columns[key][6] != 0
+        for key, (kind, required, primary) in expected.items()
+    ):
+        raise Refusal(category)
 
-    A disabled schedules flag does NOT disable native Schedule.rewake. All rows,
+
+def _check_scheduler(connection, profile):
+    """Refuse before native's flag-independent scheduler/automation rewake."""
+    table = "schedule"
+    if profile == "2.3":
+        layouts = connection.execute(
+            "SELECT name, type FROM sqlite_master WHERE name IN ('schedule', 'automation')"
+        ).fetchall()
+        if len(layouts) != 1 or layouts[0][1] != "table":
+            raise Refusal("schedule-schema")
+        table = layouts[0][0]
+        # 2.3.0's schedule and 2.3.1+'s automation are the two known contracts.
+        # Empty old stores may migrate forward; missing/ambiguous/new shapes
+        # never inherit a pass merely because the native version is 2.3.x.
+        common = {
+            "id": ("TEXT", None, True),
+            "session_id": ("TEXT", False, False),
+            "name": ("TEXT", table == "automation", False),
+            "action": ("TEXT", True, False),
+            "tz": ("TEXT", True, False),
+            "status": ("TEXT", True, False),
+            "next_due_at": ("INTEGER", False, False),
+            "run_count": ("INTEGER", True, False),
+            "failures": ("INTEGER", True, False),
+            "last_message_id": ("TEXT", False, False),
+            "last_outcome": ("TEXT", False, False),
+            "retry_at": ("INTEGER", False, False),
+            "state": ("TEXT", False, False),
+            "time_created": ("INTEGER", True, False),
+            "time_updated": ("INTEGER", True, False),
+        }
+        specific = (
+            {
+                "check": ("TEXT", False, False),
+                "when": ("TEXT", True, False),
+                "ends_at": ("INTEGER", False, False),
+                "remaining_runs": ("INTEGER", False, False),
+                "checks": ("INTEGER", True, False),
+                "last_fired_at": ("INTEGER", False, False),
+            }
+            if table == "schedule"
+            else {
+                "project_id": ("TEXT", True, False),
+                "directory": ("TEXT", True, False),
+                "trigger": ("TEXT", True, False),
+                "expires_at": ("INTEGER", False, False),
+                "last_run_at": ("INTEGER", False, False),
+                "last_output": ("TEXT", False, False),
+                "event_position": ("TEXT", False, False),
+            }
+        )
+        _table_schema(connection, table, {**common, **specific}, "schedule-schema")
+    else:
+        if connection.execute(
+            "SELECT type FROM sqlite_master WHERE name = 'schedule'"
+        ).fetchall() != [("table",)]:
+            raise Refusal("schedule-schema")
+        columns = {
+            row[1]: row for row in connection.execute("PRAGMA table_info('schedule')")
+        }
+        required = ("id", "session_id", "status", "last_message_id")
+        if (
+            any(
+                name not in columns or columns[name][2].upper() != "TEXT"
+                for name in required
+            )
+            or not columns["id"][5]
+        ):
+            raise Refusal("schedule-schema")
+    if (
+        connection.execute('SELECT 1 FROM "' + table + '" LIMIT 1').fetchone()
+        is not None
+    ):
+        raise Refusal("schedule-present")
+    return table
+
+
+def _check_jobs(connection, deadline):
+    """Validate bounded 2.3.x recovery metadata, never outputs or transcripts.
+
+    All known statuses remain historical metadata, not proof of completion. The
+    unregistered native profile must preserve these rows, including execution
+    claims/inbox state; this guard never edits, acknowledges or resumes anything.
+    """
+
+    def budget():
+        if time.monotonic() >= deadline:
+            raise Refusal("deadline")
+
+    budget()
+    _table_schema(
+        connection,
+        "job",
+        {
+            "notification_id": ("TEXT", None, True),
+            "id": ("TEXT", True, False),
+            "session_id": ("TEXT", True, False),
+            "child_session_id": ("TEXT", False, False),
+            "kind": ("TEXT", True, False),
+            "title": ("TEXT", False, False),
+            "status": ("TEXT", True, False),
+            "output": ("TEXT", False, False),
+            "error": ("TEXT", False, False),
+            "recovery": ("TEXT", True, False),
+            "time_created": ("INTEGER", True, False),
+            "time_updated": ("INTEGER", True, False),
+        },
+        "job-schema",
+    )
+    _table_schema(
+        connection,
+        "kv",
+        {
+            "key": ("TEXT", None, True),
+            "value": ("TEXT", True, False),
+            "time_created": ("INTEGER", True, False),
+            "time_updated": ("INTEGER", True, False),
+        },
+        "job-schema",
+    )
+    if connection.execute(
+        "SELECT 1 FROM kv WHERE key LIKE 'job.background/%' LIMIT 1"
+    ).fetchone():
+        raise Refusal("legacy-jobs")
+
+    def identity(value, prefix):
+        return (
+            isinstance(value, str)
+            and len(value) <= 256
+            and re.fullmatch(prefix + r"[A-Za-z0-9_-]+", value) is not None
+        )
+
+    def pairs(items):
+        value = {}
+        for key, item in items:
+            if key in value:
+                raise Refusal("job-metadata")
+            value[key] = item
+        return value
+
+    def outstanding(items):
+        if not isinstance(items, list):
+            raise Refusal("job-metadata")
+        if len(items) > MAX_JOB_ROWS:
+            raise Refusal("job-limit")
+        for item in items:
+            budget()
+            if not isinstance(item, dict):
+                raise Refusal("job-metadata")
+            kind = item.get("kind")
+            if not isinstance(kind, str) or kind not in SNAPSHOT_JOB_KINDS["2.3"]:
+                raise Refusal("job-kind")
+            keys = (
+                {"kind", "sessionID", "shellID", "command"}
+                if kind == "shell"
+                else {"kind", "sessionID", "childSessionID", "agent", "description"}
+            )
+            if (
+                set(item) != keys
+                or any(not isinstance(value, str) for value in item.values())
+                or not identity(item["sessionID"], "ses")
+            ):
+                raise Refusal("job-metadata")
+            if kind == "shell":
+                valid = bool(item["shellID"]) and len(item["shellID"]) <= 256
+            else:
+                valid = (
+                    identity(item["childSessionID"], "ses")
+                    and item["childSessionID"] != item["sessionID"]
+                )
+            if not valid:
+                raise Refusal("job-metadata")
+
+    total = 0
+    # Bound SQL result strings BEFORE passing recovery JSON into Python. Its
+    # command/description are read only to validate their types; never select the
+    # job's title/output/error or any message/part/credential data.
+    identities = ", ".join(
+        "CASE WHEN typeof(" + name + ") = 'text' AND "
+        "length(CAST(" + name + " AS BLOB)) <= 256 THEN " + name + " END"
+        for name in ("notification_id", "id", "session_id", "child_session_id")
+    )
+    rows = connection.execute(
+        "SELECT " + identities + ", child_session_id IS NULL, "
+        "CASE WHEN kind IN ('shell','subagent','image') THEN kind END, "
+        "CASE WHEN status IN ('running','completed','error','cancelled') THEN status END, "
+        "typeof(time_created) = 'integer' AND typeof(time_updated) = 'integer', "
+        "length(CAST(recovery AS BLOB)), "
+        "CASE WHEN typeof(recovery) = 'text' AND "
+        "length(CAST(recovery AS BLOB)) <= ? THEN recovery ELSE NULL END "
+        "FROM job LIMIT ?",
+        (MAX_JOB_RECOVERY_BYTES, MAX_JOB_ROWS + 1),
+    )
+    for count, row in enumerate(rows, 1):
+        budget()
+        if count > MAX_JOB_ROWS:
+            raise Refusal("job-limit")
+        (
+            notice,
+            ident,
+            session,
+            child,
+            child_null,
+            kind,
+            status,
+            times_valid,
+            size,
+            encoded,
+        ) = row
+        if kind not in SNAPSHOT_JOB_KINDS["2.3"]:
+            raise Refusal("job-kind")
+        if (
+            not identity(notice, "msg")
+            or not isinstance(ident, str)
+            or not ident
+            or len(ident) > 256
+            or not identity(session, "ses")
+            or status not in ("running", "completed", "error", "cancelled")
+            or times_valid != 1
+        ):
+            raise Refusal("job-metadata")
+        if not isinstance(encoded, str):
+            raise Refusal(
+                "job-limit"
+                if size and size > MAX_JOB_RECOVERY_BYTES
+                else "job-metadata"
+            )
+        total += size
+        if total > MAX_JOB_METADATA_BYTES:
+            raise Refusal("job-limit")
+        try:
+            recovery = json.loads(encoded, object_pairs_hook=pairs)
+        except (ValueError, RecursionError):
+            raise Refusal("job-metadata") from None
+        keys = (
+            {"kind", "sessionID", "shellID", "command"}
+            if kind == "shell"
+            else {"kind", "parentSessionID", "childSessionID", "agent", "description"}
+        )
+        if (
+            kind == "subagent"
+            and isinstance(recovery, dict)
+            and "outstanding" in recovery
+        ):
+            keys = keys | {"outstanding"}
+        if (
+            not isinstance(recovery, dict)
+            or set(recovery) != keys
+            or any(
+                not isinstance(value, str)
+                for key, value in recovery.items()
+                if key != "outstanding"
+            )
+            or recovery["kind"] != kind
+        ):
+            raise Refusal("job-metadata")
+        if kind == "shell":
+            valid = (
+                child_null == 1
+                and recovery["sessionID"] == session
+                and recovery["shellID"] == ident
+            )
+        else:
+            valid = (
+                identity(child, "ses")
+                and child != session
+                and recovery["parentSessionID"] == session
+                and recovery["childSessionID"] == child == ident
+            )
+        if not valid:
+            raise Refusal("job-metadata")
+        if kind == "subagent" and "outstanding" in recovery:
+            outstanding(recovery["outstanding"])
+    budget()
+
+
+def _check_database(path, *, allow_missing=False, timeout=1, version=None):
+    """Inspect scheduler and explicitly selected job metadata without mutation.
+
+    Disabled schedules/automations flags do NOT disable native startup rewake. All rows,
     including terminal/unknown statuses, therefore refuse service construction.
     Missing schemas are not evidence of an empty scheduler. Never use immutable
     SQLite mode here: it can hide committed schedule rows in an existing WAL.
+    The default remains scheduler-only for the independent quiet-source guard.
     """
+    profile = snapshot_profile(version)
+    if version is not None and profile is None:
+        raise Refusal("unsupported-version")
+    deadline = time.monotonic() + timeout
     path = Path(path)
     try:
         before = path.lstat()
@@ -132,6 +463,11 @@ def _check_database(path, *, allow_missing=False, timeout=1):
             opened = os.fstat(descriptor)
             if (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino):
                 raise Refusal("database-unsafe")
+            if profile == "2.3" and any(
+                getattr(opened, key) != getattr(before, key)
+                for key in ("st_uid", "st_mode", "st_nlink")
+            ):
+                raise Refusal("database-unsafe")
             connection = stack.enter_context(
                 contextlib.closing(
                     sqlite3.connect(
@@ -139,40 +475,41 @@ def _check_database(path, *, allow_missing=False, timeout=1):
                     )
                 )
             )
+            if profile == "2.3":
+                connection.set_progress_handler(
+                    lambda: int(time.monotonic() >= deadline), 1000
+                )
             connection.execute("PRAGMA query_only=ON")
             connection.execute("BEGIN")
-            kind = connection.execute(
-                "SELECT type FROM sqlite_master WHERE name = 'schedule'"
-            ).fetchall()
-            if kind != [("table",)]:
+            scheduler = _check_scheduler(connection, profile)
+            if version == "2.3.0" and scheduler == "automation":
+                # This known older executable cannot consume the newer layout.
+                # Forward migration of an empty schedule store is different from
+                # silently admitting an in-place native downgrade.
                 raise Refusal("schedule-schema")
-            columns = {
-                row[1]: row
-                for row in connection.execute("PRAGMA table_info('schedule')")
-            }
-            required = ("id", "session_id", "status", "last_message_id")
-            if any(
-                name not in columns or columns[name][2].upper() != "TEXT"
-                for name in required
-            ):
-                raise Refusal("schedule-schema")
-            if not columns["id"][5]:
-                raise Refusal("schedule-schema")
-            if (
-                connection.execute('SELECT 1 FROM "schedule" LIMIT 1').fetchone()
-                is not None
-            ):
-                raise Refusal("schedule-present")
+            if profile == "2.3":
+                _check_jobs(connection, deadline)
             after = path.lstat()
+            if profile == "2.3" and any(
+                getattr(after, key) != getattr(before, key)
+                for key in ("st_mode", "st_nlink")
+            ):
+                raise Refusal("database-unsafe")
             if (after.st_dev, after.st_ino, after.st_uid) != (
                 before.st_dev,
                 before.st_ino,
                 before.st_uid,
             ) or not stat.S_ISREG(after.st_mode):
                 raise Refusal("database-unsafe")
+            # Optional callers can retain the ORIGINAL validated binding rather
+            # than treating a later lstat/open as a new baseline. Existing
+            # Reader callers deliberately ignore this return value.
+            return before
     except (OSError, sqlite3.Error, ValueError) as error:
         if isinstance(error, Refusal):
             raise
+        if profile == "2.3" and time.monotonic() >= deadline:
+            raise Refusal("deadline") from None
         raise Refusal("database-invalid") from None
 
 
@@ -257,7 +594,7 @@ def assert_host_safe(box, path, data, env, remaining):
     """
     del path
     try:
-        if data.get("opencode_version") not in SUPPORTED:
+        if snapshot_profile(data.get("opencode_version")) is None:
             raise Refusal("unsupported-version")
         _check_system_config()
         result_env = fence_environment(env)
@@ -287,7 +624,12 @@ def assert_host_safe(box, path, data, env, remaining):
             or len(candidate) > 4096
         ):
             raise Refusal("host-database-path")
-        _check_database(candidate, allow_missing=True, timeout=_budget(remaining, 1))
+        _check_database(
+            candidate,
+            allow_missing=True,
+            timeout=_budget(remaining, 1),
+            version=data["opencode_version"],
+        )
         return result_env
     except Refusal as error:
         raise _boxed(box, error.category) from None
@@ -331,8 +673,16 @@ def _remote(argv):
         if len(payload) > MAX_PAYLOAD or not payload.endswith(b"\n"):
             raise Refusal("startup-payload")
         settings = json.loads(payload)
+        if (
+            not isinstance(settings, dict)
+            or snapshot_profile(settings.get("version")) is None
+        ):
+            raise Refusal("unsupported-version")
         _check_system_config()
-        _check_database(Path(home) / ".local/share/opencode/oc-box-v2.db")
+        _check_database(
+            Path(home) / ".local/share/opencode/oc-box-v2.db",
+            version=settings["version"],
+        )
     elif action != "command":
         raise Refusal("startup-payload")
     with _remote_environment(home) as (root, env):
@@ -344,7 +694,7 @@ def _remote(argv):
         if action == "command":
             # Keep the temporary discovery roots alive until the client exits.
             return subprocess.call(arguments, env=os.environ)
-        if settings.get("version") not in SUPPORTED:
+        if snapshot_profile(settings.get("version")) is None:
             raise Refusal("unsupported-version")
         version = subprocess.run(
             [arguments[0], "--version"],
@@ -358,7 +708,9 @@ def _remote(argv):
         _check_version(version.stdout, settings["version"])
         namespace = {"__name__": "oc_box_history_bridge"}
         exec(settings["bridge"], namespace)
-        # Reuse the public bridge unchanged: it owns/reaps the native child.
+        # Reuse only its unregistered serve --stdio server; no managed-service
+        # discovery/restart continuity, which can resume native 2.3.x subagents.
+        # The public bridge owns/reaps the one native child.
         exit_info = {}
         with namespace["server"](arguments[0], exit_info=exit_info) as request:
             print(json.dumps(request.endpoint), flush=True)
@@ -368,6 +720,313 @@ def _remote(argv):
         if exit_info != {"code": 0, "forced": False}:
             raise Refusal("cleanup-failed")
     return 0
+
+
+class _Exports:
+    """One demand-driven export helper, scoped inside an existing Reader lease."""
+
+    def __init__(self, box, reader, data):
+        self.box, self.reader = box, reader
+        self.workspace = data["id"]
+        self.version = data["opencode_version"]
+        self.directory = box.container_project(data)
+        self.endpoint = {key: reader.connection[key] for key in ("url", "password")}
+        self.child = self.errors = self.error_file = None
+        self.buffer = bytearray()
+        self.sequence = 0
+        self.failed = False
+
+    def fail(self, category):
+        self.failed = True
+        return _boxed(self.box, category)
+
+    def deadline(self, maximum=180):
+        return time.monotonic() + _budget(self.reader.remaining, maximum)
+
+    def write(self, payload, deadline):
+        descriptor = self.child.stdin.fileno()
+        offset = 0
+        while offset < len(payload):
+            timeout = min(
+                deadline - time.monotonic(), _budget(self.reader.remaining, 5)
+            )
+            if timeout <= 0:
+                raise self.fail("deadline")
+            if select.select([], [descriptor], [], min(0.1, timeout))[1]:
+                try:
+                    written = os.write(descriptor, payload[offset : offset + 4096])
+                    if written <= 0:
+                        raise self.fail("history-command")
+                    offset += written
+                except BlockingIOError:
+                    continue
+
+    def read(self, size, deadline, *, line=False):
+        while True:
+            if line:
+                end = self.buffer.find(b"\n")
+                if end >= 0:
+                    if end >= size:
+                        raise self.fail("history-response")
+                    value = bytes(self.buffer[:end])
+                    del self.buffer[: end + 1]
+                    return value
+                if len(self.buffer) >= size:
+                    raise self.fail("history-response")
+            elif len(self.buffer) >= size:
+                value = bytes(self.buffer[:size])
+                del self.buffer[:size]
+                return value
+            timeout = min(
+                deadline - time.monotonic(), _budget(self.reader.remaining, 180)
+            )
+            if timeout <= 0:
+                raise self.fail("deadline")
+            if select.select([self.child.stdout], [], [], min(0.1, timeout))[0]:
+                try:
+                    chunk = os.read(
+                        self.child.stdout.fileno(), min(65536, size - len(self.buffer))
+                    )
+                except BlockingIOError:
+                    continue
+                if not chunk:
+                    raise self.fail("history-command")
+                self.buffer.extend(chunk)
+
+    def start(self):
+        bridge = self.box.opencode_v2_io
+        command = self.reader.command(
+            [
+                "python3",
+                "-I",
+                "-S",
+                "-c",
+                (self.box.PACKAGE / "opencode_v2_io.py").read_text(),
+                "history-worker",
+                self.box.CONTAINER_OPENCODE,
+            ]
+        )
+        self.errors = self.box.captured_output(private=True)
+        self.error_file = self.errors.__enter__()
+        deadline = self.deadline(45)
+        with self.box.history_recovery.admit():
+            self.child = subprocess.Popen(
+                command,
+                env=command.environment,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=self.error_file,
+                start_new_session=True,
+            )
+        os.set_blocking(self.child.stdin.fileno(), False)
+        os.set_blocking(self.child.stdout.fileno(), False)
+        payload = (
+            json.dumps(
+                {
+                    "endpoint": self.endpoint,
+                    "directory": self.directory,
+                    "timeout": _budget(self.reader.remaining, 180),
+                }
+            )
+            + "\n"
+        ).encode()
+        if len(payload) > bridge.HISTORY_WORKER_CONTROL:
+            raise self.fail("history-command")
+        # Admission covers each bounded write, not the subsequent history read.
+        with self.box.history_recovery.admit():
+            self.write(payload, min(deadline, time.monotonic() + 5))
+        if json.loads(self.read(4096, deadline, line=True)) != {
+            "protocol": bridge.HISTORY_WORKER_PROTOCOL
+        }:
+            raise self.fail("history-response")
+
+    def run(self, data, action, settings):
+        bridge = self.box.opencode_v2_io
+        live = self.box.workspace_service.live_connection()
+        if (
+            self.failed
+            or CURRENT.get() is not self.reader
+            or data.get("id") != self.workspace
+            or data.get("opencode_version") != self.version
+            or self.box.container_project(data) != self.directory
+            or self.reader.child is None
+            or self.reader.child.poll() is not None
+            or live is None
+            or live.get("workspace") != self.workspace
+            or {key: live.get(key) for key in ("url", "password")} != self.endpoint
+            or action not in ("sessions", "export")
+            or set(settings) != ({"session"} if action == "export" else set())
+        ):
+            raise self.fail("reader-source")
+        try:
+            if self.child is None:
+                self.start()
+            if (
+                self.buffer
+                or self.child.poll() is not None
+                or select.select([self.child.stdout], [], [], 0)[0]
+            ):
+                raise self.fail("history-response")
+            self.sequence += 1
+            packet = {"id": self.sequence, "action": action, **settings}
+            payload = (json.dumps(packet) + "\n").encode()
+            if len(payload) > bridge.HISTORY_WORKER_CONTROL:
+                raise self.fail("history-command")
+            deadline = self.deadline()
+            with self.box.history_recovery.admit():
+                self.write(payload, min(deadline, time.monotonic() + 5))
+            response = json.loads(self.read(4096, deadline, line=True))
+            if (
+                not isinstance(response, dict)
+                or type(response.get("id")) is not int
+                or response["id"] != self.sequence
+            ):
+                raise self.fail("history-response")
+            if set(response) == {"id", "error"}:
+                reason = response["error"]
+                if not isinstance(reason, str) or reason not in bridge.FIXED_MESSAGES:
+                    raise self.fail("history-response")
+                self.failed = reason not in bridge.PENDING_MESSAGES
+                return subprocess.CompletedProcess([], 2, "", bridge.MARKER + reason)
+            if (
+                set(response) != {"id", "size"}
+                or type(response["size"]) is not int
+                or not 0 < response["size"] <= bridge.HISTORY_WORKER_PAYLOAD
+            ):
+                raise self.fail("history-response")
+            value = self.read(response["size"], deadline).decode("utf-8")
+            _budget(self.reader.remaining, 180)
+            return subprocess.CompletedProcess([], 0, value, "")
+        except Refusal as error:
+            raise self.fail(error.category) from None
+        except (
+            self.box.history_recovery.RecoveryError,
+            self.box.workspace_control.ControlError,
+        ):
+            self.failed = True
+            raise
+        except (OSError, ValueError, subprocess.SubprocessError):
+            raise self.fail("history-response") from None
+
+    def close(self):
+        failed, interruption = False, None
+
+        def caught(error):
+            nonlocal failed, interruption
+            failed = True
+            if interruption is None and isinstance(
+                error, (KeyboardInterrupt, SystemExit)
+            ):
+                interruption = error
+
+        if self.child is not None:
+            try:
+                failed = (
+                    bool(self.buffer)
+                    or self.child.poll() is not None
+                    or bool(select.select([self.child.stdout], [], [], 0)[0])
+                )
+            except BaseException as error:
+                caught(error)
+            try:
+                self.child.stdin.close()
+            except OSError:
+                pass
+            except BaseException as error:
+                caught(error)
+            try:
+                failed = self.child.wait(timeout=10) != 0 or failed
+            except BaseException as error:
+                caught(error)
+                try:
+                    os.killpg(self.child.pid, signal.SIGKILL)
+                except OSError:
+                    pass
+                except BaseException as error:
+                    caught(error)
+                try:
+                    self.child.wait(timeout=5)
+                except BaseException as error:
+                    caught(error)
+            try:
+                # Waiting can itself make delayed trailing output readable.
+                # A reaped helper must leave exact EOF, not another reply.
+                if self.buffer or os.read(self.child.stdout.fileno(), 1):
+                    failed = True
+            except BaseException as error:
+                caught(error)
+            try:
+                self.child.stdout.close()
+            except BaseException as error:
+                caught(error)
+            self.child = None
+        if self.error_file is not None:
+            try:
+                self.errors.__exit__(None, None, None)
+            except BaseException as error:
+                caught(error)
+            self.error_file = None
+        if interruption is not None:
+            if isinstance(interruption, SystemExit) and interruption.code in (None, 0):
+                interruption.code = 1
+            raise interruption
+        if failed:
+            raise self.fail("history-cleanup")
+
+
+@contextlib.contextmanager
+def export_pass(box, data):
+    """Amortize transport only for the already fenced post-stop Reader."""
+    reader = CURRENT.get()
+    if reader is None:
+        yield
+        return
+    if EXPORTS.get() is not None or data.get("id") != reader.data["id"]:
+        raise _boxed(box, "reader-reuse")
+    if reader.connection is None:
+        raise _boxed(box, "reader-source")
+    stream = _Exports(box, reader, data)
+    token = EXPORTS.set(stream)
+    original = None
+    try:
+        yield
+    except BaseException as error:
+        original = error
+        raise
+    finally:
+        EXPORTS.reset(token)
+        try:
+            stream.close()
+        except BaseException as cleanup:
+            if original is None:
+                cleanup.history_source_cleanup_failed = True
+                raise
+            if isinstance(original, SystemExit) and original.code in (None, 0):
+                original.code = 1
+            if isinstance(cleanup, (KeyboardInterrupt, SystemExit)):
+                cleanup.history_source_cleanup_failed = True
+                if isinstance(cleanup, SystemExit) and cleanup.code in (None, 0):
+                    cleanup.code = 1
+                raise
+            # Keep the original error/interruption authoritative, but never
+            # silently turn uncertain helper cleanup into an apparent success.
+            original.history_source_cleanup_failed = True
+            if __package__:
+                from . import lifecycle_output
+            else:
+                import lifecycle_output
+            message = (
+                "History export helper cleanup unverified. "
+                "Container data retained; retry with 'oc-box sync'."
+            )
+            if lifecycle_output.concise():
+                lifecycle_output.fixed_detail("warn", message)
+            else:
+                with contextlib.suppress(OSError, ValueError):
+                    print(f"oc-box: {message}", file=sys.stderr)
+        else:
+            if original is None and stream.failed:
+                raise stream.fail("history-command")
 
 
 class Reader:
@@ -422,12 +1081,21 @@ class Reader:
                     ],
                 ):
                     raise _boxed(self.box, "client-command")
-            elif (
-                len(args) != 5
-                or args[:2] != ["python3", "-c"]
-                or args[2] != (self.box.PACKAGE / "opencode_v2_io.py").read_text()
-                or args[3] not in ("sessions", "export")
-                or args[4] != self.box.CONTAINER_OPENCODE
+            elif not (
+                (
+                    len(args) == 5
+                    and args[:2] == ["python3", "-c"]
+                    and args[2] == (self.box.PACKAGE / "opencode_v2_io.py").read_text()
+                    and args[3] in ("sessions", "export")
+                    and args[4] == self.box.CONTAINER_OPENCODE
+                )
+                or (
+                    len(args) == 7
+                    and args[:4] == ["python3", "-I", "-S", "-c"]
+                    and args[4] == (self.box.PACKAGE / "opencode_v2_io.py").read_text()
+                    and args[5] == "history-worker"
+                    and args[6] == self.box.CONTAINER_OPENCODE
+                )
             ):
                 raise _boxed(self.box, "client-command")
         return self._helper_command("command", args)
@@ -511,7 +1179,7 @@ class Reader:
             raise _boxed(self.box, "reader-reuse")
         try:
             self.started = True
-            if self.data.get("opencode_version") not in SUPPORTED:
+            if snapshot_profile(self.data.get("opencode_version")) is None:
                 raise Refusal("unsupported-version")
             if (
                 not isinstance(self.data.get("container"), str)

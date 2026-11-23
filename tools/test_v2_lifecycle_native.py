@@ -53,7 +53,7 @@ def run(binary, version):
         require(safety.private_json(root, "seed-baseline.json") == seed, "native-seed")
         # The selector cannot pass ambient host/provider/server credentials.
         require(
-            legacy.check_native_version(root, wrapper, "2", expected=version)
+            fixture.profiles.check_native_version(root, wrapper, "2", expected=version)
             == version,
             "native-selector",
         )

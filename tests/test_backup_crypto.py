@@ -1,3 +1,5 @@
+import io
+from itertools import count
 import json
 import os
 from pathlib import Path
@@ -164,12 +166,35 @@ class AgeEnvelopeTests(unittest.TestCase):
     def test_real_streaming_roundtrip_does_not_spool_plaintext(self):
         staging = self.root / "stream.age"
         value = b"large-synthetic-private-value" * 100000
+        advance = self.root / "continue-producer"
+        samples = []
+
+        def progress(size):
+            samples.append(size)
+            advance.touch()
+
+        # age must publish actual ciphertext before the producer can finish.
+        # The producer's deadline bounds the test if sampling regresses.
         producer = [
             sys.executable,
             "-c",
-            "import sys; sys.stdout.buffer.write(b'large-synthetic-private-value'*100000)",
+            "from pathlib import Path\n"
+            "import sys, time\n"
+            "chunk = b'large-synthetic-private-value' * 50000\n"
+            "sys.stdout.buffer.write(chunk)\n"
+            "sys.stdout.buffer.flush()\n"
+            "deadline = time.monotonic() + 10\n"
+            "while not Path(sys.argv[1]).exists():\n"
+            "    if time.monotonic() >= deadline: raise SystemExit(2)\n"
+            "    time.sleep(0.02)\n"
+            "sys.stdout.buffer.write(chunk)\n",
+            str(advance),
         ]
-        crypto.encrypt_stream(producer, self.recipient, staging)
+        crypto.encrypt_stream(producer, self.recipient, staging, progress=progress)
+        self.assertGreaterEqual(len(samples), 2)
+        self.assertEqual(samples, sorted(set(samples)))
+        self.assertLess(samples[0], staging.stat().st_size)
+        self.assertEqual(samples[-1], staging.stat().st_size)
         private = self.identity.read_bytes()
         with crypto.memory_file(private) as identity, crypto.memory_file() as output:
             crypto.stream_pipeline(
@@ -191,6 +216,93 @@ class AgeEnvelopeTests(unittest.TestCase):
             output.seek(0)
             self.assertEqual(output.read(), value)
         self.assertNotIn(b"large-synthetic-private-value", staging.read_bytes())
+
+    def test_ciphertext_sampling_is_opt_in_and_has_no_failure_final_sample(self):
+        produce = [sys.executable, "-c", "print('synthetic ciphertext input')"]
+        fail = [sys.executable, "-c", "raise SystemExit(2)"]
+        samples = []
+        with (
+            patch.object(crypto.os, "fstat", wraps=os.fstat) as fstat,
+            patch.object(crypto, "PROGRESS_INTERVAL", 60),
+        ):
+            crypto.encrypt_stream(produce, self.recipient, self.root / "quiet.age")
+            fstat.assert_not_called()
+            with self.assertRaisesRegex(crypto.BackupError, "producer exit 2"):
+                crypto.encrypt_stream(
+                    fail,
+                    self.recipient,
+                    self.root / "failed.age",
+                    progress=samples.append,
+                )
+            fstat.assert_not_called()
+        self.assertEqual(samples, [])
+
+    def test_sampling_and_callback_errors_do_not_change_encrypted_output(self):
+        producer = [sys.executable, "-c", "print('fixture-data')"]
+        for error in ("sample", "callback"):
+            staging = self.root / f"{error}.age"
+            samples = []
+
+            def progress(size):
+                samples.append(size)
+                raise RuntimeError("synthetic progress failure")
+
+            with self.subTest(error=error):
+                with patch.object(
+                    crypto.os,
+                    "fstat",
+                    wraps=os.fstat,
+                    side_effect=OSError("synthetic stat failure")
+                    if error == "sample"
+                    else None,
+                ):
+                    crypto.encrypt_stream(
+                        producer, self.recipient, staging, progress=progress
+                    )
+                self.assertEqual(
+                    samples, [] if error == "sample" else [staging.stat().st_size]
+                )
+                self.assertEqual(
+                    crypto.decrypt_bytes(staging, self.identity.read_bytes()),
+                    b"fixture-data\n",
+                )
+                original = staging.read_bytes()
+                with self.assertRaises(FileExistsError):
+                    crypto.encrypt_stream(
+                        producer, self.recipient, staging, progress=progress
+                    )
+                self.assertEqual(staging.read_bytes(), original)
+
+    def test_progress_interrupt_reaps_both_running_pipeline_processes(self):
+        producer = [
+            sys.executable,
+            "-c",
+            "import sys,time; sys.stdout.buffer.write(b'fixture'*100000); "
+            "sys.stdout.buffer.flush(); time.sleep(5); raise SystemExit(2)",
+        ]
+        children = []
+        launch = subprocess.Popen
+        active = []
+
+        def capture(*args, **kwargs):
+            child = launch(*args, **kwargs)
+            children.append(child)
+            return child
+
+        def cancel(_size):
+            active.extend(child.poll() for child in children)
+            raise KeyboardInterrupt
+
+        with (
+            patch.object(crypto.subprocess, "Popen", side_effect=capture),
+            self.assertRaises(KeyboardInterrupt),
+        ):
+            crypto.encrypt_stream(
+                producer, self.recipient, self.root / "cancelled.age", progress=cancel
+            )
+        self.assertEqual(active, [None, None])
+        self.assertEqual(len(children), 2)
+        self.assertTrue(all(child.returncode is not None for child in children))
 
     def test_pipeline_failure_and_timeout_terminate_both_processes(self):
         with self.assertRaisesRegex(crypto.BackupError, "failed"):
@@ -365,6 +477,37 @@ class AgeEnvelopeTests(unittest.TestCase):
 
 
 class BackupEnvironmentTests(unittest.TestCase):
+    def test_digest_and_tar_writer_count_existing_bytes_and_preserve_archive(self):
+        class Output(io.BytesIO):
+            def flush(self):
+                raise AssertionError("packing must not flush the file")
+
+        with tempfile.TemporaryDirectory(prefix="oc-box-progress-") as temporary:
+            staging = Path(temporary)
+            component = staging / "project.age"
+            component.write_bytes(b"synthetic-ciphertext" * 120000)
+            checksum = crypto.digest(component)
+            unmeasured = Output()
+            crypto.pack(staging, unmeasured)
+            measured = Output()
+            digested = []
+            packed = []
+            with patch.object(crypto.time, "monotonic", side_effect=count(step=0.6)):
+                self.assertEqual(
+                    crypto.digest(component, progress=digested.append), checksum
+                )
+                crypto.pack(
+                    staging,
+                    measured,
+                    progress=lambda value: packed.append((value, measured.tell())),
+                )
+            self.assertEqual(digested, [2 * 1024 * 1024, checksum["bytes"]])
+            self.assertEqual(measured.getvalue(), unmeasured.getvalue())
+            self.assertGreater(len(packed), 1)
+            self.assertEqual(packed[-1], (measured.tell(), measured.tell()))
+            self.assertEqual(packed, sorted(set(packed)))
+            self.assertTrue(all(counted == accepted for counted, accepted in packed))
+
     @unittest.skipUnless(shutil.which("age"), "optional age host tool unavailable")
     def test_backup_age_bridge_keeps_password_out_of_argv_env_and_files(self):
         phrase = "éight888"

@@ -36,7 +36,13 @@ TAG = re.compile(r"v\d+\.\d+\.\d+(?:\.dev0)?")
 IDENTIFIER = re.compile(r"[A-Za-z0-9_-]{1,128}")
 MAX_JSON = 4 * 1024 * 1024
 MAX_IMAGE = 8 * 1024 * 1024
-SKIP_ANNOUNCEMENT_MARKER = "<!-- oc-box: skip-linkedin -->"
+MAX_POST_UTF16 = 3000
+# Trusted workflow preflight parses this literal without executing selected code.
+# Version 1 requires exact reviewed text/card hashes before new devel mutations.
+DEVEL_ANNOUNCEMENT_APPROVAL_POLICY = 1
+POST_START = "<!-- linkedin-post:start -->"
+POST_END = "<!-- linkedin-post:end -->"
+TUI_IMAGE_SOURCE = Path(__file__).resolve().parents[1] / "docs/assets/readme-hero.png"
 CHANNEL_FIELDS = (
     "id name displayName service type isDisconnected isLocked isQueuePaused"
 )
@@ -364,11 +370,32 @@ def highlights(body):
     raise Refusal("release-highlights-required")
 
 
-def content(identity, release):
-    require(
-        SKIP_ANNOUNCEMENT_MARKER not in release["body"],
-        "release-announcement-disabled",
+def full_post(body):
+    """Extract exact public copy, excluding only marker framing line breaks."""
+    if POST_START not in body and POST_END not in body:
+        return None
+    require(body.count(POST_START) == body.count(POST_END) == 1, "post-block")
+    match = re.search(
+        r"^"
+        + re.escape(POST_START)
+        + r"\r?\n([\s\S]*?)\r?\n"
+        + re.escape(POST_END)
+        + r"\r?$",
+        body,
+        re.MULTILINE,
     )
+    require(match is not None, "post-block")
+    # GitHub's editor may use CRLF; the reviewed/exported post is always UTF-8/LF.
+    text = match[1].replace("\r\n", "\n")
+    require(
+        bool(text.strip())
+        and all(c == "\n" or not unicodedata.category(c).startswith("C") for c in text),
+        "post-control-or-empty",
+    )
+    return text
+
+
+def content(identity, release):
     features = highlights(release["body"])
     channel = identity["release_channel"]
     label = (
@@ -376,14 +403,75 @@ def content(identity, release):
         if channel == "stable"
         else "development preview — experimental"
     )
-    text = f"oc-box {identity['distribution_version']} · {label}\n\n"
+    heading = f"oc-box {identity['distribution_version']} · {label}"
+    link = (
+        f"Release notes: https://github.com/{REPOSITORY}/releases/tag/{identity['tag']}"
+    )
+    warning = "This is a development prerelease, not a stable recommendation."
+    custom = full_post(release["body"])
+    if custom is not None:
+        # Full copy is never truncated, reformatted, or extended after review.
+        require(custom.split("\n")[0] == heading, "post-release-heading")
+        require(link in custom.split("\n"), "post-release-link")
+        if channel == "devel":
+            require(warning in custom.split("\n"), "post-devel-warning")
+        require(len(custom.encode("utf-16-le")) // 2 <= MAX_POST_UTF16, "post-length")
+        return custom, features
+    text = heading + "\n\n"
     text += "\n".join("• " + item for item in features)
     if channel == "devel":
-        text += "\n\nThis is a development prerelease, not a stable recommendation."
-    text += f"\n\nRelease notes: https://github.com/{REPOSITORY}/releases/tag/{identity['tag']}"
+        text += "\n\n" + warning
+    text += "\n\n" + link
     text += "\n\n#OpenSource #Linux #DeveloperTools"
     require(len(text) <= 2800, "post-length")
+    require(len(text.encode("utf-16-le")) // 2 <= MAX_POST_UTF16, "post-length")
     return text, features
+
+
+def render_image(output, identity, release, features):
+    """Choose only the generic card or the committed README TUI screenshot."""
+    selectors = [
+        line
+        for line in release["body"].replace("\r\n", "\n").splitlines()
+        if "<!-- linkedin-image:" in line
+    ]
+    if not selectors:
+        release_card.render_card(
+            output,
+            version=identity["distribution_version"],
+            channel=identity["release_channel"],
+            highlights=features,
+        )
+        return
+    require(selectors == ["<!-- linkedin-image:readme-tui -->"], "card-selector")
+    require(
+        TUI_IMAGE_SOURCE.is_file() and not TUI_IMAGE_SOURCE.is_symlink(), "card-image"
+    )
+    with TUI_IMAGE_SOURCE.open("rb") as stream:
+        data = stream.read(MAX_IMAGE + 1)
+    require(
+        0 < len(data) <= MAX_IMAGE and data.startswith(b"\x89PNG\r\n\x1a\n"),
+        "card-image",
+    )
+    output.write_bytes(data)
+
+
+def approved_content(
+    identity, text, image, expected_text_sha256, expected_image_sha256
+):
+    """Devel creation needs exact reviewed bytes before *any* remote mutation."""
+    expected = (expected_text_sha256, expected_image_sha256)
+    if identity["release_channel"] != "devel" and expected == (None, None):
+        return  # Preserve optional stable automation.
+    require(
+        all(isinstance(v, str) and re.fullmatch(r"[a-f0-9]{64}", v) for v in expected),
+        "approval-hashes-required",
+    )
+    require(
+        sha(text.encode("utf-8")) == expected_text_sha256
+        and sha(image) == expected_image_sha256,
+        "approved-content-changed",
+    )
 
 
 def verify_pypi(identity, directory):
@@ -465,7 +553,18 @@ def valid_post(post, channel_id, text_sha, post_id=None):
     )
 
 
-def announce(github, buffer, identity, release, channel_id, image, *, post_id=None):
+def announce(
+    github,
+    buffer,
+    identity,
+    release,
+    channel_id,
+    image,
+    *,
+    post_id=None,
+    expected_text_sha256=None,
+    expected_image_sha256=None,
+):
     """Durable claim BEFORE createPost; a missing receipt always stops a rerun."""
     bound = binding(identity, release, channel_id)
     stem = prefix(bound)
@@ -482,11 +581,11 @@ def announce(github, buffer, identity, release, channel_id, image, *, post_id=No
             "outcome": "already-submitted",
             "buffer_post_id": receipt["buffer_post_id"],
         }
-    buffer.channel(channel_id)  # No auto-selection of a different connected account.
     claim = github.read_asset(release, claim_name)
     if claim is not None:
         matched_record(claim, bound)
         require(post_id is not None, "pending-claim-reconcile-in-buffer")
+        buffer.channel(channel_id)
         post = buffer.post(post_id)  # Read-only reconciliation; never calls create.
         valid_post(post, channel_id, claim["text_sha256"], post_id)
     else:
@@ -497,6 +596,10 @@ def announce(github, buffer, identity, release, channel_id, image, *, post_id=No
             0 < len(data) <= MAX_IMAGE and data.startswith(b"\x89PNG\r\n\x1a\n"),
             "card-image",
         )
+        approved_content(
+            identity, text, data, expected_text_sha256, expected_image_sha256
+        )
+        buffer.channel(channel_id)  # Never auto-select another connected account.
         claim = {
             "binding": bound,
             "text_sha256": sha(text.encode()),
@@ -546,11 +649,20 @@ def main(argv=None):
     parser.add_argument("--tag")
     parser.add_argument("--output", type=Path)
     parser.add_argument("--post-id")
+    parser.add_argument("--expected-text-sha256")
+    parser.add_argument("--expected-image-sha256")
     args = parser.parse_args(argv)
     try:
         require(
             os.environ.get("GITHUB_REPOSITORY") == REPOSITORY,
             "canonical-repository-required",
+        )
+        require(
+            args.action == "announce"
+            or (
+                args.expected_text_sha256 is None and args.expected_image_sha256 is None
+            ),
+            "invalid-options",
         )
         if args.action == "channels":
             require(args.tag is None and args.post_id is None, "invalid-options")
@@ -581,23 +693,30 @@ def main(argv=None):
                     "new-preview-directory-required",
                 )
                 args.output.mkdir(parents=True)
-                release_card.render_card(
-                    args.output / "linkedin-card.png",
-                    version=identity["distribution_version"],
-                    channel=identity["release_channel"],
-                    highlights=features,
+                render_image(
+                    args.output / "linkedin-card.png", identity, release, features
                 )
-                (args.output / "linkedin-post.txt").write_text(text + "\n")
+                # The text file hashes the actual Buffer payload (no added newline).
+                (args.output / "linkedin-post.txt").write_bytes(text.encode("utf-8"))
+                manifest = {
+                    "schema": 1,
+                    "repository": REPOSITORY,
+                    "release_id": release["id"],
+                    "tag": identity["tag"],
+                    "commit": identity["commit"],
+                    "release_channel": identity["release_channel"],
+                    "text_sha256": sha(text.encode("utf-8")),
+                    "image_sha256": sha(
+                        (args.output / "linkedin-card.png").read_bytes()
+                    ),
+                    "text_utf16_units": len(text.encode("utf-16-le")) // 2,
+                }
+                (args.output / "linkedin-approval.json").write_bytes(encoded(manifest))
                 print("Preview generated; no assets uploaded or posts created.")
             else:
                 verify_pypi(identity, work)
                 image = work / "card.png"
-                release_card.render_card(
-                    image,
-                    version=identity["distribution_version"],
-                    channel=identity["release_channel"],
-                    highlights=features,
-                )
+                render_image(image, identity, release, features)
                 result = announce(
                     github,
                     Buffer(os.environ.get("BUFFER_API_KEY")),
@@ -606,6 +725,8 @@ def main(argv=None):
                     os.environ.get("BUFFER_LINKEDIN_CHANNEL_ID"),
                     image,
                     post_id=args.post_id,
+                    expected_text_sha256=args.expected_text_sha256,
+                    expected_image_sha256=args.expected_image_sha256,
                 )
                 print(json.dumps(result, sort_keys=True))
         return 0

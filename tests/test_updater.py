@@ -47,8 +47,8 @@ class UpdateTests(unittest.TestCase):
             "available_releases",
             return_value={
                 "stable": {
-                    "version": "1.6.99999",
-                    "tag": "v1.6.99999",
+                    "version": "1.7.99999",
+                    "tag": "v1.7.99999",
                     "channel": "stable",
                 },
                 "devel": None,
@@ -56,6 +56,14 @@ class UpdateTests(unittest.TestCase):
         )
         self.releases = releases.start()
         self.addCleanup(releases.stop)
+
+    def offer_newer_stable(self):
+        release = f"{int(VERSION_SERIES.split('.')[0]) + 1}.0.99999"
+        self.releases.return_value["stable"] = {
+            "version": release,
+            "tag": "v" + release,
+            "channel": "stable",
+        }
 
     def test_up_to_date_and_check_only_never_install_or_fetch_history(self):
         commit = "a" * 40
@@ -67,13 +75,13 @@ class UpdateTests(unittest.TestCase):
                     updater,
                     "current_install",
                     return_value={
-                        "version": "1.6.99999",
+                        "version": "1.7.99999",
                         "commit": current,
                         "dirty": False,
                     },
                 ),
                 patch.object(
-                    updater, "git", return_value=commit + "\trefs/tags/v1.6.99999"
+                    updater, "git", return_value=commit + "\trefs/tags/v1.7.99999"
                 ) as git,
                 contextlib.redirect_stdout(io.StringIO()) as out,
             ):
@@ -118,6 +126,9 @@ class UpdateTests(unittest.TestCase):
         self.assertNotIn("--depth", execute.call_args.args[0])
 
     def test_network_failure_does_not_change_existing_installation(self):
+        # Exercise the fetch path even when the checkout has advanced past
+        # the historical 1.7 sample releases used by the other tests.
+        self.offer_newer_stable()
         with contextlib.redirect_stdout(io.StringIO()):
             release = installation.install(APP, self.home)
         wrapper = (self.home / ".local/bin/oc-box").read_bytes()
@@ -132,6 +143,7 @@ class UpdateTests(unittest.TestCase):
         self.assertTrue(release.is_dir())
 
     def test_invalid_remote_head_and_root_are_rejected(self):
+        self.offer_newer_stable()
         with (
             patch.object(updater.os, "geteuid", return_value=1000),
             patch.object(updater, "git", return_value="bad response"),
@@ -148,7 +160,7 @@ class UpdateTests(unittest.TestCase):
         network.assert_not_called()
 
     def test_downloaded_identity_mismatch_never_runs_the_installer(self):
-        answers = ["a" * 40 + "\trefs/tags/v1.6.99999", "", "", "b" * 40, "2", ""]
+        answers = ["a" * 40 + "\trefs/tags/v1.7.99999", "", "", "b" * 40, "2", ""]
         with (
             patch.object(updater.os, "geteuid", return_value=1000),
             patch.object(
@@ -171,7 +183,7 @@ class UpdateTests(unittest.TestCase):
         current.mkdir(parents=True)
         (current / "vault-support.json").write_text('{"optional_crypto":true}')
         commit = "a" * 40
-        answers = [commit + "\trefs/tags/v1.6.99999", "", "", commit, "2", "", ""]
+        answers = [commit + "\trefs/tags/v1.7.99999", "", "", commit, "2", "", ""]
         with (
             patch.object(updater.os, "geteuid", return_value=1000),
             patch.object(
@@ -187,7 +199,7 @@ class UpdateTests(unittest.TestCase):
             patch.object(
                 updater,
                 "get_version_info",
-                return_value={"commit": commit, "dirty": False, "version": "1.6.99999"},
+                return_value={"commit": commit, "dirty": False, "version": "1.7.99999"},
             ),
             patch.object(updater, "verify_release_source"),
             patch.object(updater, "installer_options", return_value={"--with-vault"}),
@@ -203,7 +215,7 @@ class UpdateTests(unittest.TestCase):
         self.assertNotIn("PERSONAL_GITHUB_TOKEN", installer.call_args.kwargs["env"])
 
     def test_installed_build_ahead_of_published_history_is_not_downgraded(self):
-        answers = ["a" * 40 + "\trefs/tags/v1.6.99999", "", "", "a" * 40, "2", ""]
+        answers = ["a" * 40 + "\trefs/tags/v1.7.99999", "", "", "a" * 40, "2", ""]
         with (
             patch.object(updater.os, "geteuid", return_value=1000),
             patch.object(
@@ -310,6 +322,9 @@ class UpdateTests(unittest.TestCase):
             path, data = box.create_workspace(project, "tumbleweed")
             with (
                 patch.dict(os.environ, {"OC_BOX_CONTAINER": ""}),
+                # The updater's class-wide UID simulation must not impersonate
+                # a different owner for these real workspace preference files.
+                patch.object(box.os, "geteuid", return_value=path.stat().st_uid),
                 patch.object(
                     updater,
                     "automatic_upgrade",
@@ -790,6 +805,17 @@ class UpdateTests(unittest.TestCase):
         )
         fake_id.chmod(0o755)
         fake_git = binary / "git"
+        # A clone contains project source, not arbitrary local evidence or
+        # private/unreadable untracked files in the developer's checkout.
+        source_files = {
+            str(installation.source_file(APP, name).relative_to(APP))
+            for name in installation.PROGRAM_FILES
+        } | {
+            *("docs/" + name for name in installation.MANUAL_FILES),
+            installation.COMPLETION_FILE,
+            "install.py",
+            "pyproject.toml",
+        }
         fake_git.write_text(
             "#!"
             + sys.executable
@@ -799,9 +825,13 @@ class UpdateTests(unittest.TestCase):
             + " pathlib.Path("
             + repr(str(record))
             + ").write_text(json.dumps({'argv':sys.argv[1:],'env':dict(os.environ)}))\n"
-            + " shutil.copytree("
+            + " source=pathlib.Path("
             + repr(str(APP))
-            + ",sys.argv[-1],ignore=shutil.ignore_patterns('.git','__pycache__','.ruff_cache','.oc-box-id','.venv','build','dist','*.egg-info'))\n"
+            + ")\n"
+            + " for name in "
+            + repr(sorted(source_files))
+            + ":\n"
+            + "  target=pathlib.Path(sys.argv[-1],name); target.parent.mkdir(parents=True,exist_ok=True); shutil.copyfile(source/name,target)\n"
             + " pathlib.Path(sys.argv[-1],'build-info.json').write_text(json.dumps({'version':'0.1.1+gfixture','commit':'"
             + "a" * 40
             + "','commit_count':1,'dirty':False}))\n"

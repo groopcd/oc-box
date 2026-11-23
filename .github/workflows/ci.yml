@@ -2,7 +2,7 @@ name: Package and source checks
 
 on:
   push:
-    branches: [master, devel, 'feature/**']
+    branches: [master, devel, 'feature/**', 'fix/**']
   pull_request:
   workflow_call:
 
@@ -15,8 +15,9 @@ env:
 jobs:
   test:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
     strategy:
+      fail-fast: false
       matrix:
         python: ['3.10', '3.13']
     steps:
@@ -27,7 +28,7 @@ jobs:
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: ${{ matrix.python }}
-      - name: Unit and documentation coverage checks
+      - name: Install test dependencies and check Bash completion
         run: |
           apt_root=$(mktemp -d /tmp/oc-box-ci-apt.XXXXXXXX)
           chmod 755 "$apt_root"
@@ -37,12 +38,32 @@ jobs:
           bash -n completions/oc-box
           shellcheck --shell=bash completions/oc-box
           python -m venv "$RUNNER_TEMP/tests"
-          "$RUNNER_TEMP/tests/bin/python" -m pip install 'cryptography>=44'
+          "$RUNNER_TEMP/tests/bin/python" -m pip install 'cryptography>=44' 'textual>=8.2.8,<9' 'pyte>=0.8.2,<0.9'
           # Release-card rendering uses Pillow 13 (Python 3.11+), not a runtime dependency.
           if [[ "${{ matrix.python }}" == '3.13' ]]; then
             "$RUNNER_TEMP/tests/bin/python" -m pip install 'Pillow>=13,<14'
           fi
-          "$RUNNER_TEMP/tests/bin/python" -B -m unittest discover -s tests -v
+      - name: Run unit and documentation regressions
+        run: |
+          set -o pipefail
+          log="$RUNNER_TEMP/oc-box-unittest.log"
+          if ! "$RUNNER_TEMP/tests/bin/python" -B -m unittest discover -s tests -v 2>&1 | tee "$log"; then
+            # Report only unittest identifiers, never traceback/error bodies.
+            python -B - "$log" <<'PY'
+          import re, sys
+          with open(sys.argv[1], encoding="utf-8", errors="replace") as log:
+              count = 0
+              for line in log:
+                  match = re.match(r"^(FAIL|ERROR): (test_[A-Za-z0-9_]+) \(([A-Za-z0-9_.]+)\)", line)
+                  if match and count < 20:
+                      kind, test, suite = match.groups()
+                      print(f"::error title=Python regression::{kind}: {suite}.{test}")
+                      count += 1
+          PY
+            exit 1
+          fi
+      - name: Check committed manuals and source whitespace
+        run: |
           python tools/build_docs.py --check
           git diff --check
       - name: Build Python distributions
@@ -51,13 +72,14 @@ jobs:
           "$RUNNER_TEMP/build/bin/python" -m pip install build twine
           "$RUNNER_TEMP/build/bin/python" -m build
           "$RUNNER_TEMP/build/bin/python" -m twine check dist/*
-          python tools/check_package.py dist --with-vault
+          python tools/check_package.py dist --with-vault --with-tui
   opencode-v2:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          fetch-depth: 0
           persist-credentials: false
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
@@ -68,14 +90,26 @@ jobs:
           chmod 755 "$apt_root"
           apt_config=$(python3 tools/ci_ubuntu_apt.py --output "$apt_root/config" --mirror azure --force-ipv4)
           sudo apt-get -c "$apt_config" update
-          sudo apt-get -c "$apt_config" install -y --no-install-recommends poppler-utils
+          sudo apt-get -c "$apt_config" install -y --no-install-recommends poppler-utils age
           npm install --prefix "$RUNNER_TEMP/opencode-v1" --no-audit --no-fund opencode-ai@1.19.5
           npm install --prefix "$RUNNER_TEMP/opencode-v2" --no-audit --no-fund @opencode/cli@2.2.6
       - name: Offline V1 and V2 native integration
         run: |
+          trap 'printf "::error title=Native integration command failed::%s\n" "$BASH_COMMAND"' ERR
           export PATH="$RUNNER_TEMP/opencode-v1/node_modules/.bin:$PATH"
           python3 -B tests/smoke_mainline.py
           python3 -B tests/smoke_v2.py --opencode "$RUNNER_TEMP/opencode-v2/node_modules/.bin/opencode"
+          python3 -B tests/smoke_tui_v2.py --opencode "$RUNNER_TEMP/opencode-v2/node_modules/.bin/opencode"
+          python3 -B tests/smoke_sharing_v2.py --opencode "$RUNNER_TEMP/opencode-v2/node_modules/.bin/opencode"
+          python3 -B tests/smoke_attachments_v2.py --opencode "$RUNNER_TEMP/opencode-v2/node_modules/.bin/opencode"
+          python3 -B tests/smoke_host_drop_v2.py --opencode "$RUNNER_TEMP/opencode-v2/node_modules/.bin/opencode"
+          python3 -B tests/smoke_web_sessions_v2.py --opencode "$RUNNER_TEMP/opencode-v2/node_modules/.bin/opencode"
+          python3 -B tests/smoke_web_attachments_v2.py --opencode "$RUNNER_TEMP/opencode-v2/node_modules/.bin/opencode"
+          python3 -B tests/smoke_ui_state_v2.py --opencode "$RUNNER_TEMP/opencode-v2/node_modules/.bin/opencode"
+          python3 -B tests/smoke_session_backups_v2.py --opencode "$RUNNER_TEMP/opencode-v2/node_modules/.bin/opencode"
+          python3 -B tests/smoke_host_backup_auth_v2.py --opencode "$RUNNER_TEMP/opencode-v2/node_modules/@opencode/cli-linux-x64/bin/opencode"
+          python3 -B tests/smoke_session_backup_transport_v2.py --opencode "$RUNNER_TEMP/opencode-v2/node_modules/.bin/opencode"
+          python3 -B tests/smoke_sharing_host_helpers.py --opencode "$RUNNER_TEMP/opencode-v2/node_modules/.bin/opencode"
           python3 -B tests/smoke_host_plugins.py --opencode "$RUNNER_TEMP/opencode-v2/node_modules/.bin/opencode"
           python3 -B tests/smoke_native_host_port.py --opencode "$RUNNER_TEMP/opencode-v2/node_modules/.bin/opencode"
           python3 -m venv "$RUNNER_TEMP/global-vault-tests"
@@ -83,7 +117,116 @@ jobs:
           "$RUNNER_TEMP/global-vault-tests/bin/python" -B tests/smoke_global_vault.py --opencode "$RUNNER_TEMP/opencode-v2/node_modules/.bin/opencode"
           "$RUNNER_TEMP/global-vault-tests/bin/python" -B tests/smoke_build_permissions_v2.py --opencode "$RUNNER_TEMP/opencode-v2/node_modules/.bin/opencode"
           "$RUNNER_TEMP/global-vault-tests/bin/python" -B tests/smoke_global_vault_host_helpers.py --opencode-v2 "$RUNNER_TEMP/opencode-v2/node_modules/.bin/opencode"
-  opencode-v2-native-2-3:
+
+  opencode-v23-history:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        # Retain the original regression and follow stable 2.3 patches without
+        # another patch-version allowlist edit. The fixture records exact identity.
+        opencode: ['2.3.0', '~2.3.0']
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.13'
+      - name: Install unmodified OpenCode ${{ matrix.opencode }} in temporary storage
+        run: npm install --prefix "$RUNNER_TEMP/opencode-v23" --no-audit --no-fund @opencode/cli@${{ matrix.opencode }}
+      - name: Record the exact selected native version
+        run: '"$RUNNER_TEMP/opencode-v23/node_modules/.bin/opencode" --version'
+      - name: Native retained-subagent history snapshot regression
+        run: >-
+          python3 -B tests/smoke_history_subagent_recovery_v2.py
+          --opencode "$RUNNER_TEMP/opencode-v23/node_modules/.bin/opencode"
+      - name: Native foreground interruption and queued-input preservation
+        run: >-
+          python3 -B tests/smoke_history_subagent_recovery_v2.py
+          --opencode "$RUNNER_TEMP/opencode-v23/node_modules/.bin/opencode"
+          --foreground
+      - name: Native abrupt foreground loss and partial archival preservation
+        run: >-
+          python3 -B tests/smoke_history_subagent_recovery_v2.py
+          --opencode "$RUNNER_TEMP/opencode-v23/node_modules/.bin/opencode"
+          --foreground --producer-close abrupt
+      - name: Native host-file click and input recovery smoke
+        run: |
+          python3 -m venv "$RUNNER_TEMP/host-file-open-tests"
+          "$RUNNER_TEMP/host-file-open-tests/bin/python" -m pip install 'pyte>=0.8.2,<0.9'
+          "$RUNNER_TEMP/host-file-open-tests/bin/python" -B tests/smoke_file_preview_v2.py \
+            --opencode "$RUNNER_TEMP/opencode-v23/node_modules/.bin/opencode"
+
+  opencode-v2-native-2-3-lifecycle:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.13'
+      - name: Install exact OpenCode 2.3.0 for the V2-only lifecycle fixtures
+        run: |
+          apt_root=$(mktemp -d /tmp/oc-box-ci-apt.XXXXXXXX)
+          chmod 755 "$apt_root"
+          apt_config=$(python3 tools/ci_ubuntu_apt.py --output "$apt_root/config" --mirror azure --force-ipv4)
+          sudo apt-get -c "$apt_config" update
+          sudo apt-get -c "$apt_config" install -y --no-install-recommends poppler-utils
+          npm install --prefix "$RUNNER_TEMP/opencode-v2-native-2-3" --no-audit --no-fund @opencode/cli@2.3.0
+      - name: Offline native integration without OpenCode 1.x
+        run: >-
+          python3 -B tests/smoke_v2.py --v2-only
+          --opencode "$RUNNER_TEMP/opencode-v2-native-2-3/node_modules/.bin/opencode"
+      - name: Offline native contract for the V2-only host lifecycle fixture
+        run: >-
+          python3 -B tools/test_v2_lifecycle_native.py --native-version 2.3.0
+          --opencode-v2 "$RUNNER_TEMP/opencode-v2-native-2-3/node_modules/.bin/opencode"
+      - name: Offline exact 2.3.0 global-vault host helpers
+        run: |
+          python3 -m venv "$RUNNER_TEMP/v23-vault-tests"
+          "$RUNNER_TEMP/v23-vault-tests/bin/python" -m pip install 'cryptography>=44'
+          "$RUNNER_TEMP/v23-vault-tests/bin/python" -B tests/smoke_global_vault_host_helpers.py \
+            --native-version 2.3.0 \
+            --opencode-v2 "$RUNNER_TEMP/opencode-v2-native-2-3/node_modules/.bin/opencode"
+
+  opencode-v2-current-web-tabs:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.13'
+      - name: Install current stable OpenCode 2.x in temporary storage
+        run: npm install --prefix "$RUNNER_TEMP/opencode-v2-web" --no-audit --no-fund '@opencode/cli@2'
+      - name: Native authenticated web tab catalog
+        run: |
+          opencode="$RUNNER_TEMP/opencode-v2-web/node_modules/.bin/opencode"
+          "$opencode" --version
+          python3 -B tests/smoke_web_sessions_v2.py --opencode "$opencode"
+      - name: Native public TUI reports
+        run: >-
+          python3 -B tests/smoke_ui_state_v2.py
+          --opencode "$RUNNER_TEMP/opencode-v2-web/node_modules/.bin/opencode"
+      - name: Native host credential round trip on current stable OpenCode 2.x
+        run: >-
+          python3 -B tests/smoke_host_backup_auth_v2.py
+          --opencode "$RUNNER_TEMP/opencode-v2-web/node_modules/@opencode/cli-linux-x64/bin/opencode"
+      - name: Native host archive sync on current stable OpenCode 2.x
+        run: >-
+          python3 -B tests/smoke_session_sync_v2.py
+          --opencode "$RUNNER_TEMP/opencode-v2-web/node_modules/@opencode/cli-linux-x64/bin/opencode"
+
+  opencode-v2-runtime-upgrade:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -93,16 +236,5 @@ jobs:
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: '3.13'
-      - name: Install unmodified OpenCode 2.3.0 without a V1 dependency
-        run: |
-          apt_root=$(mktemp -d /tmp/oc-box-ci-apt.XXXXXXXX)
-          chmod 755 "$apt_root"
-          apt_config=$(python3 tools/ci_ubuntu_apt.py --output "$apt_root/config" --mirror azure --force-ipv4)
-          sudo apt-get -c "$apt_config" update
-          sudo apt-get -c "$apt_config" install -y --no-install-recommends poppler-utils
-          npm install --prefix "$RUNNER_TEMP/opencode-v2-native-2-3" --no-audit --no-fund @opencode/cli@2.3.0
-      - name: Offline V2-only native integration
-        run: |
-          python3 -B tests/smoke_v2.py --v2-only --opencode "$RUNNER_TEMP/opencode-v2-native-2-3/node_modules/.bin/opencode"
-          python3 -B tests/smoke_global_vault_host_helpers.py --native-version 2.3.0 --opencode-v2 "$RUNNER_TEMP/opencode-v2-native-2-3/node_modules/.bin/opencode"
-          python3 -B tools/test_v2_lifecycle_native.py --native-version 2.3.0 --opencode-v2 "$RUNNER_TEMP/opencode-v2-native-2-3/node_modules/.bin/opencode"
+      - name: Upgrade the native CLI and require a clean plugin SDK audit
+        run: python3 -B tests/smoke_runtime_upgrade_v2.py

@@ -13,10 +13,13 @@ import unittest
 from unittest.mock import patch
 
 from oc_box import (
+    attachments,
     backups,
     dependencies,
     installation,
+    logs_cli,
     oc_box as box,
+    sharing,
     vault,
     workspace_service,
 )
@@ -89,6 +92,9 @@ fi
             ("doctor", dependencies.parser()),
             ("web", workspace_service.web_parser()),
             ("completion", box.completion_parser()),
+            ("logs", logs_cli.parser()),
+            ("share", sharing.parser()),
+            ("attach", attachments.parser()),
         ):
             with self.subTest(command=name):
                 expected = {
@@ -100,6 +106,39 @@ fi
         )
         self.assertEqual(
             set(self.complete("doctor", "--feature", "")), set(dependencies.FEATURES)
+        )
+        self.assertNotIn("tls", self.complete("web", ""))
+        self.assertEqual(self.complete("web", "tls", "s"), [])
+        self.assertEqual(self.complete("web", "tls", "setup", "localhost", "--i"), [])
+        self.assertEqual(
+            self.complete("logs", "--level", ""), ["debug", "info", "warn", "error"]
+        )
+        self.assertEqual(self.complete("logs", "--level=w"), ["warn"])
+        self.assertEqual(
+            self.complete("logs", "--verbose", ""),
+            ["all", "debug", "info", "warn", "error"],
+        )
+        self.assertEqual(
+            self.complete("--project", ".", "sync", "--verbose=d"), ["debug"]
+        )
+        self.assertTrue("--project" in self.complete("--verbose", "stop", "--"))
+        self.assertEqual(self.complete("logs", "--verbose", "=", "w"), ["warn"])
+        self.assertEqual(self.complete("logs", "--limit", ""), [])
+        self.assertEqual(self.complete("sync", "--fo"), [])
+        controls = {
+            "--journald",
+            "--no-journald",
+            "--log-dir",
+            "--lifecycle-diagnostics",
+            "--verbose",
+        }
+        for command in ("start", "reset", "stop", "sync", "terminal", "web"):
+            self.assertTrue(controls.issubset(self.complete(command, "--")))
+        for command in ("status", "repair", "upgrade", "tui"):
+            self.assertTrue(controls.isdisjoint(self.complete(command, "--")))
+        self.assertEqual(
+            controls.intersection(self.complete("logs", "--")),
+            {"--journald", "--log-dir", "--verbose"},
         )
         credential_modes = next(
             action.choices
@@ -128,7 +167,7 @@ fi
         self.assertEqual(self.complete("--status", "--j"), ["--json"])
         self.assertEqual(self.complete("--status", "--n"), [])
         self.assertEqual(self.complete("sync", "--im"), [])
-        self.assertEqual(self.complete("reset", "--im"), [])
+        self.assertEqual(self.complete("reset", "--imp"), [])
         self.assertEqual(self.complete("secrets", "set", "--min"), [])
         self.assertEqual(
             self.complete("secrets", "passwd", "--min"), ["--min-passphrase-length"]
@@ -140,21 +179,49 @@ fi
         self.assertEqual(self.complete("completion", "ba"), ["bash"])
         self.assertEqual(self.complete("completion", "bash", "ba"), [])
 
-    def test_update_channels_are_offered_for_upgrade_not_workspace_commands(self):
+    def test_table_completion_is_scoped_to_public_reports(self):
+        for command in (
+            "status",
+            "--status",
+            "logs",
+            "doctor",
+            "preferences",
+            "backup-info",
+        ):
+            with self.subTest(command=command):
+                self.assertEqual(
+                    self.complete(command, "--ta"),
+                    ["--tail", "--table"] if command == "logs" else ["--table"],
+                )
+        for command in ("start", "reset", "terminal", "web", "backup", "restore"):
+            with self.subTest(command=command):
+                self.assertEqual(self.complete(command, "--ta"), [])
+
+    def test_explicit_launcher_commands_complete_their_scoped_help_options(self):
+        parser = box.parser()
+        for command in (
+            "start",
+            "reset",
+            "stop",
+            "sync",
+            "repair",
+            "terminal",
+            "status",
+            "list",
+            "distros",
+            "upgrade",
+            "credentials",
+            "purge",
+        ):
+            with self.subTest(command=command):
+                self.assertEqual(
+                    set(self.complete(command, "-")),
+                    set(parser.command_option_strings(command)),
+                )
+
+    def test_channel_options_are_local_to_upgrade_not_tui_or_workspace_actions(self):
         self.assertEqual(self.complete("upgrade", "--st"), ["--stable"])
         self.assertEqual(self.complete("upgrade", "--de"), ["--devel"])
-        self.assertEqual(
-            set(self.complete("upgrade", "--")),
-            {
-                "--help",
-                "--check",
-                "--stable",
-                "--devel",
-                "--vault",
-                "--tui",
-                "--auto-update",
-            },
-        )
         self.assertEqual(self.complete("upgrade", "--va"), ["--vault"])
         self.assertEqual(self.complete("upgrade", "--tu"), ["--tui"])
         for command in (
@@ -165,6 +232,9 @@ fi
             "repair",
             "terminal",
             "web",
+            "tui",
+            "share",
+            "attach",
             "credentials",
             "status",
             "doctor",
@@ -194,6 +264,8 @@ fi
             "sync",
             "repair",
             "terminal",
+            "share",
+            "attach",
             "upgrade",
             "secrets",
             "credentials",
@@ -210,6 +282,123 @@ fi
         ):
             with self.subTest(command=command):
                 self.assertEqual(self.complete(command, "--no-v"), [])
+
+    def test_image_preview_is_offered_only_for_owning_tui_launches(self):
+        self.assertEqual(self.complete("--image-p"), ["--image-preview"])
+        for command in ("start", "reset"):
+            with self.subTest(command=command):
+                self.assertEqual(
+                    self.complete(command, "--image-p"), ["--image-preview"]
+                )
+        for command in (
+            "web",
+            "stop",
+            "sync",
+            "repair",
+            "terminal",
+            "attach",
+            "upgrade",
+            "secrets",
+            "credentials",
+            "backup",
+            "backup-info",
+            "restore",
+            "purge",
+            "list",
+            "distros",
+            "status",
+            "doctor",
+            "completion",
+            "--status",
+        ):
+            with self.subTest(command=command):
+                self.assertEqual(self.complete(command, "--image-p"), [])
+
+    def test_preview_completion_separates_launch_and_saved_choices(self):
+        for prefix in ((), ("start",), ("reset",)):
+            self.assertEqual(self.complete(*prefix, "--host-fi"), ["--host-file-open"])
+            self.assertEqual(
+                self.complete(*prefix, "--no-host-fi"), ["--no-host-file-open"]
+            )
+            self.assertEqual(
+                self.complete(*prefix, "--no-image-p"), ["--no-image-preview"]
+            )
+        for flag in ("--host-file-open", "--image-preview"):
+            self.assertEqual(self.complete("preferences", flag, ""), ["on", "off"])
+        self.assertEqual(self.complete("preferences", "--no-host-fi"), [])
+        self.assertEqual(self.complete("preferences", "--no-image-p"), [])
+        for command in ("web", "terminal", "tui", "attach", "status"):
+            with self.subTest(command=command):
+                self.assertEqual(self.complete(command, "--host-fi"), [])
+                self.assertEqual(self.complete(command, "--no-host-fi"), [])
+
+    def test_host_drop_is_offered_only_for_start_and_reset_tui_clients(self):
+        self.assertEqual(self.complete("--host-d"), ["--host-drop"])
+        self.assertEqual(self.complete("--no-host-d"), ["--no-host-drop"])
+        self.assertEqual(
+            self.complete("--no-host-c"),
+            ["--no-host-clipboard", "--no-host-clipboard-symlinks"],
+        )
+        for command in ("start", "reset"):
+            with self.subTest(command=command):
+                self.assertEqual(self.complete(command, "--host-d"), ["--host-drop"])
+                self.assertEqual(
+                    self.complete(command, "--no-host-d"), ["--no-host-drop"]
+                )
+                self.assertEqual(
+                    self.complete(command, "--no-host-c"),
+                    ["--no-host-clipboard", "--no-host-clipboard-symlinks"],
+                )
+        for command in (
+            "web",
+            "stop",
+            "sync",
+            "repair",
+            "terminal",
+            "tui",
+            "share",
+            "attach",
+            "upgrade",
+            "secrets",
+            "credentials",
+            "backup",
+            "backup-info",
+            "restore",
+            "purge",
+            "list",
+            "distros",
+            "status",
+            "doctor",
+            "completion",
+            "--status",
+        ):
+            with self.subTest(command=command):
+                self.assertEqual(self.complete(command, "--host-d"), [])
+                self.assertEqual(self.complete(command, "--no-host-d"), [])
+                self.assertEqual(self.complete(command, "--no-host-c"), [])
+
+    def test_workspace_preferences_have_context_specific_values(self):
+        self.assertEqual(
+            self.complete("preferences", "--startup-logo", ""), ["ascii", "graphics"]
+        )
+        self.assertEqual(self.complete("start", "--startup-l"), [])
+        self.assertEqual(self.complete("preferences", "--host-drop", ""), ["on", "off"])
+        self.assertEqual(
+            self.complete("preferences", "--host-drop", "o"), ["on", "off"]
+        )
+        self.assertEqual(self.complete("preferences", "--no-host-d"), [])
+        self.assertEqual(self.complete("preferences", "--j"), ["--json"])
+        for flag in ("--host-clipboard", "--host-clipboard-symlinks"):
+            for value in ("", "o"):
+                with self.subTest(flag=flag, value=value):
+                    self.assertEqual(
+                        self.complete("preferences", flag, value), ["on", "off"]
+                    )
+        self.assertEqual(
+            self.complete("preferences", "--host-clipboard=of", breaks=" "),
+            ["--host-clipboard=off"],
+        )
+        self.assertEqual(self.complete("preferences", "--no-host-c"), [])
 
     def test_vault_mode_completes_with_separate_and_equals_values(self):
         self.assertEqual(
@@ -259,6 +448,61 @@ fi
             self.complete("--model=restore", "doctor", "--f"), ["--feature"]
         )
 
+    def test_attachment_completion_scopes_broker_options_without_guessing_values(self):
+        self.assertEqual(self.complete("attach", "--se"), ["--session", "--send"])
+        self.assertEqual(self.complete("attach", "--br"), ["--broker"])
+        self.assertEqual(self.complete("attach", "--no-v"), [])
+        self.assertEqual(self.complete("attach", "--image-p"), [])
+        self.assertEqual(
+            set(self.complete("attach", "--broker", "--")),
+            {"--help", "--project", "--workspace", "--session", "--broker"},
+        )
+        for words in (
+            ("attach", "--session", "share", "--text", "restore", "--br"),
+            ("attach", "--session=share", "--text=restore", "--br"),
+            ("attach", "--session", "=", "share", "--text", "=", "restore", "--br"),
+        ):
+            with self.subTest(words=words):
+                self.assertEqual(self.complete(*words), ["--broker"])
+        (self.root / "PRIVATE_TOKEN").touch()
+        for words in (
+            ("attach", "--session", ""),
+            ("attach", "--session", "=", ""),
+            (
+                "attach",
+                "--session=",
+            ),
+            ("attach", "--text", ""),
+            (
+                "attach",
+                "--text=",
+            ),
+            ("attach", "--broker", "--session", ""),
+        ):
+            with self.subTest(words=words):
+                self.assertEqual(self.complete(*words), [])
+
+    def test_attachment_path_completion_is_direct_only_and_skips_option_values(self):
+        image = self.root / "Screenshot with spaces.png"
+        image.touch()
+        for words in (
+            ("attach", "Screen"),
+            ("attach", "--session", "ses_example", "Screen"),
+            ("attach", "--session=ses_example", "Screen"),
+            ("attach", "--text", "Screenshot caption", "Screen"),
+            ("attach", "--", "Screen"),
+        ):
+            with self.subTest(words=words):
+                self.assertEqual(self.complete(*words), [image.name])
+        for words in (
+            ("attach", image.name, "Screen"),
+            ("attach", "--broker", "Screen"),
+            ("attach", "--session", "ses_example", "--broker", "Screen"),
+            ("attach", "--broker", "--", "Screen"),
+        ):
+            with self.subTest(words=words):
+                self.assertEqual(self.complete(*words), [])
+
     def test_directory_file_and_archive_paths_preserve_spaces_and_metacharacters(self):
         directory = self.root / "project with spaces"
         directory.mkdir()
@@ -280,6 +524,8 @@ fi
         )
         self.assertEqual(self.complete("backup", "--output", "backup"), [archive.name])
         self.assertEqual(self.complete("restore", "$("), [literal.name])
+        self.assertEqual(self.complete("share", "project"), [directory.name + "/"])
+        self.assertEqual(self.complete("share", "backup"), [archive.name])
         self.assertFalse((self.root / "NOT_EXECUTED").exists())
         self.assertEqual(
             self.complete("--project", "~/project"), [str(directory) + "/"]

@@ -1,8 +1,9 @@
 """Offline safety contracts only: never execute the host Podman acceptance run."""
 
-import copy
 import contextlib
+import copy
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -26,12 +27,17 @@ spec.loader.exec_module(fixture)
 class GlobalVaultHostFixtureTests(unittest.TestCase):
     def test_native_version_options_are_exact_and_keep_legacy_defaults(self):
         self.assertEqual(fixture.parser().parse_args([]).native_version, "2.2.6")
-        self.assertEqual(
-            fixture.parser().parse_args(["--native-version", "2.3.0"]).native_version,
-            "2.3.0",
-        )
+        for version in ("2.2.6", "2.3.0"):
+            self.assertEqual(
+                fixture.parser().parse_args(["--native-version", version]).native_version,
+                version,
+            )
         for version in ("2", "2.2.7", "2.3.1"):
-            with self.subTest(version=version), self.assertRaises(SystemExit):
+            with (
+                self.subTest(version=version),
+                contextlib.redirect_stderr(io.StringIO()),
+                self.assertRaises(SystemExit),
+            ):
                 fixture.parser().parse_args(["--native-version", version])
 
     def test_current_selector_records_actual_version_path_and_hash_without_relabeling(
@@ -47,7 +53,8 @@ class GlobalVaultHostFixtureTests(unittest.TestCase):
         ):
             fixture.prepare_native_cli(self.root, binary, native_version="2.3.0")
         probe.assert_called_once_with(self.root, binary, "2", expected="2.3.0")
-        original = (self.root / "native-profile.json").read_bytes()
+        profile = self.root / "native-profile.json"
+        original = profile.read_bytes()
         identity = fixture.recorded_native(
             self.root, expected="2.3.0", binary=binary, verify=True
         )
@@ -56,23 +63,66 @@ class GlobalVaultHostFixtureTests(unittest.TestCase):
             fixture.recorded_native(self.root, expected="2.2.6")
         with self.assertRaisesRegex(fixture.FixtureError, "native-profile"):
             fixture.recorded_native(self.root, binary=Path("/another/native"))
-        self.assertEqual((self.root / "native-profile.json").read_bytes(), original)
+        self.assertEqual(profile.read_bytes(), original)
         self.assertEqual(fixture.NATIVE_VERSION, "2.2.6")
+
+    def test_native_selector_rejects_binary_changed_during_either_probe(self):
+        self.complete_fixture_metadata()
+        # A synthetic executable-shaped file; neither mocked probe executes it.
+        with tempfile.TemporaryDirectory(dir=self.root.parent) as parent:
+            binary = Path(parent) / "native"
+            binary.touch(mode=0o700)
+
+            def changed(*args, **kwargs):
+                binary.write_bytes(b"\x7fELFchanged")
+                return SimpleNamespace(stdout="2.3.0\n")
+
+            for probe in ("binary", "selector"):
+                with self.subTest(probe=probe):
+                    binary.write_bytes(b"\x7fELForiginal")
+                    with (
+                        patch.object(
+                            fixture,
+                            "check_native_version",
+                            side_effect=changed if probe == "binary" else None,
+                            return_value="2.3.0",
+                        ),
+                        patch.object(box, "run", side_effect=changed) as run,
+                        self.assertRaisesRegex(fixture.FixtureError, "native-changed"),
+                    ):
+                        fixture.prepare_native_cli(
+                            self.root, binary, native_version="2.3.0"
+                        )
+                    profile = self.root / "native-profile.json"
+                    if probe == "binary":
+                        run.assert_not_called()
+                        self.assertFalse(profile.exists())
+                        self.assertFalse((self.root / "bin/opencode").exists())
+                    else:
+                        run.assert_called_once()
+                        with self.assertRaisesRegex(
+                            fixture.FixtureError, "native-changed"
+                        ):
+                            fixture.recorded_native(self.root, verify=True)
 
     def test_source_retry_current_profile_requires_original_identity_and_boot(self):
         path, data, _ = self.retained_source()
         binary = Path(sys.executable).resolve()
         data["opencode_version"] = "2.3.0"
         box.atomic_json(path, data)
-        fixture.write_json_new(
-            self.root / "native-profile.json", fixture.native_identity(binary, "2.3.0")
-        )
+        profile = self.root / "native-profile.json"
+        identity = fixture.native_identity(binary, "2.3.0")
+        fixture.write_json_new(profile, identity)
         before = fixture.source_evidence_digests(self.root, path)
         self.assertIn("native-profile.json", before)
         with patch.object(box, "run") as run:
             fixture.validate_source_retry(self.root, native_version="2.3.0")
-            with self.assertRaises(fixture.FixtureError):
+            with self.assertRaisesRegex(fixture.FixtureError, "native-profile"):
                 fixture.validate_source_retry(self.root)
+            box.atomic_json(profile, {**identity, "sha256": "0" * 64})
+            with self.assertRaisesRegex(fixture.FixtureError, "native-changed"):
+                fixture.validate_source_retry(self.root, native_version="2.3.0")
+            box.atomic_json(profile, identity)
             (self.root / "podman-tmp/alive").write_bytes(
                 b"00000000-0000-0000-0000-000000000002\n"
             )
@@ -83,11 +133,44 @@ class GlobalVaultHostFixtureTests(unittest.TestCase):
 
     def test_legacy_evidence_cannot_be_promoted_to_current_profile(self):
         self.retained_source()
+        self.assertEqual(
+            fixture.recorded_native(self.root, verify=True), {"version": "2.2.6"}
+        )
         with self.assertRaisesRegex(fixture.FixtureError, "native-profile"):
             fixture.validate_source_retry(self.root, native_version="2.3.0")
         self.assertFalse((self.root / "native-profile.json").exists())
 
+    def test_profiled_empty_fixture_refuses_missing_or_removed_identity(self):
+        root = self.parent / (fixture.PREFIX + "profiled")
+        root.mkdir(mode=0o700)
+        fixture.prepare_root(root, "tumbleweed", profiled=True)
+        self.assertEqual(fixture.fixture_format(root), 2)
+        profile = root / "native-profile.json"
+        binary = Path(sys.executable).resolve()
+        with patch.object(box, "run") as run:
+            for retry in (False, True):
+                if retry:
+                    fixture.write_json_new(
+                        profile, fixture.native_identity(binary, "2.2.6")
+                    )
+                    self.assertEqual(
+                        fixture.recorded_native(root, verify=True)["version"],
+                        "2.2.6",
+                    )
+                    profile.unlink()
+                for expected in (None, "2.2.6", "2.3.0"):
+                    with (
+                        self.subTest(retry=retry, expected=expected),
+                        self.assertRaisesRegex(fixture.FixtureError, "native-profile"),
+                    ):
+                        fixture.recorded_native(root, expected=expected, verify=True)
+        run.assert_not_called()
+        self.assertFalse(profile.exists())
+
     def setUp(self):
+        # Initialize tempfile's process-wide default before installing the
+        # fixture's disposable TMPDIR; later tests must not inherit that path.
+        tempfile.gettempdir()
         preferred = Path("/tmp/opencode")
         temporary = tempfile.TemporaryDirectory(
             prefix="oc-box-gv-fixture-unit-",
@@ -372,6 +455,7 @@ class GlobalVaultHostFixtureTests(unittest.TestCase):
             fixture.validate_fixture(self.root)
 
     def test_restored_provenance_is_independent_of_uuid_directory_order(self):
+        self.complete_fixture_metadata()
         _, source = self.record("source-a", "f" * 32)
         _, restored = self.record("restored-full", "0" * 32, origin=source["id"])
         records = fixture.workspace_records(self.root)
@@ -385,6 +469,7 @@ class GlobalVaultHostFixtureTests(unittest.TestCase):
             fixture.workspace_records(self.root)
 
     def test_registry_cannot_select_a_real_project_or_selected_credential_policy(self):
+        self.complete_fixture_metadata()
         path, data = self.record("source-a", "a" * 32)
         invalid = copy.deepcopy(data)
         invalid["project"] = str(self.parent)
@@ -770,34 +855,33 @@ with patch.object(fixture,'host_guard'), patch.object(fixture,'diagnose',return_
                 self.assertEqual(json.loads(result.stdout)["status"], status)
                 self.assertEqual(result.stderr, "")
 
-    def test_retained_cli_profile_matrix_verifies_identity_before_dispatch(self):
+    def test_retained_cli_verifies_exact_profile_before_dispatch(self):
         self.complete_fixture_metadata()
         profile = self.root / "native-profile.json"
         binary = Path(sys.executable).resolve()
         original_recorded = fixture.recorded_native
         secret = "synthetic-private-native-dispatch-error"
         cases = (
-            (None, None, True, False),  # Old metadata/default stays legacy.
-            ("2.2.6", "2.2.6", True, False),
-            ("2.3.0", "2.3.0", True, False),
-            ("2.2.6", "2.3.0", False, False),
-            ("2.3.0", "2.2.6", False, False),
-            (None, "2.3.0", False, False),  # Never upgrade old metadata.
-            ("2.3.0", "2.3.0", True, True),
+            (None, None, None),
+            ("2.2.6", "2.2.6", None),
+            ("2.3.0", "2.3.0", None),
+            ("2.2.6", "2.3.0", "native-profile"),
+            ("2.3.0", "2.2.6", "native-profile"),
+            (None, "2.3.0", "native-profile"),
+            ("2.3.0", "2.3.0", "native-changed"),
+            ("2.3.0", "2.3.0", "operation-failed"),
         )
         for mode in ("diagnose", "cleanup"):
-            for recorded, selected, matches, dispatch_error in cases:
+            for recorded, selected, failure in cases:
                 with self.subTest(
-                    mode=mode,
-                    recorded=recorded,
-                    selected=selected,
-                    dispatch_error=dispatch_error,
+                    mode=mode, recorded=recorded, selected=selected, failure=failure
                 ):
                     profile.unlink(missing_ok=True)  # Synthetic case setup only.
                     if recorded is not None:
-                        fixture.write_json_new(
-                            profile, fixture.native_identity(binary, recorded)
-                        )
+                        metadata = fixture.native_identity(binary, recorded)
+                        if failure == "native-changed":
+                            metadata["sha256"] = "0" * 64
+                        fixture.write_json_new(profile, metadata)
                     before = profile.read_bytes() if profile.exists() else None
                     events = []
                     expected = selected or "2.2.6"
@@ -817,11 +901,9 @@ with patch.object(fixture,'host_guard'), patch.object(fixture,'diagnose',return_
 
                     def dispatch(root):
                         self.assertEqual(root, self.root)
-                        self.assertEqual(
-                            events, ["identity-check", "identity-verified"]
-                        )
+                        self.assertEqual(events, ["identity-check", "identity-verified"])
                         events.append(mode)
-                        if dispatch_error:
+                        if failure == "operation-failed":
                             raise subprocess.CalledProcessError(
                                 17,
                                 ["private-native", secret],
@@ -829,11 +911,7 @@ with patch.object(fixture,'host_guard'), patch.object(fixture,'diagnose',return_
                                 stderr=secret,
                             )
                         return (
-                            {
-                                "status": "diagnostic-only",
-                                "native_version": expected,
-                                "engine_probes": [],
-                            }
+                            {"status": "diagnostic-only", "native_version": expected}
                             if mode == "diagnose"
                             else {}
                         )
@@ -841,7 +919,10 @@ with patch.object(fixture,'host_guard'), patch.object(fixture,'diagnose',return_
                     arguments = ["--" + mode, str(self.root)]
                     if selected is not None:
                         arguments += ["--native-version", selected]
-                    with contextlib.ExitStack() as stack:
+                    with (
+                        contextlib.ExitStack() as stack,
+                        tempfile.TemporaryFile(mode="w+") as output,
+                    ):
                         stack.enter_context(patch.object(fixture, "host_guard"))
                         stack.enter_context(
                             patch.object(
@@ -854,63 +935,54 @@ with patch.object(fixture,'host_guard'), patch.object(fixture,'diagnose',return_
                             )
                             for name in ("diagnose", "cleanup")
                         }
+                        forbidden = (
+                            (box, "run"),
+                            (box, "podman"),
+                            (subprocess, "run"),
+                            (subprocess, "Popen"),
+                            (fixture, "check_native_version"),
+                            (fixture, "diagnostic_store_probes"),
+                            (fixture, "validate_store"),
+                            (fixture, "verify_owned_resources"),
+                        )
                         guards = [
                             stack.enter_context(
                                 patch.object(
-                                    target,
-                                    name,
-                                    side_effect=AssertionError(
-                                        "unexpected native/engine/resource operation"
-                                    ),
+                                    target, name, side_effect=AssertionError(name)
                                 )
                             )
-                            for target, name in (
-                                (box, "run"),
-                                (box, "podman"),
-                                (subprocess, "run"),
-                                (subprocess, "Popen"),
-                                (fixture, "check_native_version"),
-                                (fixture, "diagnostic_store_probes"),
-                                (fixture, "validate_store"),
-                                (fixture, "verify_owned_resources"),
-                            )
+                            for target, name in forbidden
                         ]
-                        # main duplicates fd 1; capture both actual descriptors
-                        # so private errors cannot escape through stderr either.
-                        with tempfile.TemporaryFile(mode="w+") as output:
-                            saved = {fd: os.dup(fd) for fd in (1, 2)}
-                            try:
-                                for fd in saved:
-                                    os.dup2(output.fileno(), fd)
-                                code = fixture.main(arguments)
-                            finally:
-                                for fd, original in saved.items():
-                                    os.dup2(original, fd)
-                                    os.close(original)
-                            output.seek(0)
-                            console = output.read()
+                        # main duplicates fd 1; capture both actual descriptors.
+                        saved = {fd: os.dup(fd) for fd in (1, 2)}
+                        try:
+                            for fd in saved:
+                                os.dup2(output.fileno(), fd)
+                            code = fixture.main(arguments)
+                        finally:
+                            for fd, original in saved.items():
+                                os.dup2(original, fd)
+                                os.close(original)
+                        output.seek(0)
+                        console = output.read()
                         for guard in guards:
                             guard.assert_not_called()
                     dispatches[
                         "cleanup" if mode == "diagnose" else "diagnose"
                     ].assert_not_called()
-                    if matches:
+                    if failure in ("native-profile", "native-changed"):
+                        dispatches[mode].assert_not_called()
+                        self.assertEqual(events, ["identity-check"])
+                    else:
                         dispatches[mode].assert_called_once_with(self.root)
                         self.assertEqual(
                             events, ["identity-check", "identity-verified", mode]
                         )
-                        self.assertEqual(code, int(dispatch_error))
-                        if dispatch_error:
-                            self.assertIn("category=operation-failed", console)
-                        elif mode == "diagnose":
-                            self.assertEqual(
-                                json.loads(console)["native_version"], expected
-                            )
-                    else:
-                        dispatches[mode].assert_not_called()
-                        self.assertEqual(events, ["identity-check"])
-                        self.assertEqual(code, 1)
-                        self.assertIn("category=native-profile", console)
+                    self.assertEqual(code, int(failure is not None))
+                    if failure:
+                        self.assertIn("category=" + failure, console)
+                    elif mode == "diagnose":
+                        self.assertEqual(json.loads(console)["native_version"], expected)
                     self.assertNotIn(secret, console)
                     self.assertNotIn("private-native", console)
                     self.assertEqual(

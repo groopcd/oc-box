@@ -39,10 +39,161 @@ Editable source installations must also refuse the GitHub self-updater; keep
 their checkout ownership distinct from unrelated source and flat installations.
 
 - `oc_box.py`: external rootless-Podman launcher and workspace lifecycle.
+  Keep top-level help a short grouped command index and launcher command pages
+  scoped to applicable options. Preserve dedicated command help, implicit
+  `start` and legacy selector-first parsing. Help must not resolve workspaces,
+  acquire locks, consult the vault, call Podman or touch launcher state.
 - `bootstrap.py`: baseline tools installed inside the container.
 - `sync_config.py`: container-only config refresh with dependency-cache reuse.
-- `terminal_ui.py`: native TUI relay and startup loading indicator.
+- `terminal_ui.py`: native TUI relay and startup loading indicator. Keep native
+  OpenCode output/UI unchanged. Launcher stage progress is transient on a
+  capable TTY and has no default start/done lines in pipes or `TERM=dumb`.
+  Preserve actionable warnings/prompts and one final history result per attempt,
+  with interruption/unconfirmed-completion cautions on recovery. Report partial
+  or uncertain cleanup honestly; do not change lifecycle, eligibility or exits.
+  `--lifecycle-diagnostics` explicitly opts in to expanded launcher messages for
+  one invocation; no saved default beyond quiet. The sharing host fixture uses
+  it only for the owner expecting an explicit stop and checking the legacy
+  pending-history line. Keep historical reports intact; offline output checks
+  are not new host acceptance.
 - `status_report.py`: read-only host resource and storage reporting.
+- `tui.py` / `tui_app.py` / `tui_backend.py`: optional, host-side Textual manager.
+  Keep ordinary CLI imports stdlib-only, demo strictly synthetic, browsing free
+  of workspace starts/unlocks/sync, and resource values informational. Live
+  CPU/RAM/storage edits are deferred; do not introduce resource-control RPCs.
+  Host session Connect may use normal native host discovery; workspace sources
+  must use an existing private owner, with explicit visible client leases.
+  To manage the oc-box checkout itself, run an isolated non-editable package,
+  not `--with-editable` launcher code inside that mount. Preserve APP/state
+  exposure validation; a self-workspace refusal is not permission to bypass it.
+  The first integrated TUI release requires the current focused host runner's
+  42 checks (33 retained plus nine archived-root resume checks), not an older
+  33-check pass. Its ordered exits are [0,0,0,1,0,0,0,0]. Use the interactive
+  fixture's explicit `manager` mode for Textual observations; native `tui`
+  observations do not cover the dashboard. Manager browsing has no outer lease.
+- `tui_status.py` / `tui_settings.py`: cell-bounded diagnostics and session-only
+  categorized preferences. Keep meter columns aligned and scales fixed; unknown
+  is not zero, and container CPU bars use observed quotas. Requested refresh
+  defaults to one second with no overlapping queries. Settings must not weaken
+  CLI read-only mode, connect sessions, persist search values, or edit resources.
+- `tui_sessions.py`: paginated metadata-only catalogs and private UI favorites.
+  Preserve source/store identity, verified controller-archive provenance, native
+  child cascades and process-local activity limits. Archive/delete are explicit,
+  source-specific actions, never bidirectional mirror synchronization. Archived
+  V2 roots remain synchronized but are not automatic resume targets.
+- `tui_terminal.py`: bounded local PTY/emulator for the existing native session
+  terminal client. Require explicit validated attachment and remote exec TTY;
+  do not create a replacement container shell or record terminal output. Local
+  client state is not proof of native readiness/controller ownership. Native
+  and headless checks are not interactive/rootless-Podman acceptance.
+- `tui_clipboard.py`: explicit optional dashboard clipboard/viewport selection.
+  Never read the desktop clipboard in the background, journal copied/pasted
+  text or record terminal output. User-requested auto-copy may write only when
+  a real user selection gesture finishes, never during dragging or from
+  programmatic selection, refresh, focus or container output. Explicit UI copy
+  and completed user selections use host clipboard support; container OSC
+  clipboard requests stay stripped.
+  Paste copied is the in-app cache, not the current desktop clipboard. Preserve
+  focused shell control keys, byte/queue bounds and CLI read-only fences.
+- `activity_log.py` / `logs_cli.py` / `tui_logs.py`: private bounded
+  fixed-category activity journal plus explicit in-memory dashboard external
+  log views. `oc-box logs` is host-only and read-only, with a stdlib-only
+  private default. It must not write journal, workspace or history state or
+  read native OpenCode or container logs.
+  CLI and dashboard share validated severity and message formatting; only the
+  CLI defaults to `info` and higher. The dashboard includes `debug`. Valid
+  legacy rows remain readable. Missing or unsafe journal data fails closed to
+  empty; JSON Lines with no matches emits nothing. Preserve legitimate owned
+  legacy state permissions while keeping log directories/files private. Reason
+  codes and metric names use closed sets; metric values are bounded integers.
+  Never journal raw argv, errors, env, stdout/stderr, prompts, transcripts,
+  pairing links, authentication, clipboard data or other free-form text.
+  `logs --tail` reads an independent private preparation ring beneath the
+  selected log directory. Keep ordinary activity files readable and writable
+  by older launchers; never mix the newer preparation schema into them or the
+  system journal.
+  Owning start/reset/web and sync preparation may append fixed task starts and
+  outcomes before returning; do not move existing history/shutdown writes into
+  lifecycle deadlines. Quiet setup discards selected installer streams; bare
+  launcher `--verbose` or `--verbose=ALL` restores them on the console only.
+  Never widen capture to native clients, config/auth/history protocols, or
+  interactive prompts; reading logs does not change a running launch.
+  Dashboard external-log redaction remains best-effort, not a guarantee of
+  arbitrary-secret removal.
+  RAW dashboard output uses only validated/retained display data and follows
+  source/query filters without table formatting. Explicit bulk copy stays
+  clipboard-bounded and never exposes pre-redaction input. System-journal
+  browsing is explicit, never merged into the default source view.
+  `log_config.py` loads bounded host `logs` policy without writes or following
+  config symlinks. Only a separate, explicit Host logging save may persist
+  the private directory and mirror choice, preserving all other configuration.
+  Demo and read-only views cannot save; there is no log migration or setup
+  during config edits. Existing custom destinations are checked without
+  creation; custom writes verify reserved names and the records of every file
+  affected by rotation or retention before changing the ring. Never adopt
+  unrelated files or guess at corrupt custom records. Keep default-journal
+  crash recovery unchanged. Logger flags are invocation-local, never environment
+  switches or config edits; invalid saved policy fails closed even with
+  explicit overrides. Only default/start, reset, stop, sync, terminal and web
+  accept launcher `--log-dir PATH`, `--journald` / `--no-journald`, and
+  `--lifecycle-diagnostics`. `--log-dir PATH` overrides valid `logs.directory`
+  and also works for private `logs` reads, including `logs --path`; only an
+  append can create the directory. Journal location is independent of workspace
+  registration. Rotation and age/space retention apply only on appends, only
+  to the owner's validated managed files, and never modify the system journal
+  or move old logs.
+  `logs.journald` is a host boolean, default false. The launcher flags override
+  it for one invocation. Mirror only successfully appended, validated activity
+  events to existing local systemd-journald with native priorities. The private
+  file remains primary; sink errors cannot affect lifecycle results. Do not
+  start/configure daemons or add ordinary systemd dependencies. System journal
+  visibility and retention follow host policy. `oc-box logs --journald` is
+  read-only, independent of the writer setting, and incompatible with
+  `--log-dir`. It expressly selects the current user's mirror via local
+  `journalctl`, with the same severity and workspace filters, limit, follow and
+  JSON Lines support. On unavailability give fixed safe guidance to use the
+  private default, never fall back automatically or expose raw errors. Mock
+  backends are not host journal acceptance.
+- `tui_storage.py` / `tui_operations.py` / `tui_management.py`: three distinct
+  host/selected/all-workspace scopes, canonical bounded registry reads and explicit
+  operation reviews, typed only for destructive actions. Host operations target
+  individual session trees, never a whole database. Workspace removal retains
+  project/history and uses normal locks/validators; no bulk wipe, shared-cache
+  pruning or resource-limit edits.
+  Hand secrets to existing masked foreground TTY prompts in the same pinned runtime,
+  not selectable dashboard inputs or recorded output. Recheck review bindings in
+  the child; ordinary CLI imports remain stdlib-only.
+- `tui_operation_io.py` / `tui_backup_workflow.py`: the explicitly approved
+  backup-only in-dashboard exception to foreground prompt presentation. Use a
+  separate private controlling PTY and the existing child `secret_prompt` reader,
+  explicit bounded readiness/review/result channels, and a nonselectable custom
+  `PRIVATE_INPUT` editor/screen, never an ordinary Textual/ClipboardInput field.
+  The manager's transient private editor is now inside the secret-memory trust
+  boundary; do not claim guaranteed erasure or an unchanged memory boundary.
+  Passwords cross only the echo-disabled child PTY on completed submission, not
+  protocol metadata, widget values/reactives/messages, argv/env/files, clipboard
+  caches or logs. Hold an app-wide private-input shield through prompt closure.
+  Keep ordinary CLI controlling-TTY behavior unchanged, all production host
+  guards, native verification, archive formats and lifecycle safety authoritative.
+  Parent loss/cancel requests one interrupt and waits for real cleanup/exit;
+  no automatic retry, blind process-group kill or unacknowledged success.
+  Session cancellation retains attempted versus verified/observed fresh IDs,
+  never deletes them or imports more history to manufacture rollback. Core dumps
+  are disabled in manager/children before private input; this is not protection
+  against a same-user debugger, swap, terminal recording or all memory copies.
+  Refuse private dashboard operations when Textual debug, developer tools or
+  event-file logging are configured: framework input logging precedes widget
+  handlers, so selection exclusion alone is not a sufficient privacy boundary.
+- `session_backups.py`: encrypted bounded native V2 history, separate from full/
+  portable workspace archives. Plaintext/key material stays in memory; no-overwrite
+  age envelopes, quiet source checks, fresh IDs and cleared privileges on restore.
+  Verify native GET/export/inventory, report honest partial-import recovery IDs,
+  and never infer success from native conflict exit zero or automatically roll back
+  by deleting unknown sessions. Session import transcripts must use native stdin,
+  not argv; retain the explicit source/service and process-local ownership checks.
+- `tui_notifications.py`: allowlisted actionable toasts plus persistent notices.
+  Never show raw errors or journal them. Distinguish preflight refusal, unverified
+  mutation acknowledgement and completed mutation followed by failed refresh.
 - `dependencies.py`: read-only feature-scoped doctor, OS package providers and
   early preflight guidance. Keep host and workspace-container scopes distinct;
   never install packages automatically from diagnostics.
@@ -62,19 +213,175 @@ their checkout ownership distinct from unrelated source and flat installations.
   Owners wait for attached clients before sync/stop, and lifecycle locks remain
   exclusive against reset/purge/backup. Attach never refreshes credentials.
 - `history_recovery.py` / `history_reader.py` / `workspace_control.py`: one bounded
-  persisted-history snapshot after shell-only live timeouts, never a live readiness
-  waiver or native job cleanup. Require actual verified whole-container stop,
+  persisted-history snapshot after audited live timeouts: shell-only on native
+  2.2.6/2.2.7; shell/subagent on canonical stable 2.3.x. Never a live readiness
+  waiver or native job cleanup. The shared 2.3.x profile checks durable job/recovery
+  metadata before source/destination native history processing; image/unknown jobs, unknown forms,
+  legacy background rows and incompatible schemas refuse. Actual binary versions
+  must match the captured exact patch on both sides; a shared series is not a
+  patch-mismatch waiver or untested-future-native acceptance. Prereleases,
+  modified/malformed identities and unknown minor/major series refuse.
+  Detected contract/version incompatibilities give fixed-category guidance to
+  update oc-box/OpenCode as appropriate, never a reset or state-downgrade bypass.
+  Do not misclassify ordinary activity, timeouts or cleanup failures as version
+  drift. Never substitute normal manual-sync preparation or managed restart
+  continuity. Require actual verified whole-container stop,
   immutable same-resource restart, stop intent/admission and persistent uncertainty
   fences. Readers are unregistered/non-executing, with source/destination scheduler
   metadata and system-config refusals, one endpoint, unchanged checked exports and
-  host verification, separate cleanup and original nonzero/interruption warnings.
+  host verification and separate cleanup. Pass-local export helpers require
+  admission per request, bounded private framing, no restart/replay, and
+  reaping/strict EOF before success. Transport reuse is
+  post-stop only, never bulk work admission or destination writer reuse.
+  Preserve original client nonzero results
+  and interruption/unconfirmed-completion warnings; only raw client exit 0 plus
+  complete verified archival, recovery cleanup and final stop may return 0 after a
+  live timeout. Unknown client status, partial/failure or uncertain cleanup remains
+  nonzero with retry-sync guidance; historical accepted exit records stay unchanged.
+  The new 2.3 foreground-interruption hint requires two complete validated busy
+  pairs and only supported job kinds; it authorizes post-stop archival, never live
+  export or job completion. Observed foreground interruption stays nonzero even
+  when its persisted history saves. Ordinary expected 2.3 live-sync failures may
+  route one guarded Reader attempt, not a second unrestricted manual launch.
+  Preserve explicit compatibility/cleanup refusals and legacy routing. Require
+  native queued-input/execution-claim non-consumption evidence and fresh focused
+  external-host validation before publishing this extension; earlier idle-owner
+  recovery evidence does not establish that acceptance.
   Never clear an uncertain start without verified transition completion, resume
   work, refresh credentials, create replacement resources or infer host acceptance
   from local native/process fixtures. The focused host recovery gate is additional
-  to the stable 33-check history/readiness runner, not a relabeling of it.
+  to the retained 42-check history/readiness runner, not a relabeling of it.
 - `session_terminal.py`: native persistent V2 session shell PTY client with
   authenticated WebSocket framing, resize/checkpoint replay and Ctrl-] detach.
   Reuse the session terminal, never replace it with the mini chat interface.
+- `sharing.py`: experimental host-only foreground live read/list/image tools
+  through native V2 client-MCP. Require explicit disclosure consent and a verified
+  existing workspace lease; no mounts, listener, staging copies, saved MCP config,
+  credential refresh or automatic regrant. Keep pinned-root/openat2 confinement,
+  special/link/protected-path refusals, bounded private pipe/WebSocket I/O and
+  fixed errors. Disconnect is not recall of disclosed data. Native/offline checks
+  are not host acceptance; defer publication until TUI/regression and focused host
+  sharing checks are complete.
+- `attachments.py` / `attachment_io.py`: explicit host image snapshots and
+  session-bound, expiring, one-use native client-MCP grants, or direct native
+  image input through stdin-only private admission. Remote path proposals are
+  never authorization: broker mode requires independent per-image host TTY
+  consent, including uniform denial for missing/protected/special paths. Preserve
+  pre-consent descriptor pinning, response backpressure and no automatic regrant.
+  Keep the native TUI/container boundary unchanged; there is no public transparent
+  host-drop interceptor. Native queued input is not a composer draft or an
+  inactivity guarantee. Refuse observed staged reverts and document the residual
+  native check/admission race; no host acceptance follows from offline probes.
+- `host_drop.py` / `host_drop_input.py` / `host_drop_io.py`: native TUI input
+  bridge, enabled by default per workspace on supported clients.
+  `workspace_preferences.py` stores private host-only future-client policy beside
+  workspace metadata under a separate lock; never mutate owner metadata, unlock,
+  launch or live-toggle a client from `preferences`. Explicit startup overrides
+  persist; automatic unsupported-client mode skips importing, explicit enable
+  remains strict, and corrupt/unsafe preferences refuse. Qualifying pathname pastes authorize
+  imports anywhere in that connection, not proof of a physical drag/composer
+  focus. Only host stdin or terminal-offered structured drops select sources;
+  never add model/MCP/prompt-text triggers. Keep opaque terminal replies,
+  UTF-8/C1 boundaries and fail-closed framing. Konsole is pathname-paste-only,
+  with no OSC 72 probes/registration and unchanged child output. Only the known
+  Kitty profile reserves its audited C0 OSC 72 wire traffic; do not claim a
+  generic C1-output sandbox. Unknown/ambiguous host compatibility markers refuse,
+  but markers are not authentication. Preserve valid graphics/keyboard traffic;
+  unsupported output framing limits fail closed. Graphics support is not DnD
+  support. Stream only bounded whitelisted snapshots into a
+  pinned private container temp root; never synthesize Enter or native prompt
+  admission. Native TUI/server/plugins stay container-side. Cleanup is bounded
+  best-effort, not recall or isolation from other workspace tools, and crashes
+  can retain staging/history/provider/backup copies. Default relay behavior and
+  the independent-confirmation broker remain unchanged. No host acceptance is
+  established by synthetic parser/process/native checks.
+- `host_clipboard.py`: opt-in host PNG/copied-file clipboard reader. Workspace
+  `ui-preferences.json` saves future-client clipboard/symlink booleans under the
+  independent host preference lock; absent clipboard choice means OFF, absent
+  symlink choice means ordinary following. Explicit native start/reset
+  --host-clipboard / --no-host-clipboard choices persist, including on additional
+  clients without owner restart/unlock/config refresh; existing clients never
+  live-toggle. Saved enable skips unsupported terminals/native V1/missing desktop
+  helpers without clearing policy; explicit enable remains strict. Web, terminal,
+  manager, sync and informational commands ignore saved policy and reject startup
+  flags. `preferences --host-clipboard on|off` and
+  `--host-clipboard-symlinks on|off` never launch/unlock/discover helpers and work
+  without a TTY. Store only booleans, never helper paths or clipboard data;
+  host-only preferences are not restore authority. Discovery
+  never reads; only the dedicated top-level host shortcut may call the bounded
+  desktop helper. Typed local URI lists reuse the existing pinned host-drop
+  source guards; type discovery is not proof of file-manager provenance.
+  Clipboard file sources follow ordinary symlinks by default;
+  --host-clipboard-symlinks / --no-host-clipboard-symlinks save the future-client
+  choice and require effective clipboard enable on native start/reset.
+  `preferences --host-clipboard-symlinks on|off` is independent and can save the
+  future choice even while clipboard is OFF, without runtime checks.
+  Keep strict choices through clipboard disable/re-enable; never silently revert
+  to link following. Keep this link-following exception
+  out of normal drops and live sharing. Validate selected and canonical protected
+  paths; use kernel NO_MAGICLINKS O_PATH selection and match the strict export
+  against its still-pinned descriptor before reading. Never use Path.resolve
+  followed by an unbound reopen as source authority. Copy-to-shortcut link
+  retargeting is an accepted disclosed tradeoff, not immutable source consent.
+  Imports always copy, never move/cut or modify the source/clipboard. No
+  background polling, model/output/MCP triggers, arbitrary text/plain requests,
+  unsafe fallback, socket mounts, listeners or automatic Send. Preserve ordinary
+  Ctrl+V, file-drop opt-outs and the helper's desktop-only environment. Synthetic
+  tests are not desktop/native composition acceptance; keep host checks minimal.
+  Refusal markers may include closed fixed categories only, never raw errors,
+  clipboard data or host paths; missing/strict-linked/private denials stay uniform.
+  Host drop/clipboard eligibility covers valid native 2.x releases rather than
+  an exact patch allowlist; retain private-client, transfer and terminal contract
+  refusals. No public API proves future composer attachment behavior. Do not
+  reuse this eligibility policy as a shortcut for unrelated compatibility guards.
+- `file_preview*.py` / `file_preview_tui.tsx` / `file_open_formats.py`:
+  experimental host open, per native 2.3.x TUI CLI selection. Only verified
+  fresh GitHub installations get an automatic default, never a markerless
+  upgrade, wheel, source checkout or restored workspace. Keep the owner-bound
+  installation record out of archives. A saved host-only workspace choice
+  takes precedence over that default, but not the current launch flag.
+  Saving or restoring data never changes a live client. Require a fresh
+  matched Ctrl-click from host terminal input and native assistant link
+  hit-testing. Child output must not independently grant file opens. Validate
+  mount/descriptor boundaries, bound each read and transfer, and open only
+  verified private PNG/text/Markdown/static HTML copies. Avoid clipboard
+  coupling, active HTML, arbitrary protocol dispatch, and mainline patches.
+  Native PTY evidence is not physical Yakuake/Podman acceptance.
+- `ui_state.py` / `ui_state_*.js`: public-SDK container TUI/server/RPC reports,
+  installed only during normal eligible V2 owning preparation, never on attach.
+  Canonical stable native `2.x.y` is eligible, not proof of SDK compatibility.
+  Require a compatible protocol handshake, matching generation, identity
+  verification through the same private service and a snapshot recheck.
+  Incompatible responses leave reports unavailable, without refreshing an
+  attached owner. Keep exact routed children separate from active root
+  membership. Custom client IDs are cooperative metadata, not attestation or
+  host authority. Prefer the fresh owner even when blurred; missing, expired
+  or ambiguous reports never justify focus guesses.
+  Bound receipt freshness, retain sequence/release high-water history through
+  expiry, and fail closed at capacity without evicting replay protection.
+- `web_sessions.py` / `web_sessions.js` / `web_attachments.py` /
+  `web_attachments.js`: one first-party tabstrip around one unmodified native
+  iframe, never private native-store seeding, asset patches or nested wrappers.
+  Preserve authenticated `/auth/` routing and native cookie/Origin checks.
+  Explicit session selection wins; fresh reports supply ordered membership and
+  exact selection. The web-only saved fallback attempts the pinned private
+  native `tabs.json` layout on canonical stable `2.x.y`, rechecks state and
+  verifies displayed IDs through the same private service. It never indicates
+  focus, guesses a path/session, or substitutes history. Refusals retain the
+  existing unavailable/index behavior and native Home option. Keep the exact
+  automatic owner startup/default-session allowlist and the separate history,
+  recovery, browser attachment, sharing and authentication guards unchanged.
+  Public SDK and private layout compatibility are not established for all 2.x.
+  Browser attachments remain explicitly enabled, trusted File-only and manually
+  sent. Recheck exact live URL, document, original target and selection generation
+  after asynchronous reads, including explicit away/back changes. Silent SPA
+  excursions between public observations remain a documented residual race.
+- `tools/test_sharing_podman.py` and its provider/archive helpers are a separate
+  source-pinned host harness, not a change to an already frozen release candidate.
+  Keep host guards, verified fresh private stores, controlling-PTY consent,
+  unmodified production sharing/native transport, strict PASS/INCOMPLETE scopes,
+  streaming encrypted-backup inspection and original failure evidence. Never run
+  it inside oc-box or substitute its local/native preparation for host acceptance.
 - `plugin_compat.py` / `plugin_bridge.js`: bounded copied-V1-plugin adapters on
   native V2 plugin APIs. Keep host originals and V1 behavior intact, propagate
   refusal errors and preserve attachments/structured output; reject unsupported
@@ -92,6 +399,21 @@ their checkout ownership distinct from unrelated source and flat installations.
 - `backups.py` / `backup_crypto.py` / `backup_archive.py`: host-only encrypted
   backup/restore feature; use established age streaming encryption, no plaintext
   archive staging, fresh restore IDs, and no archived privilege reactivation.
+- `host_backup_payload.py` / `host_backup_restore.py` / `host_backup_auth.py`:
+  explicit CLI and reviewed dashboard host migration component. Preserve bounded
+  exact file bytes, read-only no-follow capture, the already-encrypted vault and independent
+  native OpenCode consent. No host configuration writes from workspace-only
+  restore. Never restore registry identities, an archived host database,
+  external paths or plaintext archive staging. V2 credentials come from an
+  explicit native export and are verified in an isolated tmpfs-backed native
+  store before publication to a reviewed, absent host database. Stable native
+  2.x uses the fresh-store behavior checks, not a patch allowlist or the live
+  history recovery policy. Refuse unexpected persisted work. No joins to the
+  live host service, silent overwrite or cross-filesystem transaction claims.
+  Dashboard switches select a plan only. Use the existing private backup PTY
+  and authenticated metadata review; native restore also needs the explicit
+  trust phrase. Review and recheck private export file identity without
+  carrying its contents on the dashboard protocol, stdout or clipboard.
 - `install.py` (under the package): copies the launcher to `~/.local/share/oc-box` and creates
   `~/.local/bin/oc-box`.
 - `installation.py`: staged immutable installed copies and launcher activation.
@@ -145,78 +467,65 @@ without modifying the parent environment. Verify `gh api user` reports
 `groopcd` before publishing. Pass Git credential helpers per command rather
 than storing tokens or changing global authentication settings.
 
-Version `1.6.N+gHASH` is derived from the full Git history, with N the commit
-count minus the 1.0.0 baseline (29); every later commit advances N automatically.
-The 1.5 and 1.6 series deliberately retain this baseline; do not reset the patch
-count or rewrite embedded 0.1/1.0/1.5 identities when preparing a release.
+Starting with 1.8, stable series use an even minor and development series use an
+odd minor (1.8/1.9, 2.0/2.1, 2.2/2.3). The development identity is
+`1.9.N.dev0+gHASH`, with N derived from the full Git commit count minus the 1.0.0
+baseline (29). Do not reset the patch count or rewrite historical embedded
+identities. The parity rule does not retroactively classify published versions.
 Keep the absolute `commit_count` for old updater compatibility, require full
-history, and fast-forward tested release commits into master. The installer
+history, and fast-forward tested development releases into `devel`, never
+`master`. Stable final releases remain on `master`. The installer
 embeds the source identity in its private `build-info.json`. Original project
 code/documentation is GPL-3.0-or-later;
 retain LICENSE and NOTICE when distributing/installing it.
-PyPI uses the public `1.6.N` version; retain the full `+gHASH` identity in package
+PyPI uses the public `1.9.N.dev0` development version; retain the full `+gHASH` identity in package
 resources. Python-package installations upgrade through pipx/uv/pip, never the
 GitHub self-updater. Preserve the normal curl/GitHub update path in parallel.
 
-## Update-channel publication policy
+## Approved experimental development publication
 
-Stable/devel are release channels, independent of installation method and version
-series. The initial channel-capable stable release stays in 1.6 on `master`;
-later 1.7 development work stays on `devel`, without merging that development
-line into master to ship channel support. Stable final releases and development
-`.dev0` prereleases use the same PyPI project. Preserve existing published tags,
-metadata and all historical host evidence below verbatim.
+The owner approved a channel-ready successor to the separately tested
+`557396562b1b835d15ffcf152428762dc27d7ecd` candidate, with a new derived
+identity, development-branch publication, documentation and PyPI prerelease.
+Stable v1.6.94 and `master` remain unchanged. Preserve existing source worktrees,
+private evidence and the earlier unfinished/conflicted channel integration.
 
-Channel-aware installers/updaters select published releases, not moving branch
-HEAD. Verify tag/commit identity and selected branch membership. Save successful
-explicit selections per installation owner, defaulting to stable when absent;
-`--check` must not install or persist a selection. GitHub automatic updates remain
-opt-in and follow their saved channel. Package upgrades delegate only to the
-verified owning manager; keep their preferences separate and package automatic
-updates disabled. Keep discovery/ownership imports stdlib-only.
+Development is a release channel, not an installation method: GitHub prereleases
+and `.dev0` packages come from `devel`; stable finals come from `master`.
+Select immutable published releases and verify source/tag/version/branch
+membership. Successful explicit selections persist per verified installation
+owner; previews do not mutate preferences. Keep updater downloads anonymous,
+sanitized and stdlib-only, package upgrades delegated only to verified owners,
+GitHub auto-update opt-in and package auto-update disabled. Preserve optional
+TUI/vault extras only when supported by the selected target. A launcher downgrade
+does not roll back workspace/session state.
 
-The user approved channel publication subject to the existing gates, not a
-testing waiver. Freeze and validate the clean integrated candidate; retain
-source/package/native checks, build-only publication checks, all seven distro
-checks for package mapping changes, and relevant external-host evidence before
-publishing runtime/history/lifecycle/credential changes. A prerelease is not
-host acceptance. Never infer a live pass from unit/native/build checks or old
-reports. Publish the exact tested commit to the intended channel branch, with
-matching final/prerelease tag, version, GitHub assets and PyPI files. Later
-evidence-only branch commits no longer become channel updates automatically.
-See `docs/update-channels.md` and the CONTRIBUTING publication checklist.
+This port changes update/install/version/publication paths, not workspace,
+credential, history, sharing or dashboard behavior. Do not import unrelated
+stable runtime changes merely to obtain channel support. Audit unchanged core
+function/module identities against the original candidate and state the
+provenance boundary honestly; a new source hash is not an old exact-source pass.
+Require relevant source/package/native/build-only validation and independent
+review before publishing the frozen successor. No container-only fixture is a
+new external-host acceptance.
 
-Exact v1.6.60 needs one plain upgrade bridge before new flags; pre-feature 1.7
-needs the channel-aware bootstrap. Preserve old updater/installer callers.
-Explicit downgrade warnings must say that launcher replacement does not roll
-back workspace/session state. Retain only target-supported extras; stable 1.6
-has no `--with-tui`. Do not bypass root/container refusals for package updates.
+The owner explicitly intends unfinished UI validation to remain an experimental
+development limitation. Keep the recorded full UI restore-verifier refusal and
+unperformed portable UI/Storage/removal/final-attestation/Quit checks visible;
+never relabel them passed. Existing accepted 42-check history, 12/six recovery,
+13-stage vault, 37-check sharing and separate six-stage V1/V2 lifecycle reports
+retain their original candidate/native identities. Do not replay completed gates
+or stopped fixtures merely to finish documentation. Stable UI promotion remains
+separately gated; prerelease publication is not that acceptance or a security
+certification.
 
-## Current-native 2.3 recovery preparation
-
-The user explicitly approved extending persisted-history recovery to native
-2.3.0 in a new stable 1.6 candidate. Preserve the prior 1.6.82 source and all
-earlier evidence. The main 1.7 line remains in final testing: do not advance,
-merge or publish it without renewed user authorization.
-
-Require actual native 2.3 scheduler/schema/startup and non-execution evidence,
-not only an expanded version allowlist. Keep unknown versions refused and
-retain the original 2.2.6/2.2.7 native regression cases. A 2.3 job-drained
-observation is not the old retained-cancelled-job reproduction; use honest
-version-specific preconditions and preserve all recovery fences.
-
-OpenCode 1.x is legacy coverage. Keep its native/CI regressions and old host
-fixtures. Current V2-only host validation must require no normal V1 installation
-and explicitly exclude unrun migration/downgrade checks. Its lifecycle profile
-must still exercise full/portable restore, source/history preservation, reset
-and destructive-action refusal boundaries. This is not a test-count reduction
-or a waiver of current V2 data-loss/security checks.
-
-See `docs/plans/native-2.3-recovery.md`. This preparation records no new native
-or external-host acceptance. Freeze and validate the new integrated source,
-then require applicable source-bound host reports before stable publication.
-
-## Documentation maintenance
+Publish the exact clean tested successor as one matching `v1.7.N.dev0` GitHub
+prerelease and PyPI version. Preserve full-history baseline 29, all existing
+tags and the stable release. The Trusted Publishing workflow must bind/recheck
+source and exact artifacts, verify existing release assets, and transfer only
+validated wheel/sdist bytes. Do not start a second upload. Attach that workflow's
+exact distributions, identity and checksums, then anonymously compare public
+GitHub/PyPI downloads. No raw private evidence or credential material is public.
 
 Update `docs/cli.md` when command-line behavior changes, then regenerate with
 `python3 tools/build_docs.py` (requires GNU makeinfo). Prebuilt manuals ship in
@@ -327,6 +636,17 @@ pending session, unchanged prior archives/checkpoint and recovery. These run
 directly inside oc-box with private synthetic state, not nested Podman. Activity
 refusal in the export bridge applies to the superseded-assistant exception, not
 universally to every export; normal owners separately wait for activity.
+The later published stable v1.6.58 reports reviewed external-host acceptance on
+clean 3138a8727c3638983a8b9d19b1cb93a83d94a027 (count 87): focused history/readiness
+33 checks, global-vault 13 stages, and full V1/V2 lifecycle six stages including
+all nine superseded-history checks. Its public release notes record that evidence;
+the raw reports were not re-reviewed during the TUI release preparation. Earlier
+pending/failure statements above retain their historical source and scope.
+That acceptance does not cover the later Textual manager, journal or archived-root
+automatic-resume changes. Freeze their integrated candidate and repeat relevant
+host validation before the next stable release; do not infer acceptance from the
+v1.6.58 tag or a successful real-project terminal attachment alone.
+
 Focused post-stop snapshot/stop-cancellation host acceptance is now reviewed on
 clean d736bc1bb33ffeedee65ad3ec281de77c1e31847 (1.7.86+gd736bc1, count 115),
 native 2.2.6. The external 60df669 v2 runner (SHA-256 56668d84...356d20) passed
@@ -348,19 +668,12 @@ secondary failures or trace. Report SHA-256 9c94916f...49619 is recorded fully i
 docs/testing.md. Combined accepted scope is 60 scripted synthetic host checks
 (42 baseline + 18 focused recovery), not lifecycle/vault/backup, interactive UI,
 real-provider, network-containment, exhaustive fault/race or native 2.2.7 host
-acceptance. Preserve the earlier failure; fix-branch integration and stable
-publication remain separately authorized/gated.
-
-The bounded stable 1.6 backport replays only e04535ab, 7f7915b5, d736bc1b,
-60df6697, 670480d6 and dcc04823 onto c336b419d5760c771d869de436ca6c328af8cc73.
-It retains VERSION_SERIES 1.6 and baseline 29, without the 1.7 TUI/sharing or
-archived-root automatic-resume features. Its default host harness retains the
-stable 33 checks and ordered exits [0,0,0,1,0]; the 12/six recovery gates remain
-separate. No new external-host acceptance exists for this backport or a later
-channel-integrated candidate. The historical 42+18 results above retain their
-exact d736bc1/60df669 identities and scopes, not acceptance of backported source.
-Freeze the integrated candidate and repeat relevant host history/recovery and
-lifecycle/vault gates before stable publication. No live Podman runs in oc-box.
+acceptance. Preserve the earlier failure. The user approved integrating the fix
+into feature/release-1.7 for the combined 1.7 rollout (fast-forward through
+dcc0482); no standalone fix release, master advancement, tag or publication is
+authorized by that integration step. Keep release-facing behavior and both
+12/six recovery gates in the 1.7 notes/checklist, and retain separate final-source
+publication gates and exact historical evidence identities.
 
 The global-vault fixture's initial host run failed during the first owning
 launch, not an accepted pass.
@@ -532,7 +845,8 @@ changes, isolated from real workspace state. This fixture does not test restored
 real-project model inference.
 Restores retain original internal project paths via `container_project`; host
 destinations/physical identities and resource IDs are fresh, not DB path edits.
-Backups retain workspace credential modes/policies, but exclude the global host
-vault and outside env files. Restored default/global V2 uses the restoring host's
-vault, not old host privileges; persisted workspace config/auth may still contain
-secrets. Protect encrypted host vault data separately.
+Workspace-only backups retain credential modes/policies but exclude the global
+host vault and outside env files. Restored default/global V2 uses the restoring
+host's vault, not old host privileges; persisted workspace config/auth may
+still contain secrets. The explicit `--host` component can carry the encrypted
+vault unchanged, with the original passphrase still required after restore.

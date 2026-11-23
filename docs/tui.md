@@ -1,12 +1,5 @@
 # Experimental workspace manager
 
-> **Development documentation on the default branch.** Stable `master` does not
-> contain this manager runtime. Use a published development build or a
-> [`devel` source checkout](https://github.com/groopcd/oc-box/tree/devel) for the
-> manager; source-launch, fixture and capture instructions require that checkout.
-> Publishing this guide on `master` is not stable runtime promotion or new host
-> acceptance. Development reference links below intentionally target `devel`.
-
 > **OpenCode 2.x TUI guide.** Native session connections and persistent-shell
 > integration here target 2.x workspaces. For legacy 1.x lifecycle and maintenance
 > terminals, use the [legacy guide](legacy/README.md#workspaces-and-terminal).
@@ -30,12 +23,13 @@
 managing native OpenCode 2.x sessions, and attaching to their persistent session
 terminals. It is separate from the native OpenCode conversation TUI opened by
 `oc-box start`; it does not replace that client or add a new chat interface.
+The wide dashboard header shows a four-column dotted outline of the oc-box cube.
+Compact mode saves the space; the native OpenCode TUI keeps its own branding.
 
-**Status: experimental development channel; incomplete UI acceptance is
-explicitly disclosed, not passed.** The owner approved development publication,
-not stable manager promotion. Stable 1.6.94 remains the default without this
-manager. The embedded terminal remains experimental. The contract below
-describes the integrated manager, not a completed test-execution report.
+**Status: optional workspace manager.** The first `1.8` and `1.9` releases
+include the same dashboard; stable `1.6.94` did not contain it. The embedded
+terminal remains experimental. The contract below describes the integrated
+manager, not a completed test-execution report.
 Check `oc-box tui --help` in the installed build for availability; previously
 published packages need not include it. Demo/headless checks and native offline
 fixtures do not establish interactive host or rootless-Podman acceptance.
@@ -132,16 +126,18 @@ extras, and repeating a satisfied request is a no-op. Add `--check` to validate
 support without installation or preference changes. Dependencies remain private
 to the immutable GitHub release; no curl, workspace reset, history deletion or
 system-Python installation is needed. Do not create a second pipx/uv copy.
-An explicit TUI request against stable refuses; an inherited TUI preference is
-retained for a later return to a supporting development target. See the
-[channel-switch troubleshooting](https://github.com/groopcd/oc-box/blob/devel/docs/update-channels.md#enable-the-dashboard-after-a-github-channel-switch).
+An explicit TUI request against an older stable `1.6` target refuses; an inherited
+TUI preference is retained for any later supporting release. See the
+[channel-switch troubleshooting](update-channels.md#enable-the-dashboard-after-a-github-channel-switch).
 
-These installation examples explicitly select experimental development;
-stable 1.6.94 does not include the manager. Older channel-aware launchers must
+These installation examples explicitly select development. For stable `1.8`
+targets, use `oc-box upgrade --stable --tui` or the stable bootstrap with
+`--with-tui`; do not enable prereleases for a stable Python installation.
+Older channel-aware launchers must
 upgrade normally to a published release supporting the extras flags first;
 branch HEAD is not automatically published. Genuinely pre-channel 1.7 launchers
 retain their exceptional bootstrap route; see
-[update channels](https://github.com/groopcd/oc-box/blob/devel/docs/update-channels.md#bootstrap-and-older-installations).
+[update channels](update-channels.md#bootstrap-and-older-installations).
 For ordinary unrelated projects, use the installed `oc-box tui` normally. The
 self-checkout launch below is specifically for managing oc-box's own source.
 
@@ -151,11 +147,10 @@ for host Podman or OpenCode.
 
 ## Card redesign availability
 
-The card layout and follow-up input/settings polish are integrated into `devel`
-from `feature/tui-card-redesign` for a later publication. They are not automatically
-included in an already-published development package. A source merge is not a
-release or new interactive host acceptance; channel upgrades select published
-releases, not branch HEAD.
+The card layout and follow-up input/settings polish are shared by the initial
+`1.8` and `1.9` source. Their integration does not update older published
+packages or establish interactive host acceptance. Channel upgrades select
+published releases, not branch HEAD.
 
 ## Launch and navigation
 
@@ -185,7 +180,7 @@ not a promise that an explicitly requested native host connection cannot start
 the native host service.
 
 For developing **oc-box inside its own workspace**, launch an isolated,
-non-editable copy from the root of a `devel` source checkout, not stable `master`:
+non-editable copy from the checkout:
 
 ```sh
 uv run --no-project --with '.[tui]' python -I -m oc_box tui --project ~/src/oc-box
@@ -252,7 +247,8 @@ Drag to select visible text throughout the dashboard: diagnostics, tables,
 logs, graphs, the embedded terminal and control labels. The highlight remains
 visible over colored logs, row cursors and meters. **Releasing the mouse copies
 the completed selection immediately**; no extra Copy click is required. A successful
-copy shows a Clipboard notification. There are no Copy or Paste buttons. A label
+copy shows a Clipboard notification. The Logs RAW view also offers explicit
+**Copy all**; ordinary controls and dialogs do not need Copy or Paste buttons. A label
 drag never presses its button, changes its tab/dropdown, or activates a footer
 shortcut. Normal clicks still operate those controls. Scrollbar drags still
 scroll. Panel captions and settings group titles are selectable text as well.
@@ -275,8 +271,9 @@ plain text; it is not required for selecting control labels. The same shortcuts
 work in ordinary settings and review dialogs without adding clipboard buttons.
 `F1` explains them. Copying is available in read-only
 mode and never confirms a dialog, changes a session, or starts a connection.
-Table/log/terminal selections cover the displayed viewport, not offscreen
-history. Scroll to the desired text before selecting. Followed-log display stays
+Mouse selections in tables, logs and terminals cover the displayed viewport, not
+offscreen history. Scroll to the desired text before selecting, or use Logs RAW
+**Copy all** for matching retained entries. Followed-log display stays
 in place while its text is highlighted; bounded collection continues in memory.
 
 For text from your desktop clipboard, focus a text field or the connected shell
@@ -381,14 +378,14 @@ remain estimates:
 reflinks, compression, shared image layers and filesystem accounting do not
 establish exclusive physical consumption or quota headroom. Reading a mount or
 filesystem capacity does not authorize changing it. See the
-[resource report reference](https://github.com/groopcd/oc-box/blob/devel/docs/cli.md#resource-reports).
+[resource report reference](cli.md#resource-reports).
 
 ### 2. Settings
 
 <!-- tui-screenshot:settings -->
 ![Settings section showing Monitoring, Display, Sessions, Logs, Resources and Safety groups in one inline page](assets/tui/settings.png)
 
-*Expanded-height capture of all six settings groups, with Apply, Reset and Revert.*
+*Earlier expanded-height capture of the session preferences, with Apply, Reset and Revert.*
 
 <!-- /tui-screenshot -->
 
@@ -402,32 +399,50 @@ The categorized inline form is also usable without a current workspace:
 | Monitoring | Auto-refresh and a custom shared Status/followed-log interval: any whole number from 1 to 60 seconds; default 1. |
 | Display | Built-in Textual theme and expanded/collapsed diagnostics details. |
 | Sessions | Scope and text filter only; changing them never connects or refreshes a native inventory automatically. |
-| Logs | Follow, source and literal search; searches stay in memory and are never persisted or journaled. External sources retain their explicit opt-in and ownership guards. |
+| Logs | Follow, source, severity and literal search; these filter the dashboard, not what the logger writes. Searches stay in memory and are never persisted or journaled. External sources retain their explicit opt-in and ownership guards. |
+| Host logging | Separate host-wide **Private log directory** and **Mirror to journald** controls, saved independently of session preferences. |
 | Resources | Read-only saved limits and observed values. |
 | Safety/terminals | Read-only information about the CLI-selected mode and terminal safety; the `--read-only` fence cannot be weakened here. |
 
 **Reset to defaults** stages factory dashboard preferences without immediately
 changing the active dashboard. Defaults are automatic
 one-second refresh, `oc-box-navy`, collapsed details, global session scope,
-following all loaded log sources, and empty session/log filters. **Apply** makes
+following ordinary log sources, and empty session/log filters. **Apply** makes
 them active; **Escape** or **Revert** discards the reset. No reset touches containers,
 resource limits, history, favorites or retained log entries, and it cannot weaken
 the CLI-selected read-only mode.
 
 **Escape** or **Revert** discards pending form edits. **Apply** accepts only the
 allowlisted dashboard preferences, for **this dashboard session only**. Changes
-are neither persisted nor logged; they do not modify OpenCode `cli.json`, host
+are neither persisted nor logged; Apply does not modify OpenCode `cli.json`, host
 settings, workspace resources or credential snapshots. There are no CPU/RAM/
 storage edit controls, resource-control RPCs, implicit resets or storage
 migrations. A settings Apply is not a resource Apply or native service reload.
+
+The **Host logging** card has a separate **Save Host Logging** action. Its
+directory field points to a private directory, not a file; **Use default** clears
+the override on save and falls back to the effective oc-box state root. Changing
+that setting does not move or delete old journals, and saving creates no log
+directory. Use a dedicated directory. An existing
+unsafe directory or an unrecognized file with a reserved activity name is
+refused rather than being adopted as a log. The journald switch is off by default.
+When enabled, successfully written, validated private activity events may also
+be mirrored to the local system journal. The private file remains primary, and
+authorized system-journal viewers may see the mirrored metadata. Saving never
+changes systemd configuration. It preserves unrelated JSON values and writes
+changed settings in a private `0600` replacement file. Close other manual config
+editors before saving; they need not respect the application's write lock.
+Existing rotation and retention policy remains in host config, not the dashboard
+form. Demo and read-only views cannot save host logging settings.
 
 Enter refresh seconds directly in the Monitoring field. Blank, fractional or
 out-of-range values show inline feedback and do not apply any other draft
 preferences. Unapplied changes do not alter monitoring cadence. Drafts survive
 tab changes, background refreshes and workspace selection; resource information
 updates separately. There is only one monitoring form, not duplicate quick
-controls. Settings and Logs Follow use compact single-row native switches,
-retaining click/Space operation, spatial on/off state and visible keyboard focus.
+controls. Settings and Logs Follow use narrow rounded switches with explicit
+ON/OFF text centered beside each label. Click, Space and Enter retain their
+native toggle behavior; focus is visible on the border.
 
 If you deliberately need different create-time limits, exit the relevant
 clients/owner and use the existing CLI workflow outside the manager:
@@ -437,7 +452,7 @@ oc-box reset --project ~/devel/demo --cpus 8 --memory 16g
 ```
 
 That command recreates the container OS; it is not a live resize. Review the
-[reset reference](https://github.com/groopcd/oc-box/blob/devel/docs/cli.md#reset) first. Native config hot reload does not require
+[reset reference](cli.md#reset) first. Native config hot reload does not require
 restarting the host service and does not import new vault values or host config
 into a running workspace.
 
@@ -514,7 +529,7 @@ archiving a host copy does not delete/archive the workspace source; changing a
 source does not instantly update its mirror. Later normal oc-box sync may
 replace a managed host copy or recreate a deleted one from a still-present
 source. This manager adds no permanent mirror suppression or bidirectional
-editing. Existing [sync and recovery rules](https://github.com/groopcd/oc-box/blob/devel/docs/cli.md#sync) still apply.
+editing. Existing [sync and recovery rules](cli.md#sync) still apply.
 
 OpenCode 1.x remains supported by the existing launcher/CLI. The new live session
 manager APIs are V2-only; this guide makes no native V1 archive/unarchive claim.
@@ -544,7 +559,7 @@ the native shell available for reattachment. Typing `exit` in that shell ends
 it. Dashboard resize is forwarded through the existing client; TUI/web clients
 may regain interactive control independently. Closing the dashboard releases
 its leases, not the owner or other clients. See the
-[native terminal reference](https://github.com/groopcd/oc-box/blob/devel/docs/cli.md#terminal) for the existing client boundary.
+[native terminal reference](cli.md#terminal) for the existing client boundary.
 
 The emulator is not a complete xterm implementation. Native application mouse reporting, images,
 complex grapheme rendering and extended keyboard protocols are not supported;
@@ -563,7 +578,7 @@ unconfirmed manager Quit.
 <!-- tui-screenshot:logs -->
 ![Logs section filtering fixed synthetic activity entries and showing a source-scoped log-match count](assets/tui/logs.png)
 
-*Fixed activity examples; no external container logs were loaded.*
+*Earlier view of fixed activity examples; no external container logs were loaded.*
 
 <!-- /tui-screenshot -->
 
@@ -571,33 +586,68 @@ The case-insensitive **literal** log search stays visible across all seven tabs.
 `Ctrl+L` opens Logs and focuses it. Search applies to retained entries and can be
 changed at any time, including while follow is paused. Source filtering and
 follow/pause controls never disable search; it is not a regular-expression or
-shell-command field. Follow uses the same best-effort refresh interval as Status
-(default one second); pausing follow leaves retained entries searchable. Search
-text and settings changes are never saved or written to the activity journal.
+shell-command field. Ordinary follow uses the same best-effort refresh interval
+as Status (default one second); pausing follow leaves retained entries searchable.
+Log view filters and search text are session-only and never written to the
+activity journal.
+
+The table sorts by time, source, severity or message. Click a heading to sort
+and click again to reverse; optional metadata columns can be hidden without
+changing the source. Open a row to read its full message. **RAW** shows the
+matching retained entries without table formatting, independent of the table's
+sort and visible columns. Each record occupies one line; scroll horizontally
+for long lines. **Copy all** copies matching retained records subject to the same
+1 MiB UTF-8 limit, refusing an oversized result rather than truncating it, and
+shows a clipboard notification. If matches contain output from multiple Podman
+workspaces, select a scoped source before bulk copying.
+RAW never bypasses validation or redaction: it does not recover discarded bytes,
+arbitrary system journal fields, or pre-redaction Podman output.
 
 The header shows **N log entries** when search is empty and **N log matches**
 when filtering, with singular forms for one result. These are retained log
-entries in the selected Logs source, not sessions, workspaces or agent calls.
+entries visible in the selected Logs source, not sessions, workspaces or agent
+calls.
 Hover for an explanation. The double-width red **❌**, with a two-cell click
 target, clears only the input/filter,
 restoring the unfiltered count rather than deleting logs. Search feedback stays
-current while a selected output snapshot is held still for copying.
+current while a same-source output selection is held still for copying. Changing
+the source clears its old selection. A changed private journal location or a
+fresh empty snapshot also clears the old private rows, rather than leaving them
+available to copy under the current source.
 
 The default oc-box activity source is the private rotating JSON-lines journal
 `log/activity.jsonl` under the configured oc-box state root:
 `OC_BOX_STATE_HOME`, otherwise `$XDG_STATE_HOME/oc-box`. With neither override,
-the file is `~/.local/state/oc-box/log/activity.jsonl`. Rotations are
+the file is `~/.local/state/oc-box/log/activity.jsonl`. Default rotations are
 `activity.jsonl.1` through `activity.jsonl.3`: four files capped at 256 KiB each.
 Files use mode 0600 and private directories 0700; readers never create journal
-files.
+files. The dashboard uses the saved host
+[log-directory and rotation settings](cli.md#dashboard-state-and-activity-journal)
+that bare `oc-box logs` uses. Run `oc-box logs --path` to see that private
+pathname. A lifecycle command's one-off `--log-dir PATH` does not change the
+dashboard source; use `oc-box logs --log-dir PATH` to inspect that private
+journal. Optional system journal mirroring does not change the dashboard source.
+Use **Load mirror** to read or refresh the **System journal mirror** snapshot,
+independently of whether mirroring is currently enabled. It uses the same
+bounded current-user reader as `oc-box logs --journald`. Ordinary follow does
+not refresh this snapshot, and **All sources** does not include it. If
+the reader is unavailable, the dashboard does not fall back to private files.
 
-Entries contain fixed event categories and allowlisted metadata, **not raw argv,
-environment values, native stdout/stderr, error messages, prompts, or
-conversation transcripts**. The UI retains at most 2000 log entries globally
-and displays at most 1000 generated-journal entries per refresh. Rotation means
-this is not a permanent audit archive. It is not a terminal recording, and this
-first stage adds no native OpenCode logfile reader. Demo mode reads none of
-these files.
+The dashboard's oc-box source shares validated severity and message formatting
+with the read-only host command [`oc-box logs`](cli.md#logs). The dashboard
+shows all retained levels, including `debug`; only the CLI defaults to `info`
+or higher. Valid older entries without a severity remain readable with a
+derived level. Missing or unsafe journal data is treated as empty.
+
+Entries contain fixed event categories and allowlisted metadata. Reason codes
+and metric names come from fixed lists, and metric values are bounded integers.
+Entries contain **no raw arguments, environment values, errors, stdout/stderr,
+prompts, conversation transcripts, pairing links, authentication or clipboard
+data, or other free-form text**. The ordinary dashboard buffer retains up to
+2,000 entries across its sources, with up to 1,000 private-journal entries read
+per refresh. The explicit mirror snapshot holds up to 1,000 entries separately.
+The journal is not a terminal recording, a native OpenCode logfile or a
+permanent audit archive. Demo mode reads none of these sources.
 
 **Podman container logs are a separate, explicit opt-in source.** Only a selected
 verified oc-box-owned container may be queried: `--tail` 500 lines, a 1 MiB byte
@@ -608,7 +658,9 @@ have been removed**.
 Container output can contain private text or unrecognized credentials. Treat
 that display as sensitive; do not share screenshots or terminal recordings
 without your own review. Opting in is not permission to read unrelated
-containers or unlimited historical output.
+containers or unlimited historical output. If the selected container is no
+longer available, the dashboard reports that separately and can still refresh
+the private journal.
 
 ### 6. Storage
 
@@ -646,17 +698,44 @@ targets, and a source switch cannot redirect a previously reviewed action.
 <!-- tui-screenshot:backups -->
 ![Backup and restore section showing example archive and destination paths, source scope, workspace target and disabled actions](assets/tui/backups.png)
 
-*Example paths, not real archives; no backup was created, inspected or restored.*
+*Earlier view with example paths, before the host migration switches. No real
+archive was created, inspected or restored.*
 
 <!-- /tui-screenshot -->
 
 The three scopes remain explicit here. Choose one workspace from the selected/all
 inventory for a full or portable encrypted `.ocbox` backup. The ordinary
-[backup/restore contract](https://github.com/groopcd/oc-box/blob/devel/docs/cli.md#backup) remains authoritative:
+[backup/restore contract](cli.md#backup) remains authoritative:
 no overwrite, no in-place restore, fresh workspace/resource IDs, private rootless
 ownership transport, no privilege reactivation, and stopped restored workspaces.
 Whole-workspace archives can contain copied config/auth and native history, but
-exclude the global host vault and normal host database. Protect the encrypted file.
+include global host settings and the encrypted vault only when explicitly selected.
+The normal host database is not backed up. Protect the encrypted file.
+
+The **ON/OFF switches** set what to create or restore:
+
+- **Create:** choose workspace data, portable mode (omit the container OS), or
+  host settings and vault. With workspace data OFF and host settings ON, create a
+  host-only archive without selecting a workspace. To include a native V2
+  credential export, enable its switch and select an existing private file by
+  absolute path outside every archived directory. Supply the path, not
+  credential contents. The dashboard never starts a live credential export.
+  The final review shows whether the archive uses a password or public age
+  recipients and lists every recipient selected in Advanced settings.
+- **Restore:** choose workspace data and/or host settings. Native OpenCode
+  configuration, plugins and saved credentials are a separate option that
+  requires host restore. Use Inspect or Restore to detect the selected archive's
+  layout before choosing host restore. A path change or a detected replacement
+  clears the host and native selections. After unlocking and reviewing the authenticated
+  metadata, type `restore-opencode` and explicitly approve native restoration.
+  The switch alone does not grant consent. Host-only restore needs no workspace
+  destination, and host files are never overwritten.
+
+The same [host migration safeguards](cli.md#restore-host-settings-on-a-new-machine)
+apply. A later OpenCode launch may execute restored plugins or use restored
+permissions and credentials. If host installation is incomplete after a workspace
+restore, the dashboard reports the workspace as stopped and shows bounded host
+progress separately; it does not roll back or retry automatically.
 
 For host or workspace **session-tree history**, select that verified native source
 and root in Sessions, then choose the `.ocsession` kind. This is not a storage or
@@ -682,15 +761,16 @@ The archive path is the primary field. A blank workspace restore destination
 gets a visible, editable, absent sibling suggestion; displaying a suggestion
 creates nothing. Inspect/restore route from bounded envelope structure, not the
 filename suffix. Authentication failure never tries another engine or native
-store. Choose full/portable for creation; host scope creates one selected native
-session tree, not a whole-host backup.
+store. Enable portable mode to omit the workspace OS image. Host OpenCode scope
+creates one selected native session tree when using the session format. The host configuration archive is a
+separate settings-and-vault scope, not a whole-host or native database backup.
 
 Age recipients and existing private identity-file paths are optional **Advanced**
 controls, initially collapsed. Ordinary password backups require no manual key
 copying: a fresh per-archive identity is generated in anonymous memory and stored
 encrypted in the archive. Choose a password and keep it safely; oc-box does not
-save it and cannot recover it. The provider vault is neither reused as a backup
-password nor included in a workspace archive.
+save it and cannot recover it. The provider vault is never reused as a backup
+password; its existing encrypted bytes can be included with host settings.
 
 Create, inspect and restore stay in an operation modal. Password input is a
 custom masked, nonselectable editor, not Textual Input or ClipboardInput; it
@@ -698,8 +778,11 @@ submits completed input only to the existing child's private controlling TTY.
 No reveal, automatic clipboard read, copied-text cache, search or clear-X action
 is available there. Explicit terminal paste remains bounded and single-line.
 Password confirmation starts empty and unfocused: click its box or Shift+Tab
-before typing. A lost password is not an automatic key-management problem that
-the dashboard silently resolves.
+before typing. The prompt shows **Ready** when it has input to send. Click
+**Submit password** or press Enter in the password box; either submits it,
+without an extra confirmation click or keystroke. The prompt then shows
+**Password submitted** while the operation continues. A lost password is not an
+automatic key-management problem that the dashboard silently resolves.
 
 The manager's transient private editor is part of the secret-memory trust
 boundary. Core dumps are disabled before private input, but Python memory
@@ -713,10 +796,18 @@ child exit, including gaps between dialogs; local focus traversal remains usable
 
 ### Progress and cancellation
 
-The modal shows **named stage + elapsed seconds + an indeterminate progress bar**.
-It does not estimate a byte/time percentage, scan extra data to manufacture a
-total, display raw child output or write a terminal transcript to Logs. Inspection
-shows a bounded metadata projection rather than arbitrary private manifest data.
+The modal shows the **current stage**. For full and portable backup creation,
+it periodically shows how many encrypted bytes have been written for the current
+component, checked by the checksum pass, or packed into the final archive. These
+are per-stage measurements, not source size, percent complete, or proof of
+durable publication. Password-key protection, container stop/commit, and final
+sync and publication have named stages without byte counters. Elapsed time and
+the activity bar do not certify that data is moving.
+
+The dashboard does not do an extra scan to guess a total or ETA, display raw
+child output, or write a terminal transcript to Logs. It shows only the latest
+measurement and discards it on a stage change or cancellation. Inspection shows
+bounded metadata rather than arbitrary private manifest data.
 
 Cancel or Ctrl+C requests the operation child's normal cleanup. The dashboard
 waits for actual exit and verified completion before releasing its busy state.
@@ -727,14 +818,13 @@ observed fresh IDs, including cancellation after submission. Inspect the explici
 target before retrying an unverified outcome. A cancellation after completion
 was already verified is identified as such, not reported as an accepted cancel.
 
-Ordinary CLI password prompts remain unchanged. Storage removal and encrypted
-file deletion retain their separate foreground handoff and destructive typed
-review.
+Ordinary CLI password prompts remain unchanged. Storage removal retains its
+separate foreground handoff and destructive typed review.
 
-**Inspect backup** is explicit and available in CLI read-only mode. **Delete backup
-file** is a distinct typed operation on one owned, private, regular supported
-encrypted archive; deleting it does not remove any live session or storage.
-Cancel, stale selection and read-only checks apply again at execution time.
+**Inspect backup** is explicit and available in CLI read-only mode. The dashboard
+does not delete backup files: it cannot guarantee that a path still names the
+reviewed archive at deletion. Verify and remove unwanted archives in the host
+file manager instead. Existing screenshots may show the former delete control.
 Backup file paths and decrypted transcript text never enter the activity journal.
 
 ## Stable-release validation gate
@@ -765,8 +855,8 @@ Its bounded implementation/validation layers are:
 6. Clean-candidate host acceptance and review before any stable publication.
 
 Each integrated layer needs behavior-focused tests; declaring a phase does not
-mark it passed. See the [manager test plan](https://github.com/groopcd/oc-box/blob/devel/docs/testing.md#experimental-workspace-manager)
-and [publication checklist](https://github.com/groopcd/oc-box/blob/devel/CONTRIBUTING.md#release-gate-and-publication-checklist).
+mark it passed. See the [manager test plan](testing.md#experimental-workspace-manager)
+and [publication checklist](../CONTRIBUTING.md#release-gate-and-publication-checklist).
 Keep the tested full commit, clean/dirty state, native executable identities and
 manual observations with the evidence. Existing stable host reports validate
 their own earlier source and scope, not this new dashboard. No resource-editing

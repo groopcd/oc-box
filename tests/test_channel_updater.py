@@ -139,17 +139,23 @@ class ChannelUpdaterTests(unittest.TestCase):
         self.chosen = "devel"
         self.run_upgrade(channel="devel")
         self.assertIn("--with-tui", self.installs[-1][0])
+        self.assertIn("--with-vault", self.installs[-1][0])
         self.assertTrue(
             any("refs/remotes/origin/devel" in args for args in self.commands)
         )
 
     def test_check_is_a_preview_and_never_saves_channel(self):
         self.chosen = "devel"
+        before = sorted(path.relative_to(self.home) for path in self.home.rglob("*"))
         _, output = self.run_upgrade(check=True, channel="devel")
         self.assertIn("check only", output)
         self.assertEqual(len(self.commands), 1)
         self.assertFalse(self.installs)
         self.assertFalse(channels.config_path().exists())
+        self.assertEqual(
+            sorted(path.relative_to(self.home) for path in self.home.rglob("*")),
+            before,
+        )
 
     def test_explicit_features_are_independent_from_stable_or_development(self):
         for origin in ("stable", "devel"):
@@ -286,6 +292,48 @@ class ChannelUpdaterTests(unittest.TestCase):
         with self.assertRaisesRegex(updater.UpdateError, "does not match"):
             self.run_upgrade()
         self.assertFalse(self.installs)
+
+    def test_vault_support_is_not_silently_removed_by_a_target_installer(self):
+        (self.target / "current/vault-support.json").write_text("{}")
+        with (
+            patch.object(updater, "installer_options", return_value=set()),
+            self.assertRaisesRegex(updater.UpdateError, "preserve optional vault"),
+        ):
+            self.run_upgrade()
+        self.assertFalse(self.installs)
+        self.assertFalse(channels.config_path().exists())
+
+    def test_release_source_policy_binds_public_version_baseline_and_channel(self):
+        source = self.home / "policy-source"
+        source.mkdir()
+        policy = source / "version_info.py"
+        for series, channel, count, desired in (
+            ("1.6", "stable", 123, "1.6.94"),
+            ("1.7", "devel", 123, "1.7.94.dev0"),
+            ("1.7", "stable", 123, "1.7.94"),
+        ):
+            with self.subTest(series=series, channel=channel):
+                policy.write_text(
+                    f"VERSION_SERIES = {series!r}\n"
+                    "VERSION_BASE_COMMIT_COUNT = 29\n"
+                    f"RELEASE_CHANNEL = {channel!r}\n"
+                )
+                updater.verify_release_source(source, count, desired, channel)
+                other = "devel" if channel == "stable" else "stable"
+                for bad_count, version, selected in (
+                    (count + 1, desired, channel),
+                    (count, desired, other),
+                    (count, desired + "+gabcdef0", channel),
+                ):
+                    with self.assertRaises(updater.UpdateError):
+                        updater.verify_release_source(
+                            source, bad_count, version, selected
+                        )
+        # A pre-channel source may still install through its legacy caller, but
+        # must not silently erase the channel bridge during a channel upgrade.
+        policy.write_text('VERSION_SERIES = "1.6"\nVERSION_BASE_COMMIT_COUNT = 29\n')
+        with self.assertRaises(updater.UpdateError):
+            updater.verify_release_source(source, 123, "1.6.94", "stable")
 
     def test_annotated_tags_are_peeled_and_unexpected_refs_refused(self):
         ref = "refs/tags/v1.6.2"

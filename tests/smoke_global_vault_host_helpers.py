@@ -4,11 +4,12 @@
 Usage from the repository root:
   python3 -B tests/smoke_global_vault_host_helpers.py --opencode-v2 /path/to/opencode
 
-Uses an exact unmodified native profile, fixture helpers and private synthetic state. Provider
-transport alone is adapted to host loopback instead of the Podman gateway. No
-Podman, operator credentials/config/history, vault delivery, full backups or
-interactive TUI are used or certified. Every generated root is outside the
-project/HOME and retained for diagnosis; no host installations or updates occur.
+Uses an exact unmodified native profile, fixture helpers and private synthetic
+state. Provider transport alone is adapted to host loopback instead of the
+Podman gateway. No Podman, operator credentials/config/history, vault delivery,
+full backups or interactive TUI are used or certified. Every generated root is
+outside the project/HOME and retained for diagnosis; no host installations or
+updates occur.
 """
 
 import argparse
@@ -319,7 +320,7 @@ def main(argv=None):
         (root / "bin/podman").chmod(0o700)
 
         with fixture.private_output(), patch.dict(os.environ, isolated, clear=True):
-            fixture.prepare_root(root, "tumbleweed")
+            fixture.prepare_root(root, "tumbleweed", profiled=True)
             phase = "HOST_SEED"
             fixture.prepare_native_cli(root, binary, native_version=args.native_version)
             # Exact helper: direct native binary + native_env(root, '2') +

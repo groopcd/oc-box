@@ -3,12 +3,16 @@
 
 Run this file OUTSIDE --source with python3 -I -B. The runner is independently
 hashed; all application and donor helpers come from the clean, full-history
---source/--expect-commit pair. No resume, automatic cleanup, real credentials,
-normal host service, paid inference, or interactive UI acceptance is provided.
+--source/--expect-commit pair. No retained-fixture resume, automatic cleanup, real
+credentials, normal host service, paid inference, or interactive UI acceptance.
 Offline tests of this runner do NOT constitute rootless Podman acceptance.
+The exact native profiles are 2.2.6 (default) and 2.3.0.
+Three final ordinary owning starts check archived-root exclusion, creation when
+all roots are archived, and selection after explicit unarchive; no new inference.
 """
 
 import argparse
+import ast
 import contextlib
 import hashlib
 import importlib
@@ -42,8 +46,9 @@ DONORS = (
     "tools/test_interactive_podman.py",
     "tools/native_host_profile.py",
 )
-# Keep discovery stdlib-only until the host guard and audited source import.
+# Discovery stays stdlib-only; main checks these against the audited donor.
 NATIVE_VERSIONS = ("2.2.6", "2.3.0")
+RECOVERY_STAGE = {"2.2.6": "cancelled", "2.3.0": "held_running"}
 CHECKS = frozenset(
     (
         "private_store",
@@ -76,6 +81,15 @@ CHECKS = frozenset(
         "pending_archive_preservation",
         "pending_exit",
         "sync_recovery",
+        "archived_roots_inventory",
+        "archived_roots_retention",
+        "all_archived_no_resume",
+        "archived_next_start_new_root",
+        "archived_restart_retention",
+        "unarchived_root_eligible",
+        "unarchived_next_start_resume",
+        "unarchived_history_retention",
+        "resume_no_inference",
         "owner_cleanup",
         "unchanged_identity",
         "host_clean",
@@ -103,6 +117,7 @@ CATEGORIES = frozenset(
         "source-shadowing",
         "runner-placement",
         "native-changed",
+        "native-version",
         "fixture-purpose",
         "fixture-only",
         "report-schema",
@@ -124,7 +139,8 @@ CATEGORIES = frozenset(
     )
 )
 SCOPE = (
-    "Scripted native API/CLI, real rootless launcher/history/readiness. "
+    "Scripted native API/CLI, real rootless launcher/history/readiness and "
+    "ordinary owning-start archived-root resume policy. "
     "Not interactive UI, real-provider, network-containment, vault or backup acceptance."
 )
 LAUNCH_STAGES = (
@@ -133,8 +149,11 @@ LAUNCH_STAGES = (
     "background",
     "shell",
     "recovery-sync",
+    "archive_roots",
+    "archived_restart",
+    "unarchived_restart",
 )
-EXPECTED_EXITS = (0, 0, 0, 1, 0)
+EXPECTED_EXITS = (0, 0, 0, 1, 0, 0, 0, 0)
 RECOVERY_FORMAT = "oc-box-history-recovery-host-v2"
 RECOVERY_CHECKS = {
     "snapshot": frozenset(
@@ -174,6 +193,9 @@ STAGES = frozenset(
         "background",
         "shell",
         "recovery-sync",
+        "archive_roots",
+        "archived_restart",
+        "unarchived_restart",
         "complete",
     )
 )
@@ -272,7 +294,9 @@ def git(source, *arguments):
 def source_snapshot(source, expected):
     source = safe_path(source)
     require(
-        source.is_dir() and re.fullmatch(r"[0-9a-f]{40}", expected or ""),
+        source.is_dir()
+        and isinstance(expected, str)
+        and re.fullmatch(r"[0-9a-f]{40}", expected),
         "clean-source-required",
     )
     require(
@@ -282,7 +306,12 @@ def source_snapshot(source, expected):
         and not git(source, "status", "--porcelain", "--untracked-files=all"),
         "clean-source-required",
     )
-    count = int(git(source, "rev-list", "--count", "HEAD"))
+    raw_count = git(source, "rev-list", "--count", "HEAD").strip()
+    require(re.fullmatch(rb"[1-9][0-9]*", raw_count), "clean-source-required")
+    try:
+        count = int(raw_count)
+    except ValueError:
+        raise Refusal("clean-source-required") from None
     require(count > 29, "clean-source-required")
     ignored = git(
         source,
@@ -315,6 +344,7 @@ def source_snapshot(source, expected):
         source, "ls-files", "--stage", "-z", "--", "src/oc_box", *DONORS
     ).split(b"\0")
     hashes = {}
+    version_source = None
     for record in filter(None, records):
         header, name = record.split(b"\t", 1)
         mode, blob, stage = header.split()
@@ -332,14 +362,65 @@ def source_snapshot(source, expected):
             "source-changed",
         )
         hashes[relative] = hashlib.sha256(content).hexdigest()
+        if relative == "src/oc_box/version_info.py":
+            version_source = content
     require(
-        set(DONORS) <= hashes.keys() and "src/oc_box/oc_box.py" in hashes,
+        set(DONORS) <= hashes.keys()
+        and "src/oc_box/oc_box.py" in hashes
+        and version_source is not None,
         "clean-source-required",
     )
+    # Parse only the already Git-verified bytes, never execute a source import or
+    # reread an unhashed version file. Unknown/dynamic declarations fail closed.
+    try:
+        tree = ast.parse(version_source)
+    except (SyntaxError, ValueError):
+        raise Refusal("clean-source-required") from None
+    legacy = {"1.6", "1.7"}
+    channel_series = {"1.8": "stable", "1.9": "devel"}
+    names = {"VERSION_SERIES", "VERSION_BASE_COMMIT_COUNT"}
+    channel_name = "RELEASE_CHANNEL"
+    declarations = {
+        node.targets[0].id: node.value.value
+        for node in tree.body
+        if isinstance(node, ast.Assign)
+        and len(node.targets) == 1
+        and isinstance(node.targets[0], ast.Name)
+        and node.targets[0].id in names | {channel_name}
+        and isinstance(node.value, ast.Constant)
+    }
+    series = declarations.get("VERSION_SERIES")
+    require(
+        isinstance(series, str) and series in legacy | channel_series.keys(),
+        "clean-source-required",
+    )
+    if series in channel_series:
+        names.add(channel_name)
+        require(
+            declarations.get(channel_name) == channel_series[series],
+            "clean-source-required",
+        )
+    require(
+        names <= declarations.keys()
+        and all(
+            sum(
+                isinstance(node, ast.Name)
+                and isinstance(node.ctx, ast.Store)
+                and node.id == name
+                for node in ast.walk(tree)
+            )
+            == 1
+            for name in names
+        )
+        and type(declarations["VERSION_BASE_COMMIT_COUNT"]) is int
+        and declarations["VERSION_BASE_COMMIT_COUNT"] == 29,
+        "clean-source-required",
+    )
+    suffix = ".dev0" if channel_series.get(series) == "devel" else ""
     return {
         "commit": expected,
         "commit_count": count,
-        "version": f"1.6.{count - 29}+g{expected[:7]}",
+        "version": f"{series}.{count - 29}{suffix}+g{expected[:7]}",
         "dirty": False,
         "sha256": hashes,
     }
@@ -451,6 +532,16 @@ def trace(error):
     return entries
 
 
+def absolute_native_path(path):
+    return (
+        isinstance(path, str)
+        and Path(path).is_absolute()
+        and str(Path(path)) == path
+        and ".." not in Path(path).parts
+        and not any(char in path for char in "\0\r\n")
+    )
+
+
 def result(
     checks,
     identity,
@@ -500,7 +591,10 @@ def result(
     )
     require(
         identity["version"]
-        == f"1.6.{identity['commit_count'] - 29}+g{identity['commit'][:7]}",
+        in (
+            f"{series}.{identity['commit_count'] - 29}{suffix}+g{identity['commit'][:7]}"
+            for series, suffix in (("1.6", ""), ("1.7", ""), ("1.8", ""), ("1.9", ".dev0"))
+        ),
         "report-schema",
     )
     require(
@@ -522,13 +616,13 @@ def result(
     )
     require(
         isinstance(native, dict)
-        and set(native) in ({"version", "sha256"}, {"version", "sha256", "path"})
+        and set(native) in ({"version", "sha256"}, {"version", "path", "sha256"})
         and native["version"] in NATIVE_VERSIONS
         and (
-            "path" not in native
-            and native["version"] == "2.2.6"
-            or isinstance(native.get("path"), str)
-            and Path(native["path"]).is_absolute()
+            absolute_native_path(native["path"])
+            and "tools/native_host_profile.py" in identity["sha256"]
+            if "path" in native
+            else native["version"] == "2.2.6"  # Legacy reports only.
         )
         and isinstance(native["sha256"], str)
         and re.fullmatch(r"[0-9a-f]{64}", native["sha256"]),
@@ -885,14 +979,14 @@ class PairObserver:
 
 class Harness:
     def __init__(self, loaded, root, binary, runner, *, native_version="2.2.6"):
+        require(native_version in NATIVE_VERSIONS, "invalid-options")
         self.loaded, self.f = loaded, loaded.fixture
         self.box, self.service = loaded.box, loaded.service
-        self.root, self.binary, self.runner = root, binary, runner
-        require(native_version in NATIVE_VERSIONS, "invalid-options")
+        self.root, self.binary, self.runner = root, safe_path(binary), runner
         self.native = {
             "version": native_version,
-            "path": str(binary),
-            "sha256": file_hash(binary),
+            "path": str(self.binary),
+            "sha256": file_hash(self.binary),
         }
         self.checks, self.exits, self.secondary = {}, [], []
         self.stage = "preparation"
@@ -914,7 +1008,11 @@ class Harness:
         )
         import_guard(self.loaded.source, self.loaded.identity["sha256"])
         require(file_hash(__file__) == self.runner, "source-changed")
-        require(file_hash(self.binary) == self.native["sha256"], "native-changed")
+        require(
+            str(self.binary) == self.native["path"]
+            and file_hash(safe_path(self.binary)) == self.native["sha256"],
+            "native-changed",
+        )
 
     def purpose(self):
         return {
@@ -936,6 +1034,13 @@ class Harness:
         require(
             all("credentials" not in data for _, data in records.values()),
             "fixture-only",
+        )
+        require(
+            all(
+                data.get("opencode_version") == self.native["version"]
+                for _, data in records.values()
+            ),
+            "native-version",
         )
         self.validate_native_config(initial=initial)
         self.f.require_runtime_boot(
@@ -961,10 +1066,12 @@ class Harness:
         )
         require(not self.f.vault.vault_path().exists(), "fixture-only")
         if initial:
-            require(not (self.root / "executables.json").exists(), "fixture-only")
+            for name in ("executables.json", "native-profile.json"):
+                require(not os.path.lexists(self.root / name), "fixture-only")
         else:
             require(
-                self.f.private_json(self.root, "executables.json")
+                self.f.private_json(self.root, "native-profile.json") == self.native
+                and self.f.private_json(self.root, "executables.json")
                 == {"2": str(self.binary)},
                 "native-changed",
             )
@@ -977,6 +1084,12 @@ class Harness:
 
     def native_selector_source(self):
         return self.f.native_wrapper_source()
+
+    def prepare_native(self, **options):
+        self.f.prepare_native_cli(
+            self.root, self.binary, native_version=self.native["version"], **options
+        )
+        self.validate_native_config()
 
     def bind(self, command):
         self.f.record_ids(self.root)
@@ -1230,9 +1343,11 @@ class Harness:
                 )
             output, errors = io.StringIO(), io.StringIO()
             with contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
-                code = self.box.main(
-                    ["start", "--project", str(self.root / "source-a"), "--no-vault"]
-                )
+                args = ["start", "--project", str(self.root / "source-a"), "--no-vault"]
+                # This one stage still checks the exact aggregate pending line.
+                if expected and hasattr(self.box, "lifecycle_output"):
+                    args.append("--lifecycle-diagnostics")
+                code = self.box.main(args)
             if expected:
                 require(
                     [
@@ -1324,7 +1439,7 @@ class Harness:
         state = self.box.session_state(self.path)
         require(
             set(state["sessions"]) == graph
-            and state["last"] in graph - {c, d, archived_child}
+            and state["last"] in graph - {c, d, archived, archived_child}
         )
         require(not excluded & set(state["host_sessions"]))
         require(
@@ -1364,7 +1479,7 @@ class Harness:
         require(
             set(state["sessions"]) == graph
             and {a, c, d} <= set(state["missing"])
-            and state["last"] in graph - {archived_child}
+            and state["last"] in graph - {archived, archived_child}
         )
         for ident, before in retained.items():
             preserved(before, self.snapshot(ident))
@@ -1404,6 +1519,8 @@ class Harness:
         self.check("host_child_recovery")
         self.shell_id = self.seed("ses_history_shell")
         self.sync()
+        self.resume_sources = graph | {self.shell_id}
+        self.resume_missing = {a, c, d}
         return 0
 
     def readiness(self, selected):
@@ -1416,6 +1533,7 @@ class Harness:
         self.service.wait_history(self.box, self.data, self.connection, timeout=15)
         self.check("idle_pty_readiness")
         child = self.seed("ses_history_foreground", parent=selected)
+        self.resume_sources.add(child)
         worker = Worker(lambda: self.native_run(child, "SYNTHETIC_HISTORY_FOREGROUND"))
         observer = PairObserver(self.service.api, child)
         observer.phase = "foreground"
@@ -1509,6 +1627,7 @@ class Harness:
 
     def background(self, selected):
         ident = self.seed("ses_history_background", parent=selected)
+        self.resume_sources.add(ident)
         gate = ShellGate(self, marker="SYNTHETIC_HISTORY_BG_DONE")
         self.provider.background = {
             "command": gate.command(),
@@ -1690,6 +1809,7 @@ class Harness:
             and not self.archive_path(self.pending_later).exists()
         )
         self.seed(self.pending_later)
+        self.resume_sources.add(self.pending_later)
         # Do not sync here: the owner's real failing exit pass must both update
         # the earlier archive and discover/import the new later session.
         return 0
@@ -1786,14 +1906,229 @@ class Harness:
 
         return observe
 
+    def resume_inventory(self, expected, *, selected=None):
+        """Use the production complete inventory, bound to known synthetic IDs.
+
+        An omitted archived root, foreign/nested directory, malformed record or
+        duplicate is an oracle refusal, never evidence that a new root is needed.
+        The launcher itself (not this helper) selects/creates every session.
+        """
+        values = self.box.list_container_sessions(self.data)
+        require(isinstance(values, list) and 0 < len(values) <= 32)
+        project = self.box.container_project(self.data)
+        for item in values:
+            require(
+                isinstance(item, dict)
+                and self.box.valid_session_id(item.get("id"))
+                and isinstance(item.get("location"), dict)
+                and item["location"].get("directory") == project
+                and isinstance(item.get("time"), dict)
+                and type(item["time"].get("updated")) in (int, float)
+                and 0 <= item["time"]["updated"] < float("inf")
+                and (
+                    item.get("parentID") is None
+                    or self.box.valid_session_id(item["parentID"])
+                )
+                and (
+                    item["time"].get("archived") is None
+                    or (
+                        type(item["time"]["archived"]) in (int, float)
+                        and 0 <= item["time"]["archived"] < float("inf")
+                    )
+                )
+            )
+        by_id = {item["id"]: item for item in values}
+        require(len(by_id) == len(values) and set(by_id) == expected)
+        if selected is not None:
+            require(
+                selected in by_id
+                and by_id[selected].get("parentID") is None
+                and by_id[selected]["time"].get("archived") is None
+            )
+        return by_id
+
+    def verify_resume_retention(self, expected):
+        values = self.resume_inventory(expected)
+        state = self.box.session_state(self.path)
+        require(
+            set(state["sessions"]) == expected
+            and set(state["missing"]) == self.resume_missing
+        )
+        retained = expected | self.resume_missing
+        require(
+            set(state["synced"]) == retained
+            and set(state["host_sessions"]) == retained
+            and {item.stem for item in (self.path.parent / "history").glob("*.json")}
+            == {self.archive_id(ident) for ident in retained}
+            and {
+                item["id"]
+                for item in self.host("GET", "/api/session?limit=100")["data"]
+            }
+            == {self.archive_id(ident) for ident in retained}
+        )
+        for ident in sorted(retained):
+            require(
+                state["host_sessions"][ident] == self.archive_id(ident)
+                and state["synced"][ident] == file_hash(self.archive_path(ident))
+            )
+        for ident in sorted(expected):
+            source = self.export(ident)
+            require(source == self.resume_exports[ident])
+            require(
+                values[ident].get("parentID") == source["info"].get("parentID")
+                and values[ident]["time"].get("archived")
+                == source["info"]["time"].get("archived")
+            )
+            self.verify_archive(ident)
+        for ident, before in self.resume_deleted.items():
+            preserved(before, self.snapshot(ident))
+
+    def resume_quiet(self):
+        require(
+            (self.provider.requests, self.provider.errors) == self.resume_requests,
+            "provider-contract",
+        )
+
+    def archive_roots(self, selected):
+        # These stages follow shell recovery so archiving cannot change any of
+        # the pre-existing readiness, pending-export or session-order probes.
+        values = self.resume_inventory(self.resume_sources, selected=selected)
+        self.resume_roots = {
+            ident for ident, item in values.items() if item.get("parentID") is None
+        }
+        self.resume_target = "ses_history_archived"
+        require(
+            selected in self.resume_roots
+            and self.resume_target in self.resume_roots
+            and "ses_history_archived_child" not in self.resume_roots
+        )
+        before = {ident: self.export(ident) for ident in sorted(self.resume_sources)}
+        self.resume_deleted = {
+            ident: self.snapshot(ident) for ident in sorted(self.resume_missing)
+        }
+        require(
+            self.batch(
+                [
+                    ["PATCH", "/api/session/" + ident, {"archived": True}]
+                    for ident in sorted(self.resume_roots)
+                ]
+            )
+            == [None] * len(self.resume_roots)
+        )
+        values = self.resume_inventory(self.resume_sources)
+        self.resume_exports = {}
+        for ident, original in before.items():
+            source = self.export(ident)
+            if ident in self.resume_roots:
+                require(
+                    values[ident]["time"].get("archived") is not None
+                    and source["info"]["time"].get("created")
+                    == original["info"]["time"].get("created")
+                )
+                normalized = json.loads(json.dumps(source))
+                normalized["info"]["time"] = original["info"]["time"]
+                require(normalized == original)
+            else:
+                require(source == original)
+            self.resume_exports[ident] = source
+        self.check("archived_roots_inventory")
+        self.sync()
+        self.verify_resume_retention(self.resume_sources)
+        self.check("archived_roots_retention")
+        require(self.box.session_state(self.path)["last"] is None)
+        self.check("all_archived_no_resume")
+        self.resume_archives = {
+            ident: self.snapshot(ident) for ident in sorted(self.resume_sources)
+        }
+        self.resume_quiet()
+        return 0
+
+    def archived_restart(self, selected):
+        # Selection is observed from the NEXT production owning start, with no
+        # --new, import, resume selector or patched selection/creation function.
+        require(selected not in self.resume_sources | self.resume_missing)
+        expected = self.resume_sources | {selected}
+        values = self.resume_inventory(expected, selected=selected)
+        require(
+            all(
+                values[ident]["time"].get("archived") is not None
+                for ident in self.resume_roots
+            )
+        )
+        self.resume_exports[selected] = self.export(selected)
+        self.sync()
+        require(self.box.session_state(self.path)["last"] == selected)
+        self.verify_resume_retention(expected)
+        self.check("archived_next_start_new_root")
+        for ident, before in self.resume_archives.items():
+            preserved(before, self.snapshot(ident))
+        self.check("archived_restart_retention")
+        self.resume_sources = expected
+        self.resume_new = selected
+
+        # Native title updates advance updated metadata. Require a strictly
+        # newest eligible root before exit; ties cannot certify next-start policy.
+        original = self.resume_exports[self.resume_target]
+
+        def unarchive_latest():
+            require(
+                self.request(
+                    "PATCH",
+                    "/api/session/" + self.resume_target,
+                    {"archived": False, "title": "SYNTHETIC_UNARCHIVED_RESUME_ROOT"},
+                )
+                is None
+            )
+            current = self.resume_inventory(expected, selected=self.resume_target)
+            return current[self.resume_target]["time"]["updated"] > max(
+                item["time"]["updated"]
+                for ident, item in current.items()
+                if ident != self.resume_target
+                and item.get("parentID") is None
+                and item["time"].get("archived") is None
+            )
+
+        self.until(unarchive_latest, timeout=5)
+        source = self.export(self.resume_target)
+        require(
+            source["info"]["time"].get("archived") is None
+            and source["info"]["time"].get("created")
+            == original["info"]["time"].get("created")
+        )
+        normalized = json.loads(json.dumps(source))
+        normalized["info"]["time"] = original["info"]["time"]
+        normalized["info"]["title"] = original["info"]["title"]
+        require(normalized == original)
+        self.resume_exports[self.resume_target] = source
+        self.sync()
+        self.verify_resume_retention(expected)
+        require(self.box.session_state(self.path)["last"] == self.resume_target)
+        self.check("unarchived_root_eligible")
+        self.resume_archives = {
+            ident: self.snapshot(ident) for ident in sorted(expected)
+        }
+        self.resume_quiet()
+        return 0
+
+    def unarchived_restart(self, selected):
+        require(selected == self.resume_target and selected != self.resume_new)
+        self.resume_inventory(self.resume_sources, selected=selected)
+        self.sync()
+        require(self.box.session_state(self.path)["last"] == self.resume_target)
+        self.verify_resume_retention(self.resume_sources)
+        self.check("unarchived_next_start_resume")
+        for ident, before in self.resume_archives.items():
+            preserved(before, self.snapshot(ident))
+        self.check("unarchived_history_retention")
+        self.resume_quiet()
+        return 0
+
     def run(self):
         self.stage = "private-store"
         self.validate(initial=True)
         self.check("private_store")
         self.stage = "native-version"
-        self.f.prepare_native_cli(
-            self.root, self.binary, native_version=self.native["version"]
-        )
+        self.prepare_native()
         self.check("native_version")
         self.launch(self.graph)
         self.launch(self.readiness)
@@ -1837,6 +2172,14 @@ class Harness:
             == file_hash(self.archive_path(self.shell_id))
         )
         self.check("sync_recovery")
+        # Cover startup, callbacks, final automatic sync and shutdown for ALL
+        # three ordinary starts, not just the callback bodies.
+        self.resume_requests = (self.provider.requests, self.provider.errors)
+        self.launch(self.archive_roots)
+        self.launch(self.archived_restart)
+        self.launch(self.unarchived_restart)
+        self.resume_quiet()
+        self.check("resume_no_inference")
         self.check("owner_cleanup")
         self.same_identity()
         self.check("unchanged_identity")
@@ -1858,21 +2201,8 @@ def recovery_result(
     failure_trace=(),
     observations=None,
 ):
-    """Separate evidence: never add recovery claims to the stable baseline report."""
+    """Separate evidence: never add recovery claims to the retained 42-check report."""
     require(case in RECOVERY_CHECKS, "report-schema")
-    require(
-        stage
-        in (
-            "preparation",
-            "private-store",
-            "native-version",
-            "primer",
-            "cancelled",
-            "held_running",
-            "complete",
-        ),
-        "report-schema",
-    )
     require(
         set(checks) <= RECOVERY_CHECKS[case]
         and all(type(v) is bool for v in checks.values()),
@@ -1891,13 +2221,26 @@ def recovery_result(
         exits,
         failure_trace=failure_trace,
     )
+    recovery_stage = RECOVERY_STAGE[native["version"]]
+    require(
+        stage
+        in (
+            "preparation",
+            "private-store",
+            "native-version",
+            "primer",
+            recovery_stage,
+            "complete",
+        ),
+        "report-schema",
+    )
+    legacy = recovery_stage == "cancelled"
+    pair_key = "cancelled_pairs" if legacy else "running_pairs"
     observations = {} if observations is None else observations
     require(
-        set(observations)
+        isinstance(observations, dict) and set(observations)
         <= {
             "cancelled_pairs",
-            "running_pairs",
-            "native_client_exit",
             "restarts",
             "reader_leases",
             "prepare_calls",
@@ -1907,7 +2250,7 @@ def recovery_result(
             "explicit_stop_exit_code",
             "recovery_calls",
             "snapshot_completed",
-        }
+        } | (set() if legacy else {"running_pairs", "native_client_exit"})
         and all(
             value is None or type(value) is int and -255 <= value < 10000
             for value in observations.values()
@@ -1925,25 +2268,15 @@ def recovery_result(
         "recovery_calls": 1,
         "snapshot_completed": int(case == "snapshot"),
     }
-    if native["version"] == "2.3.0":
-        expected["native_client_exit"] = 1
+    if not legacy:
+        expected.update(cancelled_pairs=0, native_client_exit=1)
     if primary is None and (
         set(checks) != RECOVERY_CHECKS[case]
         or not all(checks.values())
         or tuple(exits) != (0, 1)
         or stage != "complete"
-        or type(
-            observations.get(
-                "cancelled_pairs" if native["version"] == "2.2.6" else "running_pairs"
-            )
-        )
-        is not int
-        or observations[
-            "cancelled_pairs" if native["version"] == "2.2.6" else "running_pairs"
-        ]
-        < 2
-        or native["version"] == "2.3.0"
-        and observations.get("cancelled_pairs") != 0
+        or type(observations.get(pair_key)) is not int
+        or observations[pair_key] < 2
         or any(
             key not in observations or observations[key] != value
             for key, value in expected.items()
@@ -1967,20 +2300,20 @@ def recovery_result(
         "status": "PASS" if primary is None and not secondary else "FAIL",
         "checks": checks,
         "launcher_exit_codes": list(exits),
-        "launcher_stages": [
-            "primer",
-            "cancelled" if native["version"] == "2.2.6" else "held_running",
-        ][: len(exits)],
+        "launcher_stages": ["primer", recovery_stage][: len(exits)],
         "expected_launcher_exit_codes": [0, 1],
         "primary_category": primary,
         "observations": observations,
-        "scope": "Fresh synthetic external-host persisted-history recovery; exact native "
-        + native["version"]
-        + " profile. Not interactive UI, inference, security or general lifecycle acceptance.",
+        "scope": (
+            f"Fresh synthetic external-host persisted-history recovery; exact native "
+            f"{native['version']} profile. Not interactive UI, inference, security or "
+            "general lifecycle acceptance."
+        ),
         "observers": [
             "forwarding engine results",
             "forwarding recovery call and completion result",
             "real owner shutdown and timeout counts",
+            "scripted nonzero TUI result; separate native run client",
             "actual private reader Popen",
             "pre-selector production environment",
             "read-only owned-volume metadata",
@@ -2063,19 +2396,35 @@ else:
  raise SystemExit(oc_box.main(['stop','--workspace',s['workspace']]))
 """
 
-METADATA_HELPER = """import json,pathlib,sqlite3,sys
+METADATA_HELPER = """import contextlib,json,pathlib,sqlite3,sys
 p=pathlib.Path(sys.argv[1]); assert p.is_file() and not p.is_symlink()
-with sqlite3.connect(p.as_uri()+'?mode=ro',uri=True,timeout=1) as db:
+args=sys.argv[2:]
+current=args[:1]==['--native-2.3.0']
+if current: args=args[1:]
+with contextlib.closing(sqlite3.connect(p.as_uri()+'?mode=ro',uri=True,timeout=1)) as db:
  db.execute('PRAGMA query_only=ON'); db.execute('BEGIN')
  assert db.execute("SELECT type FROM sqlite_master WHERE name='schedule'").fetchall()==[('table',)]
  columns={r[1]:r for r in db.execute("PRAGMA table_info('schedule')")}
  assert all(k in columns and columns[k][2].upper()=='TEXT' for k in ('id','session_id','status','last_message_id')) and columns['id'][5]
  assert db.execute('SELECT 1 FROM schedule LIMIT 1').fetchone() is None
- jobs=db.execute('SELECT * FROM job ORDER BY id LIMIT 3').fetchall()
+ if current:
+  assert set(columns)==set(('id session_id name action check when tz status next_due_at '
+                           'ends_at remaining_runs run_count checks failures last_fired_at '
+                           'last_message_id last_outcome retry_at state time_created time_updated').split())
+  assert not db.execute("SELECT 1 FROM sqlite_master WHERE name='automation'").fetchone()
+  assert not db.execute("SELECT 1 FROM kv WHERE key LIKE 'job.background/%' LIMIT 1").fetchone()
+  assert db.execute("SELECT type FROM sqlite_master WHERE name='job'").fetchall()==[('table',)]
+  assert {r[1] for r in db.execute("PRAGMA table_xinfo('job')")}==set((
+   'notification_id id session_id child_session_id kind title status output error '
+   'recovery time_created time_updated').split())
+ cursor=db.execute('SELECT * FROM job ORDER BY id LIMIT 3')
+ jobs=cursor.fetchall()
  assert len(jobs)<=1
+ if current: jobs=[dict(zip((c[0] for c in cursor.description), row)) for row in jobs]
 value={'jobs':jobs}
-if len(sys.argv)>2:
- p=pathlib.Path(sys.argv[2]); assert p.is_file() and p.stat().st_size<=16
+assert len(args)<=1
+if args:
+ p=pathlib.Path(args[0]); assert p.is_file() and p.stat().st_size<=16
  value['starts']=p.read_text()
 out=json.dumps(value); assert len(out)<262144; print(out)
 """
@@ -2103,11 +2452,11 @@ class FileGate:
             self.path,
         )
 
-    def command(self):
+    def command(self, *, hold_seconds=90):
         code = (
             "import pathlib,sys,time\np=pathlib.Path(sys.argv[1])\n"
             "with (p/'starts').open('ab') as f:f.write(b'x')\n"
-            "deadline=time.monotonic()+180\n"
+            f"deadline=time.monotonic()+{hold_seconds!r}\n"
             "while not (p/'release').exists() and time.monotonic()<deadline:time.sleep(.02)\n"
             "assert (p/'release').exists()\nprint('SYNTHETIC_HISTORY_BG_DONE')\n"
         )
@@ -2135,9 +2484,11 @@ class RecoveryHarness(Harness):
         self.stop_observed = False
         self.prepares = self.auth = self.host_fences = self.cancelled_pairs = 0
         self.running_pairs = 0
+        self.native_client_exit = None
         self.source_fence = self.guards = False
         self.holder = self.stopper = self.stop_worker = self.client = None
         self.returned_at = None
+        self.timeout, self.elapsed, self.owner_closed = None, 0, False
         self.shell_starts = None
         self.idle_pair = False
         self.recovery_thread = None
@@ -2154,6 +2505,14 @@ class RecoveryHarness(Harness):
 
     def native_selector_source(self):
         return self.f.native_wrapper_source(history_recovery=True)
+
+    @property
+    def recovery_stage(self):
+        return RECOVERY_STAGE[self.native["version"]]
+
+    @property
+    def retained_status(self):
+        return "cancelled" if self.recovery_stage == "cancelled" else "running"
 
     def recovering(self):
         # A deadline also scopes the launcher's OUTER final cleanup. Observe the
@@ -2172,6 +2531,7 @@ class RecoveryHarness(Harness):
             self.recovery_thread = None
 
     def metadata(self, *, source=True):
+        profile = ["--native-2.3.0"] if self.recovery_stage == "held_running" else []
         if source:
             database = self.volume / ".local/share/opencode/oc-box-v2.db"
             args = [
@@ -2183,6 +2543,7 @@ class RecoveryHarness(Harness):
                 "-c",
                 METADATA_HELPER,
                 str(database),
+                *profile,
                 str(self.volume / self.gate.relative / "starts"),
             ]
         else:
@@ -2193,6 +2554,7 @@ class RecoveryHarness(Harness):
                 "-c",
                 METADATA_HELPER,
                 str(self.host_database),
+                *profile,
             ]
         value = self.raw_run(
             args,
@@ -2306,7 +2668,7 @@ class RecoveryHarness(Harness):
     def observe_api(self, box, data, connection, method, route, value=None, **options):
         response = self.raw_api(box, data, connection, method, route, value, **options)
         if (
-            self.stage in ("cancelled", "held_running")
+            self.stage == self.recovery_stage
             and self.returned_at is not None
             and not self.closed.is_set()
             and method == "GET"
@@ -2319,10 +2681,7 @@ class RecoveryHarness(Harness):
                     self.idle_pair
                     and isinstance(jobs, list)
                     and len(jobs) == 1
-                    and jobs[0].get("id") == self.job["id"]
-                    and jobs[0].get("sessionID") == self.job["sessionID"]
-                    and jobs[0].get("kind") == "shell"
-                    and jobs[0].get("status") == self.retained_status
+                    and self.same_job(jobs[0], self.retained_status)
                 ):
                     if self.retained_status == "cancelled":
                         self.cancelled_pairs += 1
@@ -2332,19 +2691,12 @@ class RecoveryHarness(Harness):
         return response
 
     def observe_shutdown(self, owner):
+        returned_at = self.returned_at
+        elapsed = time.monotonic() - returned_at if returned_at is not None else 0
         result = self.raw_shutdown(owner)
-        if self.stage in ("cancelled", "held_running"):
-            if self.native["version"] == "2.3.0":
-                # The native run client waits for the held background job.
-                # Closing the real owner disconnects it naturally; finish that
-                # existing client BEFORE recovery can stop the whole container.
-                # Never kill/release the actual job or substitute an API result.
-                require(self.client is not None)
-                require(self.client.join(10) == 1, "launcher-exit")
+        if self.stage == self.recovery_stage and returned_at is not None:
             self.timeout = getattr(owner, "_history_timeout", None)
-            self.elapsed = (
-                time.monotonic() - self.returned_at if self.returned_at else 0
-            )
+            self.elapsed = elapsed  # Do not count owner shutdown or the client join.
             self.owner_closed = (
                 owner.child.returncode == 0
                 and not owner.thread.is_alive()
@@ -2353,6 +2705,15 @@ class RecoveryHarness(Harness):
                 and self.service.live_connection() is None
                 and not self.service.socket_path(self.box, self.data).exists()
             )
+            require(self.owner_closed)
+            if self.recovery_stage == "held_running":
+                # The actual native run client remains attached to the held job.
+                # Let natural owner closure disconnect it before allowing either
+                # stop/admission path. Never release or kill the synthetic job here.
+                require(self.client is not None)
+                code = self.client.join(10)
+                self.native_client_exit = code if type(code) is int else None
+                require(self.native_client_exit == 1, "launcher-exit")
             self.closed.set()
         return result
 
@@ -2438,10 +2799,7 @@ class RecoveryHarness(Harness):
                 )
             self.exits.append(code)
             require(code == expected, "launcher-exit")
-            self.warning = errors.getvalue()
-            self.ordinary_success = (
-                "Session history synced to your normal host" in output.getvalue()
-            )
+            self.output, self.warning = output.getvalue(), errors.getvalue()
         self.stopped()
 
     def primer(self, selected):
@@ -2538,17 +2896,22 @@ class RecoveryHarness(Harness):
         self.check("explicit_stop_success")
 
     def cancelled(self, selected):
-        require(self.native["version"] == "2.2.6")
+        require(self.recovery_stage == "cancelled")
         return self.retained_job(selected, reload_cancel=True)
 
     def held_running(self, selected):
         """2.3 drains jobs on reload: hold real work through the ordinary timeout."""
-        require(self.native["version"] == "2.3.0")
+        require(self.recovery_stage == "held_running")
         return self.retained_job(selected, reload_cancel=False)
 
-    @property
-    def retained_status(self):
-        return "cancelled" if self.native["version"] == "2.2.6" else "running"
+    def same_job(self, item, status):
+        return (
+            isinstance(item, dict)
+            and item.get("id") == self.job["id"]
+            and item.get("sessionID") == self.job["sessionID"]
+            and item.get("kind") == "shell"
+            and item.get("status") == status
+        )
 
     def retained_job(self, selected, *, reload_cancel):
         self.control_env = dict(os.environ)
@@ -2560,7 +2923,11 @@ class RecoveryHarness(Harness):
         self.stop_token = self.owner._history_source.stop_token
         self.gate = FileGate(self)
         self.provider.background = {
-            "command": self.gate.command(),
+            "command": (
+                self.gate.command()
+                if reload_cancel
+                else self.gate.command(hold_seconds=180)
+            ),
             "background": True,
             "workdir": self.box.container_project(self.data),
         }
@@ -2586,25 +2953,37 @@ class RecoveryHarness(Harness):
 
         self.until(running)
         self.job = inventory()[1][0]
+        require(
+            isinstance(self.job.get("id"), str)
+            and bool(self.job["id"])
+            and self.job.get("sessionID") == selected
+            and self.same_job(self.job, "running")
+        )
         require("FOREGROUND_IDLE_MARKER" in json.dumps(self.export(selected)))
-        self.job_rows = self.metadata()["jobs"]
-        require(len(self.job_rows) == 1 and self.metadata()["starts"] == "x")
+        metadata = self.metadata()
+        self.job_rows = metadata["jobs"]
+        require(len(self.job_rows) == 1 and metadata["starts"] == "x")
         if reload_cancel:
             require(self.request("POST", "/api/location/reload") is None)
             self.gate.release()
+        else:
+            row = self.job_rows[0]
+            require(
+                row["id"] == self.job.get("shellID", self.job["id"])
+                and row["session_id"] == selected
+                and row["kind"] == "shell"
+                and row["status"] == "running"
+            )
 
-        def cancelled_idle():
+        def retained_idle():
             active, jobs = inventory()
             return (
                 active == {}
                 and len(jobs) == 1
-                and jobs[0].get("id") == self.job["id"]
-                and jobs[0].get("sessionID") == selected
-                and jobs[0].get("kind") == "shell"
-                and jobs[0].get("status") == self.retained_status
+                and self.same_job(jobs[0], self.retained_status)
             )
 
-        self.until(cancelled_idle)
+        self.until(retained_idle)
         self.saved = {ident: self.export(ident) for ident in self.baseline_ids}
         require(
             not any(
@@ -2633,25 +3012,49 @@ class RecoveryHarness(Harness):
             require(self.holder.stdout.readline() == b"ready\n")
             self.stop_worker = Worker(self.stop_after_close)
         self.returned_at = None
-        return 0
+        # This is the scripted TUI boundary, not the native run client above.
+        # Deliberately exercise preservation of a nonzero client result even on
+        # runtimes that now return zero for a zero client after verified recovery.
+        return 1
 
     def reproduction(self):
+        legacy = self.recovery_stage == "cancelled"
         require(
             isinstance(self.timeout, self.box.HistoryWaitTimeout)
             and self.timeout.recovery_eligible is True
             and (
                 self.cancelled_pairs >= 2
-                if self.native["version"] == "2.2.6"
+                if legacy
                 else self.running_pairs >= 2 and self.cancelled_pairs == 0
             )
+            and not getattr(self.timeout, "interrupted_foreground", False)
             and self.elapsed >= 29
             and self.owner_closed
         )
         require(
             self.timeout.diagnostic.endswith(
                 "foreground=0, jobs-running=0, jobs-completed=0, jobs-error=0, jobs-cancelled=1."
-                if self.native["version"] == "2.2.6"
+                if legacy
                 else "foreground=0, jobs-running=1, jobs-completed=0, jobs-error=0, jobs-cancelled=0."
+            )
+        )
+
+    def verify_interruption_warning(self):
+        output, warning = self.output.splitlines(), self.warning
+        ordinary = "Session history synced to your normal host OpenCode database"
+        interrupted = "Available history synced. Interrupted work may be incomplete."
+        require(
+            not any(line.startswith("History synced.") for line in output)
+            and ordinary + "." not in output
+            and (
+                output.count(interrupted) == 1
+                or (
+                    "Checked persisted history snapshots were synchronized after stopping the workspace."
+                    in warning
+                    and "Execution was interrupted; completion notices or final results may be missing."
+                    in warning
+                    and "original history-wait failure remains nonzero" in warning
+                )
             )
         )
 
@@ -2717,12 +3120,7 @@ class RecoveryHarness(Harness):
         self.stage = "private-store"
         self.validate(initial=True)
         self.stage = "native-version"
-        self.f.prepare_native_cli(
-            self.root,
-            self.binary,
-            history_recovery=True,
-            native_version=self.native["version"],
-        )
+        self.prepare_native(history_recovery=True)
         self.launch_case(self.primer, 0)
         # Native's supported path-only query does not construct a service or DB.
         # Pin its actual selector result, not an assumed native channel filename.
@@ -2758,12 +3156,7 @@ class RecoveryHarness(Harness):
         self.baseline_state = self.box.session_file(self.path).read_bytes()
         self.returned_at = None
         try:
-            callback = (
-                self.cancelled
-                if self.native["version"] == "2.2.6"
-                else self.held_running
-            )
-            self.launch_case(callback, 1)
+            self.launch_case(getattr(self, self.recovery_stage), 1)
         finally:
             finish_actions(
                 (
@@ -2809,14 +3202,7 @@ class RecoveryHarness(Harness):
             self.check("durable_job_retained")
             self.check("reader_no_execution")
             self.check("reader_no_prepare")
-            require(
-                "Checked persisted history snapshots were synchronized after stopping the workspace."
-                in self.warning
-                and "Execution was interrupted; completion notices or final results may be missing."
-                in self.warning
-                and "original history-wait failure remains nonzero" in self.warning
-                and not self.ordinary_success
-            )
+            self.verify_interruption_warning()
             self.check("nonzero_warning_stopped")
         else:
             require(
@@ -2840,10 +3226,8 @@ class RecoveryHarness(Harness):
         self.stage = "complete"
 
     def observations(self):
-        return {
+        observations = {
             "cancelled_pairs": self.cancelled_pairs,
-            "running_pairs": self.running_pairs,
-            "native_client_exit": self.client.value if self.client else None,
             "restarts": len(self.starts),
             "reader_leases": self.reader_attempts,
             "prepare_calls": self.prepares,
@@ -2859,6 +3243,11 @@ class RecoveryHarness(Harness):
             and type(self.recovery_results[0]) is bool
             else None,
         }
+        if self.recovery_stage == "held_running":
+            observations.update(
+                running_pairs=self.running_pairs, native_client_exit=self.native_client_exit
+            )
+        return observations
 
 
 class ShellGate:
@@ -2900,12 +3289,17 @@ def parser():
     value.add_argument("--work-dir", type=Path, required=True)
     value.add_argument("--temp-dir", type=Path)
     value.add_argument("--opencode-v2", type=Path, required=True)
-    value.add_argument("--native-version", choices=NATIVE_VERSIONS, default="2.2.6")
+    value.add_argument(
+        "--native-version",
+        choices=NATIVE_VERSIONS,
+        default="2.2.6",
+        help="exact OpenCode executable release (default: 2.2.6)",
+    )
     value.add_argument("--distro", default="tumbleweed")
     value.add_argument(
         "--history-recovery-case",
         choices=tuple(RECOVERY_CHECKS),
-        help="opt-in fresh recovery gate, separate from the stable default 33-check run",
+        help="opt-in fresh recovery gate, separate from the unchanged default 42-check run",
     )
     return value
 
@@ -2913,10 +3307,11 @@ def parser():
 def build_harness(
     loaded, root, binary, digest, recovery_case=None, *, native_version="2.2.6"
 ):
-    options = {} if native_version == "2.2.6" else {"native_version": native_version}
     if recovery_case is None:
-        return Harness(loaded, root, binary, digest, **options)
-    return RecoveryHarness(loaded, root, binary, digest, recovery_case, **options)
+        return Harness(loaded, root, binary, digest, native_version=native_version)
+    return RecoveryHarness(
+        loaded, root, binary, digest, recovery_case, native_version=native_version
+    )
 
 
 def main(argv=None):
@@ -2943,7 +3338,7 @@ def main(argv=None):
         require(file_hash(__file__) == runner_digest, "source-changed")
         f = loaded.fixture
         f.host_guard()
-        require(tuple(f.NATIVE_VERSIONS) == NATIVE_VERSIONS, "source-changed")
+        require(getattr(f, "NATIVE_VERSIONS", None) == NATIVE_VERSIONS, "source-changed")
         require(args.distro in loaded.box.DISTROS, "invalid-options")
         binary = loaded.interactive.native_binary(args.opencode_v2)
         require(not binary.is_relative_to(loaded.source), "placement")

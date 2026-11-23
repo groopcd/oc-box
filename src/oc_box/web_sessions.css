@@ -1,0 +1,182 @@
+:root { color-scheme: light dark; font: 14px system-ui, sans-serif; }
+body { margin: 0; }
+#web-shell { height: 100dvh; display: flex; flex-direction: column; }
+header { padding: .5rem 1rem; border-bottom: 1px solid GrayText; }
+h1 { font-size: 1.1rem; margin: .2rem 0; }
+header p { margin: .35rem 0; }
+#session-tabs { display: flex; overflow-x: auto; gap: .35rem; padding: .3rem 0; }
+[role="tab"] { white-space: nowrap; padding: .5rem .75rem; cursor: pointer; }
+[role="tab"][aria-selected="true"] { outline: 2px solid Highlight; font-weight: bold; }
+#native { flex: 1; min-height: 0; width: 100%; border: 0; }
+#no-selection { padding: 1rem; }
+[hidden] { display: none !important; }
+
+/* Opt-in workspace presentation. The default shell above keeps its layout. */
+#web-shell[data-layout] {
+  --workspace-left: 248px;
+  --workspace-right: 264px;
+  --workspace-edge: color-mix(in srgb, CanvasText 20%, Canvas);
+  --workspace-surface: color-mix(in srgb, CanvasText 4%, Canvas);
+  color: CanvasText;
+  background: Canvas;
+  overflow: hidden;
+}
+#workspace-toolbar, #workspace-layouts, #workspace-manager-nav {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: .5rem;
+}
+#workspace-toolbar, #workspace-manager-nav {
+  padding: .55rem .8rem;
+  border-bottom: 1px solid var(--workspace-edge);
+  background: var(--workspace-surface);
+}
+#workspace-toolbar > a { margin-inline-start: auto; }
+#workspace-toolbar button, #workspace-manager-nav button, #workspace-library button {
+  color: inherit;
+  background: var(--workspace-surface);
+  border: 1px solid var(--workspace-edge);
+  border-radius: .35rem;
+  font: inherit;
+  cursor: pointer;
+  padding: .4rem .65rem;
+}
+#workspace-toolbar button[aria-pressed="true"], #workspace-manager-nav button[aria-pressed="true"] {
+  color: HighlightText;
+  background: Highlight;
+}
+#workspace-content {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-areas: "library" "chat" "overview";
+  grid-template-rows: auto minmax(max(25rem, 65dvh), 1fr) auto;
+  overflow: auto;
+  position: relative;
+}
+#workspace-library, #workspace-overview, #workspace-unavailable {
+  min-width: 0;
+  padding: .8rem;
+  overflow-wrap: anywhere;
+}
+#workspace-library {
+  grid-area: library;
+  background: var(--workspace-surface);
+  max-height: 14rem;
+  overflow: auto;
+}
+#workspace-library label { display: block; }
+.workspace-session-sources { display: flex; flex-wrap: wrap; gap: .35rem; margin-block: .55rem; }
+#workspace-library .workspace-session-sources button[aria-pressed="true"] { color: HighlightText; background: Highlight; }
+#workspace-search { box-sizing: border-box; width: 100%; margin: .25rem 0 .4rem; font: inherit; }
+#workspace-library #session-tabs { flex-direction: column; overflow: visible; }
+#workspace-library #session-tabs button {
+  min-width: 0;
+  text-align: start;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  margin-inline: 2px;
+}
+#workspace-library #session-tabs button[aria-selected="true"] { color: HighlightText; background: Highlight; }
+#workspace-chat {
+  grid-area: chat;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  background: Canvas;
+}
+.workspace-chat-tools {
+  flex: none;
+  max-height: 35dvh;
+  padding: .35rem .8rem;
+  overflow: auto;
+  overflow-wrap: anywhere;
+  border-bottom: 1px solid var(--workspace-edge);
+}
+.workspace-chat-tools p { margin: .2rem 0; }
+#workspace-chat #no-selection { overflow: auto; }
+#workspace-overview { grid-area: overview; background: var(--workspace-surface); }
+#workspace-unavailable { grid-area: unavailable; }
+#workspace-content h2 { font-size: 1.1rem; margin: 0 0 .5rem; }
+.workspace-cards { display: grid; grid-template-columns: minmax(0, 1fr); gap: .65rem; }
+.workspace-cards section { border: 1px solid var(--workspace-edge); border-radius: .45rem; padding: .65rem; }
+.workspace-cards h3, .workspace-cards p { margin: 0; }
+.workspace-cards p { margin-top: .35rem; }
+.workspace-divider { display: none; }
+
+[data-layout="dashboard"] #workspace-content {
+  grid-template-areas: "overview" "library" "chat";
+  grid-template-rows: auto auto minmax(max(25rem, 65dvh), 1fr);
+}
+[data-layout="focus"] #workspace-content {
+  grid-template-areas: "chat";
+  grid-template-rows: minmax(0, 1fr);
+}
+[data-layout="focus"] #workspace-library {
+  grid-area: auto;
+  position: absolute;
+  z-index: 1;
+  inset: 0 auto auto 0;
+  box-sizing: border-box;
+  width: min(24rem, 100%);
+  max-height: 100%;
+  border: 1px solid var(--workspace-edge);
+}
+[data-layout="manager"] #workspace-content {
+  grid-template-areas: "overview" "library" "unavailable";
+  grid-template-rows: auto auto auto;
+  align-content: start;
+}
+[data-layout="manager"] #workspace-library { max-height: none; }
+[data-layout="manager"] #session-tabs { max-width: 60rem; }
+
+@media (min-width: 46rem) {
+  [data-layout="dashboard"] #workspace-content {
+    grid-template-columns: minmax(14rem, 22%) minmax(0, 1fr);
+    grid-template-areas: "overview overview" "library chat";
+    grid-template-rows: auto minmax(25rem, 1fr);
+  }
+  [data-layout="dashboard"] #workspace-library { max-height: none; }
+  [data-layout="dashboard"] .workspace-cards, [data-layout="manager"] .workspace-cards {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (min-width: 66rem) {
+  [data-layout="studio"] #workspace-content {
+    grid-template-columns: var(--workspace-left) 12px minmax(420px, 1fr) 12px var(--workspace-right);
+    grid-template-areas: "library left-divider chat right-divider overview";
+    grid-template-rows: minmax(0, 1fr);
+  }
+  [data-layout="studio"] #workspace-library { max-height: none; }
+  [data-layout="studio"] #workspace-overview { overflow: auto; }
+  [data-layout="dashboard"] #workspace-content {
+    grid-template-columns: var(--workspace-left) 12px minmax(420px, 1fr);
+    grid-template-areas: "overview overview overview" "library left-divider chat";
+  }
+  [data-layout="studio"] .workspace-divider, [data-layout="dashboard"] #workspace-divider-left {
+    display: grid;
+    place-items: center;
+    background: var(--workspace-edge);
+    cursor: col-resize;
+    touch-action: none;
+  }
+  #workspace-divider-left { grid-area: left-divider; }
+  #workspace-divider-right { grid-area: right-divider; }
+  .workspace-divider::after {
+    content: "";
+    background: GrayText;
+    width: 3px;
+    height: min(2.5rem, 50%);
+    border-radius: 3px;
+  }
+  .workspace-divider:hover, .workspace-divider:focus-visible, [data-resizing] .workspace-divider {
+    background: color-mix(in srgb, Highlight 30%, Canvas);
+  }
+  .workspace-divider:focus-visible { outline: 2px solid Highlight; outline-offset: -2px; }
+  [data-resizing] { cursor: col-resize; user-select: none; }
+  [data-resizing] #native { pointer-events: none; }
+}

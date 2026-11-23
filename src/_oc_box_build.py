@@ -52,7 +52,7 @@ class BuildPackage(build_py):
         return [
             module
             for module in super().find_package_modules(package, package_dir)
-            if module[1] != "setup"
+            if module[1] not in {"setup", "web_tls_cli", "web_tls_setup"}
         ]
 
     def run(self):

@@ -14,7 +14,7 @@ on:
         type: string
         default: ''
       skip_linkedin:
-        description: Suppress this publication's LinkedIn announcement
+        description: Skip the LinkedIn preview or announcement for this publication
         type: boolean
         default: false
 
@@ -150,7 +150,7 @@ jobs:
           "$RUNNER_TEMP/oc-box-build/bin/python" -m build --no-isolation
           "$RUNNER_TEMP/oc-box-build/bin/python" -m twine check dist/*
       - name: Verify isolated package installation and resources
-        run: python tools/check_package.py dist --with-vault
+        run: python tools/check_package.py dist --with-vault --with-tui
       - name: Revalidate clean source and bind exact release artifacts
         id: artifacts
         env:
@@ -259,9 +259,11 @@ jobs:
   linkedin:
     needs: [build, publish]
     if: >-
-      vars.LINKEDIN_ANNOUNCEMENTS == 'true' &&
-      inputs.skip_linkedin != true &&
+      !inputs.skip_linkedin &&
+      !contains(github.event.release.body || '', '<!-- linkedin:skip -->') &&
       !contains(github.event.release.body || '', '<!-- oc-box: skip-linkedin -->') &&
+      (endsWith(github.event.release.tag_name || inputs.release_tag, '.dev0') ||
+       vars.LINKEDIN_ANNOUNCEMENTS == 'true') &&
       needs.publish.result == 'success' &&
       needs.build.outputs.publish_validated == 'true'
     permissions:
@@ -269,5 +271,7 @@ jobs:
     uses: ./.github/workflows/linkedin.yml
     with:
       release_tag: ${{ github.event.release.tag_name || inputs.release_tag }}
+      # Both release events and manual PyPI publication MUST only preview devel.
+      action: ${{ endsWith(github.event.release.tag_name || inputs.release_tag, '.dev0') && 'preview' || 'announce' }}
     secrets:
-      BUFFER_API_KEY: ${{ secrets.BUFFER_API_KEY }}
+      BUFFER_API_KEY: ${{ !endsWith(github.event.release.tag_name || inputs.release_tag, '.dev0') && secrets.BUFFER_API_KEY || '' }}

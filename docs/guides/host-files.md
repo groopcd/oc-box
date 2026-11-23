@@ -2,13 +2,6 @@
 
 [Documentation](../README.md) / Guides
 
-> **Development documentation on the default branch.** The sharing, attachment
-> and host-drop runtime described here is available on
-> [`devel`](https://github.com/groopcd/oc-box/tree/devel), not stable `master`.
-> These examples require a suitable development build; copying this guide to the
-> default branch does not add the commands to stable or establish new acceptance.
-> Feature references below intentionally link to the development branch.
-
 > **OpenCode 2.x only.** These native client features are not legacy 1.x
 > attachment or filesystem-access workflows. See the [legacy feature boundary](../legacy/README.md#features-that-require-opencode-2x).
 
@@ -18,12 +11,20 @@ per-image confirmation broker, or a direct image message.
 **Prerequisites:** the explicit experimental 1.7 development channel and a
 running/ready V2 workspace as specified below. Stable 1.6.94 is the default;
 these features are not made available merely by choosing pipx, uv or GitHub.
-See [installation](../installation.md) and [channels](https://github.com/groopcd/oc-box/blob/devel/docs/update-channels.md).
+See [installation](../installation.md) and [channels](../update-channels.md).
 
 **Contents:** [live host reads](#share-a-file-or-folder-for-live-reads),
 [default TUI imports](#import-through-native-tui-path-pastes),
+[clipboard images/files](#import-clipboard-images-and-copied-files-with-ctrly),
 [per-image approval](#require-independent-host-approval-for-every-image),
 and [direct messages](#queue-a-direct-image-message).
+
+To open a container file on the host without a live share, see
+[experimental Ctrl-click host opening](../cli.md#experimental-ctrl-click-host-file-opening).
+Use `--host-file-open` or `--no-host-file-open` for the current native TUI client.
+Use `oc-box preferences --host-file-open on|off` for future clients of the
+selected workspace.
+This is the opposite transfer direction from the host imports below.
 
 **Choose the consent boundary first.** Live sharing needs an initial typed
 `share` disclosure consent. On supported TUI clients, host importing is enabled
@@ -35,17 +36,19 @@ copies or a model provider.
 | Workflow | What authorizes access | Data | Native input behavior |
 | --- | --- | --- | --- |
 | Native TUI host imports | A qualifying host pathname paste; no per-file prompt | Images/PDF, up to 8 MiB/file | A native paste; no added Enter |
+| TUI `--host-clipboard` | Saved workspace opt-in and host Ctrl+Y; no per-file prompt | PNG pixels or copied image/PDF files, up to 8 MiB/file | Native paste; you send manually |
 | Browser `web --attachments` | Explicit addon and actual browser Files | Images/PDF, up to 20 MiB/file | Native composer; you press Send |
 | Direct `attach PATH` | Typed `attach`, or explicit risk acknowledgment | One image up to 8 MiB | Queues a native message; **not a draft** |
 | `attach --broker` | Independent host approval for every image | One captured image up to 8 MiB | Expiring, session-bound, one-use tool retrieval |
 | `share PATH` | Typed disclosure consent for the path | Live file/folder reads | Read-only tools, not a container mount or per-session attachment grant |
 
 These are different adapters, not interchangeable routes to arbitrary host
-files. Browser attachments are source-checked on native **2.2.6/2.3.0**, while
-native host imports and explicit image attachment support the separately
-documented **2.2.6/2.2.7/2.3.0** profiles. Browser batches allow eight files /
+files. Browser attachments are source-checked on native **2.2.6/2.3.0**.
+Native host drops/clipboard accept valid **2.x** releases subject to their
+private-client, terminal and transfer contracts; explicit image attachment keeps
+its separate **2.2.6/2.2.7/2.3.0** profiles. Browser batches allow eight files /
 40 MiB; native TUI imports allow four paths / 16 MiB per batch, with their own
-per-client limits. See the [browser reference](https://github.com/groopcd/oc-box/blob/devel/docs/cli.md#web--browser-interface)
+per-client limits. See the [browser reference](../cli.md#web--browser-interface)
 and the workflow sections below before choosing one.
 
 ## Share a file or folder for live reads
@@ -66,7 +69,7 @@ experimental client-MCP API. It does not expose a path to shell commands.
 **Shared data may be sent to a model provider or retained in history/copies.**
 Read-only and later disconnect do not undo disclosure. Hidden files and future
 additions to a shared folder are included; prefer a single file when possible.
-See [share](https://github.com/groopcd/oc-box/blob/devel/docs/cli.md#share) for confirmation, protected-path refusals, size
+See [share](../cli.md#share) for confirmation, protected-path refusals, size
 limits and lifecycle details. Its 37-check scripted host acceptance belongs to
 the earlier exact `5573965` source and native 2.2.6, not automatically to every
 later development build; see [the evidence scope](../releases/1.7.md#reviewed-earlier-source-evidence).
@@ -83,7 +86,7 @@ oc-box --project ~/devel/demo --no-host-drop
 oc-box preferences --project ~/devel/demo --host-drop off
 ```
 
-Importing requires native V2 2.2.6/2.2.7/2.3.0 and a direct interactive host
+Importing requires native OpenCode 2.x and a direct interactive host
 terminal without SSH, tmux or screen. It works on owning start/reset and on an
 additional `start` TUI client without restarting the owner. The preference is
 saved for future clients, not live-toggled in running ones. Normal launches
@@ -118,9 +121,65 @@ can enable image visuals.
 Exit cleanup is best-effort, with no restart scavenger. Crashes, open references,
 history, copies or backups may retain bytes, and same-user container agents can
 read staged files. This is not a content scanner, blanket security guarantee or
-a new live-host acceptance pass. See [`--host-drop`](https://github.com/groopcd/oc-box/blob/devel/docs/cli.md#--host-drop),
-[security](https://github.com/groopcd/oc-box/blob/devel/SECURITY.md#opt-in-native-tui-host-drops) and
-[required checks](https://github.com/groopcd/oc-box/blob/devel/docs/testing.md#experimental-transparent-native-tui-host-drops).
+a new live-host acceptance pass. See [`--host-drop`](../cli.md#--host-drop),
+[security](../../SECURITY.md#opt-in-native-tui-host-drops) and
+[required checks](../testing.md#experimental-transparent-native-tui-host-drops).
+
+## Import clipboard images and copied files with Ctrl+Y
+
+Clipboard access is separate from default pathname drops and **off by default**.
+Enable it for this and future workspace native TUI clients on a direct
+Konsole/Kitty host terminal:
+
+```sh
+oc-box --project ~/devel/demo --host-clipboard
+# Later native TUI clients inherit the saved choice:
+oc-box --project ~/devel/demo
+# Or save policy without opening a client:
+oc-box preferences --project ~/devel/demo --host-clipboard off
+```
+
+`--no-host-clipboard` also saves disabled while opening a new native TUI client.
+These host-only preferences survive stop/start and reset; existing clients do
+not live-toggle. Explicit enable has strict preflight. A saved enable gracefully
+skips unsupported terminals, native V1 or missing desktop helpers without
+clearing the choice. Web, terminal, manager, sync and info commands ignore saved
+clipboard policy and reject explicit clipboard startup flags.
+
+Wayland requires host `wl-paste` (`wl-clipboard`); X11 requires `xclip`. Copy
+image pixels, or copy local PNG/JPEG/GIF/WebP/PDF files in a file manager, focus
+the native prompt and press **Ctrl+Y**. Ordinary Ctrl+V is unchanged. Ctrl+Y
+is reserved throughout this opted-in client, including shell panes, so its
+normal shell-yank action is unavailable there. There is no automatic Send.
+
+Copied files use typed local URI lists, not arbitrary clipboard text. Up to
+four files, 8 MiB each and 16 MiB per batch, share the existing private staging
+and client quotas. Only the shortcut reads the clipboard; no polling, model/MCP
+trigger, desktop socket mount, source move or clipboard modification is added.
+
+**Clipboard sources follow ordinary symlinks by default**, including linked
+folders, with no approval popup. A link changed after Copy may select a new
+target when Ctrl+Y is pressed. Protected aliases/targets, kernel magic links,
+hard links and special files remain refused; descriptor pinning does not freeze
+the file's contents. Add `--no-host-clipboard-symlinks` to save strict no-symlink
+clipboard sources for this and future clients. `--host-clipboard-symlinks` saves
+link following again; either needs an effective clipboard enable. The strict
+choice is retained across disabling/re-enabling clipboard imports. You can also
+use `preferences --host-clipboard-symlinks off|on` independently, even while
+clipboard is off, for a later enabled client. Normal drops and live sharing
+remain strict.
+
+An additional client may use these flags without restarting/unlocking the owner.
+The `preferences` command needs no TTY, owner restart, unlock, configuration
+refresh or desktop-helper discovery. Only policy booleans are saved, never
+clipboard contents or a helper path, and restoring a fresh workspace does not
+reactivate these host-only preferences. Imported bytes are readable by workspace
+tools and may survive in history, provider systems or retained copies.
+See the [full reference](../cli.md#--host-clipboard)
+and [short host check](../host-clipboard-testing.md). The owner has reported a
+successful Ctrl+Y PDF import through a linked folder using the merged devel test
+instructions. This is a scoped manual observation, not a full platform/refusal
+matrix or security certification; see the [recorded evidence scope](../testing.md#experimental-host-clipboard-attachment-shortcut).
 
 ## Require independent host approval for every image
 
@@ -169,12 +228,12 @@ or vault unlock occur; no native code or plugin relocation is required.
 
 **Native history/provider processing may retain or normalize the image;
 disconnect and grant expiry do not undo disclosure.** Paths pasted into
-OpenCode are also disclosed. See [attach](https://github.com/groopcd/oc-box/blob/devel/docs/cli.md#attach) for lifecycle and
-safety details and [testing](https://github.com/groopcd/oc-box/blob/devel/docs/testing.md#experimental-host-image-attachments)
+OpenCode are also disclosed. See [attach](../cli.md#attach) for lifecycle and
+safety details and [testing](../testing.md#experimental-host-image-attachments)
 for its separate, not-yet-host-accepted validation scope.
 
 ## Related
 
 - [Browser-selected attachments](clients.md#choose-a-web-session-and-add-browser-files)
-- [Security and reporting](https://github.com/groopcd/oc-box/blob/devel/SECURITY.md) · [V2 compatibility](https://github.com/groopcd/oc-box/blob/devel/docs/opencode-2.md)
+- [Security and reporting](../../SECURITY.md) · [V2 compatibility](../opencode-2.md)
 - [1.7 limitations and evidence](../releases/1.7.md) · [Workspace lifecycle](workspaces.md)

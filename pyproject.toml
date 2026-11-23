@@ -13,7 +13,7 @@ license-files = ["LICENSE", "NOTICE"]
 authors = [{ name = "Paulo Dias", email = "paulo.miguel.dias@gmail.com" }]
 keywords = ["opencode", "podman", "containers", "development", "sandbox"]
 classifiers = [
-  "Development Status :: 5 - Production/Stable",
+  "Development Status :: 4 - Beta",
   "Environment :: Console",
   "Intended Audience :: Developers",
   "Operating System :: POSIX :: Linux",
@@ -28,10 +28,11 @@ classifiers = [
 
 [project.optional-dependencies]
 vault = ["cryptography>=44"]
+tui = ["textual>=8.2.8,<9", "pyte>=0.8.2,<0.9"]
 
 [project.urls]
 Homepage = "https://github.com/groopcd/oc-box"
-Documentation = "https://github.com/groopcd/oc-box/blob/master/docs/cli.md"
+Documentation = "https://github.com/groopcd/oc-box/blob/devel/docs/cli.md"
 Repository = "https://github.com/groopcd/oc-box.git"
 Issues = "https://github.com/groopcd/oc-box/issues"
 
@@ -46,6 +47,15 @@ include-package-data = false
 [tool.setuptools.package-data]
 oc_box = [
   "plugin_bridge.js",
+  "web_attachments.js",
+  "web_sessions.js",
+  "web_sessions.css",
+  "oc-box-mark.png",
+  "ui_state_server.js",
+  "ui_state_tui.js",
+  "ui_state_rpc.js",
+  "ui_state_memory.js",
+  "file_preview_tui.tsx",
 ]
 
 [tool.setuptools.data-files]

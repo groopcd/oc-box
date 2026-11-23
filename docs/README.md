@@ -17,24 +17,10 @@ Legacy does **not** mean unsupported or removed. Version-specific runtime
 behavior, compatibility checks and regression coverage remain in place. Shared
 security/reference material and historical reports still describe both lines.
 
-> **Choose the right release:** stable is the default; 1.7 development features
-> are an explicit opt-in. Documentation at branch HEAD may describe changes that
-> are not yet published. Read [update channels](update-channels.md) and
-> [1.7 limitations](releases/1.7.md) before enabling experimental features.
-
-## Choose the command reference for your channel
-
-These are the default GitHub guides for both release channels. OpenCode's
-**2.x / legacy 1.x** major is a separate choice from the **oc-box stable /
-development** channel.
-
-| Installed oc-box channel | Matching reference |
-| --- | --- |
-| Stable 1.6 / source on `master` | [Stable CLI](cli.md) · [Stable compatibility](opencode-2.md) · [Stable security](../SECURITY.md) |
-| Experimental 1.7 / source on `devel` | [Development CLI](https://github.com/groopcd/oc-box/blob/devel/docs/cli.md) · [Development compatibility](https://github.com/groopcd/oc-box/blob/devel/docs/opencode-2.md) · [Development security](https://github.com/groopcd/oc-box/blob/devel/SECURITY.md) |
-
-Development-only pages and screenshots are labeled. Their presence here does
-not add those commands to the stable CLI or complete outstanding validation.
+> **Choose the right release:** stable is the default. The initial `1.8` and
+> `1.9` releases share their features, but older stable releases do not include
+> all of them. Documentation at branch HEAD may describe unpublished changes.
+> Read [update channels](update-channels.md) and the [release plan](plans/stable-1.8-devel-1.9.md).
 
 ## Start here
 
@@ -43,7 +29,7 @@ not add those commands to the stable CLI or complete outstanding validation.
 | Understand the project and its trust boundary | [Overview](../README.md) · [Security](../SECURITY.md) |
 | Set up the host and install oc-box | [Installation](installation.md) |
 | Create and resume a first workspace | [Getting started](getting-started.md) |
-| Choose stable/development or fix optional TUI installation | [Update channels](update-channels.md) · [Development TUI setup](https://github.com/groopcd/oc-box/blob/devel/docs/update-channels.md#enable-the-dashboard-after-a-github-channel-switch) |
+| Choose stable/development or fix optional TUI installation | [Update channels](update-channels.md) |
 
 ## How-to guides
 
@@ -57,7 +43,7 @@ reference stay with the relevant commands.
 | Configure the vault or limit credentials per project | [Credentials](guides/credentials.md) |
 | Create, inspect or restore encrypted workspace archives | [Backup and restore](guides/backups.md) |
 | Use the dashboard, browser and persistent session shell | [Interfaces and concurrent clients](guides/clients.md) |
-| Choose between development host drops, snapshots and live file tools | [Host files and attachments — 1.7 development](guides/host-files.md) |
+| Choose between host drops, clipboard imports, snapshots and live file tools | [Host files and attachments](guides/host-files.md) |
 | Port optional plain-host plugins to V2 | [Host plugin migration](host-plugins.md) |
 | Enable Bash completion or locate installed manuals | [Installation](installation.md) |
 
@@ -69,9 +55,8 @@ task guides do not replace it.
 
 | Reference | Contents |
 | --- | --- |
-| [Stable commands and options](cli.md) | Every command/flag implemented by stable `master`, configuration, lifecycle and troubleshooting |
-| [Development commands and options](https://github.com/groopcd/oc-box/blob/devel/docs/cli.md) | Experimental 1.7 commands and native-version gates; not the stable command list |
-| [OpenCode 2.x compatibility — stable](opencode-2.md) | Stable native-version differences, environment/service strategy, history and downgrade |
+| [Commands and options](cli.md) | Every CLI command, flag, configuration path, lifecycle rule and troubleshooting entry |
+| [OpenCode 2.x compatibility](opencode-2.md) | Native version differences, environment/service strategy, history and downgrade |
 | [Workspace dashboard](tui.md) | Installation, sections, keyboard controls, settings, clipboard and guarded operations |
 | [Update channels](update-channels.md) | Published release selection, installation ownership and upgrade policy |
 
@@ -107,9 +92,9 @@ the compatibility guide retains migration/downgrade comparisons.
 | Need | Page |
 | --- | --- |
 | Developer setup, checks, packaging and contribution workflow | [Contributing](../CONTRIBUTING.md) |
-| Test strategy and historical source-scoped evidence | [Stable testing](testing.md) · [Development testing](https://github.com/groopcd/oc-box/blob/devel/docs/testing.md) |
+| Current test strategy and historical source-scoped evidence | [Testing](testing.md) |
 | Understand what is and is not accepted | [Project status](project-status.md) |
-| Development feature scope and publication gates | [1.7 release notes](releases/1.7.md) |
+| Initial stable/development feature parity and release gates | [1.8/1.9 release plan](plans/stable-1.8-devel-1.9.md) · [Historical 1.7 notes](releases/1.7.md) |
 | Dashboard-specific limitations and outstanding validation | [Manager release notes](releases/tui-v1.md) |
 | Distribution channel publication policy | [Channel guide](update-channels.md#publication-policy) |
 | Maintainer announcement workflow | [Release announcements](release-announcements.md) |

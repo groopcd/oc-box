@@ -2,13 +2,6 @@
 
 [Documentation](../../README.md) / [Workspace manager](../../tui.md)
 
-> **Development assets on the default branch.** Stable `master` contains these
-> documentation images, not the manager runtime or its capture tool. Regeneration
-> requires a [`devel` source checkout](https://github.com/groopcd/oc-box/tree/devel)
-> containing both `DashboardApp` and
-> [`tools/capture_tui_docs.py`](https://github.com/groopcd/oc-box/blob/devel/tools/capture_tui_docs.py).
-> Do not run the regeneration command from stable `master`.
-
 These are captures of the actual `DashboardApp` Textual compositor, not generated
 imitations of the interface. All project names, paths, IDs, metrics, history
 points and catalog records are fixed, synthetic examples.
@@ -37,8 +30,7 @@ These images do **not** extend any interactive or external-host acceptance claim
 
 ## Regenerate
 
-From the root of that `devel` source checkout, using an ephemeral environment
-(not from this stable `master` documentation checkout):
+From the repository root, using an ephemeral environment:
 
 ```sh
 uv run --no-project --with-editable . \

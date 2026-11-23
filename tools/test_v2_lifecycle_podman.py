@@ -334,12 +334,37 @@ def prepare_native_cli(root, binary, version):
     require(version in VERSIONS, "native-profile")
     binary = Path(binary).resolve(strict=True)
     require(binary.is_file() and os.access(binary, os.X_OK), "native-executable")
-    wrapper = safety.prepare_native_cli(root, binary, native_version=version)
-    profile = safety.recorded_native(root, expected=version, binary=binary)
-    # Keep canonical native-profile.json byte/schema compatibility. The selector
-    # interpreter is separate so cleanup need not use the preparation Python.
+    profile = profiles.native_identity(binary, version)
+    profiles.check_native_version(root, binary, "2", expected=version)
+    for name in ("config", "data", "state", "cache"):
+        (root / ("host-" + name + "-2")).mkdir(mode=0o700, exist_ok=True)
+    safety.write_json_new(root / "native-profile.json", profile)
+    safety.write_json_new(root / "executables.json", {"2": str(binary)})
+    # Reuse the global fixture's isolated selector bytes without changing its
+    # independent legacy/default profile. Record the interpreter for cleanup.
     safety.write_json_new(root / "selector.json", {"interpreter": sys.executable})
+    wrapper = root / "bin/opencode"
+    with wrapper.open("x") as output:
+        output.write(safety.native_wrapper_source())
+    wrapper.chmod(0o700)
+    profiles.check_native_version(root, wrapper, "2", expected=version)
+    require(profiles.native_identity(binary, version) == profile, "native-changed")
     return wrapper, profile
+
+
+def recorded_native(root):
+    profile = safety.private_json(root, "native-profile.json")
+    require(
+        isinstance(profile, dict)
+        and set(profile) == {"version", "path", "sha256"}
+        and profile["version"] in VERSIONS
+        and isinstance(profile["path"], str)
+        and Path(profile["path"]).is_absolute()
+        and isinstance(profile["sha256"], str)
+        and re.fullmatch(r"[0-9a-f]{64}", profile["sha256"]) is not None,
+        "native-profile",
+    )
+    return profile
 
 
 def prepare_root(root, distro, podman):
@@ -376,7 +401,7 @@ def workspace_records(root):
     """Validate metadata and all project/resource identities BEFORE Podman use."""
     records = {}
     directory = safety.safe_path(root, "registry/workspaces", directory=True)
-    profile = safety.private_json(root, "native-profile.json")
+    profile = recorded_native(root)
     for folder in sorted(directory.iterdir()):
         require(re.fullmatch(r"[0-9a-f]{32}", folder.name) is not None, "workspace-id")
         safety.no_symlinks(folder)
@@ -484,8 +509,7 @@ def validate_fixture(root, *, allow_unrecorded=False):
         == safety.podman_wrapper_source(mapping["interpreter"]),
         "podman-selector",
     )
-    safety.safe_path(root, "native-profile.json")  # No legacy missing-profile fallback.
-    profile = safety.recorded_native(root)
+    profile = recorded_native(root)  # No legacy missing-profile fallback.
     binary = Path(profile["path"])
     require(
         binary.is_absolute()
@@ -768,7 +792,7 @@ def run(root, binary, version, distro, report):
             patch.object(
                 box,
                 "detect_opencode_release",
-                side_effect=lambda: legacy.check_native_version(
+                side_effect=lambda: profiles.check_native_version(
                     root, wrapper, "2", expected=version
                 ),
             ),

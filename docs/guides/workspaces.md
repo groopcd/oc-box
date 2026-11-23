@@ -9,9 +9,10 @@ Use this guide to resume work, change the environment, recover a directory
 registration, or remove only the data you intend to delete.
 
 **Prerequisites:** a configured [installation](../installation.md) and a project
-directory. Ordinary lifecycle commands are available in stable 1.6.94; the
-optional dashboard and 1.7 exit-history recovery are development-channel
-features. See [channels](../update-channels.md) before choosing a release.
+directory. Ordinary lifecycle commands are available in stable `1.6.94`. The
+optional dashboard and the integrated exit-history recovery in this guide are
+shared by the initial `1.8` and `1.9` source. See [channels](../update-channels.md)
+and the native version limits before choosing a published release.
 
 **Contents:** [everyday commands](#inspect-and-resume-work),
 [persistence and deletion](#choose-reset-or-purge),
@@ -225,7 +226,7 @@ reviewed external history/readiness, global-vault and V1/V2 lifecycle reports,
 including that migrated-history correction. This reconciles published release
 notes; it is not a fresh raw-report review or acceptance of the later Textual
 manager or post-stop recovery. Earlier reports do not validate a later revision:
-see [evidence boundaries](https://github.com/groopcd/oc-box/blob/devel/docs/testing.md#published-v1658-evidence-reconciliation)
+see [evidence boundaries](../testing.md#published-v1658-evidence-reconciliation)
 and the [final-source gates](../releases/1.7.md#final-candidate-and-publication-gates).
 
 ## Related

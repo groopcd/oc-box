@@ -3,14 +3,59 @@
 
 from pathlib import Path
 import argparse
+import os
+import re
+import subprocess
 import sys
 
 if __package__:
     from .installation import install
+    from .paths import source_root
     from .version_info import get_version_info, public_version
 else:
     from installation import install
+    from paths import source_root
     from version_info import get_version_info, public_version
+
+
+def _verified_bootstrap_checkout(version, commit):
+    """Recheck the public bootstrap's pinned checkout before enrolling policy."""
+    root = source_root(Path(__file__).resolve().parent)
+    env = {
+        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+        "HOME": str(root.parent),
+        "LANG": "C",
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_NO_REPLACE_OBJECTS": "1",
+        "GIT_TERMINAL_PROMPT": "0",
+    }
+
+    def git(*args):
+        return subprocess.run(
+            ["git", "-C", str(root), "-c", "core.fsmonitor=false", *args],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            env=env,
+            text=True,
+            check=True,
+            timeout=10,
+        ).stdout.strip()
+
+    try:
+        if (
+            git("config", "--local", "--get", "remote.origin.url")
+            != "https://github.com/groopcd/oc-box.git"
+            or git("rev-parse", "--verify", f"refs/tags/v{version}^{{commit}}")
+            != commit
+            or git("rev-parse", "--verify", "HEAD") != commit
+            or git("status", "--porcelain", "--untracked-files=all")
+        ):
+            return False
+        git("merge-base", "--is-ancestor", commit, "refs/remotes/origin/devel")
+        return True
+    except (OSError, UnicodeError, subprocess.SubprocessError):
+        return False
 
 
 def main(argv=None):
@@ -21,6 +66,11 @@ def main(argv=None):
             action="store_true",
             help="install optional cryptography into a private per-release runtime (no system/user-site packages)",
         )
+        parser.add_argument(
+            "--with-tui",
+            action="store_true",
+            help="install optional TUI dependencies into this immutable release's private runtime",
+        )
         channels = parser.add_mutually_exclusive_group()
         channels.add_argument(
             "--stable", dest="channel", action="store_const", const="stable"
@@ -29,9 +79,11 @@ def main(argv=None):
             "--devel", dest="channel", action="store_const", const="devel"
         )
         parser.add_argument("--release-version", help=argparse.SUPPRESS)
+        parser.add_argument("--verified-release-commit", help=argparse.SUPPRESS)
         args = parser.parse_args(argv)
         # Legacy no-argument downloaded installers remain valid. Bootstrap
         # selectors additionally bind the requested published identity.
+        verified_release = False
         if args.channel is not None or args.release_version is not None:
             if __package__:
                 from .update_channels import (
@@ -67,6 +119,18 @@ def main(argv=None):
                 raise ValueError(
                     "Installer source does not match the published version."
                 )
+            # Only the updated, state-preserving bootstrap supplies this
+            # checkout attestation after fetching the verified public refs.
+            # Older bootstraps and source installs keep the legacy default.
+            verified_release = (
+                args.channel == "devel"
+                and args.release_version is not None
+                and build.get("dirty") is False
+                and isinstance(build.get("commit"), str)
+                and re.fullmatch(r"[a-f0-9]{40}", build["commit"]) is not None
+                and args.verified_release_commit == build["commit"]
+                and _verified_bootstrap_checkout(args.release_version, build["commit"])
+            )
             try:
                 selected_channel(args.channel)
             except ChannelError as exc:
@@ -94,7 +158,12 @@ def main(argv=None):
                         "workspace/session state is not rolled back.",
                         flush=True,
                     )
-        install(Path(__file__).resolve().parent, with_vault=args.with_vault)
+        install(
+            Path(__file__).resolve().parent,
+            with_vault=args.with_vault,
+            with_tui=args.with_tui,
+            **({"verified_release": True} if verified_release else {}),
+        )
         if args.channel is not None:
             try:
                 remember_channel(args.channel)

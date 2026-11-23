@@ -46,6 +46,9 @@ def source_identity(text):
         or values["VERSION_BASE_COMMIT_COUNT"] != 29
     ):
         raise ValueError("Invalid tracked source release identity")
+    major, minor = map(int, series.split("."))
+    if (major, minor) >= (1, 8) and channel != ("devel" if minor % 2 else "stable"):
+        raise ValueError("New release series require an even stable or odd devel minor")
     return series, channel, values["VERSION_BASE_COMMIT_COUNT"]
 
 

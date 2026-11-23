@@ -1,3 +1,4 @@
+import argparse
 import contextlib
 import importlib.util
 import io
@@ -9,7 +10,17 @@ import shutil
 import subprocess
 import tempfile
 import unittest
-from oc_box import backups, dependencies, oc_box as box, workspace_service
+from oc_box import (
+    attachments,
+    backups,
+    dependencies,
+    logs_cli,
+    oc_box as box,
+    sharing,
+    tui,
+    workspace_preferences,
+    workspace_service,
+)
 from unittest.mock import patch
 
 APP = Path(__file__).resolve().parents[1]
@@ -54,7 +65,12 @@ class DocumentationTests(unittest.TestCase):
 
     def test_every_parser_command_and_option_has_its_own_reference_entry(self):
         text = (APP / "docs/cli.md").read_text()
-        headings = re.findall(r"^### (.+)$", text, re.MULTILINE)
+        sections = dict(
+            re.findall(
+                r"^### ([^\n]+)\n(.*?)(?=^#{1,3} |\Z)", text, re.MULTILINE | re.DOTALL
+            )
+        )
+        headings = sections.keys()
         options = {
             value
             for heading in headings
@@ -64,9 +80,14 @@ class DocumentationTests(unittest.TestCase):
         parsers = [
             parser,
             dependencies.parser(),
+            logs_cli.parser(),
             workspace_service.web_parser(),
+            tui.parser(),
             box.secrets_parser(),
             box.completion_parser(),
+            attachments.parser(),
+            sharing.parser(),
+            workspace_preferences.parser(),
             *(
                 backups.parser_for(action)
                 for action in ("backup", "backup-info", "restore")
@@ -85,6 +106,24 @@ class DocumentationTests(unittest.TestCase):
         self.assertTrue(
             set(commands).issubset({heading.split(" — ", 1)[0] for heading in headings})
         )
+        for heading, body in sections.items():
+            if heading.startswith("-") or heading.split(" — ", 1)[0] in commands:
+                explanation = re.sub(
+                    r"^```.*?^```[^\n]*", "", body, flags=re.MULTILINE | re.DOTALL
+                )
+                self.assertTrue(
+                    explanation.strip(), f"Missing manual description: {heading}"
+                )
+        for current in parsers:
+            self.assertTrue(
+                current.description and current.description.strip(), current.prog
+            )
+            for action in current._actions:
+                if action.help != argparse.SUPPRESS:
+                    self.assertTrue(
+                        action.help and action.help.strip(),
+                        f"Missing help in {current.prog}: {action.option_strings or action.dest}",
+                    )
         for name, (image, _) in box.DISTROS.items():
             self.assertIn(image, text, name)
         for alias in box.ALIASES:
@@ -101,7 +140,6 @@ class DocumentationTests(unittest.TestCase):
             "CONTRIBUTING.md",
             "SECURITY.md",
             "docs/cli.md",
-            "docs/update-channels.md",
             "docs/opencode-2.md",
         ):
             with self.subTest(name=name):
