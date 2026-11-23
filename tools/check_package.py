@@ -394,8 +394,10 @@ def check_archives(directory):
         ):
             assert root + "/" + name in source.getnames(), name
         for name, content in web_runtime.items():
-            module = source.extractfile(root + "/src/oc_box/" + name)
-            assert module is not None and module.read() == content, name
+            relative = "src/oc_box/" + name
+            assert root + "/" + relative in source.getnames(), relative
+            module = source.extractfile(root + "/" + relative)
+            assert module is not None and module.read() == content, relative
         assert not any(name.endswith(".wasm") for name in source.getnames()), (
             "unapproved web verifier"
         )

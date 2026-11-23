@@ -66,6 +66,8 @@ class PackagingTests(unittest.TestCase):
             "src/oc_box/package_updates.py",
             "src/oc_box/oc-box-mark.svg",
             "src/oc_box/oc-box-mark.png",
+            "docs/mockups/web-manager.html",
+            *("src/oc_box/" + name for name in check_package._WEB_RUNTIME_FILES),
             *(
                 path.relative_to(APP).as_posix()
                 for directory in ("src", "tests", "tools", "docs")
@@ -86,9 +88,7 @@ class PackagingTests(unittest.TestCase):
                     "workspace_service.py",
                     "web_attachments.py",
                     "web_attachments.js",
-                    "web_sessions.py",
-                    "web_sessions.js",
-                    "web_sessions.css",
+                    *check_package._WEB_RUNTIME_FILES,
                     "oc-box-mark.png",
                     "version_info.py",
                     "build-info.json",
@@ -104,7 +104,6 @@ class PackagingTests(unittest.TestCase):
                     "ui_state_tui.js",
                     "file_preview.py",
                     "file_preview_io.py",
-                    *check_package._WEB_RUNTIME_FILES,
                     "file_preview_tui.tsx",
                     "file_preview_png.py",
                     "file_preview_host.py",
