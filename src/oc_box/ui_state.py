@@ -26,7 +26,8 @@ from urllib.parse import quote, urlsplit
 MAX_TABS = 4096
 MAX_REPLY = 1024 * 1024
 MAX_ANCESTRY = 32
-RPC = "/api/rpc/oc-box.ui-state/"
+PLUGIN_ID = "oc-box.ui-state"
+RPC = f"/api/rpc/{PLUGIN_ID}/"
 RESOURCES = (
     "ui_state_server.js",
     "ui_state_tui.js",
@@ -118,23 +119,52 @@ def _supported(release):
 
 
 def available(box, data, connection, *, timeout=4):
-    """Owning-start-only, read-only readiness probe; no retry or installation."""
+    """Owning-start-only, bounded readiness probe; never installs or reloads."""
     if not _supported(data.get("opencode_version")):
+        return False
+    if type(timeout) not in (int, float) or not 0 < timeout <= 30:
         return False
     try:
         deadline = time.monotonic() + timeout
-        # Native V2's config/provider plugins activate in stages. Resolve its
-        # public location readiness boundary before asking for a custom RPC,
-        # as normal owning runtime preparation already does. No inference.
+        directory = box.container_project(data)
+        query = "?location%5Bdirectory%5D=" + quote(directory, safe="")
         box.workspace_service.api(
             box,
             data,
             connection,
             "GET",
-            "/api/model/default?location%5Bdirectory%5D="
-            + quote(box.container_project(data), safe=""),
+            "/api/model/default" + query,
             timeout=timeout,
         )
+        # 2.4 can answer model/default while still loading location plugins.
+        # Use the same private server and location; don't retry the custom RPC.
+        while (remaining := deadline - time.monotonic()) > 0:
+            response = box.workspace_service.api(
+                box,
+                data,
+                connection,
+                "GET",
+                "/api/plugin" + query,
+                timeout=remaining,
+            )
+            plugins = response.get("data") if isinstance(response, dict) else None
+            if not isinstance(plugins, list) or any(
+                not isinstance(plugin, dict) for plugin in plugins
+            ):
+                return False
+            reports = [plugin for plugin in plugins if plugin.get("id") == PLUGIN_ID]
+            if reports:
+                state = reports[0].get("state")
+                if (
+                    len(reports) != 1
+                    or not isinstance(state, dict)
+                    or state.get("status") != "active"
+                ):
+                    return False
+                break
+            time.sleep(max(0, min(0.1, deadline - time.monotonic())))
+        else:
+            return False
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             return False
@@ -144,7 +174,7 @@ def available(box, data, connection, *, timeout=4):
                 data,
                 connection,
                 "POST",
-                _target("ping", box.container_project(data)),
+                _target("ping", directory),
                 {"input": {}},
                 timeout=remaining,
             )

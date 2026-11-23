@@ -15,6 +15,7 @@ from oc_box import oc_box as box, ui_state as ui, workspace_service as service
 
 GENERATION, OWNER, ALTERNATE = "1" * 32, "2" * 32, "3" * 32
 BINDING = {"available": True, "generation": GENERATION, "ownerClient": OWNER}
+ACTIVE_PLUGIN = {"id": ui.PLUGIN_ID, "state": {"status": "active"}}
 
 
 def report(**changes):
@@ -236,10 +237,11 @@ class WiringTests(unittest.TestCase):
             container_project=lambda _data: "/synthetic/project",
             maintenance_host_env=lambda: {"PATH": "/usr/bin:/bin"},
         )
+        self.ping = {"output": {"protocol": 1}}
         self.native.workspace_service = SimpleNamespace(
             validate_endpoint=service.validate_endpoint,
             client_command=Mock(return_value=["private-helper"]),
-            api=Mock(return_value={"output": {"protocol": 1}}),
+            api=Mock(side_effect=self.readiness_reply),
         )
         self.native.run = Mock(
             return_value=SimpleNamespace(
@@ -376,6 +378,11 @@ class WiringTests(unittest.TestCase):
         )
         self.assertEqual(names["OC_BOX_UI_STATE_CLIENT"], OWNER)
 
+    def readiness_reply(self, _box, _data, _connection, _method, route, *_args, **_kwargs):
+        if route.startswith("/api/plugin?"):
+            return {"data": [ACTIVE_PLUGIN]}
+        return self.ping
+
     def test_ready_probe_is_pinned_and_quiet_on_refusal(self):
         self.assertTrue(ui.available(self.native, self.data, self.connection))
         self.assertEqual(
@@ -388,12 +395,57 @@ class WiringTests(unittest.TestCase):
         self.native.workspace_service.api.side_effect = box.BoxError("private-sentinel")
         self.assertFalse(ui.available(self.native, self.data, self.connection))
 
-    def test_new_stable_patches_still_require_the_exact_reporting_protocol(self):
+    def test_early_empty_catalog_waits_for_one_active_helper_and_pings_once(self):
         api = self.native.workspace_service.api
+        api.side_effect = [
+            {"data": None},
+            {"data": []},
+            {"data": [ACTIVE_PLUGIN]},
+            self.ping,
+        ]
+        with (
+            patch.object(ui.time, "monotonic", side_effect=[0, 1, 1.1, 2, 2.1]),
+            patch.object(ui.time, "sleep") as pause,
+        ):
+            self.assertTrue(ui.available(self.native, self.data, self.connection))
+        self.assertEqual(
+            [call.args[3] for call in api.call_args_list], ["GET", "GET", "GET", "POST"]
+        )
+        self.assertEqual(api.call_args_list[1].args[4], api.call_args_list[2].args[4])
+        budgets = [call.kwargs["timeout"] for call in api.call_args_list]
+        self.assertEqual(budgets, [4, 3, 2, 1.9])
+        pause.assert_called_once()
+
+    def test_active_catalog_at_deadline_does_not_send_a_ping(self):
+        api = self.native.workspace_service.api
+        api.side_effect = [{}, {"data": [ACTIVE_PLUGIN]}]
+        with patch.object(ui.time, "monotonic", side_effect=[0, 3.8, 4]):
+            self.assertFalse(ui.available(self.native, self.data, self.connection))
+        self.assertEqual([call.args[3] for call in api.call_args_list], ["GET", "GET"])
+
+    def test_missing_failed_or_ambiguous_helper_cannot_enable_reporting(self):
+        api = self.native.workspace_service.api
+        for plugins in (
+            [],
+            [{"id": ui.PLUGIN_ID, "state": {"status": "failed"}}],
+            [ACTIVE_PLUGIN, ACTIVE_PLUGIN],
+            [None],
+        ):
+            api.reset_mock()
+            api.side_effect = [{}, {"data": plugins}]
+            with (
+                self.subTest(plugins=plugins),
+                patch.object(ui.time, "monotonic", side_effect=[0, 0, 4, 4]),
+                patch.object(ui.time, "sleep"),
+            ):
+                self.assertFalse(ui.available(self.native, self.data, self.connection))
+            self.assertEqual([call.args[3] for call in api.call_args_list], ["GET", "GET"])
+
+    def test_new_stable_patches_still_require_the_exact_reporting_protocol(self):
         for release in ("2.3.2", "2.4.0", "2.99.123"):
             data = {**self.data, "opencode_version": release}
             with self.subTest(release=release):
-                api.return_value = {"output": {"protocol": 1}}
+                self.ping = {"output": {"protocol": 1}}
                 self.assertTrue(ui.available(self.native, data, self.connection))
                 self.assertEqual(
                     ui.read_snapshot(self.native, data, self.connection).selected,
@@ -406,7 +458,7 @@ class WiringTests(unittest.TestCase):
                     {"output": {"protocol": 1, "other": 1}},
                     {"result": {"protocol": 1}},
                 ):
-                    api.return_value = ping
+                    self.ping = ping
                     self.assertFalse(ui.available(self.native, data, self.connection))
 
     def test_nonrelease_versions_do_not_probe_private_native_service(self):
@@ -433,6 +485,8 @@ import ui_state
 requests = []
 def api(box, data, connection, method, route, *args, **kwargs):
     requests.append((method, route))
+    if route.startswith("/api/plugin?"):
+        return {"data": [{"id": ui_state.PLUGIN_ID, "state": {"status": "active"}}]}
     return {"output": {"protocol": 1}}
 
 box = SimpleNamespace(
@@ -441,7 +495,7 @@ box = SimpleNamespace(
     container_project=lambda data: "/synthetic/project",
 )
 assert ui_state.available(box, {"opencode_version": "2.3.2"}, {})
-assert [method for method, _ in requests] == ["GET", "POST"]
+assert [method for method, _ in requests] == ["GET", "GET", "POST"]
 assert "oc_box" not in sys.modules
 """
         result = subprocess.run(

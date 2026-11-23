@@ -62,10 +62,12 @@ project/managed policy may disable the helper. Unlike the Build permissions
 helper, UI reporting is not reenabled by the final mandatory configuration
 overlay.
 
-After owning startup, a bounded read-only default-model catalog lookup resolves
-native location/plugin readiness; it performs no inference. A ping then checks
-the helper's RPC protocol version. An absent or incompatible response leaves
-reporting unavailable.
+After owning startup, a bounded read-only default-model catalog lookup warms the
+native location without inference. OpenCode 2.4 can answer that lookup before
+its plugins register. oc-box waits within the same deadline for the private
+location's plugin catalog to show the UI-state helper active, then checks its
+RPC protocol with one ping. Missing, failed, ambiguous or incompatible state
+leaves reporting unavailable.
 The owner's in-memory UDS connection metadata then contains either:
 
 ```json

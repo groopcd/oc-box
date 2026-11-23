@@ -75,6 +75,7 @@ jobs:
           npm install --prefix "$RUNNER_TEMP/opencode-v2" --no-audit --no-fund @opencode/cli@2.2.6
       - name: Offline V1 and V2 native integration
         run: |
+          trap 'printf "::error title=Native integration command failed::%s\n" "$BASH_COMMAND"' ERR
           export PATH="$RUNNER_TEMP/opencode-v1/node_modules/.bin:$PATH"
           python3 -B tests/smoke_mainline.py
           python3 -B tests/smoke_v2.py --opencode "$RUNNER_TEMP/opencode-v2/node_modules/.bin/opencode"
@@ -152,12 +153,15 @@ jobs:
           python-version: '3.13'
       - name: Install current stable OpenCode 2.x in temporary storage
         run: npm install --prefix "$RUNNER_TEMP/opencode-v2-web" --no-audit --no-fund '@opencode/cli@2'
-      - name: Native authenticated web tab catalog and public TUI reports
+      - name: Native authenticated web tab catalog
         run: |
           opencode="$RUNNER_TEMP/opencode-v2-web/node_modules/.bin/opencode"
           "$opencode" --version
           python3 -B tests/smoke_web_sessions_v2.py --opencode "$opencode"
-          python3 -B tests/smoke_ui_state_v2.py --opencode "$opencode"
+      - name: Native public TUI reports
+        run: >-
+          python3 -B tests/smoke_ui_state_v2.py
+          --opencode "$RUNNER_TEMP/opencode-v2-web/node_modules/.bin/opencode"
       - name: Native host credential round trip on current stable OpenCode 2.x
         run: >-
           python3 -B tests/smoke_host_backup_auth_v2.py

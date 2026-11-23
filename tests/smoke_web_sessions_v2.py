@@ -55,7 +55,10 @@ class Links(HTMLParser):
 def fresh_home(native, data, release, home, project, local_exec, local_relay):
     """Unbound HTTP-only navigation; no session create/open/prompt mutations."""
     snapshot = native_tabs.read_snapshot(str(home), str(project), release)
-    require(snapshot.status == "missing", "Fresh Home fixture had TUI membership.")
+    require(
+        snapshot.status == "missing",
+        f"Fresh Home expected absent TUI membership ({snapshot.status}/{snapshot.reason}).",
+    )
     before = bridge.service_session_catalog(native)
     require(before == [], "Fresh Home fixture had existing sessions.")
     connection = {**native.endpoint, "workspace": data["id"], "session": None}
