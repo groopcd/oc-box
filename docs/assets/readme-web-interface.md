@@ -1,16 +1,17 @@
-# Browser Workspace manager preview
+# Browser Dashboard screenshot
 
-`readme-web-interface.png` is a static documentation rendering of **Workspace
-manager → Sessions**, not a live browser or Podman screenshot. It uses
-[the production web shell at `96ee684`](https://github.com/groopcd/oc-box/tree/96ee684b91d852544711672d0d5710d57c7eb615/src/oc_box):
-`web_sessions.document` renders the markup, `web_sessions.js` selects the
-manager layout and its Sessions section and populates a synthetic three-session
-catalog, and `web_sessions.css` supplies the layout. The static renderer uses
-a dark palette and print-layout adjustments. No network request, native
-conversation, credentials or host data was used.
+`readme-web-interface.png` is a Firefox 159.0.1 viewport screenshot of the
+**Dashboard** tab, captured with WebDriver BiDi at 1440 × 810. It shows
+[the production oc-box browser shell and gateway at `9b48657`](https://github.com/groopcd/oc-box/tree/9b4865789637b9c5c176affca3b7f7433e76c3ea/src/oc_box)
+with one unmodified native OpenCode 2.4.1 conversation.
 
-The browser manager exposes TUI-style section navigation, not a live Textual
-terminal or host manager controls. Unsupported sections display an unavailable
-state. See the [development web shell guide](https://github.com/groopcd/oc-box/blob/devel/docs/web-shell.md)
-for the live feature boundaries. The previous Studio image was a hand-drawn SVG
-illustration, not an external image or screenshot.
+The capture used a fresh, synthetic workspace and a private native server,
+with native one-use browser pairing. Only the outer Podman exec transport was
+replaced with local processes. The session transcript was imported through the
+native API, and a fixture supplied the three open TUI tab identities; no
+provider inference or live TUI session was used. No real project, credentials
+or host metadata appears in the image. This is a browser documentation
+screenshot, not a live rootless Podman acceptance run.
+
+See the [development web shell guide](https://github.com/groopcd/oc-box/blob/devel/docs/web-shell.md)
+for the layout and data boundaries.
