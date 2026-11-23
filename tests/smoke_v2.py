@@ -1074,10 +1074,13 @@ export const Fixture = async () => ({
                     {**isolated, "PWD": str(project)},
                 )
 
+            owner_profile = env["OPENCODE_CONFIG_CONTENT"]
             with (
                 patch.object(box, "exec_command", side_effect=local_exec),
                 patch.object(box, "CONTAINER_OPENCODE", binary),
-                patch.object(box, "host_cli_env", return_value=env),
+                # Production returns a fresh environment. The host controller
+                # adds a no-plugins policy and must not mutate this owner fixture.
+                patch.object(box, "host_cli_env", side_effect=lambda _path: env.copy()),
                 patch.object(
                     box,
                     "host_command",
@@ -1097,6 +1100,7 @@ export const Fixture = async () => ({
                 else:
                     raise AssertionError("V2 duplicate transcript was overwritten")
                 box.sync_sessions(registry, data)
+            assert env["OPENCODE_CONFIG_CONTENT"] == owner_profile
             print(
                 "PASS: production V2 large-history import/export, duplicate protection and host archive sync.",
                 flush=True,
