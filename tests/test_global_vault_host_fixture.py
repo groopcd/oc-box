@@ -25,11 +25,56 @@ spec.loader.exec_module(fixture)
 
 
 class GlobalVaultHostFixtureTests(unittest.TestCase):
+    def test_explicit_native_selector_precedes_backend_probe_after_store_proof(self):
+        events = []
+        binary = Path("/fixture-native/opencode-2.3.0")
+
+        def verify_store(root):
+            self.assertEqual(root, self.root)
+            events.append("store")
+
+        def select_native(root, selected, *, native_version):
+            self.assertEqual(
+                (root, selected, native_version), (self.root, binary, "2.3.0")
+            )
+            self.assertEqual(events, ["store"])
+            events.append("selector")
+
+        def check_backend(*, feature):
+            self.assertEqual(feature, "launch")
+            self.assertEqual(events, ["store", "selector"])
+            events.append("backend")
+
+        with (
+            patch.object(fixture, "host_guard"),
+            patch.object(
+                fixture,
+                "isolated_env",
+                return_value={"XDG_RUNTIME_DIR": "/run/user/1000"},
+            ),
+            patch.object(fixture, "validate_store", side_effect=verify_store),
+            patch.object(fixture, "prepare_native_cli", side_effect=select_native),
+            patch.object(box, "check_backend", side_effect=check_backend),
+            patch.object(crypto, "tools"),
+            patch.object(vault, "crypto"),
+            patch.object(
+                fixture,
+                "seed_native_history",
+                side_effect=fixture.FixtureError("test-stop"),
+            ),
+            contextlib.redirect_stdout(io.StringIO()),
+            self.assertRaisesRegex(fixture.FixtureError, "^test-stop$"),
+        ):
+            fixture.run(self.root, binary, "tumbleweed", native_version="2.3.0")
+        self.assertEqual(events, ["store", "selector", "backend"])
+
     def test_native_version_options_are_exact_and_keep_legacy_defaults(self):
         self.assertEqual(fixture.parser().parse_args([]).native_version, "2.2.6")
         for version in ("2.2.6", "2.3.0"):
             self.assertEqual(
-                fixture.parser().parse_args(["--native-version", version]).native_version,
+                fixture.parser()
+                .parse_args(["--native-version", version])
+                .native_version,
                 version,
             )
         for version in ("2", "2.2.7", "2.3.1"):
