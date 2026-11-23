@@ -76,3 +76,32 @@ design, not merely a stronger workspace login.
 
 Option 3 is still the default: the native one-use link on localhost. Neither
 lab enables a production named or network mode.
+
+## Final integration and publication checklist
+
+The development branch was synchronized through `c0cd1fb`, including its
+quiet preparation logs and installer failure handling. Keep those changes
+and the default web/native TUI behavior intact when integrating the feature.
+Do not infer readiness from a green check on an earlier branch commit.
+
+1. Review and test a separate named HTTPS ingress. It must admit every HTTP
+   request and upgrade before opening private upstream work, with no public
+   native pairing route or fallback to guest admission. Preserve the pinned
+   native cookie check as a separate requirement. A browser must never
+   receive the server-side native cookie as part of named sign-in.
+2. Review the exact PAKE artifacts and distribution terms before adding any
+   shipped backend. The pinned prerelease was reproducible in the isolated
+   Linux/native and Chromium/WASM labs; build reproducibility and protocol
+   interop are not a security or licensing review.
+3. On an exact candidate, verify enrolled named accounts, same-browser
+   handoff, native workspace binding, and per-browser logout with active
+   HTTP streams and WebSockets. Confirm draining and account/owner
+   revocation, not just clearing a cookie. Audit password and native-code
+   handling across diagnostics, proxy paths and package assets.
+4. Review the network bind separately. Private LAN TLS feasibility does not
+   permit enabling a LAN listener, touching production DNS, or requesting a
+   certificate. The host-wide manager also needs separate authorization.
+5. After the intended development tip is frozen and explicitly approved,
+   run the [build-only release preflight](../release-security.md). Only
+   then consider an exact-source tag and matched distributions. This
+   branch has not been tagged, pushed, or published.
