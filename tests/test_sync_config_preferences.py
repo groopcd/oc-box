@@ -23,6 +23,24 @@ def config_archive(files):
 
 
 class NativeCliPreferencesTests(unittest.TestCase):
+    def verified_sdk_cache(self, home, *, content, version="2.3.0"):
+        config = home / ".config/opencode"
+        modules = config / "node_modules"
+        package = modules / "@opencode/plugin"
+        package.mkdir(parents=True)
+        (package / "package.json").write_text(json.dumps({"version": version}))
+        lock = json.dumps(
+            {
+                "lockfileVersion": 3,
+                "packages": {"node_modules/@opencode/plugin": {"version": version}},
+            }
+        )
+        (config / "package-lock.json").write_text(lock)
+        (modules / ".package-lock.json").write_text(lock)
+        (modules / "cached").write_text(content)
+        self.assertTrue(sync_config.mark_sdk_installed(home, version))
+        return modules
+
     def test_real_host_archive_seeds_once_and_never_receives_native_preferences(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -181,9 +199,7 @@ class NativeCliPreferencesTests(unittest.TestCase):
             sync_config.sync_config(home, config_archive(host), "2.3.0")
             config = home / ".config/opencode"
             (config / "cli.json").write_text("native opaque preferences")
-            modules = config / "node_modules"
-            modules.mkdir()
-            (modules / "cached").write_text("retained")
+            modules = self.verified_sdk_cache(home, content="retained")
 
             self.assertTrue(
                 sync_config.sync_config(home, config_archive(host), "2.3.0")
@@ -197,6 +213,22 @@ class NativeCliPreferencesTests(unittest.TestCase):
             self.assertEqual(
                 (config / "cli.json").read_text(), "native opaque preferences"
             )
+
+    def test_unverified_sdk_cache_is_discarded_without_losing_preferences(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary)
+            host = config_archive({"cli.json": '{"theme":{"name":"seed"}}'})
+            self.assertFalse(sync_config.sync_config(home, host, "2.3.0"))
+            config = home / ".config/opencode"
+            preferences = config / "cli.json"
+            preferences.write_text("native opaque preferences")
+            modules = config / "node_modules"
+            modules.mkdir()
+            (modules / "partial-install").touch()
+
+            self.assertFalse(sync_config.sync_config(home, host, "2.3.0"))
+            self.assertFalse(modules.exists())
+            self.assertEqual(preferences.read_text(), "native opaque preferences")
 
     def test_v1_config_refresh_retains_legacy_host_copy_behavior(self):
         for runtime in (None, "1.19.5"):
@@ -345,9 +377,7 @@ class NativeCliPreferencesTests(unittest.TestCase):
             sync_config.sync_config(home, config_archive(host), "2.3.0")
             config = home / ".config/opencode"
             (config / "cli.json").write_text("native preferences")
-            modules = config / "node_modules"
-            modules.mkdir()
-            (modules / "cached").write_text("cached dependency")
+            modules = self.verified_sdk_cache(home, content="cached dependency")
 
             def fail_copy(*_):
                 self.assertEqual(
