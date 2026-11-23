@@ -26,11 +26,10 @@ terminals. It is separate from the native OpenCode conversation TUI opened by
 The wide dashboard header shows a four-column dotted outline of the oc-box cube.
 Compact mode saves the space; the native OpenCode TUI keeps its own branding.
 
-**Status: experimental development channel; incomplete UI acceptance is
-explicitly disclosed, not passed.** The owner approved development publication,
-not stable manager promotion. Stable 1.6.94 remains the default without this
-manager. The embedded terminal remains experimental. The contract below
-describes the integrated manager, not a completed test-execution report.
+**Status: optional workspace manager.** The first `1.8` and `1.9` releases
+include the same dashboard; stable `1.6.94` did not contain it. The embedded
+terminal remains experimental. The contract below describes the integrated
+manager, not a completed test-execution report.
 Check `oc-box tui --help` in the installed build for availability; previously
 published packages need not include it. Demo/headless checks and native offline
 fixtures do not establish interactive host or rootless-Podman acceptance.
@@ -127,12 +126,14 @@ extras, and repeating a satisfied request is a no-op. Add `--check` to validate
 support without installation or preference changes. Dependencies remain private
 to the immutable GitHub release; no curl, workspace reset, history deletion or
 system-Python installation is needed. Do not create a second pipx/uv copy.
-An explicit TUI request against stable refuses; an inherited TUI preference is
-retained for a later return to a supporting development target. See the
+An explicit TUI request against an older stable `1.6` target refuses; an inherited
+TUI preference is retained for any later supporting release. See the
 [channel-switch troubleshooting](update-channels.md#enable-the-dashboard-after-a-github-channel-switch).
 
-These installation examples explicitly select experimental development;
-stable 1.6.94 does not include the manager. Older channel-aware launchers must
+These installation examples explicitly select development. For stable `1.8`
+targets, use `oc-box upgrade --stable --tui` or the stable bootstrap with
+`--with-tui`; do not enable prereleases for a stable Python installation.
+Older channel-aware launchers must
 upgrade normally to a published release supporting the extras flags first;
 branch HEAD is not automatically published. Genuinely pre-channel 1.7 launchers
 retain their exceptional bootstrap route; see
@@ -146,11 +147,10 @@ for host Podman or OpenCode.
 
 ## Card redesign availability
 
-The card layout and follow-up input/settings polish are integrated into `devel`
-from `feature/tui-card-redesign` for a later publication. They are not automatically
-included in an already-published development package. A source merge is not a
-release or new interactive host acceptance; channel upgrades select published
-releases, not branch HEAD.
+The card layout and follow-up input/settings polish are shared by the initial
+`1.8` and `1.9` source. Their integration does not update older published
+packages or establish interactive host acceptance. Channel upgrades select
+published releases, not branch HEAD.
 
 ## Launch and navigation
 

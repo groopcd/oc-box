@@ -57,17 +57,17 @@ see [private-output troubleshooting](cli.md#private-output-capture-and-uv-python
 
 ## Recommended first install
 
-**First installation — recommended GitHub path with vault and TUI:**
+**First installation — GitHub path with vault and TUI for a published stable 1.8 target:**
 
 ```sh
-curl -fsSL --proto '=https' --tlsv1.2 https://raw.githubusercontent.com/groopcd/oc-box/devel/install.sh | sh -s -- --devel --with-vault --with-tui
+curl -fsSL --proto '=https' --tlsv1.2 https://raw.githubusercontent.com/groopcd/oc-box/master/install.sh | sh -s -- --stable --with-vault --with-tui
 oc-box --version
 oc-box doctor
 ```
 
-This explicitly selects a **published development release**, because stable
-does not yet include the dashboard. Dependencies stay private to the GitHub
-installation. This does not initialize or unlock a vault, change credential
+While stable still selects `1.6`, omit `--with-tui` or choose a published
+development target that supports the dashboard. Dependencies stay private to
+the GitHub installation. This does not initialize or unlock a vault, change credential
 policy, launch the dashboard or start a workspace. The command downloads and
 runs the public installer; review it first if preferred.
 
@@ -79,10 +79,10 @@ Ordinary PyPI installs and older bootstraps do not establish it.
 **Already installed?** Use the existing installation, without rerunning curl:
 
 ```sh
-oc-box upgrade --devel --vault --tui  # Add both extras and select development
+oc-box upgrade --vault --tui  # Add both extras on the saved channel
 # Or request either extra independently:
-oc-box upgrade --devel --vault
-oc-box upgrade --devel --tui
+oc-box upgrade --vault
+oc-box upgrade --tui
 ```
 
 These upgrade flags require a launcher release that supports them and a
@@ -261,7 +261,9 @@ Old pre-channel 1.7 launchers need the channel-aware bootstrap, not unsupported
 new flags; exact v1.6.60 needs one plain upgrade first. See
 [bootstrap compatibility](update-channels.md#bootstrap-and-older-installations).
 
-## Enable optional development features
+<a id="enable-optional-development-features"></a>
+
+## Enable optional features
 
 On a launcher release supporting the extras flags, add optional dependencies to
 the existing GitHub, verified uv tool or verified pipx installation:
@@ -274,11 +276,10 @@ oc-box upgrade --devel --vault --tui   # Both
 ```
 
 These work from stable or development installations without switching owners.
-Use `oc-box upgrade --vault` to follow the saved channel when only vault support
-is wanted; stable does not include the dashboard, so requesting `--tui` against
-that target refuses. Selecting a channel alone does not request new extras.
-Existing extras remain requested, including a dashboard preference across a
-stable interval, but only supported extras are installed in each target.
+Use `oc-box upgrade --vault` or `oc-box upgrade --tui` to follow the saved channel.
+Both `1.8` and `1.9` support the dashboard, but older stable `1.6` targets refuse
+an explicit `--tui` request. Selecting a channel alone does not request new extras.
+Existing extras remain requested, but only supported extras are installed in each target.
 
 No newer release is required to add an extra to the selected release. A repeated
 satisfied request is a no-op; `--check` validates support without installing or

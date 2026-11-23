@@ -9,11 +9,10 @@ Open another view of a running V2 workspace, or inspect workspaces using the
 optional experimental dashboard without starting them.
 
 **Prerequisites:** a configured [installation](../installation.md). Shared V2
-web/session-shell clients are available in stable 1.6.94; the Textual dashboard,
-mirrored web tabs and browser attachments described here are development
-features until the planned 1.8 stable promotion. Use a published release that
-supports the feature you need. The dashboard also needs the independent `tui`
-extra.
+web/session-shell clients are available in stable `1.6.94`; the initial `1.8`
+and `1.9` lines also include the Textual dashboard, mirrored web tabs and browser
+attachment adapter. Use a published release and native version that support the
+feature you need. The dashboard also needs the independent `tui` extra.
 An installation method is not a [release channel](../update-channels.md).
 
 **Contents:** [shared native clients](#open-a-shared-web-or-session-shell-client),

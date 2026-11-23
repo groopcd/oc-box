@@ -26,8 +26,8 @@ PyPI both remain supported.
 
 | Channel | Publication branch | GitHub publication | PyPI version |
 | --- | --- | --- | --- |
-| `stable` (default) | `master` | Final Release; current stable line is 1.6, including `v1.6.94` | `1.6.N` |
-| `devel` (explicit opt-in) | `devel` | Prerelease, for example `v1.7.N.dev0` | `1.7.N.dev0`, in the same `oc-box` project |
+| `stable` (default) | `master` | Final Release, for example `v1.8.N` | `1.8.N` |
+| `devel` (explicit opt-in) | `devel` | Prerelease, for example `v1.9.N.dev0` | `1.9.N.dev0`, in the same `oc-box` project |
 
 Starting with 1.8, **even minor numbers** are stable (`1.8`, `2.0`, `2.2`) and
 **odd minor numbers** are development (`1.9`, `2.1`, `2.3`). Stable uses final
@@ -38,11 +38,10 @@ Unpublished branch commits are not channel updates. Both distributions retain th
 full source hash and absolute commit count, even though PyPI versions cannot
 contain `+gHASH`.
 
-**The optional seven-tab manager and temporary sharing belong to experimental
-1.7 development releases, not stable 1.6.94.** Development publication is approved
-with explicit [acceptance limitations](releases/1.7.md#known-acceptance-limitations).
-It does not declare the unfinished dashboard restore/storage sequence passed
-or promote the manager to stable. The original native OpenCode **2.3.0**
+**The initial `1.8` and `1.9` releases share the optional seven-tab manager and
+temporary sharing.** These were experimental development features in `1.7`,
+not part of stable `1.6.94`. The historical [1.7 acceptance limitations](releases/1.7.md#known-acceptance-limitations)
+do not establish a stable pass. The original native OpenCode **2.3.0**
 persisted-history recovery extension and later guarded **stable 2.3.x**
 compatibility amendment have focused native/offline coverage, not new integrated
 external-host or dashboard acceptance. The shell/subagent storage profile still
@@ -51,7 +50,7 @@ certify untested future native behavior or waive refusals. Other integrations
 retain their independently documented version limits. See the
 [recovery reference](cli.md#web--browser-interface).
 
-The combined development update also includes the card dashboard, saved
+The shared update also includes the card dashboard, saved
 per-workspace native host importing (enabled by default on supported clients),
 the shared web tabstrip/current-conversation reports and optional browser File
 attachments. Existing clients do not live-toggle; save `--no-host-drop` or use
@@ -90,8 +89,8 @@ select an older release and warns before doing so. This changes program files,
 not workspace/session schemas, private volumes, project files or credentials:
 it is not a data rollback. Stop active clients, keep appropriate encrypted
 backups, and check compatibility before returning from development to stable.
-Only extras supported by the target are installed. Current stable 1.6 has no
-dashboard; selecting stable does not carry the development manager into it.
+Only extras supported by the target are installed. Older stable `1.6` has no
+dashboard; selecting a target without the dashboard does not carry it into that release.
 An inherited TUI preference is retained so it can apply on a later return to
 development. An explicit `--tui` request against an unsupported target refuses.
 
@@ -111,13 +110,13 @@ oc-box upgrade --devel --vault --tui # Add both
 not workspace credential settings. `upgrade` accepts these canonical names only;
 the bootstrap keeps its separate `--with-vault`/`--with-tui` options. Without
 either flag, channel selection alone does not enable a new extra. Use
-`oc-box upgrade --vault` to add vault support on the saved channel; stable does
-not include the dashboard, so select `--devel` for it.
+`oc-box upgrade --vault` or `oc-box upgrade --tui` to add support on the saved
+channel. Use a published target that includes the requested feature.
 
 The selected release can gain extras even when it is already installed.
 Repeating a satisfied request is a no-op. Omitted extras are not removed;
 inherited requests are installed where supported, and the dashboard preference
-survives a stable interval for a later return to development. Explicitly
+survives a switch to an older target without the dashboard. Explicitly
 requesting an unavailable extra refuses instead of silently ignoring it.
 `--check` validates requested support but changes neither installation nor saved
 channel/extra preferences.

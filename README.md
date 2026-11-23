@@ -14,10 +14,10 @@ as [legacy, with its own guide](docs/legacy/README.md).
 [Command reference](docs/cli.md) · [Security](SECURITY.md) ·
 [Contributing](CONTRIBUTING.md)
 
-> **Release channels:** stable is the default. Until the planned `1.8` stable
-> promotion, the dashboard and new browser workspace layout are development
-> features. Use a published development release that supports them; changes in
-> the source tree are not automatically available in installed packages.
+> **Release channels:** stable is the default. Stable `1.8` and development `1.9`
+> start with the same features, including the optional dashboard and browser
+> workspace layout. Older stable `1.6` releases do not include the dashboard.
+> Use a published release that supports the feature; branch HEAD is not an update.
 > [Choose a channel](docs/update-channels.md) ·
 > [Release plan](docs/plans/stable-1.8-devel-1.9.md)
 
@@ -70,29 +70,29 @@ networking and delegated CPU/memory/process cgroup controllers. Initial setup
 needs network access. See [installation and prerequisites](docs/installation.md)
 for all methods.
 
-**First installation — recommended GitHub path with vault and TUI:**
+**First installation — GitHub path with vault and TUI for a published stable 1.8 target:**
 
 ```sh
-curl -fsSL --proto '=https' --tlsv1.2 https://raw.githubusercontent.com/groopcd/oc-box/devel/install.sh | sh -s -- --devel --with-vault --with-tui
+curl -fsSL --proto '=https' --tlsv1.2 https://raw.githubusercontent.com/groopcd/oc-box/master/install.sh | sh -s -- --stable --with-vault --with-tui
 oc-box --version
 oc-box doctor
 ```
 
-This explicitly selects a **published development release**, because stable
-does not yet include the dashboard. Dependencies stay private to the GitHub
-installation. This does not initialize or unlock a vault, change credential
+While stable still selects `1.6`, omit `--with-tui` or choose a published
+development target that supports the dashboard. Dependencies stay private to
+the GitHub installation. This does not initialize or unlock a vault, change credential
 policy, launch the dashboard or start a workspace. The command downloads and
-runs the public installer; review it first if preferred. Only a verified fresh
-install through this bootstrap turns on the
+runs the public installer; review it first if preferred. Only the verified fresh
+development bootstrap enrolls the
 [Ctrl-click host opening default](docs/cli.md#experimental-ctrl-click-host-file-opening).
 
 **Already installed?** Use the existing installation, without rerunning curl:
 
 ```sh
-oc-box upgrade --devel --vault --tui  # Add both extras and select development
+oc-box upgrade --vault --tui  # Add both extras on the saved channel
 # Or request either extra independently:
-oc-box upgrade --devel --vault
-oc-box upgrade --devel --tui
+oc-box upgrade --vault
+oc-box upgrade --tui
 ```
 
 These upgrade flags require a launcher release that supports them and a
@@ -103,7 +103,7 @@ removed, the same release can gain extras, and repeating a satisfied request is
 a no-op. The command uses the verified existing installation owner; it does not
 create a second copy.
 
-Prefer stable without the dashboard, or a Python tool manager? See the
+Prefer a minimal install without the dashboard, or a Python tool manager? See the
 [installation alternatives](docs/installation.md). Do not install a second copy
 just to enable optional features. Genuinely pre-channel launchers have a separate
 [bootstrap compatibility route](docs/update-channels.md#bootstrap-and-older-installations).

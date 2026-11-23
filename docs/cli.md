@@ -1729,9 +1729,9 @@ unchanged. These flags do not change workspace credential policy, initialize or
 unlock a vault, launch the dashboard or start a workspace.
 
 Requests are additive: omitted extras are not removed. Only extras supported
-by the target are installed, but inherited requests remain saved; a development
-TUI preference survives a stable interval for a later return to development.
-Stable 1.6 has no dashboard. Explicitly requesting an unavailable extra, such
+by the target are installed, but inherited requests remain saved for later
+supporting releases. Older stable 1.6 has no dashboard; stable 1.8 and devel 1.9
+support it. Explicitly requesting an unavailable extra, such
 as `--stable --tui` against that target, refuses rather than ignoring it.
 
 The same selected release can gain extras even when no newer release is
@@ -2665,10 +2665,9 @@ Example: `oc-box upgrade --devel --vault`.
 
 With `upgrade` only, add optional dashboard dependencies through the verified
 installation owner. Independent of `--vault` and additive; may be combined with
-`--devel` and nonmutating `--check`. An explicit request against a target without
-the dashboard, including current stable 1.6, refuses. An inherited TUI preference
-survives a stable interval for a later return to development, but does not put
-the dashboard into stable. The same release can gain dependencies; repeating a
+either channel selector and nonmutating `--check`. An explicit request against
+a target without the dashboard, including older stable 1.6, refuses. An inherited
+TUI preference survives for later releases that include it. The same release can gain dependencies; repeating a
 satisfied request is a no-op. Does not launch the dashboard or a workspace.
 Requires a launcher release supporting this flag and a published supporting
 target. Cannot be combined with `--auto-update` or workspace actions.
