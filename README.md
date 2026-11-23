@@ -29,10 +29,12 @@ read-only sample data. [Read the TUI guide](docs/tui.md#tui-guide).*
 
 <!-- /readme-hero -->
 
-![Synthetic illustration of the oc-box Studio web layout: open TUI sessions on the left, one native OpenCode conversation in the center, and workspace status on the right](docs/assets/readme-web-interface.svg)
+![oc-box browser Workspace manager with Sessions selected, a TUI-style section bar, and a synthetic list of open TUI sessions](docs/assets/readme-web-interface.png)
 
-*Browser workspace in Studio layout. Synthetic illustration, not a live
-screenshot. [Try the Studio layout](docs/guides/clients.md#try-the-studio-layout).*
+*Browser Workspace manager → Sessions, rendered from the current web shell
+with synthetic data. The TUI-style section bar is not a live embedded
+terminal. [Browser manager guide](docs/guides/clients.md#use-the-browser-workspace-manager) ·
+[Image source](docs/assets/readme-web-interface.md).*
 
 ## Why oc-box?
 

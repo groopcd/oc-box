@@ -92,6 +92,18 @@ not alter native one-use pairing or add browser attachments by itself.
 See the [web workspace reference](../web-shell.md) for the other layouts
 and data boundaries.
 
+### Use the browser Workspace manager
+
+With the workspace layout enabled, choose **Workspace manager → Sessions** to
+browse verified open native TUI tabs, or explicitly request **Workspace
+history**. Choosing a session returns to the previous chat layout and opens
+that native conversation. The section bar matches the terminal dashboard's
+navigation, but it does not embed Textual or expose host-wide operations.
+**Status** and **Sessions** are available; the other sections report that they
+are unavailable in the browser manager.
+
+See the [preview and its source](../assets/readme-web-interface.md).
+
 ## Enable the experimental dashboard
 
 Stable 1.6.94 remains the default and does not include the manager. For an
