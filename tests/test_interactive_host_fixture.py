@@ -80,39 +80,77 @@ class InteractiveHostFixtureTests(unittest.TestCase):
         self.addCleanup(manager.__exit__, None, None, None)
         return value
 
-    def prepare_native(self, root, binary):
+    def prepare_native(self, root, binary, *, native_version=None):
         for name in ("config", "data", "state", "cache"):
             (root / ("host-" + name + "-2")).mkdir(mode=0o700)
+        if native_version is not None:
+            fixture.write_json_new(
+                root / "native-profile.json",
+                fixture.native_identity(binary, native_version),
+            )
         fixture.write_json_new(root / "executables.json", {"2": str(binary)})
         wrapper = root / "bin/opencode"
         wrapper.write_text(fixture.native_wrapper_source())
         wrapper.chmod(0o700)
 
-    def record(self, name="source-a"):
+    def record(self, name="source-a", *, native_version=fixture.NATIVE_VERSION):
         env = fixture.isolated_env(self.root)
         with patch.dict(os.environ, env, clear=True):
             path, data = box.create_workspace(self.root / name, "tumbleweed")
-            data.update(opencode_version=fixture.NATIVE_VERSION, ready=True)
+            data.update(opencode_version=native_version, ready=True)
             box.atomic_json(path, data)
         return path, data
 
-    def prepare_host_port(self, root, source, binary):
+    def prepare_host_port(
+        self, root, source, binary, *, native_version=fixture.NATIVE_VERSION
+    ):
         """New-format fixture metadata, without invoking any native command."""
         (root / "host-config-2/opencode").mkdir(mode=0o700)
         fixture.write_json_new(root / ui.HOST_SERVICE_CONFIG, {"port": 40001})
         fixture.write_json_new(
             root / ui.HOST_SERVICE_MARKER,
-            ui.host_service_metadata(root, source, binary, 40001),
+            ui.host_service_metadata(
+                root, source, binary, 40001, native_version=native_version
+            ),
         )
         return 40001
 
-    def args(self, mode="tui"):
-        return ui.parser().parse_args([mode, "--fixture", str(self.root)])
-
-    def owner_args(self):
-        return ui.parser().parse_args(
-            ["start", "--work-dir", str(self.parent), "--opencode-v2", str(self.binary)]
+    def current_profile(self):
+        self.record(native_version="2.3.0")
+        fixture.write_json_new(
+            self.root / "native-profile.json",
+            fixture.native_identity(self.binary, "2.3.0"),
         )
+        # Replace legacy files only in the synthetic setup, never in the runner.
+        (self.root / ui.HOST_SERVICE_MARKER).unlink()
+        fixture.write_json_new(
+            self.root / ui.HOST_SERVICE_MARKER,
+            ui.host_service_metadata(
+                self.root, self.source, self.binary, 40001, native_version="2.3.0"
+            ),
+        )
+        (self.root / "interactive.json").unlink()
+        return ui.write_metadata(
+            self.root, self.source, self.binary, native_version="2.3.0"
+        )
+
+    def args(self, mode="tui", *, native_version=None):
+        arguments = [mode, "--fixture", str(self.root)]
+        if native_version is not None:
+            arguments += ["--native-version", native_version]
+        return ui.parser().parse_args(arguments)
+
+    def owner_args(self, *, native_version=None):
+        arguments = [
+            "start",
+            "--work-dir",
+            str(self.parent),
+            "--opencode-v2",
+            str(self.binary),
+        ]
+        if native_version is not None:
+            arguments += ["--native-version", native_version]
+        return ui.parser().parse_args(arguments)
 
     def client_boundaries(self, *, live=True, running=True):
         stack = contextlib.ExitStack()
@@ -204,9 +242,126 @@ class InteractiveHostFixtureTests(unittest.TestCase):
             ["tui", "--fixture", "/old", "--no-vault"],
             ["terminal", "--workspace", "foreign"],
             ["manager", "--fixture", "/old", "--workspace", "foreign"],
+            *[
+                ["tui", "--fixture", "/old", "--native-version", version]
+                for version in ("2.2.7", "2.3.1", "2.3.0-rc.1")
+            ],
         ):
             with self.subTest(unknown=arguments), self.assertRaises(SystemExit):
                 ui.parser().parse_args(arguments)
+
+    def test_current_profile_secondary_requires_the_recorded_owner_version(self):
+        identity = self.current_profile()
+        metadata = self.root / "interactive.json"
+        original = metadata.read_bytes()
+        self.assertEqual(
+            ui.validate_interactive(self.root, self.source, native_version="2.3.0"),
+            (self.root, self.binary),
+        )
+        with self.assertRaisesRegex(fixture.FixtureError, "native-selector"):
+            ui.validate_interactive(self.root, self.source)
+        self.assertEqual(metadata.read_bytes(), original)
+        self.assertEqual(self.args("tui", native_version="2.3.0").native_version, "2.3.0")
+        args = self.args("manager", native_version="2.3.0")
+
+        def dashboard(*_):
+            # Report the identity verified before dispatch, not a reread of
+            # mutable files or the secondary's default.
+            metadata.write_text(json.dumps({"native": {"extra": "synthetic-private"}}))
+            return 0
+
+        self.client_boundaries()
+        with (
+            patch.object(fixture, "check_native_version", return_value="2.3.0") as probe,
+            patch.object(tui, "cli", side_effect=dashboard),
+            patch.object(fixture.workspace_service, "attach") as lease,
+            patch.object(box, "main") as launch,
+            patch.object(vault, "hidden") as unlock,
+        ):
+            self.assertEqual(ui.attach(args, self.source), 0)
+        probe.assert_called_once_with(self.root, self.binary, "2", expected="2.3.0")
+        for operation in (lease, launch, unlock, self.run):
+            operation.assert_not_called()
+        report = self.reports("manager")[0]
+        self.assertEqual(report["native"], identity)
+        self.assertEqual(report["manual_observations"], "NOT_AUTOMATICALLY_PASSED")
+        self.assertNotIn("synthetic-private", json.dumps(report))
+
+    def test_current_profile_requires_private_exact_service_metadata_before_dispatch(self):
+        self.current_profile()
+        config = self.root / ui.HOST_SERVICE_CONFIG
+        marker = self.root / ui.HOST_SERVICE_MARKER
+        native_profile = self.root / "native-profile.json"
+        service = self.root / ui.HOST_SERVICE_REGISTRATION
+        service.parent.mkdir(mode=0o700)
+        opaque = "synthetic-native-auth"
+        configuration = {"port": 40001, "password": opaque}
+        registration = {
+            "id": "synthetic-service",
+            "pid": 4242,
+            "url": "http://127.0.0.1:40001",
+            "version": "2.3.0",
+            "password": opaque,
+        }
+        config.write_text(json.dumps(configuration))
+        fixture.write_json_new(service, registration)
+        snapshot = {p: p.read_bytes() for p in (config, marker, service, native_profile)}
+        args = self.args("manager", native_version="2.3.0")
+        self.assertEqual(
+            ui.validate_interactive(self.root, self.source, native_version="2.3.0"),
+            (self.root, self.binary),
+        )
+        self.assertEqual({p: p.read_bytes() for p in snapshot}, snapshot)
+        with (
+            patch.object(fixture, "validate_store") as store,
+            patch.object(fixture, "check_native_version") as native,
+            patch.object(tui, "cli") as manager,
+            patch.object(fixture.workspace_service, "attach") as lease,
+        ):
+            for path, replacement, category in (
+                (native_profile, {"sha256": "0" * 64}, "native-changed"),
+                (marker, {"native_version": "2.2.6"}, "host-service-marker"),
+                (config, {"remoteAccepted": True}, "host-service-config"),
+                (service, {"version": "2.2.6"}, "host-service-registration"),
+                (service, {"url": "http://127.0.0.1:49374"}, "host-service-registration"),
+                (service, {"extra": opaque}, "host-service-registration"),
+            ):
+                with self.subTest(path=path.name, keys=tuple(replacement)):
+                    rejected = {**json.loads(snapshot[path]), **replacement}
+                    path.write_text(json.dumps(rejected))
+                    before = path.read_bytes()
+                    with self.assertRaisesRegex(fixture.FixtureError, category):
+                        ui.attach(args, self.source)
+                    self.assertEqual(path.read_bytes(), before)
+                    path.write_bytes(snapshot[path])
+        for operation in (self.run, store, native, manager, lease):
+            operation.assert_not_called()
+        self.assertFalse(self.reports("manager"))
+        self.assertNotIn(opaque, self.output.getvalue())
+
+    def test_current_profile_native_probe_cannot_accept_a_different_release(self):
+        identity = self.current_profile()
+        self.run.side_effect = None
+        self.run.return_value = subprocess.CompletedProcess(
+            [str(self.binary), "--version"], 0, "opencode v2.2.6\n", ""
+        )
+        with (
+            patch.object(fixture, "validate_store"),
+            patch.object(fixture, "verify_owned_resources") as resources,
+            patch.object(tui, "cli") as manager,
+            patch.object(fixture.workspace_service, "attach") as lease,
+        ):
+            self.assertEqual(
+                ui.attach(self.args("manager", native_version="2.3.0"), self.source), 1
+            )
+        self.run.assert_called_once()
+        for operation in (resources, manager, lease):
+            operation.assert_not_called()
+        report = self.reports("manager")[0]
+        self.assertEqual(
+            (report["outcome"], report["category"]), ("failed", "native-version")
+        )
+        self.assertEqual(report["native"], identity)
 
     def test_container_refuses_before_source_placement_native_or_engine(self):
         for arguments in (
@@ -555,7 +710,7 @@ class InteractiveHostFixtureTests(unittest.TestCase):
             patch.object(
                 fixture,
                 "check_native_version",
-                side_effect=lambda *a: order.append("native"),
+                side_effect=lambda *a, **k: order.append("native"),
             ),
             patch.object(
                 fixture,
@@ -680,7 +835,7 @@ class InteractiveHostFixtureTests(unittest.TestCase):
             patch.object(
                 fixture,
                 "check_native_version",
-                side_effect=lambda *a: order.append("native"),
+                side_effect=lambda *a, **k: order.append("native"),
             ),
             patch.object(
                 fixture,
@@ -868,6 +1023,13 @@ class InteractiveHostFixtureTests(unittest.TestCase):
         self.assertIn("optional textual/pyte", output)
         self.assertIn("monitoring takes no client lease", output)
         self.assertIn("Manual UI observations are NOT automatically passed", output)
+        ui.print_commands(self.root, native_version="2.3.0")
+        current = self.output.getvalue()[len(output) :]
+        for mode in ui.MODES[1:]:
+            with self.subTest(mode=mode):
+                command = f" {mode} --fixture {self.root} --native-version "
+                self.assertIn(command + "2.2.6", output)
+                self.assertIn(command + "2.3.0", current)
 
     def test_clients_use_production_authenticated_commands_and_unmodified_relays_without_main(
         self,
@@ -1279,6 +1441,7 @@ class InteractiveHostFixtureTests(unittest.TestCase):
         order = []
         live = [False]
         private_depth = [0]
+        selected = "2.2.6"
         real_prepare = fixture.prepare_root
         original_private = fixture.private_output
         original_run_tui = box.run_tui
@@ -1316,16 +1479,20 @@ class InteractiveHostFixtureTests(unittest.TestCase):
             order.append("podman")
             return real_podman(root, binary)
 
-        def native(root, binary):
+        def native(root, binary, *, native_version):
+            self.assertEqual(native_version, selected)
             order.append("native")
-            self.prepare_native(root, binary)
+            self.prepare_native(root, binary, native_version=native_version)
 
-        def host_port(root, source, binary):
+        def host_port(root, source, binary, *, native_version):
+            self.assertEqual(native_version, selected)
             order.append("host-port")
             self.assertGreater(private_depth[0], 0)
             self.assertFalse(live[0])
             self.assertNotIn(fixture.KEY, os.environ)
-            return self.prepare_host_port(root, source, binary)
+            return self.prepare_host_port(
+                root, source, binary, native_version=native_version
+            )
 
         def store(root):
             order.append("store")
@@ -1352,7 +1519,7 @@ class InteractiveHostFixtureTests(unittest.TestCase):
             ):
                 self.assertNotIn(name, os.environ)
             path, data = box.create_workspace(roots[0] / "source-a", "tumbleweed")
-            data["opencode_version"] = "2.2.6"
+            data["opencode_version"] = selected
             box.atomic_json(path, data)
             if launch_failure[0]:
                 raise KeyboardInterrupt()
@@ -1388,40 +1555,48 @@ class InteractiveHostFixtureTests(unittest.TestCase):
         self.assertFalse(live[0])
         self.assertNotEqual(roots[0], self.root)
         reports = list(roots[0].glob("interactive-start-*-report.json"))
-        self.assertEqual(json.loads(reports[0].read_text())["outcome"], "returned")
+        report = json.loads(reports[0].read_text())
+        self.assertEqual(report["outcome"], "returned")
+        self.assertEqual(report["native"]["version"], selected)
         self.assertFalse((roots[0] / "result.json").exists())
         self.assertNotIn(fixture.KEY, os.environ)
         self.assertIn("--fixture", self.output.getvalue())
 
-        # A separate fresh owner records the first UI interruption even when
-        # provider shutdown also fails; it still journals verified resource IDs.
+        # A separate fresh owner of either version records the first UI
+        # interruption even when provider shutdown also fails.
         launch_failure[0] = True
-        roots.clear()
-        order.clear()
-        with (
-            patch.object(fixture, "private_output", side_effect=private),
-            patch.object(ui.shutil, "which", return_value=str(self.binary)),
-            patch.object(fixture, "prepare_root", side_effect=prepare),
-            patch.object(fixture, "prepare_podman_cli", side_effect=podman),
-            patch.object(fixture, "validate_store", side_effect=store),
-            patch.object(fixture, "prepare_native_cli", side_effect=native),
-            patch.object(ui, "prepare_host_service_port", side_effect=host_port),
-            patch.object(ui, "provider", side_effect=synthetic_provider),
-            patch.object(box, "main", side_effect=launch),
-            patch.object(fixture, "verify_owned_resources"),
-        ):
-            self.assertEqual(ui.own(self.owner_args(), self.source), 130)
-        report = json.loads(
-            next(roots[0].glob("interactive-start-*-report.json")).read_text()
-        )
-        self.assertEqual(
-            (report["outcome"], report["category"]), ("interrupted", "interrupted")
-        )
-        self.assertEqual(report["secondary_errors"], ["provider-cleanup-timeout"])
-        self.assertEqual(
-            set(fixture.private_json(roots[0], "fixture-ids.json")), {"source-a"}
-        )
-        self.assertFalse(live[0])
+        for selected in ("2.2.6", "2.3.0"):
+            roots.clear()
+            order.clear()
+            with self.subTest(native_version=selected):
+                with (
+                    patch.object(fixture, "private_output", side_effect=private),
+                    patch.object(ui.shutil, "which", return_value=str(self.binary)),
+                    patch.object(fixture, "prepare_root", side_effect=prepare),
+                    patch.object(fixture, "prepare_podman_cli", side_effect=podman),
+                    patch.object(fixture, "validate_store", side_effect=store),
+                    patch.object(fixture, "prepare_native_cli", side_effect=native),
+                    patch.object(ui, "prepare_host_service_port", side_effect=host_port),
+                    patch.object(ui, "provider", side_effect=synthetic_provider),
+                    patch.object(box, "main", side_effect=launch),
+                    patch.object(fixture, "verify_owned_resources"),
+                ):
+                    self.assertEqual(
+                        ui.own(self.owner_args(native_version=selected), self.source), 130
+                    )
+                report = json.loads(
+                    next(roots[0].glob("interactive-start-*-report.json")).read_text()
+                )
+                self.assertEqual(
+                    (report["outcome"], report["category"]),
+                    ("interrupted", "interrupted"),
+                )
+                self.assertEqual(report["native"]["version"], selected)
+                self.assertEqual(report["secondary_errors"], ["provider-cleanup-timeout"])
+                self.assertEqual(
+                    set(fixture.private_json(roots[0], "fixture-ids.json")), {"source-a"}
+                )
+                self.assertFalse(live[0])
 
     def test_reports_keep_actual_failure_scope_and_never_exception_argv_or_values(self):
         self.record()
