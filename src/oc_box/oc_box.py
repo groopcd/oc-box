@@ -2466,14 +2466,21 @@ def prepare_runtime(
             ]
             managed = bool(sync_config.sdk_security_overrides(version))
             if managed:
+                # npm 10 can hoist the SDK's scoped overrides into a lock
+                # that its own `ci` rejects. Give both operations the same
+                # shallow layout; unrelated, unmanaged installs keep defaults.
+                npm_options.append("--install-strategy=shallow")
                 # Resolve without executing package scripts. No private package
                 # inventory is uploaded to an advisory service.
                 run(
                     exec_command(
                         data,
                         [
-                            "npm", "install", *npm_options,
-                            "--package-lock-only", "--ignore-scripts",
+                            "npm",
+                            "install",
+                            *npm_options,
+                            "--package-lock-only",
+                            "--ignore-scripts",
                         ],
                     ),
                     timeout=600,

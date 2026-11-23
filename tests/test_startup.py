@@ -380,6 +380,8 @@ class StartupOutputTests(unittest.TestCase):
                     self.assertIn("--package-lock-only", calls[0].args[0])
                     self.assertIn("--ignore-scripts", calls[0].args[0])
                     self.assertIn("ci", calls[1].args[0])
+                    self.assertIn("--install-strategy=shallow", calls[0].args[0])
+                    self.assertIn("--install-strategy=shallow", calls[1].args[0])
                 if install:
                     self.assertEqual(
                         calls[0].kwargs,
