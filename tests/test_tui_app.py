@@ -787,7 +787,7 @@ class DashboardInteractionTests(unittest.IsolatedAsyncioTestCase):
         async with app.run_test(size=(140, 45)) as pilot:
             await self.settle(app, pilot)
             app.apply_settings({**app._settings_snapshot(), "auto_refresh": False})
-            for dimensions in ((80, 24), (100, 30), (140, 45), (220, 70)):
+            for dimensions in ((80, 24), (100, 30), (140, 30), (140, 45), (220, 70)):
                 with self.subTest(dimensions=dimensions):
                     was_compact = app._compact_layout
                     prior_fold = app.query_one(
@@ -800,7 +800,8 @@ class DashboardInteractionTests(unittest.IsolatedAsyncioTestCase):
                     system = app.query_one("#system-report", MonitorPanel)
                     inspector = app.query_one("#workspace-inspector", Collapsible)
                     inventory = app.query_one("#workspace-card")
-                    if dimensions[0] < 118:
+                    compact = dimensions[0] < 118 or dimensions[1] < 32
+                    if compact:
                         self.assertEqual(
                             inspector.collapsed, prior_fold if was_compact else True
                         )
@@ -825,6 +826,18 @@ class DashboardInteractionTests(unittest.IsolatedAsyncioTestCase):
                         region.region.intersection(region.clip), region.region
                     )
                     self.assertEqual(header.content_size.height, 1)
+                    self.assertEqual(header.render().plain, "oc-box READ ONLY")
+                    self.assertGreaterEqual(
+                        header.content_size.width, len("oc-box READ ONLY")
+                    )
+                    mark = app.query_one("#dashboard-mark")
+                    self.assertEqual(mark.display, not compact)
+                    if mark.display:
+                        self.assertEqual(mark.render().plain, "⡠⠔⠤⡀\n⡏⢢⠊⡇\n⠈⠺⠊⠀")
+                        self.assertEqual(
+                            (mark.region.width, mark.region.height), (4, 3)
+                        )
+                        self.assertEqual(header.region.y, mark.region.y + 1)
                     app.action_tab("settings")
                     await pilot.pause()
                     self.assertEqual(

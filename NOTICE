@@ -6,6 +6,10 @@ documentation are licensed under the GNU General Public License as published
 by the Free Software Foundation, either version 3 of the License, or (at your
 option) any later version (SPDX-License-Identifier: GPL-3.0-or-later).
 
+The oc-box cube mark is drawn from simple geometry in the project's own
+release-card renderer. Its packaged SVG and PNG use the same license and contain
+no third-party artwork or fonts.
+
 This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
 FOR A PARTICULAR PURPOSE. See LICENSE for the full terms.

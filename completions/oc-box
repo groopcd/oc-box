@@ -60,7 +60,7 @@ _oc_box()
                 --project|--workspace|--distro|--auto-update|--import-session|--model|--credential-mode|--env-secret|--vault-secret|--cpus|--memory|--pids-limit|--device|--podman-arg|--output|--recipient|--identity|--opencode-auth-export|--min-passphrase-length|--feature|--port|--session|--text|--level|--limit|--log-dir|--origin|--cert|--key|--account-cert|--account-key|--workspace-cert|--workspace-key|--account-port|--workspace-port)
                     skip=1; continue ;;
                 --broker) broker=1; continue ;;
-                --host-drop|--host-clipboard|--host-clipboard-symlinks|--host-file-open|--image-preview)
+                --host-drop|--host-clipboard|--host-clipboard-symlinks|--host-file-open|--image-preview|--startup-logo)
                     [[ $command == preferences ]] && skip=1
                     continue ;;
                 --status) command=status; continue ;;
@@ -116,6 +116,10 @@ _oc_box()
                 if [[ $command == preferences ]]; then
                     _oc_box_words 'on off'; return 0
                 fi ;;
+            --startup-logo)
+                if [[ $command == preferences ]]; then
+                    _oc_box_words 'ascii graphics'; return 0
+                fi ;;
             --credential-mode) _oc_box_words 'env selected vault'; return 0 ;;
             --workspace|--import-session|--model|--env-secret|--vault-secret|--cpus|--memory|--pids-limit|--device|--podman-arg|--recipient|--min-passphrase-length|--port|--session|--text|--limit|--origin|--account-port|--workspace-port)
                 return 0 ;;
@@ -150,7 +154,7 @@ _oc_box()
         logs) options="$help $selectors --level --verbose --limit --follow --tail --json --table --journald --log-dir --path" ;;
         purge) options="$help $selectors --delete-sessions --all -y --yes" ;;
         credentials) options="$help $selectors --credential-mode --env-secret --vault-secret --clear-credentials" ;;
-        preferences) options="$help $selectors --host-drop --host-clipboard --host-clipboard-symlinks --host-file-open --image-preview --json --table" ;;
+        preferences) options="$help $selectors --host-drop --host-clipboard --host-clipboard-symlinks --host-file-open --image-preview --startup-logo --json --table" ;;
         upgrade) options="$help --check --stable --devel --vault --tui --auto-update" ;;
         doctor) options="$help --json --table --feature" ;;
         backup) options="$help $selectors --output --portable --host --opencode-auth-export --recipient --min-passphrase-length" ;;

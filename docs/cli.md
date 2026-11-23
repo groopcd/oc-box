@@ -16,7 +16,7 @@ oc-box terminal [--project PATH | --workspace ID] [--maintenance] [LIFECYCLE-LOG
 oc-box share PATH [--project PATH | --workspace ID] [--acknowledge-risk]
 oc-box attach PATH --session ID [--project PATH | --workspace ID] [--text TEXT] [--send] [--acknowledge-risk]
 oc-box attach --broker --session ID [--project PATH | --workspace ID]
-oc-box preferences [--project PATH | --workspace ID] [--host-drop on|off] [--host-clipboard on|off] [--host-clipboard-symlinks on|off] [--host-file-open on|off] [--image-preview on|off] [--json | --table]
+oc-box preferences [--project PATH | --workspace ID] [--host-drop on|off] [--host-clipboard on|off] [--host-clipboard-symlinks on|off] [--host-file-open on|off] [--image-preview on|off] [--startup-logo ascii|graphics] [--json | --table]
 oc-box purge [--project PATH | --workspace ID] [--delete-sessions | --all] [-y]
 oc-box list
 oc-box distros
@@ -268,7 +268,12 @@ compatible caches. See [Lifecycle output](#lifecycle-output) for transient
 progress and the final history result. The progress display distinguishes
 waiting for live activity to settle from copying history archives. A separate
 loading line covers blank TUI startup frames and disappears when OpenCode draws
-text.
+text. By default, supported terminals show a tiny oc-box cube PNG and other
+terminals use the `[/]` ASCII mark. Save `oc-box preferences --startup-logo ascii`
+for an existing workspace to use the ASCII mark even on a supported terminal.
+The launcher removes the image before forwarding native output, so it may
+appear only briefly.
+Pipes and `TERM=dumb` get neither.
 The container OpenCode version is verified against the host on every launch;
 exact upgrades and downgrades are supported, with no fallback to another release.
 With a V2 release supporting image previews, `--image-preview` enables prompt
@@ -319,12 +324,13 @@ oc-box preferences --project ~/devel/demo --host-clipboard-symlinks off
 oc-box preferences --project ~/devel/demo --host-clipboard off
 oc-box preferences --project ~/devel/demo --host-file-open on
 oc-box preferences --project ~/devel/demo --image-preview on
+oc-box preferences --project ~/devel/demo --startup-logo graphics
 oc-box preferences --project ~/devel/demo --json
 oc-box preferences --project ~/devel/demo --table
 ```
 
 `--project` and `--workspace` are mutually exclusive. With no change option this
-is read-only. The independent settings accept `on`/`off`:
+is read-only. The independent settings accept `on`/`off` except `--startup-logo`:
 
 | Setting | Default when no choice is saved |
 | --- | --- |
@@ -333,6 +339,7 @@ is read-only. The independent settings accept `on`/`off`:
 | `--host-clipboard-symlinks` | `on`: follow ordinary links for clipboard file imports |
 | `--host-file-open` | Follow the verified installation policy for Ctrl-click host opening |
 | `--image-preview` | `off`: no launcher image-preview override; keep native settings |
+| `--startup-logo ascii\|graphics` | `graphics`: cube PNG where supported; otherwise `[/]` |
 
 The symlink preference can be saved independently, even while clipboard
 importing is off; it takes effect on a later enabled client. The strict symlink
@@ -346,7 +353,7 @@ owning native V2 start/reset; additional clients inherit their running owner's
 setting, not a preference changed after that owner started.
 JSON output includes the effective `host_clipboard` and
 `host_clipboard_symlinks` booleans. It includes `host_file_open` and
-`image_preview` only when explicitly saved; absence means use their default
+`image_preview` and `startup_logo` only when explicitly saved; absence means use their default
 rules. `source` still describes the preference file, not each field. Use
 `--table` to see the choices and which are saved, default, or inherited.
 These are requests for future clients, not a live availability check. The
@@ -356,7 +363,8 @@ Corrupt, unsafe or mismatched preferences refuse rather than silently granting
 access. Changes apply to future clients only. Preferences survive ordinary
 stop/start and reset in a private host `ui-preferences.json` beside workspace metadata,
 with an independent lock so an active owning launcher need not exit.
-Only policy booleans are saved, never clipboard contents or a helper path.
+Only policy booleans and the startup logo choice are saved, never clipboard
+contents or a helper path.
 They are not native CLI settings, credential policy or archived authority:
 backup/restore into a fresh workspace does not reactivate these host preferences.
 The new workspace uses the defaults above until explicitly changed.
@@ -2810,6 +2818,21 @@ If actual mount or desktop admission later fails, host opening stays off.
 Disable Ctrl-click host file opening for this native `start` or `reset` TUI
 client, even if the workspace preference or installation default is on. Neither
 flag is saved or changes another client.
+
+### --startup-logo ascii|graphics
+
+For `preferences` only. Save the startup display for future native `start`
+and `reset` clients of a registered workspace. `ascii` always uses the `[/]`
+mark on the loading line. `graphics` (the default) requests a one-row PNG in
+direct Kitty or Konsole 22.04+ (including Yakuake using that Konsole part).
+It falls back to ASCII
+when the terminal is unsupported or the launcher detects conflicting markers,
+SSH or a multiplexer. The PNG disappears before native output begins; the
+option does not affect web, the manager, or terminal shell clients.
+Terminal detection uses compatibility hints, not proof of the emulator.
+From a source checkout, `python3 tools/demo_startup_logo.py ascii` and
+`python3 tools/demo_startup_logo.py graphics` preview the loading line without
+launching a workspace or saving preferences.
 
 ### Experimental Ctrl-click host file opening
 

@@ -261,6 +261,9 @@ class LogDetails(ModalScreen):
 
 class DashboardApp(ManagementActions, ClipboardActions, App):
     TITLE = "oc-box control center"
+    # Mirror on an odd-width dot grid so the top, seam and bottom
+    # share one center column, not a doubled or stair-stepped seam.
+    _CUBE = "⡠⠔⠤⡀\n⡏⢢⠊⡇\n⠈⠺⠊⠀"
     AUTO_FOCUS = "#workspaces"
     SECTIONS = (
         ("Status", "status"),
@@ -288,7 +291,9 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
     Button.-style-default.-error:focus { border: round $error; }
     Button.-style-default:disabled { border: round $primary 18%; }
     #dashboard-header { height: 3; background: $surface; }
-    #host-summary { width: 24; height: 1; margin: 1 1; text-style: bold;
+    #dashboard-mark { width: 4; height: 3; margin-left: 1; color: $primary;
+      text-wrap: nowrap; }
+    #host-summary { width: 18; height: 1; margin: 1 1; text-style: bold;
       text-wrap: nowrap; text-overflow: ellipsis; }
     #view-title { width: 1fr; height: 1; margin: 1 1; color: $primary; }
     #workspace-picker { width: 38; margin-right: 1; }
@@ -369,6 +374,7 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
     Screen.compact #monitoring-state { display: none; }
     Screen.compact #section-picker { display: block; }
     Screen.compact #dashboard-header { height: 1; }
+    Screen.compact #dashboard-mark { display: none; }
     Screen.compact #host-summary { width: 17; min-width: 17; margin: 0 1; }
     Screen.compact #workspace-picker { width: 1fr; height: 1; }
     Screen.compact #section-picker { height: 1; }
@@ -509,7 +515,8 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="dashboard-header"):
-            yield Static("oc-box", id="host-summary", markup=False)
+            yield Static(self._CUBE, id="dashboard-mark", markup=False)
+            yield Static(self._host_heading(), id="host-summary", markup=False)
             yield Static("Status / Overview", id="view-title", markup=False)
             yield Select(
                 [
@@ -930,15 +937,12 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
                 else " · process-local checks"
             )
         self._update_text("#workspace-source-context", source)
-        self._update_text(
-            "#host-summary",
-            "oc-box READ ONLY"
-            if self.read_only
-            else "oc-box DEMO"
-            if self.demo
-            else "oc-box",
-        )
+        self._update_text("#host-summary", self._host_heading())
         self._render_monitoring_state()
+
+    def _host_heading(self):
+        mode = " READ ONLY" if self.read_only else " DEMO" if self.demo else ""
+        return "oc-box" + mode
 
     def _render_monitoring_state(self):
         interval = self._monitoring_settings["interval"]

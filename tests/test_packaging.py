@@ -64,6 +64,8 @@ class PackagingTests(unittest.TestCase):
             "tests/test_upgrade_cli.py",
             "src/oc_box/update_channels.py",
             "src/oc_box/package_updates.py",
+            "src/oc_box/oc-box-mark.svg",
+            "src/oc_box/oc-box-mark.png",
             *(
                 path.relative_to(APP).as_posix()
                 for directory in ("src", "tests", "tools", "docs")
@@ -87,6 +89,7 @@ class PackagingTests(unittest.TestCase):
                     "web_sessions.py",
                     "web_sessions.js",
                     "web_sessions.css",
+                    "oc-box-mark.png",
                     "version_info.py",
                     "build-info.json",
                     "distribution.json",
@@ -136,6 +139,8 @@ class PackagingTests(unittest.TestCase):
             *(
                 ("sdist", name)
                 for name in (
+                    "src/oc_box/oc-box-mark.svg",
+                    "src/oc_box/oc-box-mark.png",
                     "tests/test_session_sync.py",
                     "tests/test_web_attachments.py",
                     "tests/web_attachments_browser.mjs",

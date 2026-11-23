@@ -43,6 +43,7 @@ RUNTIME_FILES = (
     "web_pake_worker.py",
     "web_pake_profile.py",
     "web_history.py",
+    "oc-box-mark.png",
     "workspace_control.py",
     "history_reader.py",
     "history_recovery.py",
