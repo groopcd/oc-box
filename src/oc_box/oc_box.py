@@ -40,6 +40,7 @@ if __package__:
         paths,
         plugin_compat,
         private_memory,
+        sync_config,
         vault,
         workspace_control,
         workspace_identity,
@@ -59,6 +60,7 @@ else:
     import paths
     import plugin_compat
     import private_memory
+    import sync_config
     import vault
     import workspace_control
     import workspace_identity
@@ -2456,21 +2458,64 @@ def prepare_runtime(
         with loading_stage(
             "Installing OpenCode 2.x plugin dependencies", stage="dependencies"
         ):
+            npm_options = [
+                "--prefix",
+                data["home"] + "/.config/opencode",
+                "--no-audit",
+                "--no-fund",
+            ]
+            managed = bool(sync_config.sdk_security_overrides(version))
+            if managed:
+                # Resolve without executing package scripts. No private package
+                # inventory is uploaded to an advisory service.
+                run(
+                    exec_command(
+                        data,
+                        [
+                            "npm", "install", *npm_options,
+                            "--package-lock-only", "--ignore-scripts",
+                        ],
+                    ),
+                    timeout=600,
+                    preparation="plugin-dependencies",
+                )
+                checked = run(
+                    exec_command(
+                        data, ["python3", "-c", unpack, "check-sdk-lock", version]
+                    ),
+                    check=False,
+                    capture=True,
+                    private=True,
+                    timeout=30,
+                )
+                if checked.returncode:
+                    raise BoxError(
+                        "Plugin dependencies contain a known unsafe glob/minimatch "
+                        "version or their resolution could not be verified. "
+                        "Review your OpenCode plugin dependency overrides."
+                    )
             run(
                 exec_command(
-                    data,
-                    [
-                        "npm",
-                        "install",
-                        "--prefix",
-                        data["home"] + "/.config/opencode",
-                        "--no-audit",
-                        "--no-fund",
-                    ],
+                    data, ["npm", "ci" if managed else "install", *npm_options],
                 ),
                 timeout=600,
                 preparation="plugin-dependencies",
             )
+            if managed:
+                cached = run(
+                    exec_command(
+                        data, ["python3", "-c", unpack, "mark-sdk-installed", version]
+                    ),
+                    check=False,
+                    capture=True,
+                    private=True,
+                    timeout=30,
+                )
+                if cached.returncode:
+                    raise BoxError(
+                        "Installed OpenCode plugin dependencies did not match "
+                        "their verified npm lock."
+                    )
     auth = (
         Path(os.environ.get("XDG_DATA_HOME", str(Path.home() / ".local/share")))
         / "opencode/auth.json"
@@ -2562,8 +2607,15 @@ def prepare_runtime(
                 ),
                 capture=True,
                 private=True,
+                check=False,
                 timeout=240,
             )
+            if initialized.returncode:
+                raise BoxError(
+                    opencode_v2_io.fixed_message(initialized.stderr)
+                    or f"OpenCode 2.x private service/plugin preparation failed "
+                    f"(exit {initialized.returncode})."
+                )
             for line in initialized.stdout.splitlines():
                 if line.startswith("oc-box: OpenCode 2.x plugin unavailable: "):
                     print(credentials.redact(line), file=sys.stderr, flush=True)

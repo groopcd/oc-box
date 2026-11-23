@@ -188,6 +188,12 @@ changing vault values/names; attach or native config reload does not replace the
 service environment. Changes to host config are copied at the next owning
 launch, while native V2 reload operates on the existing container copy.
 
+OpenCode's `opencode service set env` and `opencode service restart` manage the
+normal shared background service. They are not required for oc-box, including
+with OpenCode 2.3.0 and 2.4.0. oc-box starts its own private foreground service
+with the selected variables in its process environment. It does not persist
+vault values in native `service.json`.
+
 ### Intentional workspace overrides and one-off opt-out
 
 Existing explicit `env` or `selected` workspace policies remain overrides. The

@@ -232,6 +232,16 @@ class OpenCodeCompatibilityTests(unittest.TestCase):
         )
         (config / "node_modules").mkdir()
         (config / "node_modules/cached").touch()
+        lock = json.dumps({
+            "lockfileVersion": 3,
+            "packages": {"node_modules/@opencode/plugin": {"version": "2.2.6"}},
+        })
+        (config / "package-lock.json").write_text(lock)
+        (config / "node_modules/.package-lock.json").write_text(lock)
+        sdk = config / "node_modules/@opencode/plugin"
+        sdk.mkdir(parents=True)
+        (sdk / "package.json").write_text('{"version":"2.2.6"}')
+        self.assertTrue(sync_config.mark_sdk_installed(self.root, "2.2.6"))
         self.assertTrue(sync_config.sync_config(self.root, payload.getvalue(), "2.2.6"))
         self.assertTrue((config / "node_modules/cached").exists())
 

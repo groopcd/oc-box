@@ -228,9 +228,13 @@ provided. Do not combine selectors when a single selector will do.
 On first launch, detect the host distro, create a labeled container and private
 home volume, install baseline tools, install the exact host OpenCode release,
 copy configuration, resolve plugin dependencies, and start a conversation.
-Afterward, start the existing environment. Native V2 terminal clients preserve
-their open-tab membership independently of history synchronization: a closed tab
-stays closed, while its transcript and child sessions remain in the history
+Afterward, start the existing environment. V2 startup waits for the required
+Build permissions plugin to actually activate, not just for the server to
+answer. If it cannot activate, oc-box refuses to start the client.
+
+Native V2 terminal clients preserve their open-tab membership independently of
+history synchronization: a closed tab stays closed, while its transcript and
+child sessions remain in the history
 inventory. If every tab was closed, the next default terminal launch opens native
 home without creating or reopening a conversation. Use native
 Ctrl+P → Switch session to reopen one. OpenCode records tab membership/order, not

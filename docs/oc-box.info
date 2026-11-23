@@ -299,7 +299,11 @@ when a single selector will do.
 On first launch, detect the host distro, create a labeled container and
 private home volume, install baseline tools, install the exact host
 OpenCode release, copy configuration, resolve plugin dependencies, and
-start a conversation.  Afterward, start the existing environment.
+start a conversation.  Afterward, start the existing environment.  V2
+startup waits for the required Build permissions plugin to actually
+activate, not just for the server to answer.  If it cannot activate,
+oc-box refuses to start the client.
+
 Native V2 terminal clients preserve their open-tab membership
 independently of history synchronization: a closed tab stays closed,
 while its transcript and child sessions remain in the history inventory.
@@ -5212,20 +5216,20 @@ Node: Name769
 Node: Synopsis930
 Node: Description5483
 Node: Commands11290
-Node: Options146077
-Node: Lifecycle and persistence208934
-Node: Distribution images211234
-Node: Sessions and recovery216311
-Node: Devices and host permissions222896
-Node: Resource reports225242
-Node: Configuration and environment227353
-Node: Files238734
-Node: Exit status249644
-Node: Examples251052
-Node: Troubleshooting253191
-Node: Installation and manuals265689
-Node: Authors and license275879
-Node: See also276486
+Node: Options146255
+Node: Lifecycle and persistence209112
+Node: Distribution images211412
+Node: Sessions and recovery216489
+Node: Devices and host permissions223074
+Node: Resource reports225420
+Node: Configuration and environment227531
+Node: Files238912
+Node: Exit status249822
+Node: Examples251230
+Node: Troubleshooting253369
+Node: Installation and manuals265867
+Node: Authors and license276057
+Node: See also276664
 
 End Tag Table
 

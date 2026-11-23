@@ -14,6 +14,7 @@ import time
 import unittest
 from unittest import mock
 from oc_box import lifecycle_output
+from oc_box import opencode_v2_io as v2
 from oc_box import oc_box as box, sync_config as sync, terminal_ui as ui
 
 APP = Path(__file__).resolve().parents[1]
@@ -32,6 +33,71 @@ def archive(files):
 
 
 class ConfigCacheTests(unittest.TestCase):
+    def test_sdk_security_fixes_invalidate_old_cache_without_rewriting_host(self):
+        manifest = {
+            "dependencies": {"@opencode/plugin": "2.4.0", "custom": "1"},
+            "overrides": {"custom": {"glob": "10.5.0"}},
+        }
+        payload = archive(
+            {"package.json": json.dumps(manifest), "package-lock.json": "{}"}
+        )
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            # Simulate the prior launcher preparing exactly the same host input.
+            with mock.patch.object(sync, "sdk_security_overrides", return_value={}):
+                sync.sync_config(root, payload, "2.4.0")
+            config = root / ".config/opencode"
+            modules = config / "node_modules"
+            modules.mkdir()
+            self.assertFalse(sync.sync_config(root, payload, "2.4.0"))
+            self.assertFalse(modules.exists())
+            self.assertFalse((config / "package-lock.json").exists())
+            installed = json.loads((config / "package.json").read_text())
+            self.assertEqual(installed["dependencies"], manifest["dependencies"])
+            self.assertEqual(
+                installed["overrides"],
+                {"custom": {"glob": "10.5.0"}, **sync.sdk_security_overrides("2.4.0")},
+            )
+            modules.mkdir()
+            (modules / "cached").touch()
+            lock = json.dumps({
+                "lockfileVersion": 3,
+                "packages": {"node_modules/@opencode/plugin": {"version": "2.4.0"}},
+            })
+            (config / "package-lock.json").write_text(lock)
+            (modules / ".package-lock.json").write_text(lock)
+            sdk = modules / "@opencode/plugin"
+            sdk.mkdir(parents=True)
+            (sdk / "package.json").write_text('{"version":"2.4.0"}')
+            self.assertTrue(sync.mark_sdk_installed(root, "2.4.0"))
+            self.assertTrue(sync.sync_config(root, payload, "2.4.0"))
+            self.assertTrue((modules / "cached").exists())
+            (sdk / "package.json").write_text('{"version":"2.3.0"}')
+            self.assertFalse(sync.sync_config(root, payload, "2.4.0"))
+            self.assertFalse((modules / "cached").exists())
+
+    def test_sdk_lock_refuses_nested_and_aliased_affected_packages(self):
+        with tempfile.TemporaryDirectory() as name:
+            path = Path(name) / "package-lock.json"
+            for entry, version, safe in (
+                ("node_modules/rimraf/node_modules/glob", "10.5.0", False),
+                ("node_modules/glob", "14.0.2", True),
+                ("node_modules/renamed", "10.5.0", False),
+                ("node_modules/renamed", "11.0.1", True),
+            ):
+                with self.subTest(entry=entry, version=version):
+                    path.write_text(json.dumps({
+                        "lockfileVersion": 3,
+                        "packages": {
+                            "node_modules/@opencode/plugin": {"version": "2.4.0"},
+                            entry: {
+                                "version": version,
+                                **({"name": "minimatch"} if entry.endswith("renamed") else {}),
+                            },
+                        },
+                    }))
+                    self.assertIs(sync.sdk_lock_safe(path, "2.4.0"), safe)
+
     def test_cold_sync_uses_runtime_sdk_and_drops_incompatible_host_lock(self):
         with tempfile.TemporaryDirectory() as name:
             root = Path(name)
@@ -217,6 +283,40 @@ class ConfigCacheTests(unittest.TestCase):
         self.assertFalse(plugin.exists())
 
 
+class V2PluginReadinessTests(unittest.TestCase):
+    def test_empty_early_catalog_can_settle_but_never_counts_as_ready(self):
+        active = {"id": "oc-box.build-permissions", "state": {"status": "active"}}
+        request = mock.Mock(side_effect=[{}, {"data": []}, {"data": [active]}])
+        with mock.patch.object(v2.time, "sleep") as pause:
+            self.assertEqual(v2.ready_plugins(request, "/demo project"), [active])
+        self.assertEqual(request.call_count, 3)
+        self.assertEqual(request.call_args.args[1], "/api/plugin?directory=%2Fdemo%20project")
+        self.assertEqual(
+            request.call_args_list[0].kwargs["deadline"], request.call_args.kwargs["deadline"]
+        )
+        pause.assert_called_once()
+
+    def test_missing_failed_malformed_or_ambiguous_build_plugin_refuses(self):
+        active = {"id": "oc-box.build-permissions", "state": {"status": "active"}}
+        failed = {"id": active["id"], "state": {"status": "failed", "error": "secret"}}
+        for value, expected, clock in (
+            ({"data": []}, v2.BUILD_PLUGIN_TIMEOUT, [0, 0, 60, 60]),
+            ({"data": [failed]}, v2.BUILD_PLUGIN_FAILED, [0, 0]),
+            ({"data": [{}]}, v2.READINESS, [0, 0]),
+            ({"data": [active, active]}, v2.READINESS, [0, 0]),
+        ):
+            request = mock.Mock(side_effect=[{}, value])
+            with (
+                self.subTest(expected=expected),
+                mock.patch.object(v2.time, "monotonic", side_effect=clock),
+                mock.patch.object(v2.time, "sleep"),
+                self.assertRaises(v2.FixedError) as raised,
+            ):
+                v2.ready_plugins(request, "/project")
+            self.assertEqual(str(raised.exception), expected)
+            self.assertEqual(request.call_count, 2)
+
+
 class StartupOutputTests(unittest.TestCase):
     def test_scoped_runtime_keeps_plugin_warning_and_marks_installer_calls(self):
         for config_message, install in (
@@ -275,7 +375,11 @@ class StartupOutputTests(unittest.TestCase):
                 calls = [
                     call for call in execute.call_args_list if call.args[0][0] == "npm"
                 ]
-                self.assertEqual(len(calls), int(install))
+                self.assertEqual(len(calls), 2 * int(install))
+                if install:
+                    self.assertIn("--package-lock-only", calls[0].args[0])
+                    self.assertIn("--ignore-scripts", calls[0].args[0])
+                    self.assertIn("ci", calls[1].args[0])
                 if install:
                     self.assertEqual(
                         calls[0].kwargs,

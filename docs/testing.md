@@ -73,6 +73,36 @@ not a deprecated feature that can be removed from the regression suite.
   real workspaces/credentials. Native/offline results do not establish a new live
   host pass; retained evidence and each accepted scope remain separate.
 
+### Current OpenCode npm upgrade and advisories
+
+The reusable source CI runs `tests/smoke_runtime_upgrade_v2.py` in addition
+to the pinned integration and 2.3 history suites. It installs OpenCode
+2.3.0, upgrades the same private npm global prefix, and runs owning
+preparation against 2.4.0 and the latest stable 2.x resolved by npm (once
+if they match). It checks that a synthetic session survives, the required
+Build plugin becomes active, and a second launch does not reinstall the CLI
+or SDK. It substitutes a local process for `podman exec`; distro package
+selection and live Podman behavior still need their own checks.
+
+The fixture audits the generated public plugin SDK dependency tree at all
+reported severities before installing the resolved tree. An advisory or
+failed audit fails the job and therefore blocks PyPI publication through the
+reusable source gate. The managed SDK graphs for 2.2.6–2.2.7 and
+2.3.0–2.4.0 (the tested releases) scope fixes for
+[glob](https://github.com/advisories/GHSA-3g3m-2fjr-6pw4) and
+[minimatch](https://github.com/advisories/GHSA-g3hv-75wg-m249) to the SDK;
+old SDK caches prepared without those fixes are not reused. Deprecation
+warnings are not the advisory check. Updating the managed overrides invalidates
+the old copied lock, so other ranges in a custom profile can also re-resolve.
+For these releases, the launcher resolves the lock without package scripts
+and checks for the two affected ranges locally before `npm ci`; it refuses a
+resolution that reintroduces an affected version, even via a custom override.
+The CI audit does not inspect dependencies
+bundled inside upstream executables, distro packages, or private/user plugin
+and MCP dependency graphs; no private dependency names are sent to npm audit.
+The launcher still matches the exact host OpenCode version rather than
+silently switching the workspace to whatever npm currently labels latest.
+
 ### Command help
 
 Use offline CLI contract checks for the grouped `oc-box --help` index and

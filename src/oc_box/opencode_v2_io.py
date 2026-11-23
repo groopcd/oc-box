@@ -59,6 +59,8 @@ def write_control_record(descriptor, record):
 ENDPOINT = "Invalid private OpenCode 2.x endpoint."
 NOT_READY = "Private OpenCode 2.x server did not become ready."
 READINESS = "Invalid private OpenCode 2.x readiness response."
+BUILD_PLUGIN_FAILED = "The oc-box Build permissions plugin failed to activate."
+BUILD_PLUGIN_TIMEOUT = "Timed out waiting for the oc-box Build permissions plugin."
 INVENTORY = "Invalid OpenCode 2.x session inventory."
 INVENTORY_ENTRY = "Invalid OpenCode 2.x session inventory entry."
 INVENTORY_INCONSISTENT = "Inconsistent OpenCode 2.x session inventory."
@@ -80,6 +82,8 @@ FIXED_MESSAGES = frozenset(
         ENDPOINT,
         NOT_READY,
         READINESS,
+        BUILD_PLUGIN_FAILED,
+        BUILD_PLUGIN_TIMEOUT,
         INVENTORY,
         INVENTORY_ENTRY,
         INVENTORY_INCONSISTENT,
@@ -999,6 +1003,49 @@ def history_worker():
         raise FixedError(WORKER) from None
 
 
+def ready_plugins(request, directory, *, startup_deadline=None):
+    """Wait for the required plugin, not merely for the HTTP server to answer."""
+    query = "?directory=" + quote(directory, safe="")
+    deadline = time.monotonic() + 60
+    if startup_deadline is not None:
+        deadline = min(deadline, startup_deadline)
+    try:
+        # Older releases warm the location through this call. On 2.4 a
+        # successful response can still precede plugin registration.
+        request("GET", "/api/model/default" + query, deadline=deadline)
+        while time.monotonic() < deadline:
+            response = request("GET", "/api/plugin" + query, deadline=deadline)
+            plugins = response.get("data") if isinstance(response, dict) else None
+            if not isinstance(plugins, list) or any(
+                not isinstance(plugin, dict)
+                or not isinstance(plugin.get("state"), dict)
+                for plugin in plugins
+            ):
+                raise FixedError(READINESS)
+            required = [
+                plugin
+                for plugin in plugins
+                if plugin.get("id") == "oc-box.build-permissions"
+            ]
+            if required:
+                status = required[0]["state"].get("status")
+                if len(required) != 1 or status not in ("active", "failed"):
+                    raise FixedError(READINESS)
+                if status == "failed":
+                    raise FixedError(BUILD_PLUGIN_FAILED)
+                if time.monotonic() < deadline:
+                    return plugins
+                break
+            time.sleep(max(0, min(0.1, deadline - time.monotonic())))
+    except TimeoutError:
+        raise FixedError(BUILD_PLUGIN_TIMEOUT) from None
+    except FixedError as error:
+        if str(error) != NOT_READY:
+            raise
+        raise FixedError(BUILD_PLUGIN_TIMEOUT) from None
+    raise FixedError(BUILD_PLUGIN_TIMEOUT)
+
+
 def main(argv):
     action, binary = argv
     if action == "seed":
@@ -1031,7 +1078,10 @@ def main(argv):
         print(json.dumps(value), flush=True)
     elif action == "lease":
         descriptor = require_control_pipe()
-        with server(binary) as request:
+        # Leave time for the owner-side control wait and service teardown.
+        deadline = time.monotonic() + 165
+        with server(binary, startup_deadline=deadline) as request:
+            ready_plugins(request, os.getcwd(), startup_deadline=deadline)
             # Control credentials are returned only through the owner's pipe,
             # kept in memory, and never written to the workspace or service.json.
             write_control_record(descriptor, request.endpoint)
@@ -1046,18 +1096,7 @@ def main(argv):
         history_worker()
     elif action == "plugins":
         with server(binary) as request:
-            query = "?directory=" + quote(os.getcwd(), safe="")
-            request("GET", "/api/model/default" + query)
-            plugins = request("GET", "/api/plugin" + query)["data"]
-            if not any(
-                plugin.get("id") == "oc-box.build-permissions"
-                and plugin.get("state", {}).get("status") == "active"
-                for plugin in plugins
-            ):
-                raise ValueError(
-                    "The oc-box Build permissions plugin did not activate."
-                )
-            for plugin in plugins:
+            for plugin in ready_plugins(request, os.getcwd()):
                 if plugin.get("state", {}).get("status") == "failed":
                     source = plugin.get("source", {})
                     name = (
