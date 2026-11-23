@@ -3,7 +3,6 @@ include AGENTS.md pyproject.toml setup.py MANIFEST.in install.py install.sh
 recursive-include .github/workflows *.yml
 recursive-include docs *.md *.1 *.texi *.info
 recursive-include docs/assets *.png
-include docs/assets/readme-web-interface.svg
 include docs/assets/tui/manifest.json
 include completions/oc-box
 recursive-include src *.py *.js
