@@ -38,6 +38,7 @@ _WEB_RUNTIME_FILES = (
     "web_native_pair.py",
     "web_named_local.py",
     "web_named_headers.py",
+    "web_bootstrap.py",
     "web_pake_flow.py",
     "web_pake_profile.py",
     "web_pake_worker.py",

@@ -19,7 +19,9 @@ _MAX_FIELDS = 64
 _MAX_HEADER_SIZE = 16384
 _MAX_COOKIES = 32
 _FORWARDED = frozenset(("authorization", "proxy-authorization", "forwarded"))
-_COOKIE_NAMES = frozenset(("__Host-ocbox-app", "__Host-ocbox-bootstrap"))
+_COOKIE_NAMES = frozenset(
+    ("__Host-ocbox-app", "__Host-ocbox-bootstrap", "__Host-ocbox-account")
+)
 
 
 class NamedRequestError(ValueError):
