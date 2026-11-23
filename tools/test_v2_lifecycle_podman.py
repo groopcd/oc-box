@@ -727,12 +727,15 @@ def home_snapshot(data):
     result = {name: legacy.digest_home(data, name) for name in HOME_FILES}
     volume = backups.owned_volume(box, data)
     require(volume is not None, "private-home")
-    # Hash names, kinds, link targets, ownership/mode and every regular file
-    # without following symlinks or printing private names/content. mtimes are
-    # deliberately excluded: archive precision is not byte preservation.
+    # Hash every descendant's names, kinds, links, ownership, modes and bytes.
+    # Keep root metadata separately: extraction intentionally sets its mode to
+    # 0700, while the original source must retain its exact root metadata.
+    # mtimes are deliberately excluded: archive precision is not byte equality.
     program = """import hashlib,json,os,pathlib,stat,sys
 root=pathlib.Path(sys.argv[1]); info=root.lstat()
-entries=[['.',stat.S_IFMT(info.st_mode),stat.S_IMODE(info.st_mode),info.st_uid,info.st_gid]]
+if not stat.S_ISDIR(info.st_mode): raise ValueError('unsupported-home-root')
+root_metadata=[stat.S_IMODE(info.st_mode),info.st_uid,info.st_gid]
+entries=[]
 def fail(error): raise error
 def checksum(path):
  digest=hashlib.sha256()
@@ -748,9 +751,10 @@ for parent,dirs,files in os.walk(root,followlinks=False,onerror=fail):
   elif stat.S_ISLNK(info.st_mode): entry.append(os.readlink(path))
   elif not stat.S_ISDIR(info.st_mode): raise ValueError('unsupported-home-entry')
   entries.append(entry)
-print(hashlib.sha256(json.dumps(sorted(entries),ensure_ascii=True,separators=(',',':')).encode()).hexdigest())
+digest=hashlib.sha256(json.dumps(sorted(entries),ensure_ascii=True,separators=(',',':')).encode()).hexdigest()
+print(json.dumps({'complete-home-tree':digest,'home-root':root_metadata}))
 """
-    digest = (
+    manifest = json.loads(
         crypto.small(
             [
                 "podman",
@@ -762,12 +766,26 @@ print(hashlib.sha256(json.dumps(sorted(entries),ensure_ascii=True,separators=(',
                 volume["Mountpoint"],
             ]
         )
-        .decode()
-        .strip()
     )
-    require(re.fullmatch(r"[0-9a-f]{64}", digest) is not None, "private-home-digest")
-    result["complete-home-tree"] = digest
+    require(
+        isinstance(manifest, dict)
+        and set(manifest) == {"complete-home-tree", "home-root"}
+        and isinstance(manifest["complete-home-tree"], str)
+        and re.fullmatch(r"[0-9a-f]{64}", manifest["complete-home-tree"]) is not None
+        and isinstance(manifest["home-root"], list)
+        and len(manifest["home-root"]) == 3
+        and all(type(value) is int and value >= 0 for value in manifest["home-root"])
+        and manifest["home-root"][0] <= 0o7777,
+        "private-home-digest",
+    )
+    result.update(manifest)
     return result
+
+
+def expected_restored_home(saved):
+    """Only the restored root mode changes; ownership and descendants do not."""
+    _, uid, gid = saved["home-root"]
+    return {**saved, "home-root": [0o700, uid, gid]}
 
 
 def project_payload(project):
@@ -1040,9 +1058,12 @@ def run(root, binary, version, distro, report):
                     and restored["home_volume"] != data["home_volume"]
                     and box.container_project(restored) == str(root / "source-a")
                     and box.session_state(restored_path)["last"]
-                    == baseline["info"]["id"]
-                    and home_snapshot(restored) == saved,
+                    == baseline["info"]["id"],
                     "stopped-restore",
+                )
+                require(
+                    home_snapshot(restored) == expected_restored_home(saved),
+                    "restored-home",
                 )
                 require(
                     project_payload(destination) == project_payload(root / "source-a"),
@@ -1132,6 +1153,26 @@ class QuietParser(argparse.ArgumentParser):
         self.exit(2, "V2-only lifecycle fixture refused: arguments.\n")
 
 
+def fixture_failure_frames(error):
+    """Fixed source locations only; no paths, source text, args or trace values."""
+    names = {
+        "test_v2_lifecycle_podman.py",
+        "test_global_vault_podman.py",
+        "test_v2_podman.py",
+        "oc_box.py",
+        "backups.py",
+        "backup_archive.py",
+    }
+    trace, frames = error.__traceback__, []
+    while trace is not None:
+        code = trace.tb_frame.f_code
+        name = Path(code.co_filename).name
+        if name in names and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,63}", code.co_name):
+            frames.append(f"{name}:{code.co_name}:{trace.tb_lineno}")
+        trace = trace.tb_next
+    return frames[-6:]
+
+
 def main(argv=None):
     parser = QuietParser(description=__doc__, allow_abbrev=False)
     parser.add_argument("--source", type=Path, help="frozen checkout for external runner")
@@ -1207,16 +1248,26 @@ def main(argv=None):
             "launcher-exit",
             "store-info-shape",
             "source-changed",
+            "stopped-restore",
+            "restored-home",
+            "restored-project",
+            "source-preservation",
+            "private-home-digest",
         }
         detail = str(error) if isinstance(error, safety.FixtureError) else None
         if detail in fixed:
             report["failure_category"] = detail
+        frames = fixture_failure_frames(error)
+        if frames:
+            report["failure_trace"] = frames
         print(
             "V2-only lifecycle fixture failed: "
             + (detail if detail in fixed else category)
             + ".",
             file=sys.stderr,
         )
+        if frames:
+            print("V2-only lifecycle fixture trace: " + " ".join(frames), file=sys.stderr)
         return 130 if isinstance(error, KeyboardInterrupt) else 1
     finally:
         if root is not None:

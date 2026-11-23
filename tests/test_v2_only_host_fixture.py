@@ -696,7 +696,10 @@ class V2OnlyHostFixtureTests(unittest.TestCase):
                 patch.object(
                     fixture,
                     "home_snapshot",
-                    return_value={"complete-home-tree": "same"},
+                    side_effect=lambda data: {
+                        "complete-home-tree": "same",
+                        "home-root": [0o700 if data.get("restored_from") else 0o755, 0, 0],
+                    },
                 ),
                 patch.object(
                     fixture.crypto, "small", return_value=b"synthetic-age-material"
@@ -740,6 +743,7 @@ class V2OnlyHostFixtureTests(unittest.TestCase):
     ):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
+            root.chmod(0o755)
             (root / "nested").mkdir()
             payload = root / "nested/payload"
             payload.write_text("first")
@@ -762,9 +766,17 @@ class V2OnlyHostFixtureTests(unittest.TestCase):
                 initial = fixture.home_snapshot({})
                 self.assertEqual(len(initial["complete-home-tree"]), 64)
                 self.assertEqual(initial, fixture.home_snapshot({}))
+                self.assertEqual(initial["home-root"][0], 0o755)
+                expected = fixture.expected_restored_home(initial)
+                self.assertEqual(expected["home-root"], [0o700, *initial["home-root"][1:]])
+                root.chmod(0o750)
+                self.assertNotEqual(expected, fixture.home_snapshot({}))
+                root.chmod(0o700)
+                self.assertEqual(expected, fixture.home_snapshot({}))
+                self.assertNotEqual(initial, fixture.home_snapshot({}))
                 payload.write_text("other")
                 changed = fixture.home_snapshot({})
-                self.assertNotEqual(initial, changed)
+                self.assertNotEqual(expected, changed)
                 payload.chmod(0o600)
                 mode_changed = fixture.home_snapshot({})
                 self.assertNotEqual(changed, mode_changed)
@@ -774,6 +786,22 @@ class V2OnlyHostFixtureTests(unittest.TestCase):
                 os.mkfifo(root / "unsupported")
                 with self.assertRaises(subprocess.CalledProcessError):
                     fixture.home_snapshot({})
+
+    def test_restore_keeps_root_ownership_and_the_original_source_manifest(self):
+        source = {"complete-home-tree": "same", "home-root": [0o755, 1000, 1001]}
+        expected = fixture.expected_restored_home(source)
+        self.assertEqual(expected["home-root"], [0o700, 1000, 1001])
+        self.assertEqual(source["home-root"], [0o755, 1000, 1001])
+        self.assertEqual(expected["complete-home-tree"], source["complete-home-tree"])
+
+    def test_fixture_failure_frames_do_not_disclose_messages_or_paths(self):
+        try:
+            safety.require(False, "private-synthetic-message /unrelated/path")
+        except safety.FixtureError as error:
+            frames = fixture.fixture_failure_frames(error)
+        self.assertEqual(len(frames), 1)
+        self.assertRegex(frames[0], r"^test_global_vault_podman\.py:require:\d+$")
+        self.assertNotIn("private-synthetic-message", " ".join(frames))
 
     def test_project_payload_requires_exact_files_except_the_fresh_identity_marker(
         self,
