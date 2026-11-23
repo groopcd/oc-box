@@ -119,7 +119,9 @@ class LocalNamedSignIn:
                 )
             except OSError:
                 return None
-            return None if self._stopped.is_set() else token
+            return (
+                None if self._stopped.is_set() or self._flow.cleanup_failed else token
+            )
         finally:
             self._pairs.release()
 

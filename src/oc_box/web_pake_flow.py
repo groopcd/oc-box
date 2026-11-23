@@ -264,8 +264,9 @@ class PakeFlow:
 
     def _fence_cleanup(self):
         with self._lock:
+            pending = self._admission._begin_close()
             self._cleanup_failed = True
-        self._admission.close()
+        self._admission._notify(pending)
 
     def _release(self, ident, exchange):
         try:
@@ -294,6 +295,7 @@ class PakeFlow:
         with self._lock:
             if self._closed:
                 return
+            pending = self._admission._begin_close()
             self._closed = True
             exchanges = [
                 entry.exchange for entry in self._entries.values() if entry is not None
@@ -301,7 +303,7 @@ class PakeFlow:
             self._entries.clear()
             self._registrations.clear()
             self._setup = b""
-        self._admission.close()
+        self._admission._notify(pending)
         for exchange in exchanges:
             self._discard(exchange)
 

@@ -320,10 +320,14 @@ class BrowserAdmission:
 
     def close(self) -> None:
         """Permanently stop admission and cancel all remaining registered uses."""
+        self._notify(self._begin_close())
+
+    def _begin_close(self) -> list[ConnectionUse]:
+        """Latch the fence before returning callbacks for out-of-lock delivery."""
         pending = []
         with self._lock:
             self._closed = True
             for token in tuple(self._sessions):
                 self._retire(token, pending)
             self._attempts.clear()
-        self._notify(pending)
+        return pending

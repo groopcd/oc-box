@@ -7,7 +7,7 @@ authorization checks are responsibilities of the future ingress.
 import unittest
 from contextlib import ExitStack
 from dataclasses import replace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import test_web_pake_flow as fixture
 
@@ -83,6 +83,31 @@ class NamedCompositionTests(unittest.TestCase):
         self.assertIsNone(driver.redeem(ticket.value, browser_nonce=fixture.BROWSER))
         current.return_value = True
         self.assertIsNone(driver.redeem(ticket.value, browser_nonce=fixture.BROWSER))
+        self.assertIsNone(driver.admission.issue(case.binding, principal="synthetic"))
+        pair.assert_called_once()
+
+    def test_cleanup_fence_wins_against_a_delayed_admission_after_pairing(self):
+        case, _, driver, _, pair, _ = self.local_driver()
+        ticket = self.local_ticket(driver)
+        delegate = driver.admission.issue
+
+        def delayed_issue(*args, **kwargs):
+            with patch.object(
+                case.backend, "start", side_effect=fixture.pake.VerifierCleanupError
+            ):
+                self.assertIsNone(
+                    driver.start(
+                        browser_nonce=fixture.BROWSER,
+                        username="in-scope",
+                        ke1=fixture.KE1,
+                    )
+                )
+            return delegate(*args, **kwargs)
+
+        with patch.object(driver.admission, "issue", side_effect=delayed_issue):
+            self.assertIsNone(
+                driver.redeem(ticket.value, browser_nonce=fixture.BROWSER)
+            )
         self.assertIsNone(driver.admission.issue(case.binding, principal="synthetic"))
         pair.assert_called_once()
 
