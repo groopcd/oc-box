@@ -1831,6 +1831,22 @@ runner hash. Preserve the old candidate, runner, report and retained storage.
 
 #### Reviewed focused recovery host acceptance
 
+The following stable backport note describes the historical 1.6 scope only:
+
+**Stable backport scope:** the bounded six-commit backport is based on stable
+`c336b419d5760c771d869de436ca6c328af8cc73` (`v1.6.60`), retains version series
+1.6 and the shared baseline 29, and does not import the 1.7 TUI/sharing or
+archived-root automatic-resume features. Its default harness retains the stable
+33 checks, stages `graph`, `readiness`, `background`, `shell`, `recovery-sync`,
+and ordered exits `[0,0,0,1,0]`. Reports require every check, complete stage and
+those exact exits; the 12/six recovery cases remain separate. The historical
+reports below are retained verbatim with their original source, runner and scope.
+There is **no new external-host acceptance** for the stable backport or any later
+channel-integrated candidate: neither local unit/native checks nor matching core
+runtime hashes relabel the original 42+18 pass. Freeze the integrated candidate
+and repeat relevant external-host history/recovery and lifecycle/vault gates
+before stable publication. Never run the live Podman fixtures inside oc-box.
+
 Two operator-provided v2 reports passed review against clean runtime
 `d736bc1bb33ffeedee65ad3ec281de77c1e31847`, count **115**, version
 `1.7.86+gd736bc1`. All **44** runtime/donor hashes match that Git tree. Both pin
