@@ -18,8 +18,12 @@ profile. The default command and Textual remain unchanged.
 ## Named sign-in is not enabled
 
 The source contains internal encrypted account records, bounded PAKE
-orchestration and expiring browser admission with stream cancellation hooks.
-It does not route a browser through these components. No password backend or
+orchestration with a pinned-descriptor worker interface, and expiring browser
+admission with stream cancellation and drain hooks. The private coordinator
+does not mint a native credential until a verified principal's one-use
+handoff is redeemed by the matching browser. The native credential remains
+server-side and is fenced to a verified owner generation and current lease.
+No listener routes browser requests through these components. No password backend or
 browser WASM is shipped. A candidate `opaque-ke` prerelease demonstrated
 separate offline Chromium WASM and native interop with synthetic inputs;
 that did not exercise TLS, live enrollment, cookies, origin validation or

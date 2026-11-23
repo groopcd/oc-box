@@ -57,6 +57,7 @@ class SyntheticExchange:
         if not self.discarded:
             self.discarded = True
             self.backend.discards.append(self)
+        return True
 
 
 class PakeFlowTests(unittest.TestCase):
@@ -359,7 +360,7 @@ class PakeFlowTests(unittest.TestCase):
         failing = self.backend.exchange(base64.b64decode(PROOF))
         with patch.object(self.backend, "start", return_value=(b"AB", failing)):
             challenge = self.start(flow)
-        with patch.object(failing, "discard", side_effect=OSError("private fixture")):
+        with patch.object(failing, "discard", return_value=False):
             self.assertIsNone(self.finish(flow, challenge))
         self.assertTrue(flow.cleanup_failed)
         self.assertIsNone(flow.admission.lookup(self.binding, previous))

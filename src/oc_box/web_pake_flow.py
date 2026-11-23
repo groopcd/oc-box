@@ -41,7 +41,7 @@ class OpaqueExchange(Protocol):
         """Verify at most once, with a bounded lifetime and clean worker exit."""
         ...
 
-    def discard(self) -> None:
+    def discard(self) -> bool:
         """Cancel and reap, idempotently and safely against concurrent finish."""
         ...
 
@@ -240,6 +240,9 @@ class PakeFlow:
     def _matches(self, binding):
         return type(binding) is WebBinding and binding == self._binding
 
+    def matches(self, binding, auth_origin):
+        return self._matches(binding) and self._auth_origin == auth_origin
+
     @property
     def cleanup_failed(self):
         with self._lock:
@@ -247,13 +250,15 @@ class PakeFlow:
 
     def _discard(self, exchange):
         try:
-            exchange.discard()
+            confirmed = exchange.discard() is True
         except Exception:  # noqa: BLE001 - never grant access after failed verifier cleanup.
+            confirmed = False
+        if not confirmed:
             with self._lock:
                 self._cleanup_failed = True
             self._admission.close()
             return False
-        return True
+        return confirmed
 
     def _release(self, ident, exchange):
         try:

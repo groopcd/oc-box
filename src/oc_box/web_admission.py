@@ -52,6 +52,9 @@ class BrowserSession:
     principal: str
     expires_at: float
     _token: str
+    native_cookie: object = (
+        None  # Private upstream data, never serialized to the browser.
+    )
 
 
 @dataclass(frozen=True, slots=True, eq=False, repr=False)
@@ -204,7 +207,9 @@ class BrowserAdmission:
             self._attempts.append(now)
             return True
 
-    def issue(self, binding: WebBinding, *, principal: str) -> str | None:
+    def issue(
+        self, binding: WebBinding, *, principal: str, native_cookie: object = None
+    ) -> str | None:
         """Mint only after an independent, workspace-authorized sign-in."""
         if not self._matches(binding):
             return None
@@ -225,7 +230,9 @@ class BrowserAdmission:
             ):
                 token = None
             else:
-                session = BrowserSession(principal, now + self._session_ttl, token)
+                session = BrowserSession(
+                    principal, now + self._session_ttl, token, native_cookie
+                )
                 self._sessions[token] = _Entry(session)
         self._notify(pending)
         return token

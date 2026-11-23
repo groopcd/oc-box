@@ -18,9 +18,11 @@ import time
 from pathlib import Path
 
 if __package__:
+    from .web_admission import WebBinding
     from .web_local_origins import WORKSPACE_HOST
     from .web_tls import HTTPSOrigin
 elif __name__ != "__main__":
+    from web_admission import WebBinding
     from web_local_origins import WORKSPACE_HOST
     from web_tls import HTTPSOrigin
 
@@ -78,22 +80,35 @@ def _cookie_name(authority):
 class NativeCookie:
     """Private upstream credential, not a browser cookie or an admission grant."""
 
-    __slots__ = ("_scope", "_value")
+    __slots__ = ("_binding", "_scope", "_value", "_owner_current")
 
-    def __init__(self, workspace, endpoint, authority, value):
-        if type(value) is not str or _VALUE.fullmatch(value) is None:
+    def __init__(self, binding, endpoint, authority, value, *, owner_current):
+        if (
+            type(binding) is not WebBinding
+            or binding.origin != "https://" + authority
+            or not callable(owner_current)
+            or type(value) is not str
+            or _VALUE.fullmatch(value) is None
+        ):
             _refuse()
-        self._scope = workspace, endpoint, authority
+        self._binding = binding
+        self._scope = endpoint, authority
         self._value = value
+        self._owner_current = owner_current
 
-    def upstream_cookie(self, *, workspace, endpoint, origin):
+    def upstream_cookie(self, *, binding, endpoint, origin):
         """Return only the Cookie value for this trusted, still-leased upstream.
 
         Do not send it in a browser response, merge it with browser cookies,
         rebind it, log it or persist it. It has native workspace-wide authority.
         """
         authority = _authority(origin)
-        if self._scope != (workspace, endpoint, authority):
+        if (
+            type(binding) is not WebBinding
+            or binding != self._binding
+            or self._scope != (endpoint, authority)
+            or not _owner_matches(self._owner_current, binding)
+        ):
             _refuse()
         return _cookie_name(authority) + "=" + self._value
 
@@ -312,7 +327,14 @@ def _read_bridge(command):
             process.wait(timeout=1)
 
 
-def pair_cookie(box, data, connection, *, origin):
+def _owner_matches(owner_current, binding):
+    try:
+        return owner_current(binding) is True
+    except Exception:  # noqa: BLE001 - lease check errors fail closed with no raw diagnostics.
+        return False
+
+
+def pair_cookie(box, data, connection, *, origin, binding, owner_current):
     """Mint once on an already-held, verified 2.3.2 private workspace lease.
 
     Supply the origin from the trusted local TLS profile, never Host/Origin
@@ -330,6 +352,10 @@ def pair_cookie(box, data, connection, *, origin):
             or connection.get("workspace") != workspace
             or connection.get("version") != _VERSION
             or data.get("opencode_version") != _VERSION
+            or type(binding) is not WebBinding
+            or binding.workspace_id != workspace
+            or binding.origin != origin.value
+            or not _owner_matches(owner_current, binding)
         ):
             _refuse()
         endpoint = connection.get("url")
@@ -350,7 +376,12 @@ def pair_cookie(box, data, connection, *, origin):
                 authority,
             ],
         )
-        return NativeCookie(workspace, endpoint, authority, _read_bridge(command))
+        value = _read_bridge(command)
+        if not _owner_matches(owner_current, binding):
+            _refuse()
+        return NativeCookie(
+            binding, endpoint, authority, value, owner_current=owner_current
+        )
     except (
         box.BoxError,
         OSError,

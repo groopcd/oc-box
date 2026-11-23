@@ -35,6 +35,7 @@ RUNTIME_FILES = (
     "web_local_origins.py",
     "web_handoff.py",
     "web_native_pair.py",
+    "web_named_local.py",
     "web_accounts.py",
     "web_admission.py",
     "web_pake_flow.py",

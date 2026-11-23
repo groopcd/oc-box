@@ -11,10 +11,81 @@ from unittest.mock import Mock
 
 import test_web_pake_flow as fixture
 
+from oc_box import web_local_origins, web_named_local, web_native_pair
 from oc_box.web_handoff import WebHandoff
 
 
 class NamedCompositionTests(unittest.TestCase):
+    def local_driver(self):
+        case = fixture.PakeFlowTests()
+        case.setUp()
+        self.addCleanup(case.doCleanups)
+        origins = web_local_origins.LocalOrigins()
+        case.binding = replace(case.binding, origin=origins.workspace.value)
+        flow = case.flow(auth_origin=origins.account.value)
+        current = Mock(return_value=True)
+        native = web_native_pair.NativeCookie(
+            case.binding,
+            "http://127.0.0.1:43100",
+            origins.workspace.value.removeprefix("https://"),
+            "a" * 10 + "." + "b" * 43,
+            owner_current=current,
+        )
+        pair = Mock(return_value=native)
+        driver = web_named_local.LocalNamedSignIn(
+            origins=origins,
+            binding=case.binding,
+            flow=flow,
+            owner_current=current,
+            pair_native=pair,
+        )
+        self.addCleanup(driver.close)
+        return case, origins, driver, current, pair, native
+
+    @staticmethod
+    def local_ticket(driver):
+        challenge = driver.start(
+            browser_nonce=fixture.BROWSER, username="in-scope", ke1=fixture.KE1
+        )
+        return driver.finish(
+            browser_nonce=fixture.BROWSER,
+            challenge_id=challenge.challenge_id,
+            ke3=fixture.PROOF,
+        )
+
+    def test_private_composition_pairs_only_after_redemption_and_retains_native_cookie(
+        self,
+    ):
+        case, origins, driver, _, pair, native = self.local_driver()
+        ticket = self.local_ticket(driver)
+        pair.assert_not_called()
+        self.assertIsNone(
+            driver.redeem(ticket.value, browser_nonce=fixture.OTHER_BROWSER)
+        )
+        pair.assert_not_called()
+        lease = driver.redeem(ticket.value, browser_nonce=fixture.BROWSER)
+        self.assertIsInstance(lease, str)
+        session = driver.admission.lookup(case.binding, lease)
+        self.assertIs(session.native_cookie, native)
+        self.assertEqual(session.principal, "in-scope")
+        self.assertIsNone(driver.redeem(ticket.value, browser_nonce=fixture.BROWSER))
+        pair.assert_called_once_with(case.binding, origins.workspace)
+
+    def test_owner_change_during_native_cookie_mint_refuses_and_consumes_ticket(self):
+        case, _, driver, current, pair, native = self.local_driver()
+        ticket = self.local_ticket(driver)
+
+        def owner_lost(*_args):
+            current.return_value = False
+            return native
+
+        pair.side_effect = owner_lost
+        self.assertIsNone(driver.redeem(ticket.value, browser_nonce=fixture.BROWSER))
+        current.return_value = True
+        self.assertIsNone(driver.redeem(ticket.value, browser_nonce=fixture.BROWSER))
+        self.assertIsNone(driver.admission.issue(case.binding, principal="synthetic"))
+        pair.assert_called_once()
+
     def test_app_session_exists_only_after_same_browser_handoff_and_revokes_one(self):
         case = fixture.PakeFlowTests()
         case.setUp()

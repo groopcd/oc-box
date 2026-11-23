@@ -193,8 +193,8 @@ oc-box doctor --feature web-tls-local
 ```
 
 Feature selectors: `launch`, `private-output`, `maintenance`, `history`, `backup`, `backup-info`, `restore`,
-`vault`, `github-upgrade`, `bootstrap`, `storage`, `overlay`, `manuals`, and
-`docs-build`. Without selectors all are reported, but exit status checks only
+`vault`, `github-upgrade`, `bootstrap`, `storage`, `overlay`, `manuals`,
+`docs-build`, and `web-tls-local`. Without selectors all are reported, but exit status checks only
 core `launch` prerequisites. With selectors, exit 0 means every selected
 feature's prerequisites are present; exit 1 means at least one is missing or
 incompatible. JSON schema version 1 includes scope, detected distro, feature

@@ -259,18 +259,18 @@ os-release text.
 
 Feature selectors: ‘launch’, ‘private-output’, ‘maintenance’, ‘history’,
 ‘backup’, ‘backup-info’, ‘restore’, ‘vault’, ‘github-upgrade’,
-‘bootstrap’, ‘storage’, ‘overlay’, ‘manuals’, and ‘docs-build’.  Without
-selectors all are reported, but exit status checks only core ‘launch’
-prerequisites.  With selectors, exit 0 means every selected feature's
-prerequisites are present; exit 1 means at least one is missing or
-incompatible.  JSON schema version 1 includes scope, detected distro,
-feature availability, dependency details, missing providers, package
-names, installation commands, and notes.  Missing optional features
-never disable unrelated commands.  ‘--table’ shows feature readiness,
-missing prerequisites and package guidance in columns, without changing
-the checks or exit status.  Feature commands check their prerequisites
-before secret prompts or destructive workspace changes and include
-OS-specific fixes.
+‘bootstrap’, ‘storage’, ‘overlay’, ‘manuals’, ‘docs-build’, and
+‘web-tls-local’.  Without selectors all are reported, but exit status
+checks only core ‘launch’ prerequisites.  With selectors, exit 0 means
+every selected feature's prerequisites are present; exit 1 means at
+least one is missing or incompatible.  JSON schema version 1 includes
+scope, detected distro, feature availability, dependency details,
+missing providers, package names, installation commands, and notes.
+Missing optional features never disable unrelated commands.  ‘--table’
+shows feature readiness, missing prerequisites and package guidance in
+columns, without changing the checks or exit status.  Feature commands
+check their prerequisites before secret prompts or destructive workspace
+changes and include OS-specific fixes.
 
 This checks installed prerequisites, not full runtime certification.
 Podman still checks rootless mode, subordinate IDs, controller
@@ -5186,20 +5186,20 @@ Node: Name769
 Node: Synopsis930
 Node: Description5451
 Node: Commands11258
-Node: Options145392
-Node: Lifecycle and persistence207327
-Node: Distribution images209627
-Node: Sessions and recovery214704
-Node: Devices and host permissions221289
-Node: Resource reports223635
-Node: Configuration and environment225746
-Node: Files237127
-Node: Exit status248037
-Node: Examples249445
-Node: Troubleshooting251584
-Node: Installation and manuals264082
-Node: Authors and license274272
-Node: See also274879
+Node: Options145412
+Node: Lifecycle and persistence207347
+Node: Distribution images209647
+Node: Sessions and recovery214724
+Node: Devices and host permissions221309
+Node: Resource reports223655
+Node: Configuration and environment225766
+Node: Files237147
+Node: Exit status248057
+Node: Examples249465
+Node: Troubleshooting251604
+Node: Installation and manuals264102
+Node: Authors and license274292
+Node: See also274899
 
 End Tag Table
 

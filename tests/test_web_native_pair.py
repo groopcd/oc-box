@@ -9,10 +9,12 @@ import sys
 import tempfile
 import threading
 import unittest
+from dataclasses import replace
 from unittest.mock import patch
 
 from oc_box import oc_box as box
 from oc_box import web_native_pair as pair
+from oc_box.web_admission import WebBinding
 from oc_box.web_local_origins import LocalOrigins, WORKSPACE_HOST
 from oc_box.web_tls import HTTPSOrigin
 
@@ -125,6 +127,19 @@ def _workspace(home, endpoint):
 
 
 class NativePairTests(unittest.TestCase):
+    def _pair(self, data, connection, origin=ORIGIN, owner_current=None):
+        binding = WebBinding(data["id"], "fixture-owner", origin.value)
+        if owner_current is None:
+            owner_current = lambda candidate: candidate == binding
+        return pair.pair_cookie(
+            box,
+            data,
+            connection,
+            origin=origin,
+            binding=binding,
+            owner_current=owner_current,
+        )
+
     @contextlib.contextmanager
     def _fixture(self, origin=ORIGIN, *, override=None):
         with _peer(origin, override or {}) as (endpoint, requests):
@@ -166,21 +181,32 @@ class NativePairTests(unittest.TestCase):
         for origin in (ORIGIN, HTTPSOrigin(WORKSPACE_HOST, 443)):
             with self.subTest(port=origin.port), self._fixture(origin) as fixture:
                 data, connection, requests = fixture
-                token = pair.pair_cookie(box, data, connection, origin=origin)
+                binding = WebBinding(data["id"], "fixture-owner", origin.value)
+                live = True
+                token = self._pair(
+                    data,
+                    connection,
+                    origin,
+                    owner_current=lambda candidate: live and candidate == binding,
+                )
                 self.assertNotIn(VALUE, repr(token))
                 args = {
-                    "workspace": data["id"],
+                    "binding": binding,
                     "endpoint": connection["url"],
                     "origin": origin,
                 }
                 self.assertEqual(token.upstream_cookie(**args), _cookie(origin))
                 for wrong in (
-                    {"workspace": "other"},
+                    {"binding": replace(binding, workspace_id="other")},
+                    {"binding": replace(binding, owner_generation="replacement-owner")},
                     {"endpoint": connection["url"] + "/"},
                     {"origin": HTTPSOrigin(WORKSPACE_HOST, 9999)},
                 ):
                     with self.assertRaisesRegex(pair.NativePairError, ERROR):
                         token.upstream_cookie(**(args | wrong))
+                live = False
+                with self.assertRaisesRegex(pair.NativePairError, ERROR):
+                    token.upstream_cookie(**args)
 
                 expected = [
                     ("GET /api/info HTTP/1.1", None, None),
@@ -221,8 +247,9 @@ class NativePairTests(unittest.TestCase):
                 patch.object(pair.subprocess, "Popen") as spawn,
                 self.assertRaisesRegex(pair.NativePairError, ERROR),
             ):
-                pair.pair_cookie(box, data, connection | update, origin=ORIGIN)
+                self._pair(data, connection | update)
             spawn.assert_not_called()
+
         for origin in (
             ORIGIN.value,
             LocalOrigins().account,
@@ -234,8 +261,30 @@ class NativePairTests(unittest.TestCase):
                 patch.object(pair.subprocess, "Popen") as spawn,
                 self.assertRaisesRegex(pair.NativePairError, ERROR),
             ):
-                pair.pair_cookie(box, data, connection, origin=origin)
+                pair.pair_cookie(
+                    box,
+                    data,
+                    connection,
+                    origin=origin,
+                    binding=WebBinding(data["id"], "fixture-owner", ORIGIN.value),
+                    owner_current=lambda _: True,
+                )
             spawn.assert_not_called()
+
+    def test_owner_loss_before_or_during_pairing_never_returns_the_credential(self):
+        for checks, expected_requests in (([False], 0), ([True, False], 5)):
+            with (
+                self.subTest(checks=checks),
+                self._fixture() as (data, connection, requests),
+                self.assertRaisesRegex(pair.NativePairError, ERROR),
+            ):
+                responses = iter(checks)
+                try:
+                    self._pair(
+                        data, connection, owner_current=lambda _: next(responses)
+                    )
+                finally:
+                    self.assertEqual(len(requests), expected_requests)
 
     def test_refuses_unauthenticated_wrong_owner_or_failed_cookie_without_retry(self):
         for name, index, reply in (
@@ -273,7 +322,7 @@ class NativePairTests(unittest.TestCase):
                 self._fixture(override={index: reply}) as (data, connection, requests),
                 self.assertRaisesRegex(pair.NativePairError, ERROR) as refusal,
             ):
-                pair.pair_cookie(box, data, connection, origin=ORIGIN)
+                self._pair(data, connection)
             self.assertIsNone(refusal.exception.__context__)
             self.assertEqual(len(requests), index + 1)
 

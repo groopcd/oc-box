@@ -445,16 +445,17 @@ class PakeWorkerAttempt:
         finally:
             self._io.release()
 
-    def discard(self) -> None:
-        """Idempotently cancel; do not propagate errors or wait without a bound."""
+    def discard(self) -> bool:
+        """Idempotently cancel; report whether cleanup was confirmed."""
         self._cancel.set()
-        self._discard_until(monotonic() + _DRAIN_BUDGET)
+        return self._discard_until(monotonic() + _DRAIN_BUDGET)
 
     def _discard_until(self, deadline):
         if not self._io.acquire(timeout=max(0, deadline - monotonic())):
-            return
+            return False
         try:
             self._cleanup(deadline)
+            return self._released
         finally:
             self._io.release()
 
