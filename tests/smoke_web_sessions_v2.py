@@ -17,6 +17,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import traceback
 from unittest.mock import patch
 from urllib.error import HTTPError
 from urllib.request import HTTPCookieProcessor, ProxyHandler, Request, build_opener
@@ -480,4 +481,18 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as error:
+        if os.environ.get("GITHUB_ACTIONS") == "true":
+            # Locate the failed check without copying native/private response
+            # text or a pairing URL into the remotely visible annotation.
+            for frame in reversed(traceback.extract_tb(error.__traceback__)):
+                if Path(frame.filename) == Path(__file__):
+                    print(
+                        f"::error file=tests/smoke_web_sessions_v2.py,line={frame.lineno}"
+                        f",title=Native web fixture failed::{type(error).__name__} in {frame.name}",
+                        flush=True,
+                    )
+                    break
+        raise

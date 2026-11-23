@@ -23,7 +23,9 @@ def sdk_security_overrides(runtime_version):
     # These audited SDKs include affected glob/minimatch versions on multiple
     # paths. Scope the fix to the selected SDK, not the user's other packages.
     # GHSA-3g3m-2fjr-6pw4 and GHSA-g3hv-75wg-m249.
-    if runtime_version in ("2.2.6", "2.2.7", "2.3.0", "2.3.1", "2.3.2", "2.4.0"):
+    if runtime_version in (
+        "2.2.6", "2.2.7", "2.3.0", "2.3.1", "2.3.2", "2.4.0", "2.4.1",
+    ):
         return {
             f"@opencode/plugin@{runtime_version}": {
                 "glob": "14.0.2",

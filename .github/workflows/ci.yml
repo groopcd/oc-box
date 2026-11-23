@@ -28,7 +28,7 @@ jobs:
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: ${{ matrix.python }}
-      - name: Unit and documentation coverage checks
+      - name: Install test dependencies and check Bash completion
         run: |
           apt_root=$(mktemp -d /tmp/oc-box-ci-apt.XXXXXXXX)
           chmod 755 "$apt_root"
@@ -43,7 +43,27 @@ jobs:
           if [[ "${{ matrix.python }}" == '3.13' ]]; then
             "$RUNNER_TEMP/tests/bin/python" -m pip install 'Pillow>=13,<14'
           fi
-          "$RUNNER_TEMP/tests/bin/python" -B -m unittest discover -s tests -v
+      - name: Run unit and documentation regressions
+        run: |
+          set -o pipefail
+          log="$RUNNER_TEMP/oc-box-unittest.log"
+          if ! "$RUNNER_TEMP/tests/bin/python" -B -m unittest discover -s tests -v 2>&1 | tee "$log"; then
+            # Report only unittest identifiers, never traceback/error bodies.
+            python -B - "$log" <<'PY'
+          import re, sys
+          with open(sys.argv[1], encoding="utf-8", errors="replace") as log:
+              count = 0
+              for line in log:
+                  match = re.match(r"^(FAIL|ERROR): (test_[A-Za-z0-9_]+) \(([A-Za-z0-9_.]+)\)", line)
+                  if match and count < 20:
+                      kind, test, suite = match.groups()
+                      print(f"::error title=Python regression::{kind}: {suite}.{test}")
+                      count += 1
+          PY
+            exit 1
+          fi
+      - name: Check committed manuals and source whitespace
+        run: |
           python tools/build_docs.py --check
           git diff --check
       - name: Build Python distributions

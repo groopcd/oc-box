@@ -88,7 +88,7 @@ The fixture audits the generated public plugin SDK dependency tree at all
 reported severities before installing the resolved tree. An advisory or
 failed audit fails the job and therefore blocks PyPI publication through the
 reusable source gate. The managed SDK graphs for 2.2.6–2.2.7 and
-2.3.0–2.4.0 (the tested releases) scope fixes for
+2.3.0–2.4.1 (the tested releases) scope fixes for
 [glob](https://github.com/advisories/GHSA-3g3m-2fjr-6pw4) and
 [minimatch](https://github.com/advisories/GHSA-g3hv-75wg-m249) to the SDK;
 old SDK caches prepared without those fixes are not reused. Deprecation
