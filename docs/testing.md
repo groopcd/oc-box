@@ -1978,6 +1978,13 @@ native executable may not sit inside the source. Runner and native executable
 hashes are recorded separately. Never edit the candidate or change native
 executables during a run.
 
+The runner defaults to exact native `2.2.6`. `--native-version 2.3.0`
+selects the separate exact `2.3.0` profile and must be paired with that
+executable. The focused recovery cases require observed `cancelled` work
+on `2.2.6`, but an actually held `running` job through the ordinary timeout
+and native-client shutdown on `2.3.0`. These profiles do not establish an
+external-host pass, and the same 42 baseline checks remain mandatory.
+
 Use a regular unprivileged host terminal, outside containers and shell sandboxes.
 Only fresh synthetic projects, config/history and a verified private rootless
 Podman store may be used. The existing global-vault fixture's selectors, boot,
@@ -2281,10 +2288,12 @@ the earlier lifecycle or interactive runs.
 
 `tools/test_interactive_podman.py` is a bounded **interactive-only** fixture, not
 another full vault/lifecycle acceptance run. Use an unprivileged host terminal,
-a clean full-history source checkout, explicit unmodified OpenCode 2.2.6 and an
-existing disk-backed work parent. Never run it inside oc-box or reuse completed
-fixture roots. No real project, operator credentials or vault unlock is needed:
-the owning start explicitly uses `--no-vault` and a synthetic `_API_KEY`.
+a clean full-history source checkout, explicit unmodified OpenCode 2.2.6 (the
+default profile), and an existing disk-backed work parent. Never run it inside
+oc-box or reuse completed fixture roots. No real project, operator credentials
+or vault unlock is needed: the owning start explicitly uses `--no-vault` and a
+synthetic `_API_KEY`. To run the separate exact 2.3.0 profile, supply its native
+executable and pass `--native-version 2.3.0` to both owner and secondary clients.
 
 ```bash
 python3 -B tools/test_interactive_podman.py start \
