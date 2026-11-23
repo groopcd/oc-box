@@ -160,7 +160,7 @@ class AccountIngressTests(unittest.TestCase):
         self.assertNotIn(challenge["challenge_id"], repr(response))
         self.assertEqual(self.translate_nonce.call_count, 2)
         self.translate_nonce.assert_called_with(ACCOUNT_NONCE)
-        self.assertEqual(self.owner.call_count, 2)
+        self.assertEqual(self.owner.call_count, 3)
         self.owner.assert_called_with(self.binding)
 
         with patch.object(self.sign_in, "finish", wraps=self.sign_in.finish) as finish:
@@ -188,6 +188,24 @@ class AccountIngressTests(unittest.TestCase):
         self.assertEqual(len(self.backend.starts), 2)
         self.assertEqual(len(self.backend.finishes), 1)
         self.pair_native.assert_not_called()
+
+    def test_owner_loss_during_handoff_issuance_never_returns_ticket(self):
+        challenge = json.loads(self.send().body)
+        handoff = self.sign_in._handoff
+        delegate = handoff.issue
+
+        def issue(*args, **kwargs):
+            ticket = delegate(*args, **kwargs)
+            self.owner.return_value = False
+            return ticket
+
+        with patch.object(handoff, "issue", side_effect=issue) as issuer:
+            self.assert_refused(self.finish(challenge["challenge_id"]))
+        issuer.assert_called_once()
+        self.pair_native.assert_not_called()
+        self.assertIsNone(
+            self.sign_in.admission.issue(self.binding, principal="in-scope")
+        )
 
     def test_raw_paths_and_methods_have_no_other_dispatch_or_fallback(self):
         for target in (
