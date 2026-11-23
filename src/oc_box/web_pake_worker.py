@@ -53,6 +53,10 @@ class PakeWorkerError(Exception):
         super().__init__("Web PAKE worker refused.")
 
 
+class PakeWorkerCleanupError(PakeWorkerError):
+    """A verifier may still be live; the caller must keep its teardown fence."""
+
+
 @dataclass(frozen=True, slots=True)
 class WorkerSizes:
     """Fixed `OCOP` v1 field widths from a trusted suite, not from the wire."""
@@ -276,6 +280,8 @@ class PakeWorker:
                 return attempt._begin(fd, frame), attempt
             finally:
                 _close_fd(fd)
+        except PakeWorkerCleanupError:
+            raise
         except (OSError, RuntimeError, ValueError, subprocess.SubprocessError):
             raise PakeWorkerError() from None
 
@@ -410,6 +416,8 @@ class PakeWorkerAttempt:
             finally:
                 if not pending:
                     self._cleanup(monotonic() + _REAP_BUDGET)
+                    if not self._released:
+                        raise PakeWorkerCleanupError() from None
 
     def finish(self, ke3: bytes) -> bool:
         """Consume the handle; true requires exact ACK, EOF and clean waitpid."""

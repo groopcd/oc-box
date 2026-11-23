@@ -47,16 +47,19 @@ class LocalPakeProfile:
     def start(
         self, *, setup, credential_identifier, context, registration, ke1, deadline
     ):
-        return self._worker.start(
-            setup=setup,
-            credential_identifier=_identifier(b"credential", credential_identifier),
-            client_identifier=_identifier(b"client", credential_identifier),
-            verifier_identifier=self._verifier,
-            context=context,
-            registration=registration,
-            ke1=ke1,
-            deadline=deadline,
-        )
+        try:
+            return self._worker.start(
+                setup=setup,
+                credential_identifier=_identifier(b"credential", credential_identifier),
+                client_identifier=_identifier(b"client", credential_identifier),
+                verifier_identifier=self._verifier,
+                context=context,
+                registration=registration,
+                ke1=ke1,
+                deadline=deadline,
+            )
+        except web_pake_worker.PakeWorkerCleanupError:
+            raise web_pake_flow.VerifierCleanupError from None
 
     def close(self):
         """Return False if the verifier teardown remains unconfirmed."""

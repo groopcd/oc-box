@@ -366,6 +366,15 @@ class PakeFlowTests(unittest.TestCase):
         self.assertIsNone(flow.admission.lookup(self.binding, previous))
         self.assertIsNone(self.start(flow))
 
+    def test_unconfirmed_failed_start_fences_existing_admission(self):
+        flow = self.flow()
+        previous = flow.admission.issue(self.binding, principal="existing-session")
+        with patch.object(self.backend, "start", side_effect=pake.VerifierCleanupError):
+            self.assertIsNone(self.start(flow))
+        self.assertTrue(flow.cleanup_failed)
+        self.assertIsNone(flow.admission.lookup(self.binding, previous))
+        self.assertIsNone(self.start(flow))
+
     def test_close_calls_discard_for_running_finish_and_late_start(self):
         flow = self.flow()
         challenge = self.start(flow)

@@ -29,6 +29,11 @@ else:
 
 MAX_MESSAGE_BYTES = 4096
 
+
+class VerifierCleanupError(Exception):
+    """The adapter could not confirm termination after a failed start."""
+
+
 # Canonical unpadded base64url for 32 bytes, including zero trailing pad bits.
 _TOKEN_BYTES = 32
 _TOKEN = re.compile(r"[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]")
@@ -254,11 +259,13 @@ class PakeFlow:
         except Exception:  # noqa: BLE001 - never grant access after failed verifier cleanup.
             confirmed = False
         if not confirmed:
-            with self._lock:
-                self._cleanup_failed = True
-            self._admission.close()
-            return False
+            self._fence_cleanup()
         return confirmed
+
+    def _fence_cleanup(self):
+        with self._lock:
+            self._cleanup_failed = True
+        self._admission.close()
 
     def _release(self, ident, exchange):
         try:
@@ -347,6 +354,9 @@ class PakeFlow:
                     ke1=request,
                     deadline=expires_at,
                 )
+            except VerifierCleanupError:
+                self._fence_cleanup()
+                return None
             except Exception:  # noqa: BLE001 - an adapter error is a uniform sign-in refusal.
                 return None
             if type(result) is not tuple or len(result) != 2:
