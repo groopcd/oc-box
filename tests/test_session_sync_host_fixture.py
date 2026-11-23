@@ -2276,6 +2276,15 @@ class SessionHistoryHostFixtureTests(unittest.TestCase):
         self.assertEqual(order[0], "isolate")
         self.assertEqual(len(order), 3)
 
+    def test_store_schema_refusal_uses_a_fixed_public_category(self):
+        error = type("FixtureError", (Exception,), {})
+        self.assertEqual(
+            runner.category(error("store-info-shape")), "store-info-shape"
+        )
+        self.assertEqual(
+            runner.category(error("store-info-shape /private/path")), "fixture-refusal"
+        )
+
     def test_failure_trace_reports_only_code_locations_never_messages(self):
         def inner():
             raise KeyError("private-sentinel-key")

@@ -432,27 +432,37 @@ class GlobalVaultHostFixtureTests(unittest.TestCase):
         with self.assertRaises(fixture.FixtureError):
             fixture.no_symlinks(target)
 
-    def test_audited_podman_614_info_without_configfile_requires_private_selector(self):
+    def test_only_audited_podman_omissions_are_accepted_with_private_selectors(self):
         self.complete_fixture_metadata()
         info = self.info()
-        info["version"] = {"Version": "6.1.4"}
         del info["store"]["configFile"]
         fixture.validate_fixture(self.root)
-        fixture.validate_store_info(self.root, info)
-        for version in (None, "6.1.5", "5.6.2"):
+        for version in ("6.1.4", "6.2.0"):
             with self.subTest(version=version):
+                audited = copy.deepcopy(info)
+                audited["version"] = {"Version": version}
+                fixture.validate_store_info(self.root, audited)
+                poisoned = copy.deepcopy(audited)
+                poisoned["store"]["configFile"] = str(self.parent / "unrelated.conf")
+                with self.assertRaisesRegex(fixture.FixtureError, "store-info-shape"):
+                    fixture.validate_store_info(self.root, poisoned)
+                for field in ("graphRoot", "runRoot", "volumePath", "imageCopyTmpDir"):
+                    with self.subTest(field=field):
+                        wrong_path = copy.deepcopy(audited)
+                        wrong_path["store"][field] = str(self.parent)
+                        with self.assertRaises(fixture.FixtureError):
+                            fixture.validate_store_info(self.root, wrong_path)
+        for version in (None, "6.1.5", "5.6.2", "6.2.1", "6.2.0-dev", ["6.2.0"]):
+            with self.subTest(unknown=version):
                 unknown = copy.deepcopy(info)
                 unknown["version"] = {} if version is None else {"Version": version}
-                with self.assertRaises(fixture.FixtureError):
+                with self.assertRaisesRegex(fixture.FixtureError, "store-info-shape"):
                     fixture.validate_store_info(self.root, unknown)
-        poisoned = copy.deepcopy(info)
-        poisoned["store"]["configFile"] = str(self.parent / "unrelated.conf")
-        with self.assertRaises(fixture.FixtureError):
-            fixture.validate_store_info(self.root, poisoned)
+        info["version"] = {"Version": "6.2.0"}
         wrapper = self.root / "bin/podman"
         wrapper.write_text("unrecognized fixture selector")
         with self.assertRaises(fixture.FixtureError):
-            fixture.validate_fixture(self.root)
+            fixture.validate_store_info(self.root, info)
 
     def test_restored_provenance_is_independent_of_uuid_directory_order(self):
         self.complete_fixture_metadata()

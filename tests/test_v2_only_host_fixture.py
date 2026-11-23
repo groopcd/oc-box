@@ -887,8 +887,13 @@ class V2OnlyHostFixtureTests(unittest.TestCase):
             del good["store"]["configFile"]
             with self.assertRaises(safety.FixtureError):
                 fixture.validate_store_info(root, good, root / "temporary")
-            good["version"]["Version"] = "6.1.4"
-            fixture.validate_store_info(root, good, root / "temporary")
+            for version in ("6.1.4", "6.2.0"):
+                with self.subTest(version=version):
+                    good["version"]["Version"] = version
+                    fixture.validate_store_info(root, good, root / "temporary")
+            good["version"]["Version"] = "6.2.1"
+            with self.assertRaisesRegex(safety.FixtureError, "store-info-shape"):
+                fixture.validate_store_info(root, good, root / "temporary")
 
     def test_stale_missing_invalid_boot_marker_refuses_all_retained_engine_commands(
         self,

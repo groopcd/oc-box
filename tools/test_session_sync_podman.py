@@ -136,6 +136,7 @@ CATEGORIES = frozenset(
         "interrupted",
         "operation-failed",
         "fixture-refusal",
+        "store-info-shape",
     )
 )
 SCOPE = (

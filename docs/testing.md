@@ -1992,6 +1992,13 @@ store, ownership and mount checks remain authoritative; a history-purpose marker
 and source-workspace allowlist add restrictions rather than bypassing them. Do
 not reuse a completed global-vault/lifecycle root for these cases.
 
+The private-store proof accepts a missing `store.configFile` only for the
+audited exact Podman `6.1.4` and `6.2.0` info schemas. It still checks the private
+selector/config bytes, rootless local engine, overlay, graphroot, runroot,
+volume path and image staging path. If a config path is reported it must match
+exactly, even on those versions. This schema check is not host acceptance; an
+unknown omission still refuses with `store-info-shape`.
+
 Required history cases cover actual paginated root/child/grandchild/fork/archived
 discovery and directory scope, independent archive provenance, parent-only
 replacement, missing-source retention and genuine refusal of untracked native

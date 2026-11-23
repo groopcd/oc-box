@@ -577,11 +577,7 @@ def validate_store_info(root, info, temporary):
             "store-info-shape",
         )
     else:
-        require(
-            info.get("version", {}).get("Version")
-            in safety.PODMAN_CONFIGFILE_OMISSIONS,
-            "store-info-shape",
-        )
+        require(safety.audited_podman_configfile_omission(info), "store-info-shape")
         validate_fixture(root, allow_unrecorded=True)
     temporary = safety.no_symlinks(temporary)
     info = temporary.stat()

@@ -70,7 +70,7 @@ from oc_box.version_info import get_version_info
 PREFIX = "oc-box-gv-host-"
 FORMAT = "oc-box-global-vault-host-acceptance"
 NATIVE_VERSION = DEFAULT_NATIVE_VERSION
-PODMAN_CONFIGFILE_OMISSIONS = frozenset({"6.1.4"})
+PODMAN_CONFIGFILE_OMISSIONS = frozenset({"6.1.4", "6.2.0"})
 PROJECTS = ("source-a", "source-b", "restored-full")
 KEY = "ACCEPTANCE_API_KEY"
 SIDE = "ACCEPTANCE_SIDE_SECRET"
@@ -702,6 +702,12 @@ def require_runtime_boot(root, *, allow_uninitialized=False):
     return checkpoint
 
 
+def audited_podman_configfile_omission(info):
+    version = info.get("version")
+    reported = version.get("Version") if isinstance(version, dict) else None
+    return isinstance(reported, str) and reported in PODMAN_CONFIGFILE_OMISSIONS
+
+
 def validate_store_info(root, info, temporary=None):
     """Independent native Podman proof; labels alone never authorize cleanup."""
     require(isinstance(info, dict), "private-store")
@@ -720,12 +726,13 @@ def validate_store_info(root, info, temporary=None):
         actual = store.get(field)
         require(isinstance(actual, str) and Path(actual) == expected, "private-store")
         require(no_symlinks(actual).resolve(strict=True) == expected, "private-store")
-    # Podman 5.6.2 exposes configFile. The separately audited v6.1.4
-    # libpod/define/info.go removes it; define/version.go reports Version with
-    # that exact capitalization. Only that verified omission is supported:
+    # Podman 5.6.2 exposes configFile. The audited v6.1.4 and v6.2.0
+    # StoreInfo structs omit it; define/version.go reports Version with
+    # that exact capitalization. Only these exact omissions are recognized:
     # https://github.com/containers/podman/blob/v6.1.4/libpod/define/info.go
-    # Unknown omissions fail closed. Exposed fields are ALWAYS validated, even
-    # for 6.1.4. This exception also revalidates the exact selector source,
+    # https://github.com/containers/podman/blob/v6.2.0/libpod/define/info.go
+    # Unknown omissions fail closed. Exposed fields are ALWAYS validated.
+    # This exception also revalidates the exact selector source,
     # native executable mapping and private config; it is not label-only proof.
     if "configFile" in store:
         config = store["configFile"]
@@ -735,12 +742,7 @@ def validate_store_info(root, info, temporary=None):
             "store-info-shape",
         )
     else:
-        version = info.get("version")
-        require(
-            isinstance(version, dict)
-            and version.get("Version") in PODMAN_CONFIGFILE_OMISSIONS,
-            "store-info-shape",
-        )
+        require(audited_podman_configfile_omission(info), "store-info-shape")
         validate_fixture(root, allow_unrecorded=True)
     temporary = no_symlinks(temporary or root / "temporary")
     info = temporary.stat()
