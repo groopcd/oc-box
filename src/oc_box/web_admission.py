@@ -60,10 +60,30 @@ class ConnectionUse:
 
     _cancel: Callable[[], None]
     _cancelled: Event = field(default_factory=Event, init=False)
+    _drained: Event = field(default_factory=Event, init=False)
 
     @property
     def cancelled(self) -> bool:
         return self._cancelled.is_set()
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class BrowserRevocation:
+    """Distinguish revoked authority from completion of transport cleanup."""
+
+    revoked: bool
+    _uses: tuple[ConnectionUse, ...]
+    _callbacks_ok: bool
+
+    def wait_drained(self, timeout: float = 5.0) -> bool:
+        if type(timeout) not in (int, float) or not 0 <= timeout <= 30:
+            raise ValueError("Invalid web revocation deadline.")
+        if not self.revoked or not self._callbacks_ok:
+            return False
+        deadline = monotonic() + timeout
+        return all(
+            use._drained.wait(max(0.0, deadline - monotonic())) for use in self._uses
+        )
 
 
 @dataclass(slots=True)
@@ -147,6 +167,7 @@ class BrowserAdmission:
         return pending
 
     def _notify(self, pending):
+        delivered = True
         for connection in pending:
             try:
                 connection._cancel()
@@ -154,6 +175,8 @@ class BrowserAdmission:
                 # Do not skip peers, retain raw errors, or undo revocation.
                 with self._lock:
                     self._cancellation_failed = True
+                delivered = False
+        return delivered
 
     @property
     def cancellation_failed(self) -> bool:
@@ -263,18 +286,24 @@ class BrowserAdmission:
                     entry.connections.discard(use)
                     # A cancelled use still consumes capacity until it exits.
                     self._in_use -= 1
+                    use._drained.set()
 
     def revoke(self, binding: WebBinding, session: BrowserSession) -> bool:
         """Revoke exactly the looked-up session, not other sign-ins."""
+        return self.begin_revocation(binding, session).revoked
+
+    def begin_revocation(self, binding, session) -> BrowserRevocation:
+        """Revoke now; a caller outside the revoked uses may await their exit."""
         if not self._matches(binding):
-            return False
+            return BrowserRevocation(False, (), False)
         with self._lock:
-            pending = self._expired(monotonic())
+            expired = self._expired(monotonic())
+            pending = []
             revoked = self._entry(session) is not None
             if revoked:
                 self._retire(session._token, pending)
-        self._notify(pending)
-        return revoked
+        self._notify(expired)
+        return BrowserRevocation(revoked, tuple(pending), self._notify(pending))
 
     def expire(self) -> None:
         """Revoke expired sessions and notify their registered connections."""

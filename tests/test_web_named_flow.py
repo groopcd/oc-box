@@ -70,19 +70,20 @@ class NamedCompositionTests(unittest.TestCase):
 
         with ExitStack() as stack:
             cancel_first, cancel_second = Mock(), Mock()
-            first_use = stack.enter_context(
-                flow.admission.connection(
-                    case.binding, first_session, cancel=cancel_first
-                )
-            )
             second_use = stack.enter_context(
                 flow.admission.connection(
                     case.binding, second_session, cancel=cancel_second
                 )
             )
-            self.assertTrue(flow.admission.revoke(case.binding, first_session))
-            self.assertTrue(first_use.cancelled)
-            self.assertFalse(second_use.cancelled)
+            with flow.admission.connection(
+                case.binding, first_session, cancel=cancel_first
+            ) as first_use:
+                logout = flow.admission.begin_revocation(case.binding, first_session)
+                self.assertTrue(logout.revoked)
+                self.assertTrue(first_use.cancelled)
+                self.assertFalse(second_use.cancelled)
+                self.assertFalse(logout.wait_drained(0))
+            self.assertTrue(logout.wait_drained(0))
             cancel_first.assert_called_once_with()
             cancel_second.assert_not_called()
             with flow.admission.connection(

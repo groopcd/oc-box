@@ -114,6 +114,22 @@ class WebAdmissionTests(unittest.TestCase):
         registry.close()
         self.assertCountEqual(cancelled, [0, 1])
 
+    def test_revocation_does_not_report_drained_after_a_failed_callback(self):
+        registry = self.registry()
+        _, session = self.sign_in(registry)
+
+        def failed_cancel():
+            raise OSError("synthetic transport cleanup")
+
+        with registry.connection(self.binding, session, cancel=failed_cancel) as use:
+            result = registry.begin_revocation(self.binding, session)
+            self.assertTrue(result.revoked)
+            self.assertTrue(use.cancelled)
+        self.assertFalse(result.wait_drained(0))
+        self.assertTrue(registry.cancellation_failed)
+        with registry.connection(self.binding, session, cancel=failed_cancel) as use:
+            self.assertIsNone(use)
+
     def test_expiry_is_absolute_monotonic_and_cancels_idle_connections(self):
         registry = self.registry(session_ttl=10, max_sessions=2)
         token, session = self.sign_in(registry)
