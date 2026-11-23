@@ -29,12 +29,12 @@ read-only sample data. [Read the TUI guide](docs/tui.md#tui-guide).*
 
 <!-- /readme-hero -->
 
-![Firefox screenshot of the oc-box Dashboard tab showing workspace status, open TUI sessions, and a native OpenCode conversation with synthetic data](docs/assets/readme-web-interface.png)
+![Studio view of the offline oc-box browser redesign, with synthetic sessions, chat, and a workspace inspector](docs/assets/readme-web-studio-demo.png)
 
-*The browser **Dashboard** tab, captured in Firefox with a synthetic
-workspace and native OpenCode conversation.
-[Dashboard guide](docs/guides/clients.md#switch-to-dashboard) ·
-[Capture details](docs/assets/readme-web-interface.md).*
+*The Studio view in the offline browser redesign demo, with synthetic data.
+This is a design preview, not the live `oc-box web` interface.
+[Try the offline demo](docs/mockups/README.md) ·
+[See the live Dashboard capture](docs/assets/readme-web-interface.md).*
 
 ## Why oc-box?
 
