@@ -76,8 +76,9 @@ not a deprecated feature that can be removed from the regression suite.
 ### Current OpenCode npm upgrade and advisories
 
 The reusable source CI runs `tests/smoke_runtime_upgrade_v2.py` in addition
-to the pinned integration and 2.3 history suites. It installs OpenCode
-2.3.0, upgrades the same private npm global prefix, and runs owning
+to the pinned integration and 2.3 history suites. It checks cold `2.2.6`
+owning preparation and warm reuse, then installs OpenCode 2.3.0, upgrades the
+same private npm global prefix, and runs owning
 preparation against 2.4.0 and the latest stable 2.x resolved by npm (once
 if they match). It checks that a synthetic session survives, the required
 Build plugin becomes active, and a second launch does not reinstall the CLI
@@ -97,6 +98,9 @@ the old copied lock, so other ranges in a custom profile can also re-resolve.
 For these releases, the launcher resolves the lock without package scripts
 and checks for the two affected ranges locally before `npm ci`; it refuses a
 resolution that reintroduces an affected version, even via a custom override.
+Managed resolution and `npm ci` use the same shallow layout: npm 10 can
+otherwise hoist scoped overrides into a lockfile that its own `ci` rejects.
+The unmanaged install path keeps npm's ordinary strategy.
 The CI audit does not inspect dependencies
 bundled inside upstream executables, distro packages, or private/user plugin
 and MCP dependency graphs; no private dependency names are sent to npm audit.

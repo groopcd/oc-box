@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""Exercise owning preparation across a real npm upgrade, without Podman."""
+"""Exercise cold and upgrade owning preparation with real npm, without Podman."""
 
+import argparse
 import json
 import os
 from pathlib import Path
@@ -15,6 +16,7 @@ from oc_box import oc_box as box, opencode_v2_io as bridge
 
 
 OLD = "2.3.0"
+COLD_REGRESSION = "2.2.6"
 REGRESSION = "2.4.0"
 ENV_KEY = "OC_BOX_UPGRADE_FIXTURE_API_KEY"
 
@@ -25,7 +27,7 @@ def npm(*args, **kwargs):
     )
 
 
-def smoke(version, parent, network):
+def smoke(version, parent, network, *, initial=OLD):
     with tempfile.TemporaryDirectory(prefix="native-upgrade-", dir=parent) as directory:
         root = Path(directory)
         prefix = root / "runtime"
@@ -38,7 +40,7 @@ def smoke(version, parent, network):
             "id": "native-upgrade-fixture",
             "project": str(project),
             "home": str(home),
-            "opencode_version": OLD,
+            "opencode_version": initial,
             "credentials": {"mode": "env", "env": [], "vault": []},
         }
         registry = root / "workspace.json"
@@ -132,28 +134,40 @@ def smoke(version, parent, network):
                     "PATH": os.environ["PATH"],
                     "OPENCODE_DISABLE_MODELS_FETCH": "1",
                 }
-                with patch.dict(os.environ, env, clear=True), bridge.server(
-                    str(binary)
-                ) as request:
+                with (
+                    patch.dict(os.environ, env, clear=True),
+                    bridge.server(str(binary)) as request,
+                ):
                     return request(method, route, payload)["data"]
             finally:
                 os.chdir(cwd)
 
         with (
-            patch.dict(os.environ, {
-                "PATH": f"{binary.parent}:{os.environ['PATH']}", ENV_KEY: "synthetic",
-            }),
+            patch.dict(
+                os.environ,
+                {
+                    "PATH": f"{binary.parent}:{os.environ['PATH']}",
+                    ENV_KEY: "synthetic",
+                },
+            ),
             patch.object(box, "CONTAINER_OPENCODE", str(binary)),
             patch.object(box, "exec_command", side_effect=execute_inside),
         ):
-            print(f"Preparing OpenCode {OLD}, then upgrading in place to {version}.",
-                  flush=True)
-            box.prepare_runtime(registry, data, OLD)
-            verify_audited_lock(OLD)
+            print(f"Preparing OpenCode {initial} for target {version}.", flush=True)
+            box.prepare_runtime(registry, data, initial)
+            verify_audited_lock(initial)
+            if version == initial:
+                box.prepare_runtime(registry, data, version)
+                assert installs == ["cli", "sdk"], installs
+                verify_audited_lock(version)
+                verify_lease()
+                print(f"PASS: {version} cold SDK install and warm reuse.", flush=True)
+                return
             verify_lease()
             title = "Synthetic pre-upgrade session"
             session = native_session(
-                "POST", "/api/session",
+                "POST",
+                "/api/session",
                 {"title": title, "location": {"directory": str(project)}},
             )["id"]
             data["opencode_version"] = version
@@ -166,13 +180,16 @@ def smoke(version, parent, network):
             verify_audited_lock(version)
             verify_lease()
             print(
-                f"PASS: {OLD} -> {version}, retained session, Build plugin, "
+                f"PASS: {initial} -> {version}, retained session, Build plugin, "
                 "audited SDK and warm cache.",
                 flush=True,
             )
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--cold-only", action="store_true")
+    args = parser.parse_args()
     network = {
         key: value
         for key, value in os.environ.items()
@@ -189,9 +206,16 @@ if __name__ == "__main__":
         ):
             subprocess.run(["node", "--version"], check=True, timeout=15)
             npm("--version")
+            smoke(COLD_REGRESSION, root, network, initial=COLD_REGRESSION)
+            if args.cold_only:
+                raise SystemExit(0)
             releases = json.loads(
                 npm(
-                    "view", "@opencode/cli@2", "version", "--json", text=True,
+                    "view",
+                    "@opencode/cli@2",
+                    "version",
+                    "--json",
+                    text=True,
                     stdout=subprocess.PIPE,
                 ).stdout
             )
