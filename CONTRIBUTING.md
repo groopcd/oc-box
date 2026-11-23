@@ -32,7 +32,8 @@ uv run --no-project --with-editable . --with cryptography python -B -m unittest 
 
 ---
 
-Use the full Git history: the development identity is `1.7.N.dev0+gHASH`, with N the
+Use the full Git history: development uses `1.9.N.dev0+gHASH`, and stable
+uses `1.8.N+gHASH`, with N the
 commit count minus the 1.0.0 baseline (29). Keep the absolute `commit_count` in
 metadata for upgrade compatibility with 0.1/1.0/1.5/1.6 releases. The 1.7 manager
 and sharing series preserves that patch-count baseline, just as 1.5 and 1.6 did. Changes should keep
@@ -399,15 +400,16 @@ from the sdist to verify that it works without Git. Do not publish a dirty
 working tree.
 
 PyPI rejects local `+gHASH` version suffixes: the development distribution version
-is `1.7.N.dev0` from full-history commit count minus `VERSION_BASE_COMMIT_COUNT`,
-and packaged `build-info.json` keeps `1.7.N.dev0+gHASH` plus the full commit and
+is `1.9.N.dev0` from full-history commit count minus `VERSION_BASE_COMMIT_COUNT`.
+Stable uses `1.8.N`. Packaged `build-info.json` keeps the corresponding local
+`+gHASH` identity plus the full commit and
 absolute commit count. The original stable release has count 29 and version 1.0.0; every
 subsequent commit advances the patch automatically. Version calculation rejects
 shallow history. The 1.5, 1.6 and 1.7 series keep that baseline; a first published patch
 need not be zero. Embedded older series retain their identity until upgrade.
 Fast-forward the validated development release into `devel`, not `master`, so
 merging does not add an extra version increment. Stable final releases remain on
-`master`; no stable 1.7 integration is authorized by development publication.
+`master`; an approved development publication is not stable approval.
 Each selected release needs a unique version; ordinary commits remain on GitHub
 without requiring a PyPI upload.
 
@@ -426,12 +428,12 @@ configure the matching publisher; pending publishers do not reserve names.
 
 First run the guarded workflow with its `publish` input false to verify a
 build-only run, including isolated checks with `--with-vault --with-tui`.
-Development publication requires a matching `v1.7.N.dev0` GitHub **prerelease**,
+Development publication requires a matching `v1.9.N.dev0` GitHub **prerelease**,
 public `.dev0` package and validated source on `devel`. Stable final releases
 require final versions and the stable branch. The workflow must bind/recheck the
 clean source, version, tag, branch and exact wheel/sdist identities, including
 existing release-asset checksums. A GitHub prerelease must not upload a regular
-`1.7.N` package; manual `publish=true` is not a bypass of those guards or approval.
+final package; manual `publish=true` is not a bypass of those guards or approval.
 Only one upload is authorized for the chosen release, not competing manual and
 release-triggered uploads. Environment protection rules may require owner
 approval. Do not publish from untrusted pull requests.

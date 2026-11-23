@@ -13,29 +13,27 @@ as oc-box 1.6/1.7 below identify launcher releases, not the OpenCode major.
 | Question | Read |
 | --- | --- |
 | Which release/channel should I install? | [Update channels](update-channels.md) |
-| How will the stable and development series split? | [Stable 1.8 / development 1.9 plan](plans/stable-1.8-devel-1.9.md) |
-| What does the experimental development series add? | [1.7 release notes](releases/1.7.md) |
-| What remains unaccepted in the dashboard? | [Manager limitations](releases/tui-v1.md) |
+| What changed for stable and development users? | [Stable 1.8 / development 1.9 release guide](releases/1.8-1.9.md) |
+| Which dashboard observations are current or historical? | [Current validation scope](releases/1.8-1.9.md#validation-scope) · [Earlier manager record](releases/tui-v1.md) |
 | Which source/native version passed a test? | [Testing evidence](testing.md) |
 | How do I reproduce checks safely? | [Contributing](../CONTRIBUTING.md) and [test strategy](testing.md) |
 
-## Current development limitations
+## Current release boundaries
 
 The 1.7 development series introduced the optional card dashboard, native TUI
 image/PDF imports, shared web tabs and optional browser attachments, live
-host-file tools and guarded exit-history recovery. The 1.9 source line continues
-that work. The initial 1.8 stable and 1.9 development releases are planned to
-share the full feature set, with tested bug and security fixes backported from
-1.9 to 1.8 after the split. This is a release plan, not a publication or
-acceptance claim. Merged changes are not automatically present in an
-already-published release. Stable remains the default channel.
+host-file tools and guarded exit-history recovery. The initial 1.8 stable
+and 1.9 development releases share those features and the opt-in browser
+workspace layout. The [release guide](releases/1.8-1.9.md) distinguishes new
+stable features from changes to the earlier devel line. Stable remains the
+default channel. Changes on branch HEAD do not update a published package.
 
 Experimental publication does **not** complete unfinished validation. In the
-retained manager observations, full restore returned zero but its later
-integrity verifier refused `manifest`. Portable UI/storage completion and final
-preservation/journal checks remain unaccepted. Final combined-browser acceptance
-also remains separately scoped. See [the complete release boundaries](releases/1.7.md);
-do not infer acceptance from the presence of a feature or a zero exit alone.
+retained 1.7 manager observations, full restore returned zero but its later
+integrity verifier refused `manifest`. Portable UI/storage and combined
+browser-attachment gaps remain part of that earlier evidence record. The
+current pairing/layout checks are a different scope, not a retroactive pass.
+See [the earlier limitations](releases/1.7.md#known-acceptance-limitations).
 
 The retained native 2.3.0 recovery host attempt on `631d317` remains **FAILED,
 20/29 checks**. Later informational observations do not retroactively complete
@@ -44,8 +42,8 @@ the [formal evidence boundary](testing.md#focused-external-host-evidence-formal-
 
 Offline unit/native/process tests do not establish live rootless-Podman
 isolation, real-provider behavior, every distro/runtime/device combination or
-security certification. Each release must meet its
-[final-source gates](releases/1.7.md#final-candidate-and-publication-gates).
+security certification. Each release must meet the applicable
+[publication gates](../CONTRIBUTING.md#release-gate-and-publication-checklist).
 
 ## Historical observations retained from the project overview
 
@@ -89,8 +87,8 @@ Runtime code lives in `src/oc_box/`; tests/tools/docs remain in their convention
 top-level directories. Root installer/build entrypoints remain for compatibility.
 See [source development](../CONTRIBUTING.md#source-layout) for commands.
 
-Current development source uses `1.9.N.dev0+gHASH`; the planned stable `1.8.N`
-release has no `.dev0`. These series retain the original 1.0.0 baseline: N is
+Current development source uses `1.9.N.dev0+gHASH`; stable `1.8.N+gHASH`
+has no `.dev0`. These series retain the original 1.0.0 baseline: N is
 the full-history commit count minus 29. Installed copies retain their original
 source identity until upgraded or reinstalled. A new series number alone does
 not require a workspace reset or history migration.

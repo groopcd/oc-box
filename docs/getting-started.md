@@ -24,13 +24,13 @@ not with sudo or from inside another oc-box workspace.
 **First installation — recommended GitHub path with vault and TUI:**
 
 ```sh
-curl -fsSL --proto '=https' --tlsv1.2 https://raw.githubusercontent.com/groopcd/oc-box/master/install.sh | sh -s -- --devel --with-vault --with-tui
+curl -fsSL --proto '=https' --tlsv1.2 https://raw.githubusercontent.com/groopcd/oc-box/master/install.sh | sh -s -- --stable --with-vault --with-tui
 oc-box --version
 oc-box doctor
 ```
 
-This explicitly selects a **published development release**, because stable
-does not yet include the dashboard. Dependencies stay private to the GitHub
+This explicitly selects a **published stable release**. Stable `1.8` includes
+the optional dashboard, as does development `1.9`. Dependencies stay private to the GitHub
 installation. This does not initialize or unlock a vault, change credential
 policy, launch the dashboard or start a workspace. The command downloads and
 runs the public installer; review it first if preferred.
@@ -38,10 +38,10 @@ runs the public installer; review it first if preferred.
 **Already installed?** Use the existing installation, without rerunning curl:
 
 ```sh
-oc-box upgrade --devel --vault --tui  # Add both extras and select development
+oc-box upgrade --vault --tui  # Add both extras on the saved channel
 # Or request either extra independently:
-oc-box upgrade --devel --vault
-oc-box upgrade --devel --tui
+oc-box upgrade --vault
+oc-box upgrade --tui
 ```
 
 These upgrade flags require a launcher release that supports them and a
@@ -52,7 +52,7 @@ removed, the same release can gain extras, and repeating a satisfied request is
 a no-op. The command uses the verified existing installation owner; it does not
 create a second copy.
 
-For stable without the dashboard or Python-tool installations, see
+For installations without the dashboard or Python-tool installs, see
 [installation alternatives](installation.md). Genuinely pre-channel launchers
 have a separate [bootstrap compatibility route](update-channels.md#bootstrap-and-older-installations).
 
@@ -134,8 +134,24 @@ oc-box --status --project ~/devel/demo
 Status does not start or stop containers. Expensive storage scans and native
 session connections have separate explicit actions.
 
+## 5. Open another view of a running V2 workspace
+
+From another host terminal you can try the opt-in browser layout or the
+optional Textual dashboard:
+
+```sh
+oc-box web --project ~/devel/demo --workspace-layout
+oc-box tui --project ~/devel/demo --read-only
+```
+
+Keep the browser's one-use pairing link private. It grants access to the
+workspace over localhost only. Close the foreground web command when done.
+The [client guide](guides/clients.md) explains the separate owner, browser,
+dashboard, and native session-shell lifetimes.
+
 ## Next steps
 
+- [See what's new in stable 1.8 and development 1.9](releases/1.8-1.9.md).
 - [Manage workspaces](guides/workspaces.md): new conversations, imports, reset,
   repair, resources and deletion boundaries.
 - [Back up before changing environments](guides/backups.md).

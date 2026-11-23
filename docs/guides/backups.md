@@ -67,7 +67,8 @@ Deleting a backup does not revoke those credentials.**
 
 ## Move a workspace and its host settings
 
-On `devel`, add `--host` to a full workspace backup. If you rely on saved
+In stable `1.8` or development `1.9`, add `--host` to explicitly include
+host settings in a workspace backup. If you rely on saved
 OpenCode V2 provider or MCP logins, pipe in the native credential export:
 
 ```sh

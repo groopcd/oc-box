@@ -33,9 +33,9 @@ manager, not a completed test-execution report.
 Check `oc-box tui --help` in the installed build for availability; previously
 published packages need not include it. Demo/headless checks and native offline
 fixtures do not establish interactive host or rootless-Podman acceptance.
-See the [known acceptance limitations](releases/1.7.md#known-acceptance-limitations)
-and [manager release notes](releases/tui-v1.md) for retained observations,
-unfinished restore/storage checks and the separate stable-promotion gate.
+See the [current source-qualified evidence](releases/1.8-1.9.md#validation-scope)
+and [historical manager record](releases/tui-v1.md) for the separate scopes
+of operator observations, scripted checks, and retained limitations.
 
 ## Design and scope
 
@@ -67,22 +67,24 @@ extension to the workspace owner's service.
 
 ## Installation
 
-After a development package has been published, explicitly allow prereleases and
-opt in to its dependencies through an isolated tool installation:
+For stable `1.8`, opt into the dashboard dependencies through an isolated
+tool installation:
 
 ```sh
-uv tool install --prerelease allow 'oc-box[tui]'
+uv tool install 'oc-box[tui]'
 # Or:
-pipx install --pip-args='--pre' 'oc-box[tui]'
+pipx install 'oc-box[tui]'
 ```
 
+To select development in an isolated first install, explicitly allow
+prereleases, for example `uv tool install --prerelease allow 'oc-box[tui]'`.
 To include the independent vault extra too, use `'oc-box[tui,vault]'`. For an
-existing installation, use a launcher release supporting upgrade extras:
+existing installation, add extras on your saved channel:
 
 ```sh
-oc-box upgrade --devel --tui
+oc-box upgrade --tui
 # Or add both independent extras:
-oc-box upgrade --devel --vault --tui
+oc-box upgrade --vault --tui
 ```
 
 These commands work from stable or development. Verified uv/pipx owners receive
@@ -95,14 +97,14 @@ vault initialization/unlock or dashboard launch.
 For the channel-aware GitHub bootstrap:
 
 ```sh
-sh install.sh --devel --with-tui
+sh install.sh --stable --with-tui
 # Or enable both optional features:
-sh install.sh --devel --with-vault --with-tui
+sh install.sh --stable --with-vault --with-tui
 ```
 
 Review the downloaded `install.sh` before running it. The equivalent piped
-bootstrap suffix is `sh -s -- --devel --with-tui`, or
-`sh -s -- --devel --with-vault --with-tui`. GitHub installations keep these optional
+bootstrap suffix is `sh -s -- --stable --with-tui`, or
+`sh -s -- --stable --with-vault --with-tui`. GitHub installations keep these optional
 dependencies in the private immutable release, retain the opt-in across GitHub
 updates, and leave running releases pinned to their original copy. No system or
 user-site pip installation is needed. Normal non-TUI CLI operation retains its
@@ -111,12 +113,12 @@ stdlib-only baseline; the UI dependencies are optional, not prerequisites for
 
 ### Missing TUI dependencies after a GitHub upgrade
 
-Selecting `oc-box upgrade --devel` alone does not request the TUI extra for the
+Selecting a channel alone does not request the TUI extra for the
 first time. If `oc-box tui` reports “Optional TUI dependencies are missing”,
 add it on the host as your regular user with a supporting launcher:
 
 ```sh
-oc-box upgrade --devel --tui
+oc-box upgrade --tui
 oc-box tui
 ```
 
@@ -130,10 +132,9 @@ An explicit TUI request against an older stable `1.6` target refuses; an inherit
 TUI preference is retained for any later supporting release. See the
 [channel-switch troubleshooting](update-channels.md#enable-the-dashboard-after-a-github-channel-switch).
 
-These installation examples explicitly select development. For stable `1.8`
-targets, use `oc-box upgrade --stable --tui` or the stable bootstrap with
-`--with-tui`; do not enable prereleases for a stable Python installation.
-Older channel-aware launchers must
+For an explicit channel switch, use `oc-box upgrade --stable --tui` or
+`oc-box upgrade --devel --tui` with a supporting target. Use `--devel` on
+the bootstrap only if you deliberately want a prerelease. Older channel-aware launchers must
 upgrade normally to a published release supporting the extras flags first;
 branch HEAD is not automatically published. Genuinely pre-channel 1.7 launchers
 retain their exceptional bootstrap route; see
@@ -829,7 +830,7 @@ Backup file paths and decrypted transcript text never enter the activity journal
 
 ## Stable-release validation gate
 
-The development release is explicitly experimental. A full UI restore returned
+In the earlier `1.7` development acceptance, a full UI restore returned
 0, but its later integrity verifier refused `manifest`; full restored integrity
 remains unaccepted. The intentional extraction-root mode change 0755 to 0700
 does not prove all-entry equality or the sole failure cause. Portable UI was not
@@ -842,7 +843,9 @@ with native 1.19.5/2.2.6. It is not a completed UI gate and is not to be replaye
 for documentation. Prior source-qualified results are not exact-source passes
 for the channel-integrated successor.
 
-This document describes the manager contract, not completed stable acceptance.
+The [1.8/1.9 release guide](releases/1.8-1.9.md#validation-scope) records newer
+focused operator work separately. This page describes the manager contract,
+not independent proof of a release's acceptance.
 Its bounded implementation/validation layers are:
 
 1. Transport-free session domain, private favorites and fixed-category logging.

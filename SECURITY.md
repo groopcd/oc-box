@@ -128,11 +128,11 @@ Unit/process/native tests are not rootless-Podman or interactive host acceptance
 The earlier exact `5573965` candidate has 37 reviewed scripted external-host
 sharing checks with native 2.2.6, including nested mounts and enforcing SELinux
 with source labels unchanged. That scope is not a security certification or
-acceptance of every later source/native version. The owner approved experimental
-development publication with the separate dashboard acceptance limitations
-disclosed, not a stable manager pass. See
-[the source-qualified evidence](docs/testing.md#reviewed-5573965-candidate-evidence)
-and [known limitations](docs/releases/1.7.md#known-acceptance-limitations).
+acceptance of every later source/native version. That earlier experimental
+publication was not a stable manager pass. Current stable and development
+evidence is recorded separately in the [1.8/1.9 release guide](docs/releases/1.8-1.9.md#validation-scope).
+See the [earlier source-qualified evidence](docs/testing.md#reviewed-5573965-candidate-evidence)
+and [historical limitations](docs/releases/1.7.md#known-acceptance-limitations).
 
 ## Explicit host-image attachments
 

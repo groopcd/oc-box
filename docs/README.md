@@ -20,7 +20,7 @@ security/reference material and historical reports still describe both lines.
 > **Choose the right release:** stable is the default. The initial `1.8` and
 > `1.9` releases share their features, but older stable releases do not include
 > all of them. Documentation at branch HEAD may describe unpublished changes.
-> Read [update channels](update-channels.md) and the [release plan](plans/stable-1.8-devel-1.9.md).
+> Read [what changed in 1.8 and 1.9](releases/1.8-1.9.md) and [update channels](update-channels.md).
 
 ## Start here
 
@@ -94,7 +94,8 @@ the compatibility guide retains migration/downgrade comparisons.
 | Developer setup, checks, packaging and contribution workflow | [Contributing](../CONTRIBUTING.md) |
 | Current test strategy and historical source-scoped evidence | [Testing](testing.md) |
 | Understand what is and is not accepted | [Project status](project-status.md) |
-| Initial stable/development feature parity and release gates | [1.8/1.9 release plan](plans/stable-1.8-devel-1.9.md) · [Historical 1.7 notes](releases/1.7.md) |
+| Current features, changes, and acceptance scope | [Stable 1.8 and development 1.9](releases/1.8-1.9.md) |
+| Initial release plan and earlier development evidence | [1.8/1.9 release plan](plans/stable-1.8-devel-1.9.md) · [Historical 1.7 notes](releases/1.7.md) |
 | Dashboard-specific limitations and outstanding validation | [Manager release notes](releases/tui-v1.md) |
 | Distribution channel publication policy | [Channel guide](update-channels.md#publication-policy) |
 | Maintainer announcement workflow | [Release announcements](release-announcements.md) |
