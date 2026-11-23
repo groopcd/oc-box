@@ -375,6 +375,10 @@ fi
                 self.assertEqual(self.complete(command, "--no-host-c"), [])
 
     def test_workspace_preferences_have_context_specific_values(self):
+        self.assertEqual(
+            self.complete("preferences", "--startup-logo", ""), ["ascii", "graphics"]
+        )
+        self.assertEqual(self.complete("start", "--startup-l"), [])
         self.assertEqual(self.complete("preferences", "--host-drop", ""), ["on", "off"])
         self.assertEqual(
             self.complete("preferences", "--host-drop", "o"), ["on", "off"]

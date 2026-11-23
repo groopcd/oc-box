@@ -31,6 +31,8 @@ import time
 DEFAULT_HOST_DROP = True
 DEFAULT_HOST_CLIPBOARD = False
 DEFAULT_HOST_CLIPBOARD_SYMLINKS = True
+DEFAULT_STARTUP_LOGO = "ascii"
+STARTUP_LOGOS = ("ascii", "graphics")
 FILE_NAME = "ui-preferences.json"
 LOCK_NAME = ".ui-preferences.lock"
 MAX_BYTES = 16 * 1024
@@ -51,6 +53,7 @@ INVALID_VALUE = "Host drop preference must be a boolean."
 INVALID_CLIPBOARD_VALUE = "Host clipboard preferences must be booleans."
 INVALID_HOST_FILE_OPEN = "Host file open preference must be a boolean."
 INVALID_IMAGE_PREVIEW = "Image preview preference must be a boolean."
+INVALID_STARTUP_LOGO = "Startup logo preference must be ascii or graphics."
 UNSAFE_STORAGE = "Workspace preference storage is unsafe or unavailable."
 BUSY = "Workspace preferences are busy; retry the command."
 SAVE_UNVERIFIED = "Workspace preference saving could not be verified; read preferences before retrying."
@@ -361,6 +364,7 @@ def _preferences(directory):
         or value["version"] != 1
         or value.get("workspace") != directory.workspace_id
         or type(value.get("host_drop")) is not bool
+        or ("startup_logo" in value and value["startup_logo"] not in STARTUP_LOGOS)
         or any(
             name in value and type(value[name]) is not bool
             for name in (
@@ -551,6 +555,7 @@ def set_preferences(
     host_clipboard_symlinks=None,
     host_file_open=None,
     image_preview=None,
+    startup_logo=None,
 ):
     """Atomically save explicit choices, preserving other fields under the lock."""
     updates = {}
@@ -565,6 +570,10 @@ def set_preferences(
             if type(value) is not bool:
                 raise PreferenceError(invalid)
             updates[name] = value
+    if startup_logo is not None:
+        if startup_logo not in STARTUP_LOGOS:
+            raise PreferenceError(INVALID_STARTUP_LOGO)
+        updates["startup_logo"] = startup_logo
     with _directory(workspace_path, workspace_id) as directory:
         # Refuse pre-existing unsafe/corrupt state before creating even the lock.
         initial, _ = _preferences(directory)
@@ -623,6 +632,12 @@ def parser():
         help="save the future-client Ctrl-click host opening preference (otherwise inherit the installation default)",
     )
     result.add_argument(
+        "--startup-logo",
+        choices=STARTUP_LOGOS,
+        metavar="ascii|graphics",
+        help="save the startup logo for future native TUI clients (default: ascii; graphics falls back to ASCII on unsupported terminals)",
+    )
+    result.add_argument(
         "--image-preview",
         choices=("on", "off"),
         metavar="on|off",
@@ -674,6 +689,11 @@ def _table(value, source, changed):
                 "enabled" if value.get("image_preview", False) else "disabled",
                 "saved" if "image_preview" in value else "default",
             ),
+            (
+                "Startup logo",
+                value.get("startup_logo", DEFAULT_STARTUP_LOGO),
+                "saved" if "startup_logo" in value else "default",
+            ),
         ),
     )
     scope = {
@@ -715,6 +735,8 @@ def cli(box, args):
             )
             if getattr(args, name) is not None
         }
+        if args.startup_logo is not None:
+            updates["startup_logo"] = args.startup_logo
         changed = bool(updates)
         value = (
             set_preferences(path, data["id"], **updates)
@@ -737,7 +759,7 @@ def cli(box, args):
         # fields in the established JSON shape for existing preferences.
         projected.update(
             (name, value[name])
-            for name in ("host_file_open", "image_preview")
+            for name in ("host_file_open", "image_preview", "startup_logo")
             if name in value
         )
         if changed:
@@ -762,6 +784,8 @@ def cli(box, args):
                     + " preference: "
                     + ("enabled." if updates[name] else "disabled.")
                 )
+        if "startup_logo" in updates:
+            print(f"Saved startup logo preference: {updates['startup_logo']}.")
         print("Applies to future TUI clients; current clients keep their setting.")
         if "image_preview" in updates:
             print(
@@ -800,4 +824,7 @@ def cli(box, args):
             )
         else:
             print("Host file open preference: inherit (installation policy).")
+        logo = value.get("startup_logo", DEFAULT_STARTUP_LOGO)
+        logo_source = "saved" if "startup_logo" in value else "default"
+        print(f"Startup logo preference: {logo} ({logo_source}).")
     return 0

@@ -1377,6 +1377,40 @@ class WorkspacePreferenceCliTests(_WorkspaceFixture):
         self.assertEqual([call[0] for call in box.calls], ["find_workspace"])
         self.assertFalse(preferences.enabled(self.path, WORKSPACE))
 
+    def test_startup_logo_is_saved_without_terminal_discovery_or_runtime_work(self):
+        box = self.box()
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("sys.stdin.isatty", side_effect=AssertionError("TTY queried")),
+        ):
+            default = self.invoke(box, "--table")
+            self.assertRegex(default, r"Startup logo[^\n]*ascii[^\n]*default")
+            self.assertFalse(self.file.exists())
+            for style in ("graphics", "ascii"):
+                result = json.loads(self.invoke(box, "--startup-logo", style, "--json"))
+                self.assertEqual(result["startup_logo"], style)
+                self.assertEqual(
+                    preferences.read(self.path, WORKSPACE)["startup_logo"], style
+                )
+                self.assertTrue(result["current_clients_unchanged"])
+        self.assertEqual([call[0] for call in box.calls], ["find_workspace"] * 3)
+
+    def test_invalid_startup_logo_does_not_replace_saved_preferences(self):
+        for invalid in (True, "kitty", []):
+            with self.subTest(invalid=invalid):
+                self.seed(
+                    {
+                        "version": 1,
+                        "workspace": WORKSPACE,
+                        "host_drop": True,
+                        "startup_logo": invalid,
+                    }
+                )
+                with self.assertRaisesRegex(
+                    preferences.PreferenceError, preferences.INVALID_DATA
+                ):
+                    preferences.read(self.path, WORKSPACE)
+
     def test_json_projects_only_boolean_status_and_fixed_source_not_unknown_fields(
         self,
     ):

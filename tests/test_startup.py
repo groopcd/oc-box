@@ -838,18 +838,16 @@ class StartupProgressTests(unittest.TestCase):
 
     @unittest.skipUnless(sys.platform == "linux", "Linux PTY/termios integration")
     def test_tui_progress_handoff_input_resize_and_terminal_restore(self):
-        for mode in ("ascii", "kitty", "dumb"):
+        for mode in ("ascii", "kitty", "konsole", "dumb"):
             with self.subTest(mode=mode):
                 self._check_tui_handoff(mode)
 
-    def test_kitty_mark_requires_opt_in_and_matching_direct_terminal(self):
+    def test_graphics_mark_requires_matching_direct_terminal_and_asset(self):
         supported = {
             "TERM": "xterm-kitty",
             "KITTY_WINDOW_ID": "42",
-            "OC_BOX_KITTY_LOGO": "1",
         }
         for overrides in (
-            {"OC_BOX_KITTY_LOGO": ""},
             {"TERM": "xterm-256color"},
             {"KITTY_WINDOW_ID": "0"},
             *(
@@ -862,22 +860,38 @@ class StartupProgressTests(unittest.TestCase):
                     "SSH_CONNECTION",
                     "SSH_CLIENT",
                     "SSH_TTY",
+                    "XTERM_VERSION",
+                    "VTE_VERSION",
+                    "WEZTERM_PANE",
+                    "ALACRITTY_WINDOW_ID",
                 )
             ),
         ):
             with self.subTest(overrides=overrides):
                 with mock.patch.object(ui.os, "ttyname") as ttyname:
-                    self.assertIsNone(ui._kitty_mark(0, 1, supported | overrides))
+                    self.assertIsNone(ui._graphics_mark(0, 1, supported | overrides))
                     ttyname.assert_not_called()
         with mock.patch.object(
             ui.os, "ttyname", side_effect=["/dev/pts/1", "/dev/pts/2"]
         ):
-            self.assertIsNone(ui._kitty_mark(0, 1, supported))
+            self.assertIsNone(ui._graphics_mark(0, 1, supported))
         with (
             mock.patch.object(ui.os, "ttyname", return_value="/dev/pts/1"),
             mock.patch.object(ui.Path, "open", side_effect=FileNotFoundError),
         ):
-            self.assertIsNone(ui._kitty_mark(0, 1, supported))
+            self.assertIsNone(ui._graphics_mark(0, 1, supported))
+        for version in ("220399", "261303", "2608.03", "abc", "2608030"):
+            self.assertIsNone(
+                ui._graphics_profile(
+                    {"TERM": "xterm-256color", "KONSOLE_VERSION": version}
+                )
+            )
+        self.assertEqual(
+            ui._graphics_profile(
+                {"TERM": "xterm-256color", "KONSOLE_VERSION": "220400"}
+            ),
+            "konsole",
+        )
 
     def _check_tui_handoff(self, mode):
         import fcntl
@@ -898,9 +912,10 @@ class StartupProgressTests(unittest.TestCase):
             "os.write(1,b'KEY='+key+(' SIZE=%dx%d'%(size.columns,size.lines)).encode()); "
             "time.sleep(0.15); os.write(1,b'\\x1b[?1049l')"
         )
-        relay = "import os,sys; sys.path.insert(0,sys.argv[1]+'/src'); from oc_box.terminal_ui import run_tui; sys.exit(run_tui([sys.executable,'-c',sys.argv[2]],env={**os.environ,'OC_BOX_RELAY_CHECK':'present'},refresh=0.03))"
+        relay = "import os,sys; sys.path.insert(0,sys.argv[1]+'/src'); from oc_box.terminal_ui import run_tui; sys.exit(run_tui([sys.executable,'-c',sys.argv[2]],env={**os.environ,'OC_BOX_RELAY_CHECK':'present'},refresh=0.03,startup_logo=sys.argv[3]))"
+        style = "ascii" if mode == "ascii" else "graphics"
         process = subprocess.Popen(
-            [sys.executable, "-B", "-c", relay, str(APP), fixture],
+            [sys.executable, "-B", "-c", relay, str(APP), fixture, style],
             stdin=slave,
             stdout=slave,
             stderr=slave,
@@ -908,15 +923,16 @@ class StartupProgressTests(unittest.TestCase):
                 **{
                     key: value
                     for key, value in os.environ.items()
-                    if key not in ui._KITTY_BLOCKERS
+                    if key not in ui._GRAPHICS_BLOCKERS
                 },
                 "TERM": {
-                    "ascii": "xterm-256color",
+                    "ascii": "xterm-kitty",
                     "kitty": "xterm-kitty",
+                    "konsole": "xterm-256color",
                     "dumb": "dumb",
                 }[mode],
-                "KITTY_WINDOW_ID": "42",
-                "OC_BOX_KITTY_LOGO": "1",
+                "KITTY_WINDOW_ID": "42" if mode != "konsole" else "",
+                "KONSOLE_VERSION": "260803" if mode == "konsole" else "",
             },
         )
         output = bytearray()
@@ -948,9 +964,13 @@ class StartupProgressTests(unittest.TestCase):
                 self.assertIn(b"Loading OpenCode, plugins and MCPs", output)
                 clear = b"\x1b7\x1b[24;1H\x1b[0m\x1b[2K\x1b8"
                 self.assertLess(output.index(clear), output.index(b"\x1b[?1049h"))
-            if mode == "kitty":
+            if mode in ("kitty", "konsole"):
+                upload = b"I=" if mode == "kitty" else b"i=0,p="
+                delete = b"d=N,I=" if mode == "kitty" else b"d=i,i=0,p="
                 match = re.search(
-                    rb"\x1b_Ga=T,t=d,f=100,I=([1-9][0-9]*),q=2,c=2,r=1,C=1;([A-Za-z0-9+/=]+)\x1b\\",
+                    rb"\x1b_Ga=T,t=d,f=100,"
+                    + upload
+                    + rb"([1-9][0-9]*),q=2,c=2,r=1,C=1;([A-Za-z0-9+/=]+)\x1b\\",
                     output,
                 )
                 self.assertIsNotNone(match, bytes(output))
@@ -958,14 +978,12 @@ class StartupProgressTests(unittest.TestCase):
                     base64.b64decode(match[2], validate=True),
                     Path(ui.__file__).with_name("oc-box-mark.png").read_bytes(),
                 )
-                deletion = b"\x1b_Ga=d,d=N,I=" + match[1] + b",q=2;\x1b\\"
+                deletion = b"\x1b_Ga=d," + delete + match[1] + b",q=2;\x1b\\"
                 self.assertEqual(output.count(b"\x1b_G"), 2)
                 self.assertLess(match.end(), output.index(deletion))
                 self.assertLess(output.index(deletion), output.index(b"\x1b[?1049h"))
             else:
                 self.assertNotIn(b"\x1b_G", output)
-                prefix = ui.ASCII_MARK.encode() + b" oc-box:"
-                self.assertEqual(prefix in output, mode == "ascii")
             self.assertIn(b"KEY=z SIZE=120x32", output)
             self.assertNotIn(b"oc-box:", bytes(output).split(b"UI_READY", 1)[1])
             self.assertEqual(termios.tcgetattr(slave), before)

@@ -19,27 +19,46 @@ import time
 import tty
 
 
-ASCII_MARK = "[/]"
 _KITTY_WINDOW = re.compile(r"[1-9][0-9]{0,9}")
-_KITTY_BLOCKERS = (
-    "KONSOLE_VERSION",
+_KONSOLE_VERSION = re.compile(r"[0-9]{2}(?:0[1-9]|1[0-2])[0-9]{2}")
+_GRAPHICS_BLOCKERS = (
     "TMUX",
     "STY",
     "ZELLIJ",
     "SSH_CONNECTION",
     "SSH_CLIENT",
     "SSH_TTY",
+    "XTERM_VERSION",
+    "VTE_VERSION",
+    "WEZTERM_PANE",
+    "ALACRITTY_WINDOW_ID",
 )
 
 
-def _kitty_mark(input_fd, output_fd, environ):
-    """Return one direct, quiet upload and its targeted deletion, or use ASCII."""
+def _graphics_profile(environ):
+    if any(environ.get(key) for key in _GRAPHICS_BLOCKERS):
+        return None
+    term = environ.get("TERM", "")
+    kitty_window = environ.get("KITTY_WINDOW_ID", "")
+    konsole = environ.get("KONSOLE_VERSION", "")
+    if kitty_window and konsole:
+        return None
+    if term == "xterm-kitty" and _KITTY_WINDOW.fullmatch(kitty_window):
+        return "kitty"
     if (
-        environ.get("OC_BOX_KITTY_LOGO") != "1"
-        or environ.get("TERM") != "xterm-kitty"
-        or not _KITTY_WINDOW.fullmatch(environ.get("KITTY_WINDOW_ID", ""))
-        or any(environ.get(key) for key in _KITTY_BLOCKERS)
+        not kitty_window
+        and term in ("xterm", "xterm-256color", "konsole", "konsole-256color")
+        and _KONSOLE_VERSION.fullmatch(konsole)
+        and int(konsole) >= 220400
     ):
+        return "konsole"
+    return None
+
+
+def _graphics_mark(input_fd, output_fd, environ):
+    """Return one quiet, same-terminal upload and its targeted deletion."""
+    profile = _graphics_profile(environ)
+    if profile is None:
         return None
     try:
         if os.ttyname(input_fd) != os.ttyname(output_fd):
@@ -50,14 +69,22 @@ def _kitty_mark(input_fd, output_fd, environ):
         return None
     if not png.startswith(b"\x89PNG\r\n\x1a\n") or len(png) > 1024:
         return None
-    # Image numbers ask Kitty to allocate its own ID instead of replacing
-    # another client's image. Delete only the newest image with our number.
-    number = 1 + secrets.randbelow(2**32 - 1)
+    number = 1 + secrets.randbelow(2**31 - 1)
+    if profile == "kitty":
+        # Allocate a fresh image via a number, not a shared client-chosen ID.
+        upload = f"I={number}"
+        delete = f"d=N,I={number}"
+    else:
+        # KonsolePart (also used by Yakuake) lacks deletion by image number.
+        # ID 0 is not stored in its image cache; give the placement its own
+        # random positive ID and remove only that image/placement pair.
+        upload = f"i=0,p={number}"
+        delete = f"d=i,i=0,p={number}"
     return (
-        f"\x1b_Ga=T,t=d,f=100,I={number},q=2,c=2,r=1,C=1;".encode()
+        f"\x1b_Ga=T,t=d,f=100,{upload},q=2,c=2,r=1,C=1;".encode()
         + base64.b64encode(png)
         + b"\x1b\\",
-        f"\x1b_Ga=d,d=N,I={number},q=2;\x1b\\".encode(),
+        f"\x1b_Ga=d,{delete},q=2;\x1b\\".encode(),
     )
 
 
@@ -121,6 +148,7 @@ def run_tui(
     output_fd=None,
     refresh=1.0,
     show_loading=True,
+    startup_logo="ascii",
     file_drops=None,
     preview_relay=None,
     preview_open=None,
@@ -224,8 +252,6 @@ def run_tui(
                     text = "   " + text
                 elif mark_cleanup is not None:
                     text = "   " + text
-                else:
-                    text = ASCII_MARK + " " + text
             text = text[: max(size.columns - 1, 0)]
             # DECSC/DECRC save and restore cursor and rendition. This runs only
             # before the first nonblank text from the app, never over its UI.
@@ -252,7 +278,11 @@ def run_tui(
 
         # A PNG is only ever sent before the first native output. Do not probe,
         # redraw on resize, or leave a graphics placement for the native UI.
-        if loading and (mark := _kitty_mark(input_fd, output_fd, os.environ)):
+        if (
+            loading
+            and startup_logo == "graphics"
+            and (mark := _graphics_mark(input_fd, output_fd, os.environ))
+        ):
             banner(mark=mark)
             next_update = started + refresh
 

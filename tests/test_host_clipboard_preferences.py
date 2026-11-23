@@ -211,6 +211,7 @@ class HostClipboardPreferenceTests(unittest.TestCase):
         return stack
 
     def test_attached_clients_inherit_and_save_without_owner_refresh_or_unlock(self):
+        preferences.set_preferences(self.path, self.ident, startup_logo="graphics")
         stack = self.main_fixture()
         connection = {"url": "http://127.0.0.1:12345", "session": None}
         stack.enter_context(
@@ -242,6 +243,7 @@ class HostClipboardPreferenceTests(unittest.TestCase):
                     box.main(["--workspace", self.ident, "--no-host-drop", *flags]), 0
                 )
                 self.assertFalse(run.call_args.kwargs["host_drop_enabled"])
+                self.assertEqual(run.call_args.kwargs["startup_logo"], "graphics")
                 if enabled:
                     self.assertIs(
                         run.call_args.kwargs["host_clipboard_reader"], self.reader
@@ -302,6 +304,7 @@ class HostClipboardPreferenceTests(unittest.TestCase):
             host_drop=False,
             host_clipboard=True,
             host_clipboard_symlinks=False,
+            startup_logo="graphics",
         )
         policy = self.path.parent / preferences.FILE_NAME
         before = policy.read_bytes()
@@ -335,6 +338,7 @@ class HostClipboardPreferenceTests(unittest.TestCase):
             host_drop_required=False,
             host_clipboard_reader=self.reader,
             host_clipboard_symlinks=False,
+            startup_logo="graphics",
         )
         self.assertEqual(
             client.call_args.kwargs,

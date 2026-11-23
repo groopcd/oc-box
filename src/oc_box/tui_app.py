@@ -36,7 +36,6 @@ from textual.widgets import (
 
 if __package__:
     from . import status_report, tui_clipboard
-    from .terminal_ui import ASCII_MARK
     from .tui_backend import plain, TerminalAttachmentError
     from .tui_logs import (
         JOURNAL_LIMIT,
@@ -79,7 +78,6 @@ if __package__:
 else:
     import status_report
     import tui_clipboard
-    from terminal_ui import ASCII_MARK
     from tui_backend import plain, TerminalAttachmentError
     from tui_logs import (
         JOURNAL_LIMIT,
@@ -263,6 +261,8 @@ class LogDetails(ModalScreen):
 
 class DashboardApp(ManagementActions, ClipboardActions, App):
     TITLE = "oc-box control center"
+    # Half-blocks trace the wireframe of the original cube at 6 × 4 cells.
+    _CUBE = " ▄▞▀▄\n▛▄▖ ▄▜\n▙ ▝▛ ▟\n ▀▚▙▀"
     AUTO_FOCUS = "#workspaces"
     SECTIONS = (
         ("Status", "status"),
@@ -289,8 +289,10 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
     Input.-invalid:focus { border: round $error; }
     Button.-style-default.-error:focus { border: round $error; }
     Button.-style-default:disabled { border: round $primary 18%; }
-    #dashboard-header { height: 3; background: $surface; }
-    #host-summary { width: 24; height: 1; margin: 1 1; text-style: bold;
+    #dashboard-header { height: 4; background: $surface; }
+    #dashboard-mark { width: 6; height: 4; margin-left: 1; color: $primary;
+      text-wrap: nowrap; }
+    #host-summary { width: 18; height: 1; margin: 1 1; text-style: bold;
       text-wrap: nowrap; text-overflow: ellipsis; }
     #view-title { width: 1fr; height: 1; margin: 1 1; color: $primary; }
     #workspace-picker { width: 38; margin-right: 1; }
@@ -371,7 +373,8 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
     Screen.compact #monitoring-state { display: none; }
     Screen.compact #section-picker { display: block; }
     Screen.compact #dashboard-header { height: 1; }
-    Screen.compact #host-summary { width: 21; min-width: 21; margin: 0 1; }
+    Screen.compact #dashboard-mark { display: none; }
+    Screen.compact #host-summary { width: 17; min-width: 17; margin: 0 1; }
     Screen.compact #workspace-picker { width: 1fr; height: 1; }
     Screen.compact #section-picker { height: 1; }
     Screen.compact #dashboard-header Select > SelectCurrent {
@@ -511,6 +514,7 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="dashboard-header"):
+            yield Static(self._CUBE, id="dashboard-mark", markup=False)
             yield Static(self._host_heading(), id="host-summary", markup=False)
             yield Static("Status / Overview", id="view-title", markup=False)
             yield Select(
@@ -937,7 +941,7 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
 
     def _host_heading(self):
         mode = " READ ONLY" if self.read_only else " DEMO" if self.demo else ""
-        return f"{ASCII_MARK} oc-box{mode}"
+        return "oc-box" + mode
 
     def _render_monitoring_state(self):
         interval = self._monitoring_settings["interval"]
