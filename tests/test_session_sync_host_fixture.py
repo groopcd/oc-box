@@ -3283,6 +3283,7 @@ class SessionHistoryHostFixtureTests(unittest.TestCase):
 
     def test_recovery_warns_about_interruption_without_announcing_live_sync(self):
         h = self.recovery_harness()
+        h.exits = [0, 1]
         h.output = "Available history synced. Interrupted work may be incomplete.\n"
         h.warning = ""
         h.verify_interruption_warning()
@@ -3302,6 +3303,41 @@ class SessionHistoryHostFixtureTests(unittest.TestCase):
             "results may be missing. The original history-wait failure remains nonzero."
         )
         h.verify_interruption_warning()
+
+    def test_recovery_oracle_preserves_nonzero_and_accepts_actual_detailed_renderer(self):
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with (
+            patch.dict(sys.modules),
+            contextlib.redirect_stdout(stdout),
+            contextlib.redirect_stderr(stderr),
+        ):
+            from oc_box import oc_box as box
+
+            box.history_recovery.announce_saved()
+            box._announce_history_synced(recovered=True)
+        h = self.recovery_harness()
+        h.exits = [0, 1]
+        h.output, h.warning = stdout.getvalue(), stderr.getvalue()
+        self.assertIn("using the post-stop fallback.", h.output)
+        h.verify_interruption_warning()
+
+        for options in (
+            {"warning": ""},
+            {"warning": h.warning.replace("Execution was interrupted; ", "")},
+            {"warning": h.warning * 2},
+            {
+                "warning": h.warning
+                + "oc-box: Final history-recovery cleanup could not be verified;\n"
+            },
+            {"warning": h.warning + "History sync cleanup could not be verified.\n"},
+            {"output": h.output + "oc-box: History synced.\n"},
+            {"exits": [0, 0]},
+        ):
+            with self.subTest(options=options), contextlib.ExitStack() as stack:
+                for attr, value in options.items():
+                    stack.enter_context(patch.object(h, attr, value))
+                with self.assertRaises(runner.Refusal):
+                    h.verify_interruption_warning()
 
     def test_scheduler_probe_is_read_only_and_refuses_every_row_not_only_due_work(self):
         import sqlite3

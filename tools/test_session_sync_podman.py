@@ -3041,22 +3041,36 @@ class RecoveryHarness(Harness):
         )
 
     def verify_interruption_warning(self):
-        output, warning = self.output.splitlines(), self.warning
-        ordinary = "Session history synced to your normal host OpenCode database"
+        def lines(stream):
+            return [line.removeprefix("oc-box: ") for line in stream.splitlines()]
+
+        output, warning = lines(self.output), lines(self.warning)
         interrupted = "Available history synced. Interrupted work may be incomplete."
+        detail = (
+            "Checked persisted history snapshots were synchronized after stopping "
+            "the workspace. Execution was interrupted; completion notices or final "
+            "results may be missing. "
+        )
+        # Direct main() uses the detailed renderer. Older sources tied the
+        # warning to the wait failure; newer sources preserve the client exit
+        # separately and warn that recovery did not finish interrupted work.
+        detailed_warnings = {
+            detail + "Background work is not declared complete.",
+            detail + "The original history-wait failure remains nonzero.",
+        }
+        forbidden = (
+            "History synced.",
+            "Session history synced to your normal host OpenCode database.",
+            "Final history-recovery cleanup could not be verified",
+            "History sync cleanup could not be verified",
+        )
+        warning_count = output.count(interrupted) + sum(
+            line in detailed_warnings for line in warning
+        )
         require(
-            not any(line.startswith("History synced.") for line in output)
-            and ordinary + "." not in output
-            and (
-                output.count(interrupted) == 1
-                or (
-                    "Checked persisted history snapshots were synchronized after stopping the workspace."
-                    in warning
-                    and "Execution was interrupted; completion notices or final results may be missing."
-                    in warning
-                    and "original history-wait failure remains nonzero" in warning
-                )
-            )
+            self.exits == [0, 1]
+            and warning_count == 1
+            and not any(line.startswith(forbidden) for line in (*output, *warning))
         )
 
     def verify_recovery_transitions(self):
