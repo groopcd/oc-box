@@ -64,6 +64,7 @@ class OpaqueServer(Protocol):
         context: bytes,
         registration: bytes | None,
         ke1: bytes,
+        deadline: float,
     ) -> tuple[bytes, OpaqueExchange]:
         """Return (KE2, live handle); clean up internally if start fails."""
         ...
@@ -339,6 +340,7 @@ class PakeFlow:
                     context=context,
                     registration=registration,
                     ke1=request,
+                    deadline=expires_at,
                 )
             except Exception:  # noqa: BLE001 - an adapter error is a uniform sign-in refusal.
                 return None

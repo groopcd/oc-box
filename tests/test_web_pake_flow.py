@@ -133,6 +133,7 @@ class PakeFlowTests(unittest.TestCase):
                         "context": context,
                         "registration": REAL,
                         "ke1": b"\xfb\xff",
+                        "deadline": 130.0,
                     }
                 ],
             )
