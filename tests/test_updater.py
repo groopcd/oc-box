@@ -57,6 +57,14 @@ class UpdateTests(unittest.TestCase):
         self.releases = releases.start()
         self.addCleanup(releases.stop)
 
+    def offer_newer_stable(self):
+        release = f"{int(VERSION_SERIES.split('.')[0]) + 1}.0.99999"
+        self.releases.return_value["stable"] = {
+            "version": release,
+            "tag": "v" + release,
+            "channel": "stable",
+        }
+
     def test_up_to_date_and_check_only_never_install_or_fetch_history(self):
         commit = "a" * 40
         for check, current in ((False, commit), (True, "b" * 40)):
@@ -118,6 +126,9 @@ class UpdateTests(unittest.TestCase):
         self.assertNotIn("--depth", execute.call_args.args[0])
 
     def test_network_failure_does_not_change_existing_installation(self):
+        # Exercise the fetch path even when the checkout has advanced past
+        # the historical 1.7 sample releases used by the other tests.
+        self.offer_newer_stable()
         with contextlib.redirect_stdout(io.StringIO()):
             release = installation.install(APP, self.home)
         wrapper = (self.home / ".local/bin/oc-box").read_bytes()
@@ -132,6 +143,7 @@ class UpdateTests(unittest.TestCase):
         self.assertTrue(release.is_dir())
 
     def test_invalid_remote_head_and_root_are_rejected(self):
+        self.offer_newer_stable()
         with (
             patch.object(updater.os, "geteuid", return_value=1000),
             patch.object(updater, "git", return_value="bad response"),
