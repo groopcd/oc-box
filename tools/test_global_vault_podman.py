@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Opt-in, disposable HOST acceptance for V2's default global encrypted vault.
 
-Uses repository launcher code, unmodified OpenCode 2.2.6 and a private rootless
-Podman store. Provider, MCP, vault, host history, config and projects are entirely
-synthetic. Only TUI exit and masked prompt input are scripted. There is no paid
-inference, host installation/update, shared native service or V1 requirement.
+Uses repository launcher code, an exact unmodified native profile and a private
+rootless Podman store. Provider, MCP, vault, host history, config and projects
+are entirely synthetic. Only TUI exit and masked prompt input are scripted.
+There is no paid inference, host installation/update, shared native service
+or V1 requirement.
 --retry-source retries only a validated retained first source owner, using a
 new companion encrypted vault; it does not repeat first-ever import acceptance.
 Evidence is retained, including on failure. --cleanup removes only
@@ -51,8 +52,13 @@ from oc_box import (
     vault,
     workspace_service,
 )
-from tools.test_v2_podman import (
+from tools.native_host_profile import (
+    DEFAULT_NATIVE_VERSION,
+    NATIVE_VERSIONS,
     check_native_version,
+    native_identity,
+)
+from tools.test_v2_podman import (
     digest_home,
     native_env,
     storage_config,
@@ -63,7 +69,7 @@ from oc_box.version_info import get_version_info
 
 PREFIX = "oc-box-gv-host-"
 FORMAT = "oc-box-global-vault-host-acceptance"
-NATIVE_VERSION = "2.2.6"
+NATIVE_VERSION = DEFAULT_NATIVE_VERSION
 PODMAN_CONFIGFILE_OMISSIONS = frozenset({"6.1.4"})
 PROJECTS = ("source-a", "source-b", "restored-full")
 KEY = "ACCEPTANCE_API_KEY"
@@ -849,9 +855,40 @@ env['OPENCODE_CONFIG_CONTENT']=json.dumps({'snapshots':False,'formatter':False,'
     )
 
 
-def prepare_native_cli(root, binary, *, history_recovery=False):
+def recorded_native(root, *, expected=None, binary=None, verify=False):
+    """Read immutable new-run identity; old evidence remains explicitly legacy."""
+    path = safe_path(root, "native-profile.json", optional=True)
+    if not path.exists():
+        require(expected in (None, NATIVE_VERSION), "native-profile")
+        return {"version": NATIVE_VERSION}
+    value = private_json(root, "native-profile.json")
+    require(
+        isinstance(value, dict)
+        and set(value) == {"version", "path", "sha256"}
+        and value["version"] in NATIVE_VERSIONS
+        and isinstance(value["path"], str)
+        and Path(value["path"]).is_absolute()
+        and isinstance(value["sha256"], str)
+        and re.fullmatch(r"[0-9a-f]{64}", value["sha256"])
+        and (expected is None or value["version"] == expected)
+        and (binary is None or value["path"] == str(binary)),
+        "native-profile",
+    )
+    if verify:
+        selected = validate_native_podman(value["path"], root)
+        require(native_identity(selected, value["version"]) == value, "native-changed")
+    return value
+
+
+def prepare_native_cli(
+    root, binary, *, history_recovery=False, native_version=NATIVE_VERSION
+):
     """A single-version selector, never a host installation or service client."""
-    check_native_version(root, binary, "2")
+    binary = validate_native_podman(binary, root)
+    identity = native_identity(binary, native_version)
+    check_native_version(root, binary, "2", expected=native_version)
+    require(native_identity(binary, native_version) == identity, "native-changed")
+    write_json_new(root / "native-profile.json", identity)
     for name in ("config", "data", "state", "cache"):
         (root / ("host-" + name + "-2")).mkdir(mode=0o700, exist_ok=True)
     write_json_new(root / "executables.json", {"2": str(binary)})
@@ -872,7 +909,8 @@ def prepare_native_cli(root, binary, *, history_recovery=False):
             timeout=15,
         ).stdout
     )
-    require(release == NATIVE_VERSION, "native-version")
+    require(release == native_version, "native-version")
+    require(native_identity(binary, native_version) == identity, "native-changed")
     return wrapper
 
 
@@ -1145,6 +1183,7 @@ def make_provider(state):
 def workspace_records(root):
     """Validate all registry paths before any resource inspection/removal."""
     directory = safe_path(root, "registry/workspaces", directory=True)
+    version = recorded_native(root)["version"]
     records = {}
     for folder in sorted(directory.iterdir()):
         require(
@@ -1180,7 +1219,7 @@ def workspace_records(root):
             "workspace-allowlist",
         )
         require(
-            data.get("opencode_version", NATIVE_VERSION) == NATIVE_VERSION,
+            data.get("opencode_version", version) == version,
             "workspace-allowlist",
         )
         require(
@@ -1806,7 +1845,7 @@ def full_backup_restore(root, baseline, expected, state, port, password, report)
     report("restored-latest-host-vault-history-os")
 
 
-def run(root, binary, distro, report=None):
+def run(root, binary, distro, report=None, *, native_version=NATIVE_VERSION):
     host_guard()
     address = (
         Path(isolated_env(root)["XDG_RUNTIME_DIR"])
@@ -1826,7 +1865,7 @@ def run(root, binary, distro, report=None):
     box.check_backend(feature="launch")
     crypto.tools()
     vault.crypto()
-    prepare_native_cli(root, binary)
+    prepare_native_cli(root, binary, native_version=native_version)
     report("private-store-native-version")
     report("native-host-seed")
     baseline = seed_native_history(root, binary)
@@ -2110,7 +2149,10 @@ def run(root, binary, distro, report=None):
                 "status": "passed",
                 "checks": report.checks,
                 "source_identity": get_version_info(APP),
-                "native_version": NATIVE_VERSION,
+                "native_version": native_version,
+                "native": recorded_native(
+                    root, expected=native_version, binary=binary, verify=True
+                ),
                 "podman_info_schema": {
                     "exposed_configFile": "exact private storage.conf required",
                     "audited_configFile_omissions": sorted(PODMAN_CONFIGFILE_OMISSIONS),
@@ -2343,6 +2385,7 @@ def diagnose(root):
         "scope": "Retained fixture inspection with a file-only boot guard and same-boot informational engine queries; no launch/replay or host acceptance, not database-byte immutability.",
         "fixture_root": str(root),
         "source_version": get_version_info(APP)["version"],
+        "native_version": recorded_native(root)["version"],
         "workspaces": {},
     }
     # info can initialize/refresh Podman state; it is not a byte-read-only
@@ -2767,6 +2810,7 @@ def first_launch_trace(root):
             report_error = None
             try:
                 result["source_identity"] = get_version_info(APP)
+                result["native"] = recorded_native(root)
             except Exception as journal_error:
                 report_error = safe_error_class(journal_error)
                 result["report_error_class"] = report_error
@@ -2782,9 +2826,10 @@ def first_launch_trace(root):
             ) from None
 
 
-def validate_source_retry(root):
+def validate_source_retry(root, *, native_version=NATIVE_VERSION):
     """Read-only checkpoint validation. Never consult/decrypt the old vault."""
     root = validate_fixture(root)
+    recorded_native(root, expected=native_version)
 
     def later_evidence(name):
         return (
@@ -2821,7 +2866,7 @@ def validate_source_retry(root):
     path, data = records["source-a"]
     require(
         data.get("ready") is True
-        and data.get("opencode_version") == NATIVE_VERSION
+        and data.get("opencode_version") == native_version
         and not any("restore" in name or "backup" in name for name in data),
         "retry-source-state",
     )
@@ -2869,6 +2914,7 @@ def validate_source_retry(root):
         "retry-native-executable",
     )
     binary = validate_native_podman(mapping["2"], root)
+    recorded_native(root, expected=native_version, binary=binary, verify=True)
     wrapper = safe_path(root, "bin/opencode")
     previous = wrapper.read_text()
     first = previous.splitlines()[0] if previous else ""
@@ -2939,6 +2985,9 @@ def source_evidence_digests(root, path):
         "data/oc-box/credentials/vault.json",
     )
     result = {name: crypto.digest(safe_path(root, name)) for name in files}
+    profile = safe_path(root, "native-profile.json", optional=True)
+    if profile.exists():
+        result["native-profile.json"] = crypto.digest(profile)
     for directory in (root / "config", path.parent / "imports-v2", root / "vault"):
         if directory.exists():
             safe_path(root, directory.relative_to(root), directory=True)
@@ -2971,10 +3020,15 @@ def verify_stopped_source(root, data):
     return info
 
 
-def retry_source(root, temp_parent=None):
+def retry_source(root, temp_parent=None, *, native_version=NATIVE_VERSION):
     """Retry one retained owner/native check, NOT the complete acceptance fixture."""
     host_guard()
-    root, path, source, baseline, binary = validate_source_retry(root)
+    root, path, source, baseline, binary = validate_source_retry(
+        root, native_version=native_version
+    )
+    native = recorded_native(
+        root, expected=native_version, binary=binary, verify=True
+    )
     if temp_parent is not None:
         temp_parent = existing_directory(temp_parent)
     before = source_evidence_digests(root, path)
@@ -2992,7 +3046,8 @@ def retry_source(root, temp_parent=None):
         "scope": "retained-source-only",
         "acceptance": "Only retained source owning launch/native checks; no first-ever launch/import, second project, rotation/reload/attach or backup/restore acceptance.",
         "source_identity": None,
-        "native_version": NATIVE_VERSION,
+        "native_version": native_version,
+        "native": native,
         "workspace_ids": {"source-a": source["id"]},
         "selected_session_before": selected_before,
         "diagnostic_session": baseline["info"]["id"],
@@ -3015,7 +3070,7 @@ def retry_source(root, temp_parent=None):
             trace.completed()
             result["checks"].append("private-store")
             trace("native-version")
-            check_native_version(root, binary, "2")
+            check_native_version(root, binary, "2", expected=native_version)
             trace.completed()
             result["checks"].append("recorded-native-version")
             trace("source-resources")
@@ -3058,7 +3113,15 @@ def retry_source(root, temp_parent=None):
             def start_retained(current_path, data):
                 # Called under the launcher's lifecycle lock. Refuse recreation
                 # if the retained source disappeared/changed since validation.
-                _, checked_path, checked, _, _ = validate_source_retry(root)
+                _, checked_path, checked, _, checked_binary = validate_source_retry(
+                    root, native_version=native_version
+                )
+                require(
+                    checked_binary == binary
+                    and recorded_native(root, expected=native_version, binary=binary)
+                    == native,
+                    "native-changed",
+                )
                 require(
                     current_path == checked_path
                     and data == checked
@@ -3211,6 +3274,13 @@ def retry_source(root, temp_parent=None):
                 trace.fail(error)
         try:
             trace("evidence-preservation")
+            require(
+                recorded_native(
+                    root, expected=native_version, binary=binary, verify=True
+                )
+                == native,
+                "native-changed",
+            )
             after = source_evidence_digests(root, path)
             result["evidence_after"] = after
             result["evidence_unchanged"] = after == before
@@ -3240,7 +3310,13 @@ def parser():
     value.add_argument(
         "--opencode-v2",
         type=Path,
-        help="Read-only unmodified OpenCode 2.2.6 executable; defaults to PATH discovery",
+        help="Read-only unmodified executable matching --native-version; defaults to PATH discovery",
+    )
+    value.add_argument(
+        "--native-version",
+        choices=NATIVE_VERSIONS,
+        default=NATIVE_VERSION,
+        help="Exact native profile (default: %(default)s); retained operations must match original evidence",
     )
     value.add_argument(
         "--work-dir",
@@ -3305,7 +3381,9 @@ def main(argv=None):
             phase = "retry-source-validation"
             root = validate_fixture(args.retry_source)
             with private_output():
-                report_path, result = retry_source(root, args.temp_dir)
+                report_path, result = retry_source(
+                    root, args.temp_dir, native_version=args.native_version
+                )
             print("Retained root: " + str(root), file=output)
             print("Report: " + str(report_path), file=output)
             if result["status"] == "passed":
@@ -3344,6 +3422,7 @@ def main(argv=None):
                 "diagnostic-options",
             )
             root = validate_fixture(args.diagnose, allow_unrecorded=True)
+            recorded_native(root, expected=args.native_version, verify=True)
             phase = "diagnostic-inspection"
             with private_output():
                 result = diagnose(root)
@@ -3361,6 +3440,7 @@ def main(argv=None):
                 "cleanup-options",
             )
             root = validate_fixture(args.cleanup, allow_unrecorded=True)
+            recorded_native(root, expected=args.native_version, verify=True)
             phase = "cleanup-validation"
             with private_output():
                 ids = cleanup(root)
@@ -3399,7 +3479,13 @@ def main(argv=None):
                 temporary_location(root, args.temp_dir),
             ):
                 try:
-                    run(root, binary, args.distro, report)
+                    run(
+                        root,
+                        binary,
+                        args.distro,
+                        report,
+                        native_version=args.native_version,
+                    )
                 finally:
                     # Journal production-created IDs even after a later failure.
                     record_ids(root)
@@ -3437,6 +3523,8 @@ def main(argv=None):
             # FixtureError text unless it is one of these fixed public labels.
             refusals = {
                 "host-only",
+                "native-profile",
+                "native-changed",
                 "retry-options",
                 "retry-later-evidence",
                 "retry-source-only",
