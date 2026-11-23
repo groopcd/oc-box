@@ -1,0 +1,99 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 920" width="1600" height="920" role="img" aria-labelledby="title description">
+  <title id="title">oc-box browser workspace in Studio layout</title>
+  <desc id="description">Synthetic illustration with open TUI sessions on the left, one native OpenCode conversation in the center, and workspace-only status on the right.</desc>
+  <defs>
+    <style>
+      text { font-family: system-ui, 'DejaVu Sans', sans-serif; fill: #e2edf4; }
+      .hero { font-size: 46px; font-weight: 750; fill: #62ddeb; }
+      .subtitle { font-size: 24px; fill: #b2c7d7; }
+      .heading { font-size: 27px; font-weight: 700; }
+      .label { font-size: 22px; font-weight: 650; }
+      .body { font-size: 22px; }
+      .small { font-size: 19px; fill: #b2c7d7; }
+      .caption { font-size: 20px; font-weight: 650; fill: #62ddeb; }
+      .bright { fill: #76e4ee; }
+      .selected { fill: #133d4b; stroke: #62ddeb; }
+      .chrome { fill: #10202d; stroke: #385363; }
+      .surface { fill: #0e1b25; stroke: #2b4353; }
+    </style>
+  </defs>
+  <rect width="1600" height="920" fill="#0b141f"/>
+
+  <text x="50" y="69" class="hero">oc-box web interface</text>
+  <text x="52" y="108" class="subtitle">Studio · sessions, native chat, and workspace status</text>
+  <rect x="1310" y="50" width="240" height="43" rx="8" class="chrome"/>
+  <text x="1430" y="78" text-anchor="middle" class="caption">Synthetic preview</text>
+
+  <rect x="34" y="139" width="1532" height="732" rx="12" fill="#0a131c" stroke="#385e70" stroke-width="2"/>
+  <path d="M46 140h1508a11 11 0 0 1 11 11v54H35v-54a11 11 0 0 1 11-11z" fill="#101e29"/>
+  <path d="M35 205h1530" stroke="#385363" stroke-width="2"/>
+
+  <text x="57" y="179" class="heading">oc-box workspace</text>
+  <g stroke-width="1.5">
+    <rect x="312" y="153" width="100" height="40" rx="6" class="selected"/>
+    <rect x="423" y="153" width="139" height="40" rx="6" class="chrome"/>
+    <rect x="573" y="153" width="124" height="40" rx="6" class="chrome"/>
+    <rect x="708" y="153" width="232" height="40" rx="6" class="chrome"/>
+  </g>
+  <g text-anchor="middle" class="label">
+    <text x="362" y="180" class="bright">Studio</text>
+    <text x="492.5" y="180">Dashboard</text>
+    <text x="635" y="180">Chat focus</text>
+    <text x="824" y="180">Workspace manager</text>
+  </g>
+  <text x="1539" y="179" text-anchor="end" class="small bright">Open native OpenCode Home ↗</text>
+
+  <!-- The outer shell displays two side panes around one native conversation. -->
+  <path d="M35 206h381v664H46a11 11 0 0 1-11-11zM1192 206h373v653a11 11 0 0 1-11 11h-362z" fill="#0d1a24"/>
+  <path d="M416 206v664M1192 206v664" stroke="#385363" stroke-width="2"/>
+  <path d="M420 531v56M1188 531v56" stroke="#5b7a89" stroke-width="3" stroke-linecap="round"/>
+
+  <text x="58" y="254" class="heading">Open TUI sessions</text>
+  <text x="58" y="288" class="small">Sessions in native tab order</text>
+  <g stroke-width="1.5">
+    <rect x="58" y="315" width="145" height="43" rx="6" class="selected"/>
+    <rect x="213" y="315" width="177" height="43" rx="6" class="chrome"/>
+    <rect x="58" y="409" width="332" height="44" rx="6" class="surface"/>
+    <rect x="58" y="470" width="196" height="42" rx="6" class="chrome"/>
+    <rect x="58" y="540" width="332" height="54" rx="6" class="selected"/>
+    <rect x="58" y="604" width="332" height="54" rx="6" class="surface"/>
+    <rect x="58" y="668" width="332" height="54" rx="6" class="surface"/>
+  </g>
+  <text x="130.5" y="343" text-anchor="middle" class="small bright">Open TUI tabs</text>
+  <text x="301.5" y="343" text-anchor="middle" class="small">Workspace history</text>
+  <text x="58" y="396" class="small">Search by title or session ID</text>
+  <path d="M81 431a7 7 0 1 0-14 0 7 7 0 1 0 14 0m-2 5 6 6" fill="none" stroke="#b2c7d7" stroke-width="2" stroke-linecap="round"/>
+  <text x="97" y="439" class="small">Search sessions</text>
+  <text x="156" y="498" text-anchor="middle" class="small">Refresh TUI tabs</text>
+  <text x="78" y="575" class="label bright">Plan orbit-web</text>
+  <text x="78" y="639" class="body">Fix sidebar spacing</text>
+  <text x="78" y="703" class="body">Documentation pass</text>
+
+  <text x="452" y="245" class="small">Selected: Plan orbit-web</text>
+  <path d="M422 264h764" stroke="#2b4353"/>
+  <rect x="444" y="282" width="722" height="564" rx="8" fill="#111a24" stroke="#385363"/>
+  <path d="M445 345h720" stroke="#2b4353"/>
+  <text x="473" y="322" class="heading">OpenCode</text>
+  <text x="1140" y="321" text-anchor="end" class="small">Native conversation</text>
+  <rect x="575" y="390" width="557" height="80" rx="8" fill="#18303e"/>
+  <text x="595" y="422" class="small bright">YOU</text>
+  <text x="595" y="451" class="body">Review the sidebar layout.</text>
+  <text x="480" y="528" class="small bright">OPENCODE</text>
+  <text x="480" y="567" class="body">The session list now keeps its native tab order.</text>
+  <rect x="479" y="744" width="653" height="66" rx="9" class="surface"/>
+  <text x="502" y="785" class="small">Ask anything</text>
+  <path d="M1092 789v-23m-9 9 9-9 9 9" fill="none" stroke="#7798aa" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <text x="1220" y="254" class="heading">Workspace status</text>
+  <rect x="1220" y="285" width="317" height="123" rx="8" class="surface"/>
+  <text x="1239" y="324" class="label">Open TUI membership</text>
+  <text x="1239" y="373" class="heading bright">3 open tabs</text>
+  <rect x="1220" y="427" width="317" height="199" rx="8" class="surface"/>
+  <text x="1239" y="466" class="label">Private workspace only</text>
+  <text x="1239" y="506" class="small">Verified tabs and on-demand</text>
+  <text x="1239" y="535" class="small">project history. No host data</text>
+  <text x="1239" y="564" class="small">or privileged actions.</text>
+  <text x="1239" y="604" class="small bright">Reload shell</text>
+
+  <text x="51" y="901" class="small">Illustrative interface · fictional workspace and conversation</text>
+</svg>
