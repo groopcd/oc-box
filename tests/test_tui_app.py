@@ -825,6 +825,10 @@ class DashboardInteractionTests(unittest.IsolatedAsyncioTestCase):
                         region.region.intersection(region.clip), region.region
                     )
                     self.assertEqual(header.content_size.height, 1)
+                    self.assertEqual(header.render().plain, "[/] oc-box READ ONLY")
+                    self.assertGreaterEqual(
+                        header.content_size.width, len("[/] oc-box READ ONLY")
+                    )
                     app.action_tab("settings")
                     await pilot.pause()
                     self.assertEqual(

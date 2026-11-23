@@ -1,8 +1,10 @@
+import base64
 import contextlib
 import io
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tarfile
@@ -836,6 +838,48 @@ class StartupProgressTests(unittest.TestCase):
 
     @unittest.skipUnless(sys.platform == "linux", "Linux PTY/termios integration")
     def test_tui_progress_handoff_input_resize_and_terminal_restore(self):
+        for mode in ("ascii", "kitty", "dumb"):
+            with self.subTest(mode=mode):
+                self._check_tui_handoff(mode)
+
+    def test_kitty_mark_requires_opt_in_and_matching_direct_terminal(self):
+        supported = {
+            "TERM": "xterm-kitty",
+            "KITTY_WINDOW_ID": "42",
+            "OC_BOX_KITTY_LOGO": "1",
+        }
+        for overrides in (
+            {"OC_BOX_KITTY_LOGO": ""},
+            {"TERM": "xterm-256color"},
+            {"KITTY_WINDOW_ID": "0"},
+            *(
+                {key: "present"}
+                for key in (
+                    "KONSOLE_VERSION",
+                    "TMUX",
+                    "STY",
+                    "ZELLIJ",
+                    "SSH_CONNECTION",
+                    "SSH_CLIENT",
+                    "SSH_TTY",
+                )
+            ),
+        ):
+            with self.subTest(overrides=overrides):
+                with mock.patch.object(ui.os, "ttyname") as ttyname:
+                    self.assertIsNone(ui._kitty_mark(0, 1, supported | overrides))
+                    ttyname.assert_not_called()
+        with mock.patch.object(
+            ui.os, "ttyname", side_effect=["/dev/pts/1", "/dev/pts/2"]
+        ):
+            self.assertIsNone(ui._kitty_mark(0, 1, supported))
+        with (
+            mock.patch.object(ui.os, "ttyname", return_value="/dev/pts/1"),
+            mock.patch.object(ui.Path, "open", side_effect=FileNotFoundError),
+        ):
+            self.assertIsNone(ui._kitty_mark(0, 1, supported))
+
+    def _check_tui_handoff(self, mode):
         import fcntl
         import pty
         import select
@@ -848,8 +892,8 @@ class StartupProgressTests(unittest.TestCase):
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 100, 0, 0))
         fixture = (
             "import os,sys,time,tty; assert os.environ['OC_BOX_RELAY_CHECK']=='present'; tty.setraw(0); "
-            "os.write(1,b'\\x1b[?1049h\\x1b[2J\\x1b]0;Booting\\x07'); "
-            "time.sleep(0.2); os.write(1,b'UI_READY'); "
+            "os.write(1,b'\\x1b[?1049h\\x1b[2J\\x1b]0;Boot'); "
+            "time.sleep(0.2); os.write(1,b'ing\\x07UI_READY'); "
             "key=os.read(0,1); size=os.get_terminal_size(0); "
             "os.write(1,b'KEY='+key+(' SIZE=%dx%d'%(size.columns,size.lines)).encode()); "
             "time.sleep(0.15); os.write(1,b'\\x1b[?1049l')"
@@ -860,6 +904,20 @@ class StartupProgressTests(unittest.TestCase):
             stdin=slave,
             stdout=slave,
             stderr=slave,
+            env={
+                **{
+                    key: value
+                    for key, value in os.environ.items()
+                    if key not in ui._KITTY_BLOCKERS
+                },
+                "TERM": {
+                    "ascii": "xterm-256color",
+                    "kitty": "xterm-kitty",
+                    "dumb": "dumb",
+                }[mode],
+                "KITTY_WINDOW_ID": "42",
+                "OC_BOX_KITTY_LOGO": "1",
+            },
         )
         output = bytearray()
         sent = False
@@ -883,7 +941,31 @@ class StartupProgressTests(unittest.TestCase):
                     break
             self.assertIsNotNone(process.poll(), bytes(output))
             self.assertEqual(process.returncode, 0, bytes(output))
-            self.assertIn(b"Loading OpenCode, plugins and MCPs", output)
+            self.assertIn(b"Booting\x07UI_READY", output)
+            if mode == "dumb":
+                self.assertNotIn(b"Loading OpenCode", output)
+            else:
+                self.assertIn(b"Loading OpenCode, plugins and MCPs", output)
+                clear = b"\x1b7\x1b[24;1H\x1b[0m\x1b[2K\x1b8"
+                self.assertLess(output.index(clear), output.index(b"\x1b[?1049h"))
+            if mode == "kitty":
+                match = re.search(
+                    rb"\x1b_Ga=T,t=d,f=100,I=([1-9][0-9]*),q=2,c=2,r=1,C=1;([A-Za-z0-9+/=]+)\x1b\\",
+                    output,
+                )
+                self.assertIsNotNone(match, bytes(output))
+                self.assertEqual(
+                    base64.b64decode(match[2], validate=True),
+                    Path(ui.__file__).with_name("oc-box-mark.png").read_bytes(),
+                )
+                deletion = b"\x1b_Ga=d,d=N,I=" + match[1] + b",q=2;\x1b\\"
+                self.assertEqual(output.count(b"\x1b_G"), 2)
+                self.assertLess(match.end(), output.index(deletion))
+                self.assertLess(output.index(deletion), output.index(b"\x1b[?1049h"))
+            else:
+                self.assertNotIn(b"\x1b_G", output)
+                prefix = ui.ASCII_MARK.encode() + b" oc-box:"
+                self.assertEqual(prefix in output, mode == "ascii")
             self.assertIn(b"KEY=z SIZE=120x32", output)
             self.assertNotIn(b"oc-box:", bytes(output).split(b"UI_READY", 1)[1])
             self.assertEqual(termios.tcgetattr(slave), before)

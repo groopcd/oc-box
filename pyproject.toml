@@ -50,6 +50,7 @@ oc_box = [
   "web_attachments.js",
   "web_sessions.js",
   "web_sessions.css",
+  "oc-box-mark.png",
   "ui_state_server.js",
   "ui_state_tui.js",
   "ui_state_rpc.js",

@@ -263,7 +263,12 @@ compatible caches. See [Lifecycle output](#lifecycle-output) for transient
 progress and the final history result. The progress display distinguishes
 waiting for live activity to settle from copying history archives. A separate
 loading line covers blank TUI startup frames and disappears when OpenCode draws
-text.
+text. On a capable interactive terminal it shows a small ASCII oc-box mark.
+Direct Kitty terminals can opt into a tiny PNG with
+`OC_BOX_KITTY_LOGO=1 oc-box start`. The launcher removes the image before
+forwarding native output, so it may appear only briefly. Use the PNG only in
+Kitty itself; the launcher falls back to ASCII when it detects tmux, Screen,
+Zellij, SSH, or conflicting terminal markers. Pipes and `TERM=dumb` get neither mark.
 The container OpenCode version is verified against the host on every launch;
 exact upgrades and downgrades are supported, with no fallback to another release.
 With a V2 release supporting image previews, `--image-preview` enables prompt

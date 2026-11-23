@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <!-- SPDX-License-Identifier: GPL-3.0-or-later; oc-box release-card cube -->
+  <rect width="32" height="32" rx="6" fill="#0b1525"/>
+  <path d="M16 4 28 10v12L16 28 4 22V10Z M4 10l12 6 12-6 M16 16v12"
+        fill="none" stroke="#47dfc2" stroke-width="2" stroke-linejoin="round"/>
+</svg>

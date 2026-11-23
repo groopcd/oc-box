@@ -23,6 +23,8 @@
 managing native OpenCode 2.x sessions, and attaching to their persistent session
 terminals. It is separate from the native OpenCode conversation TUI opened by
 `oc-box start`; it does not replace that client or add a new chat interface.
+The dashboard header shows a text version of the oc-box cube; the native
+OpenCode TUI keeps its own branding.
 
 **Status: experimental development channel; incomplete UI acceptance is
 explicitly disclosed, not passed.** The owner approved development publication,

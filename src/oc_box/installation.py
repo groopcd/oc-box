@@ -29,6 +29,7 @@ RUNTIME_FILES = (
     "web_sessions.py",
     "web_sessions.js",
     "web_sessions.css",
+    "oc-box-mark.png",
     "workspace_control.py",
     "history_reader.py",
     "history_recovery.py",

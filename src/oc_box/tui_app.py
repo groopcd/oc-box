@@ -36,6 +36,7 @@ from textual.widgets import (
 
 if __package__:
     from . import status_report, tui_clipboard
+    from .terminal_ui import ASCII_MARK
     from .tui_backend import plain, TerminalAttachmentError
     from .tui_logs import (
         JOURNAL_LIMIT,
@@ -78,6 +79,7 @@ if __package__:
 else:
     import status_report
     import tui_clipboard
+    from terminal_ui import ASCII_MARK
     from tui_backend import plain, TerminalAttachmentError
     from tui_logs import (
         JOURNAL_LIMIT,
@@ -369,7 +371,7 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
     Screen.compact #monitoring-state { display: none; }
     Screen.compact #section-picker { display: block; }
     Screen.compact #dashboard-header { height: 1; }
-    Screen.compact #host-summary { width: 17; min-width: 17; margin: 0 1; }
+    Screen.compact #host-summary { width: 21; min-width: 21; margin: 0 1; }
     Screen.compact #workspace-picker { width: 1fr; height: 1; }
     Screen.compact #section-picker { height: 1; }
     Screen.compact #dashboard-header Select > SelectCurrent {
@@ -509,7 +511,7 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="dashboard-header"):
-            yield Static("oc-box", id="host-summary", markup=False)
+            yield Static(self._host_heading(), id="host-summary", markup=False)
             yield Static("Status / Overview", id="view-title", markup=False)
             yield Select(
                 [
@@ -930,15 +932,12 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
                 else " · process-local checks"
             )
         self._update_text("#workspace-source-context", source)
-        self._update_text(
-            "#host-summary",
-            "oc-box READ ONLY"
-            if self.read_only
-            else "oc-box DEMO"
-            if self.demo
-            else "oc-box",
-        )
+        self._update_text("#host-summary", self._host_heading())
         self._render_monitoring_state()
+
+    def _host_heading(self):
+        mode = " READ ONLY" if self.read_only else " DEMO" if self.demo else ""
+        return f"{ASCII_MARK} oc-box{mode}"
 
     def _render_monitoring_state(self):
         interval = self._monitoring_settings["interval"]
