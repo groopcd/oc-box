@@ -2,7 +2,6 @@
 
 import contextlib
 import errno
-import fcntl
 import hashlib
 import os
 from pathlib import Path
@@ -14,12 +13,10 @@ import time
 import unittest
 from unittest.mock import patch
 
+from oc_box import private_memory
 from oc_box import web_pake_worker as worker
 
 
-_SEALS = (
-    fcntl.F_SEAL_WRITE | fcntl.F_SEAL_GROW | fcntl.F_SEAL_SHRINK | fcntl.F_SEAL_SEAL
-)
 _LARGE = worker.WorkerSizes(4000, 3500, 2999, 3073, 4096)
 
 # The disposable fixture is a Python program run by a sealed snapshot of the
@@ -179,11 +176,14 @@ class PakeWorkerTests(unittest.TestCase):
             )
         ):
             raise unittest.SkipTest("Linux descriptor exec/pidfds unavailable")
+        # Relocatable Python builds need the original path in argv[0] to find
+        # their stdlib. The verifier is still executed from the sealed FD.
+        cls._argv0 = os.readlink("/proc/self/exe")
         cls._executable = Path("/proc/self/exe").read_bytes()
         cls._digest = hashlib.sha256(cls._executable).digest()
         cls._fd = _memfd(cls._executable)
         cls.addClassCleanup(os.close, cls._fd)
-        fcntl.fcntl(cls._fd, fcntl.F_ADD_SEALS, _SEALS)
+        private_memory.seal(cls._fd)
 
     def _worker(self, *, sizes=worker.LAB_SIZES, io_timeout=0.6, **options):
         backend = worker.PakeWorker(
@@ -208,7 +208,7 @@ class PakeWorkerTests(unittest.TestCase):
                 spawned.set()
             return child
 
-        args = ("pake-test", "-I", "-S", "-B", "-c", _PEER, mode)
+        args = (self._argv0, "-I", "-S", "-B", "-c", _PEER, mode)
         with (
             patch.object(worker, "_VERIFIER_ARGV", args),
             patch.object(worker, "_spawn", capture),
@@ -260,7 +260,7 @@ class PakeWorkerTests(unittest.TestCase):
         self.addCleanup(os.close, unsealed)
         script = _memfd(b"#!not-an-elf")
         self.addCleanup(os.close, script)
-        fcntl.fcntl(script, fcntl.F_ADD_SEALS, _SEALS)
+        private_memory.seal(script)
         with self._peer("fragment") as children:
             for fd, digest in (
                 (unsealed, self._digest),

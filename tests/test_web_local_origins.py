@@ -50,7 +50,9 @@ class LocalProfileTests(unittest.TestCase):
 @unittest.skipUnless(OPENSSL, "openssl is required for synthetic TLS files")
 class LocalTLSFileTests(unittest.TestCase):
     def setUp(self):
-        self.folder = self.enterContext(tempfile.TemporaryDirectory())
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        self.folder = folder.name
         self.cert, self.key = (
             Path(self.folder) / "cert.pem",
             Path(self.folder) / "key.pem",

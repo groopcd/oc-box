@@ -1,7 +1,6 @@
 """Read-only host validation of operator-supplied web TLS files."""
 
 import base64
-import fcntl
 import os
 import re
 import shutil
@@ -11,6 +10,11 @@ from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from ipaddress import IPv4Address
 from pathlib import Path
+
+if __package__:
+    from . import private_memory
+else:
+    import private_memory
 
 _CERT_LIMIT = 96 * 1024
 _KEY_LIMIT = 32 * 1024
@@ -195,14 +199,7 @@ def _snapshot(path, *, private):
         except OSError:
             raise WebTLSError(f"{kind}_file") from None
         try:
-            fcntl.fcntl(
-                snapshot,
-                fcntl.F_ADD_SEALS,
-                fcntl.F_SEAL_WRITE
-                | fcntl.F_SEAL_GROW
-                | fcntl.F_SEAL_SHRINK
-                | fcntl.F_SEAL_SEAL,
-            )
+            private_memory.seal(snapshot)
         except (AttributeError, OSError):
             raise WebTLSError("unavailable") from None
         yield snapshot

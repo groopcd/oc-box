@@ -254,6 +254,68 @@ class PrivateMemoryTests(unittest.TestCase):
 
 @unittest.skipUnless(sys.platform == "linux", "Linux anonymous-memory files required")
 class LinuxPrivateMemoryTests(unittest.TestCase):
+    @unittest.skipUnless(
+        hasattr(os, "memfd_create") and hasattr(os, "MFD_ALLOW_SEALING"),
+        "native sealable memfd creation required",
+    )
+    def test_real_seals_enforce_immutability_with_or_without_python_names(self):
+        import fcntl
+
+        for omit_names in (False, True):
+            with self.subTest(omit_names=omit_names), patch.dict(fcntl.__dict__):
+                if omit_names:
+                    for name in (
+                        "F_ADD_SEALS",
+                        "F_GET_SEALS",
+                        "F_SEAL_SEAL",
+                        "F_SEAL_SHRINK",
+                        "F_SEAL_GROW",
+                        "F_SEAL_WRITE",
+                    ):
+                        fcntl.__dict__.pop(name, None)
+                fd = os.memfd_create(
+                    "oc-box-test-seals", os.MFD_CLOEXEC | os.MFD_ALLOW_SEALING
+                )
+                try:
+                    self.assertFalse(memory.is_sealed(fd))
+                    os.write(fd, b"bytes")
+                    memory.seal(fd)
+                    self.assertTrue(memory.is_sealed(fd))
+                    for operation, args in (
+                        (os.pwrite, (b"x", 0)),
+                        (os.ftruncate, (0,)),
+                        (os.ftruncate, (6,)),
+                        (memory.seal, ()),
+                    ):
+                        with self.assertRaises(PermissionError) as caught:
+                            operation(fd, *args)
+                        self.assertEqual(caught.exception.errno, errno.EPERM)
+                    self.assertEqual(os.pread(fd, 6, 0), b"bytes")
+                finally:
+                    os.close(fd)
+
+    def test_memfd_with_only_the_seal_lock_is_not_immutable(self):
+        fd = memory.create("oc-box-test-seal-lock-only")
+        self.addCleanup(os.close, fd)
+        self.assertFalse(memory.is_sealed(fd))
+        with self.assertRaises(PermissionError) as caught:
+            memory.seal(fd)
+        self.assertEqual(caught.exception.errno, errno.EPERM)
+
+    def test_seal_operations_propagate_kernel_errors_without_retry(self):
+        import fcntl
+
+        failure = OSError(errno.EINVAL, "synthetic kernel refusal")
+        for operation in (memory.seal, memory.is_sealed):
+            with (
+                self.subTest(operation=operation.__name__),
+                patch.object(fcntl, "fcntl", side_effect=failure) as call,
+                self.assertRaises(OSError) as caught,
+            ):
+                operation(73)
+            self.assertIs(caught.exception, failure)
+            call.assert_called_once()
+
     def test_real_native_and_libc_files_are_binary_regular_and_non_inheritable(self):
         for case in ("native", "libc", "libc-without-python-flag"):
             with self.subTest(case=case), contextlib.ExitStack() as stack:

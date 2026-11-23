@@ -20,6 +20,11 @@ from dataclasses import dataclass
 from threading import Event, Lock, Timer
 from time import monotonic, sleep
 
+if __package__:
+    from . import private_memory
+else:
+    import private_memory
+
 _V1 = b"OCOP\x01"
 _START = _V1 + b"\x01"
 _FINISH = _V1 + b"\x02"
@@ -93,10 +98,7 @@ def _dup(fd):
 
 
 def _verify_executable(fd, expected):
-    seals = (
-        fcntl.F_SEAL_SEAL | fcntl.F_SEAL_WRITE | fcntl.F_SEAL_GROW | fcntl.F_SEAL_SHRINK
-    )
-    if fcntl.fcntl(fd, fcntl.F_GET_SEALS) & seals != seals:
+    if not private_memory.is_sealed(fd):
         raise PakeWorkerError()
     info = os.fstat(fd)
     if (
