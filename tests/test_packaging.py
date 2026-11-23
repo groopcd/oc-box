@@ -104,6 +104,7 @@ class PackagingTests(unittest.TestCase):
                     "ui_state_tui.js",
                     "file_preview.py",
                     "file_preview_io.py",
+                    *check_package._WEB_RUNTIME_FILES,
                     "file_preview_tui.tsx",
                     "file_preview_png.py",
                     "file_preview_host.py",
@@ -151,6 +152,13 @@ class PackagingTests(unittest.TestCase):
                     "tests/test_web_sessions.py",
                     "tests/web_sessions_dom.mjs",
                     "tests/smoke_web_sessions_v2.py",
+                    "tests/test_web_layout_runtime.mjs",
+                    "tests/smoke_web_layout_browser.py",
+                    "docs/mockups/web-manager.html",
+                    *(
+                        "src/oc_box/" + name
+                        for name in check_package._WEB_RUNTIME_FILES
+                    ),
                     "tests/smoke_native_tabs_v2.py",
                     "tests/smoke_native_preferences_v2.py",
                     "tests/smoke_image_preview_preferences_v2.py",

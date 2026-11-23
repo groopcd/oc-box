@@ -23,6 +23,27 @@ else:
     from check_release import source_identity
 
 
+_WEB_RUNTIME_FILES = (
+    "web_sessions.py",
+    "web_sessions.js",
+    "web_sessions.css",
+    "web_history.py",
+    "web_tls.py",
+    "web_tls_cli.py",
+    "web_tls_setup.py",
+    "web_local_origins.py",
+    "web_accounts.py",
+    "web_admission.py",
+    "web_handoff.py",
+    "web_native_pair.py",
+    "web_named_local.py",
+    "web_named_headers.py",
+    "web_pake_flow.py",
+    "web_pake_profile.py",
+    "web_pake_worker.py",
+)
+
+
 def check_build_identity(build, source, version):
     """Prove public/channel/source provenance, including sdist rebuild identity."""
     series, channel, baseline = source_identity(source)
@@ -89,9 +110,7 @@ def check_archives(directory):
             "workspace_service.py",
             "web_attachments.py",
             "web_attachments.js",
-            "web_sessions.py",
-            "web_sessions.js",
-            "web_sessions.css",
+            *_WEB_RUNTIME_FILES,
             "oc-box-mark.png",
             "workspace_control.py",
             "history_reader.py",
@@ -172,6 +191,12 @@ def check_archives(directory):
         ):
             assert "oc_box/" + name in names, name
         assert "oc_box/setup.py" not in names
+        assert not any(name.endswith(".wasm") for name in names), (
+            "unapproved web verifier"
+        )
+        web_runtime = {
+            name: wheel.read("oc_box/" + name) for name in _WEB_RUNTIME_FILES
+        }
         assert not any(
             "/tests/" in name
             or name.endswith(".pyc")
@@ -255,6 +280,9 @@ def check_archives(directory):
             "tests/test_web_sessions.py",
             "tests/web_sessions_dom.mjs",
             "tests/smoke_web_sessions_v2.py",
+            "tests/test_web_layout_runtime.mjs",
+            "tests/smoke_web_layout_browser.py",
+            "docs/mockups/web-manager.html",
             "tests/smoke_native_tabs_v2.py",
             "tests/smoke_native_preferences_v2.py",
             "tests/smoke_image_preview_preferences_v2.py",
@@ -365,6 +393,12 @@ def check_archives(directory):
             "NOTICE",
         ):
             assert root + "/" + name in source.getnames(), name
+        for name, content in web_runtime.items():
+            module = source.extractfile(root + "/src/oc_box/" + name)
+            assert module is not None and module.read() == content, name
+        assert not any(name.endswith(".wasm") for name in source.getnames()), (
+            "unapproved web verifier"
+        )
         version_file = source.extractfile(root + "/src/oc_box/version_info.py")
         assert version_file is not None
         sdist_version_source = version_file.read().decode()
@@ -427,6 +461,9 @@ def check(directory, *, with_vault=False, with_tui=False):
         overview = run(cli, "--help")
         assert "COMMAND --help" in overview
         assert "--image-preview" not in overview and "--delete-sessions" not in overview
+        web_help = run(cli, "web", "--help")
+        assert "--workspace-layout" in web_help and "--auth" not in web_help
+        assert "check-local-pair" in run(cli, "web", "tls", "--help")
         log_help = run(cli, "logs", "--help")
         for option in (
             "--level",
