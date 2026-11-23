@@ -245,7 +245,7 @@ class Observer:
         self.url = "http://127.0.0.1:" + str(self.server.server_port)
         return self
 
-    def __exit__(self, *_):
+    def __exit__(self, error_type, *_):
         self.closing = True
         self.server.shutdown()
         with self.lock:
@@ -259,11 +259,14 @@ class Observer:
         deadline = time.monotonic() + 5
         for handler in handlers:
             handler.join(max(0, deadline - time.monotonic()))
-        require(
+        stopped = (
             not self.worker.is_alive()
-            and all(not handler.is_alive() for handler in handlers),
-            "http-observer-stop",
+            and all(not handler.is_alive() for handler in handlers)
         )
+        if error_type is None:
+            require(stopped, "http-observer-stop")
+        elif not stopped:
+            print("DIAGNOSTIC HTTP observer cleanup also failed", flush=True)
 
 
 class LocalTransport:
@@ -405,6 +408,9 @@ class Client(PreferencesClient):
         )
 
     def close(self):
+        if getattr(self, "_closed", False):
+            return
+        self._closed = True
         try:
             if self.process.poll() is None:
                 self.control(self.native, "exit")
@@ -415,11 +421,17 @@ class Client(PreferencesClient):
                 )
             require(self.process.wait(timeout=5) == 0, "native-client-clean-exit")
         finally:
-            if self.process.poll() is None:
-                os.killpg(self.process.pid, signal.SIGTERM)
-                self.process.wait(timeout=5)
-            os.close(self.master)
-            self.tail = ""
+            try:
+                if self.process.poll() is None:
+                    os.killpg(self.process.pid, signal.SIGTERM)
+                    try:
+                        self.process.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        os.killpg(self.process.pid, signal.SIGKILL)
+                        self.process.wait(timeout=5)
+            finally:
+                os.close(self.master)
+                self.tail = ""
 
 
 def exercise(binary, root):
@@ -681,6 +693,7 @@ def exercise(binary, root):
                 for ident in identifiers
             }
             clients = []
+            owner = None
             with Observer(native.endpoint) as observer:
                 try:
                     owner = Client(transport, child, observer, owner=True)
@@ -711,18 +724,28 @@ def exercise(binary, root):
                         "ordered-real-tabs",
                     )
                     owner.control(native, "blur")
-                    owner.drain(0.3)
-                    raw = native(
-                        "POST",
-                        ui_state._target("snapshot", str(project)),
-                        {
-                            "input": {
-                                key: connection["ui_state"][key]
-                                for key in ("generation", "ownerClient")
+
+                    def native_blurred():
+                        raw = native(
+                            "POST",
+                            ui_state._target("snapshot", str(project)),
+                            {
+                                "input": {
+                                    key: connection["ui_state"][key]
+                                    for key in ("generation", "ownerClient")
+                                },
                             },
-                        },
-                    )["output"]
-                    require(raw.get("focus") == "blurred", "native-renderer-blur")
+                        )["output"]
+                        return (
+                            raw.get("status") == "valid"
+                            and raw.get("client") == owner.client_id
+                            and raw.get("selected") == read
+                            and raw.get("focus") == "blurred"
+                        )
+
+                    # The send RPC acknowledges dispatch, not the native
+                    # renderer's next asynchronous focus report.
+                    owner.wait(native_blurred, "native-renderer-blur")
                     require(
                         transport.snapshot().source == "owner-tui",
                         "owner-blurred-selection",
@@ -830,15 +853,25 @@ def exercise(binary, root):
                                 "reports": observer.reports,
                                 "report_statuses": observer.report_statuses,
                                 "report_shapes": observer.report_shapes,
-                                "metadata_bound": owner.metadata_bound,
+                                "metadata_bound": getattr(owner, "metadata_bound", False),
                             }
                         ),
                         flush=True,
                     )
                     raise
                 finally:
+                    failing = sys.exc_info()[0] is not None
+                    cleanup_error = None
                     for client in reversed(clients):
-                        client.close()
+                        try:
+                            client.close()
+                        except BaseException as error:
+                            if cleanup_error is None:
+                                cleanup_error = error
+                    if cleanup_error is not None:
+                        if not failing:
+                            raise cleanup_error
+                        print("DIAGNOSTIC native client cleanup also failed", flush=True)
             after = {
                 ident: native("GET", "/api/experimental/session/" + ident + "/export")[
                     "data"
@@ -894,6 +927,12 @@ def main():
         return 0
     except Failure as error:
         print("FAIL: native UI state (" + str(error) + ").", file=sys.stderr)
+        if os.environ.get("GITHUB_ACTIONS") == "true":
+            # Only publish fixed fixture categories, not diagnostic payloads.
+            category = str(error)
+            if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,80}", category):
+                category = "fixture-check"
+            print(f"::error title=Native UI state fixture::{category}", flush=True)
         return 1
     except (Exception, KeyboardInterrupt) as error:
         print(
@@ -913,6 +952,21 @@ def main():
             ),
             flush=True,
         )
+        if os.environ.get("GITHUB_ACTIONS") == "true":
+            frame = next(
+                (
+                    item
+                    for item in reversed(traceback.extract_tb(error.__traceback__))
+                    if Path(item.filename) == Path(__file__)
+                ),
+                None,
+            )
+            if frame is not None:
+                print(
+                    f"::error file=tests/smoke_ui_state_v2.py,line={frame.lineno}"
+                    f",title=Native UI state fixture::{type(error).__name__} in {frame.name}",
+                    flush=True,
+                )
         print("FAIL: native UI state (unexpected).", file=sys.stderr)
         return 1
     finally:
