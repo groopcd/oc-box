@@ -4788,12 +4788,6 @@ def main(argv=None):
             raise BoxError(str(exc)) from exc
     if arguments and arguments[0] == "secrets":
         return secrets_command(arguments[1:])
-    if arguments[:2] == ["web", "tls"]:
-        if __package__:
-            from .web_tls_cli import cli
-        else:
-            from web_tls_cli import cli
-        return cli(sys.modules[__name__], arguments[2:])
     if arguments and arguments[0] == "web":
         web = workspace_service.web_parser().parse_args(arguments[1:])
         if os.environ.get("OC_BOX_CONTAINER") == "1":
@@ -5590,11 +5584,7 @@ def entrypoint():
     )
     launch_options = None
     try:
-        if command == "web" and arguments[1:2] == ["tls"]:
-            informational = (
-                True  # Separate host preparation; never a workspace lifecycle.
-            )
-        elif command == "web":
+        if command == "web":
             launch_options = workspace_service.web_parser().parse_args(arguments[1:])
             launch_options.command = command
         elif command in _LOGGING_COMMANDS:

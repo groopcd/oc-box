@@ -107,13 +107,9 @@ fi
         self.assertEqual(
             set(self.complete("doctor", "--feature", "")), set(dependencies.FEATURES)
         )
-        self.assertIn("tls", self.complete("web", ""))
-        self.assertEqual(set(self.complete("web", "tls", "s")), {"setup"})
-        self.assertEqual(set(self.complete("web", "tls", "check", "s")), {"supplied"})
-        self.assertEqual(
-            self.complete("web", "tls", "setup", "localhost", "--i"),
-            ["--install-trust"],
-        )
+        self.assertNotIn("tls", self.complete("web", ""))
+        self.assertEqual(self.complete("web", "tls", "s"), [])
+        self.assertEqual(self.complete("web", "tls", "setup", "localhost", "--i"), [])
         self.assertEqual(
             self.complete("logs", "--level", ""), ["debug", "info", "warn", "error"]
         )

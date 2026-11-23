@@ -23,10 +23,6 @@ oc-box distros
 oc-box doctor [--json | --table] [--feature FEATURE]...
 oc-box completion bash
 oc-box web [--project PATH | --workspace ID] [--session ID] [--port N] [--no-open] [--no-vault] [--attachments] [--workspace-layout] [LIFECYCLE-LOG-OPTIONS]
-oc-box web tls check localhost [--json]
-oc-box web tls check supplied --origin HTTPS_ORIGIN --cert PEM --key PEM [--json]
-oc-box web tls check-local-pair --account-cert PEM --account-key PEM --workspace-cert PEM --workspace-key PEM [--account-port PORT] [--workspace-port PORT] [--json]
-oc-box web tls setup localhost [--install-trust]
 oc-box --status [--project PATH | --workspace ID] [--json | --table]
 oc-box status [--project PATH | --workspace ID] [--json | --table]
 oc-box logs [--journald | --log-dir PATH] [--project PATH | --workspace ID] [--level LEVEL | --verbose[=LEVEL]] [--limit N] [--tail] [--follow] [--json | --table]
@@ -189,12 +185,11 @@ oc-box doctor --feature private-output
 oc-box doctor --feature backup --feature vault
 oc-box doctor --feature backup-info --json
 oc-box doctor --feature backup-info --table
-oc-box doctor --feature web-tls-local
 ```
 
 Feature selectors: `launch`, `private-output`, `maintenance`, `history`, `backup`, `backup-info`, `restore`,
-`vault`, `github-upgrade`, `bootstrap`, `storage`, `overlay`, `manuals`,
-`docs-build`, and `web-tls-local`. Without selectors all are reported, but exit status checks only
+`vault`, `github-upgrade`, `bootstrap`, `storage`, `overlay`, `manuals`, and
+`docs-build`. Without selectors all are reported, but exit status checks only
 core `launch` prerequisites. With selectors, exit 0 means every selected
 feature's prerequisites are present; exit 1 means at least one is missing or
 incompatible. JSON schema version 1 includes scope, detected distro, feature
@@ -662,39 +657,9 @@ workspace project. It makes other views unavailable rather than granting host
 catalogs, logs, workspace/backup operations, or a host terminal. The local Textual manager and the default browser view
 remain unchanged.
 
-The host-only TLS preparation commands do not open a listener or launch a workspace.
-They prepare and check files for future named HTTPS sign-in; normal `oc-box web`
-still uses its existing one-use HTTP link on `127.0.0.1`.
-
-```sh
-oc-box doctor --feature web-tls-local
-oc-box web tls setup localhost
-oc-box web tls check localhost
-oc-box web tls check supplied --origin https://workspace.example.com \
-  --cert /secure/web/server.pem --key /secure/web/server-key.pem
-```
-
-The optional mkcert setup creates local files without changing browser trust by
-default. `--install-trust` explicitly requests browser NSS trust installation
-after confirmation on the controlling host terminal. No package or system-wide
-trust installation is automatic. Managed TLS files are stored under
-`~/.local/share/oc-box/web-tls`, outside workspace state; keep the CA private
-key private. Setup refuses overlapping registered projects and custom binds
-found in registered containers. Do not expose this directory through
-operator-supplied Podman mounts, alternate registries or external tools.
-The supplied-file check accepts PEM files for
-private-CA or publicly trusted certificates. It checks local certificate
-usability, validity dates, subject alternative names and private key match;
-it neither contacts a CA nor proves browser trust. The supplied-file check does
-not require mkcert. Use the name or IP covered by the certificate, not the
-listener bind address.
-
-`oc-box web tls check-local-pair` preflights two supplied certificate pairs for
-the local named-sign-in design: `https://accounts.ocbox.test:9443` and
-`https://workspace.ocbox-app.test:9444`, with optional distinct unprivileged
-ports. The names must resolve to loopback in the intended browser environment.
-The check does not resolve DNS, edit trust or hosts files, start a listener,
-or enable named sign-in.
+The one-use link is the only browser sign-in method and the HTTP relay binds
+to `127.0.0.1` only. Vault unlock supplies workspace credentials, not browser
+authentication. Named sign-in, LAN binding, and HTTPS/CA setup are deferred.
 
 The index lists all verified open native TUI tabs in this private service,
 including idle sessions, in native order in one outer tabstrip. Click a tab to

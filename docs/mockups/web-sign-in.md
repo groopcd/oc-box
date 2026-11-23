@@ -19,6 +19,9 @@ link to return; a named user can sign in again.
 
 ## Certificate setup
 
+The commands in this section are proposals and are not exposed by the installed
+guest-only launcher.
+
 TLS is configured per web origin, not per vault user. Creating or resetting an
 account does not issue certificates, modify browser trust, or enable a listener.
 

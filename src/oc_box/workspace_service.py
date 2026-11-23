@@ -1745,7 +1745,7 @@ def web_parser():
         description="Open the native web UI on the private V2 workspace service; attach to a running session or own a new foreground lease.",
         epilog=(
             "Run on the host with OpenCode 2.x. Keep the command open while using "
-            "the browser relay. For host-only TLS preparation, see 'oc-box web tls --help'."
+            "the loopback browser relay. Sign in with the native one-use link."
         ),
     )
     group = result.add_mutually_exclusive_group()

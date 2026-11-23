@@ -30,8 +30,6 @@ RUNTIME_FILES = (
     "web_sessions.js",
     "web_sessions.css",
     "web_tls.py",
-    "web_tls_cli.py",
-    "web_tls_setup.py",
     "web_local_origins.py",
     "web_handoff.py",
     "web_native_pair.py",

@@ -9,11 +9,11 @@ registry, global catalog, host logs, storage operations or backup authority.
 It does not start a manager terminal or duplicate Textual. See the
 [CLI reference](../cli.md#web--browser-interface) and [shell contract](../web-shell.md).
 
-`oc-box web tls` supplies host-only certificate preparation and validation.
-`oc-box doctor --feature web-tls-local` checks optional localhost tooling.
-These do not enable a TLS listener, enroll accounts or change native pairing.
-A successful local certificate check is not evidence of trust in a browser
-profile. The default command and Textual remain unchanged.
+The guest-only release does not expose host certificate preparation or
+diagnostic commands. Their prototypes and tests remain in the source tree
+for future development. They do not enable a TLS listener, enroll accounts
+or change native pairing. A successful local certificate check is not
+evidence of trust in a browser profile.
 
 ## Named sign-in is not enabled
 
@@ -39,7 +39,7 @@ The selected first development profile is **local named sign-in**:
 `accounts.ocbox.test` and `workspace.ocbox-app.test`, both bound to IPv4
 loopback and using browser-trusted HTTPS. These synthetic reserved names avoid
 production DNS and deliberately separate the two sites, not just two ports.
-`oc-box web tls check-local-pair` checks supplied material separately for each
+The internal certificate preflight checks supplied material separately for each
 hostname, without touching trust, name resolution or the workspace. The design
 uses one loopback-only named relay per verified owner and refuses concurrent
 guest access to that owner unless independent admission is proven. Guest mode

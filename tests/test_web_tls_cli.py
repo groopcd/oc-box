@@ -15,6 +15,10 @@ from unittest.mock import patch
 from oc_box import dependencies, oc_box, web_tls, web_tls_cli
 
 
+def tls_cli(*args):
+    return web_tls_cli.cli(oc_box, args)
+
+
 class WebTLSCLITests(unittest.TestCase):
     def test_local_check_reports_helper_and_certificate_status_independently(self):
         with (
@@ -25,9 +29,7 @@ class WebTLSCLITests(unittest.TestCase):
             patch.object(oc_box, "detect_opencode_release") as native,
             contextlib.redirect_stdout(io.StringIO()) as output,
         ):
-            self.assertEqual(
-                oc_box.main(["web", "tls", "check", "localhost", "--json"]), 0
-            )
+            self.assertEqual(tls_cli("check", "localhost", "--json"), 0)
             directory = Path(temporary) / ".local/share/oc-box/web-tls/localhost"
             self.assertEqual(
                 [call.args for call in validate.call_args_list],
@@ -45,8 +47,6 @@ class WebTLSCLITests(unittest.TestCase):
 
     def test_supplied_material_does_not_consult_optional_helpers_or_log_paths(self):
         args = [
-            "web",
-            "tls",
             "check",
             "supplied",
             "--origin",
@@ -65,7 +65,7 @@ class WebTLSCLITests(unittest.TestCase):
             ),
             contextlib.redirect_stdout(io.StringIO()) as output,
         ):
-            self.assertEqual(oc_box.main(args), 1)
+            self.assertEqual(tls_cli(*args), 1)
         self.assertEqual(json.loads(output.getvalue())["diagnostic"], "key_file")
         self.assertNotIn("/private", output.getvalue())
         helper.assert_not_called()
@@ -78,23 +78,19 @@ class WebTLSCLITests(unittest.TestCase):
             contextlib.redirect_stdout(io.StringIO()) as output,
         ):
             self.assertEqual(
-                oc_box.main(
-                    [
-                        "web",
-                        "tls",
-                        "check",
-                        "localhost",
-                        "--json",
-                        *paths,
-                        "--origin",
-                        "https://workspace.example",
-                    ]
+                tls_cli(
+                    "check",
+                    "localhost",
+                    "--json",
+                    *paths,
+                    "--origin",
+                    "https://workspace.example",
                 ),
                 1,
             )
             for args in (["supplied"], ["localhost", *paths]):
                 with self.assertRaisesRegex(oc_box.BoxError, "requires|together"):
-                    oc_box.main(["web", "tls", "check", *args])
+                    tls_cli("check", *args)
         self.assertEqual(json.loads(output.getvalue())["diagnostic"], "profile_origin")
         validate.assert_not_called()
 
@@ -106,53 +102,56 @@ class WebTLSCLITests(unittest.TestCase):
             contextlib.redirect_stdout(io.StringIO()),
         ):
             with self.assertRaises(SystemExit) as result:
-                oc_box.main(["web", "tls", "--help"])
+                tls_cli("--help")
             self.assertEqual(result.exception.code, 0)
             for action in ("check", "setup"):
                 with self.assertRaisesRegex(oc_box.BoxError, "browser host"):
-                    oc_box.main(["web", "tls", action, "localhost"])
+                    tls_cli(action, "localhost")
         helper.assert_not_called()
         validate.assert_not_called()
 
-    def test_tls_entrypoint_never_sets_up_the_launch_journal(self):
-        with (
-            patch.object(
-                oc_box.sys, "argv", ["oc-box", "web", "tls", "check", "localhost"]
-            ),
-            patch.object(oc_box, "main", return_value=1),
-            patch.object(oc_box.lifecycle_output, "invocation") as invocation,
-            patch.object(oc_box.lifecycle_output, "console_event") as event,
+    def test_deferred_web_commands_refuse_before_launch_or_tls_setup(self):
+        for args in (
+            ["web", "tls", "setup", "localhost", "--install-trust"],
+            ["web", "--auth", "password"],
+            ["web", "--bind", "0.0.0.0"],
         ):
-            self.assertEqual(oc_box.entrypoint(), 1)
-        invocation.assert_not_called()
-        event.assert_not_called()
+            with (
+                self.subTest(args=args),
+                patch.object(oc_box.sys, "argv", ["oc-box", *args]),
+                patch.object(oc_box, "main") as main,
+                patch.object(oc_box.lifecycle_output, "invocation") as invocation,
+                patch.object(web_tls_cli, "cli") as tls,
+                contextlib.redirect_stderr(io.StringIO()),
+                self.assertRaises(SystemExit) as result,
+            ):
+                oc_box.entrypoint()
+            self.assertEqual(result.exception.code, 2)
+            main.assert_not_called()
+            invocation.assert_not_called()
+            tls.assert_not_called()
 
-    def test_doctor_optional_helpers_do_not_determine_default_exit(self):
-        original = dependencies.probe
-
-        def available(key):
-            return (
-                original(key) if key in ("mkcert", "certutil") else (True, "available")
+    def test_doctor_does_not_expose_deferred_tls_helpers(self):
+        for env in ({}, {"OC_BOX_CONTAINER": "1"}):
+            with (
+                self.subTest(env=env),
+                patch.dict(os.environ, env, clear=True),
+                patch.object(
+                    dependencies, "probe", return_value=(True, "available")
+                ) as probe,
+                contextlib.redirect_stdout(io.StringIO()),
+                contextlib.redirect_stderr(io.StringIO()),
+            ):
+                self.assertEqual(dependencies.cli([]), 0)
+                self.assertNotIn("web-tls-local", dependencies.parser().format_help())
+                with self.assertRaises(SystemExit) as result:
+                    dependencies.cli(["--feature", "web-tls-local"])
+                self.assertEqual(result.exception.code, 2)
+            self.assertTrue(
+                {"mkcert", "certutil"}.isdisjoint(
+                    call.args[0] for call in probe.call_args_list
+                )
             )
-
-        with (
-            patch.dict(os.environ, {}, clear=True),
-            patch.object(web_tls, "find_helper", return_value=None),
-            patch.object(dependencies, "probe", side_effect=available),
-            contextlib.redirect_stdout(io.StringIO()),
-        ):
-            self.assertEqual(dependencies.cli([]), 0)
-            self.assertEqual(dependencies.cli(["--feature", "web-tls-local"]), 1)
-            result = dependencies.report(["web-tls-local"])["features"][0]
-        self.assertEqual(result["missing"], ["mkcert", "certutil"])
-
-    def test_doctor_container_does_not_recommend_installing_host_only_helpers(self):
-        with patch.dict(os.environ, {"OC_BOX_CONTAINER": "1"}, clear=True):
-            feature = dependencies.report(["web-tls-local"])["features"][0]
-        self.assertFalse(feature["available"])
-        self.assertEqual(feature["packages"], [])
-        self.assertEqual(feature["install_commands"], [])
-        self.assertIn("browser host", feature["guidance"][0])
 
     def test_xdg_paths_cannot_relocate_the_private_tls_directory(self):
         for value in ("", "relative/example", "/example/project"):

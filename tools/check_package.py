@@ -29,8 +29,6 @@ _WEB_RUNTIME_FILES = (
     "web_sessions.css",
     "web_history.py",
     "web_tls.py",
-    "web_tls_cli.py",
-    "web_tls_setup.py",
     "web_local_origins.py",
     "web_accounts.py",
     "web_admission.py",
@@ -194,6 +192,8 @@ def check_archives(directory):
         ):
             assert "oc_box/" + name in names, name
         assert "oc_box/setup.py" not in names
+        assert "oc_box/web_tls_cli.py" not in names
+        assert "oc_box/web_tls_setup.py" not in names
         assert not any(name.endswith(".wasm") for name in names), (
             "unapproved web verifier"
         )
@@ -467,8 +467,18 @@ def check(directory, *, with_vault=False, with_tui=False):
         assert "COMMAND --help" in overview
         assert "--image-preview" not in overview and "--delete-sessions" not in overview
         web_help = run(cli, "web", "--help")
-        assert "--workspace-layout" in web_help and "--auth" not in web_help
-        assert "check-local-pair" in run(cli, "web", "tls", "--help")
+        assert "--workspace-layout" in web_help and "native one-use link" in web_help
+        assert all(word not in web_help for word in ("--auth", "--bind", "web tls"))
+        assert "web-tls-local" not in run(cli, "doctor", "--help")
+        tls = subprocess.run(
+            [cli, "web", "tls", "setup", "localhost"],
+            cwd=work,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert tls.returncode == 2 and "unrecognized arguments" in tls.stderr
         log_help = run(cli, "logs", "--help")
         for option in (
             "--level",

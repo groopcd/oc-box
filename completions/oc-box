@@ -95,11 +95,11 @@ _oc_box()
         fi
         case $option in
             --project|--log-dir) _oc_box_paths -d; return 0 ;;
-            --output|--identity|--opencode-auth-export|--cert|--key|--account-cert|--account-key|--workspace-cert|--workspace-key) _oc_box_paths -f; return 0 ;;
+            --output|--identity|--opencode-auth-export) _oc_box_paths -f; return 0 ;;
             --distro)
                 _oc_box_words 'tumbleweed leap ubuntu debian fedora arch alpine opensuse opensuse-tumbleweed opensuse-leap archlinux'; return 0 ;;
             --feature)
-                _oc_box_words 'launch private-output maintenance history backup backup-info restore vault github-upgrade bootstrap storage overlay manuals docs-build web-tls-local'; return 0 ;;
+                _oc_box_words 'launch private-output maintenance history backup backup-info restore vault github-upgrade bootstrap storage overlay manuals docs-build'; return 0 ;;
             --auto-update) _oc_box_words 'on off'; return 0 ;;
             --level)
                 if [[ $command == logs ]]; then
@@ -121,7 +121,7 @@ _oc_box()
                     _oc_box_words 'ascii graphics'; return 0
                 fi ;;
             --credential-mode) _oc_box_words 'env selected vault'; return 0 ;;
-            --workspace|--import-session|--model|--env-secret|--vault-secret|--cpus|--memory|--pids-limit|--device|--podman-arg|--recipient|--min-passphrase-length|--port|--session|--text|--limit|--origin|--account-port|--workspace-port)
+            --workspace|--import-session|--model|--env-secret|--vault-secret|--cpus|--memory|--pids-limit|--device|--podman-arg|--recipient|--min-passphrase-length|--port|--session|--text|--limit)
                 return 0 ;;
         esac
     fi
@@ -133,18 +133,7 @@ _oc_box()
         stop) options="$help $selectors $launch_logs" ;;
         repair) options="$help $selectors" ;;
         terminal) options="$help $selectors $launch_logs --maintenance" ;;
-        web)
-            if [[ ${COMP_WORDS[1]} == web && ${COMP_WORDS[2]} == tls ]] && (( COMP_CWORD > 2 )); then
-                case ${COMP_WORDS[3]} in
-                    check) options="$help localhost supplied --origin --cert --key --json" ;;
-                    check-local-pair) options="$help --account-cert --account-key --workspace-cert --workspace-key --account-port --workspace-port --json" ;;
-                    setup) options="$help localhost --install-trust" ;;
-                    *) options="$help check check-local-pair setup" ;;
-                esac
-            else
-                options="$help $selectors $launch_logs --session --port --no-open --no-vault --attachments --workspace-layout"
-                (( COMP_CWORD == 2 )) && options+=' tls'
-            fi ;;
+        web) options="$help $selectors $launch_logs --session --port --no-open --no-vault --attachments --workspace-layout" ;;
         tui) options="$help $selectors --read-only --demo" ;;
         share) options="$help $selectors --acknowledge-risk" ;;
         attach)

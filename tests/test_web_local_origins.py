@@ -12,7 +12,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from oc_box import oc_box, web_tls
+from oc_box import oc_box, web_tls, web_tls_cli
 from oc_box import web_local_origins as local
 
 OPENSSL = shutil.which("openssl")
@@ -94,10 +94,9 @@ class LocalTLSFileTests(unittest.TestCase):
             patch.object(oc_box, "detect_opencode_release") as native,
             contextlib.redirect_stdout(io.StringIO()) as output,
         ):
-            result = oc_box.main(
+            result = web_tls_cli.cli(
+                oc_box,
                 [
-                    "web",
-                    "tls",
                     "check-local-pair",
                     "--json",
                     "--account-cert",
