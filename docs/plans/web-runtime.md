@@ -23,6 +23,9 @@ admission with stream cancellation and drain hooks. The private coordinator
 does not mint a native credential until a verified principal's one-use
 handoff is redeemed by the matching browser. The native credential remains
 server-side and is fenced to a verified owner generation and current lease.
+The internal account and app dispatchers preserve separate browser cookies,
+admit bounded protocol POSTs, and gate two explicit read-only native metadata
+paths and logout. They do not serve native assets, arbitrary API or upgrades.
 No listener routes browser requests through these components. No password backend or
 browser WASM is shipped. A candidate `opaque-ke` prerelease demonstrated
 separate offline Chromium WASM and native interop with synthetic inputs;
@@ -81,16 +84,26 @@ design, not merely a stronger workspace login.
   adapter, not named browser authentication or native cookie revocation.
   The guest's offline Chromium library check was incomplete, so the guest
   did not exercise the HTTPS browser composition.
+- **Browser and native streams:** Two private Chromium HTTPS runs on exact
+  `2767d46` passed all 12 checks with real OPAQUE and OpenCode 2.3.2. Copied
+  tickets and replay refused, and the native cookie stayed on the server.
+  Logging out one browser closed only its native event stream and rejected
+  its stale browser cookie; the other stream received a fresh keepalive
+  before its own logout. Native pairing can return identical cookies, so
+  revocation was enforced by the host-side browser admission, not by
+  invalidating a native cookie. The HTTPS dispatcher and owner lease were
+  fixtures rather than a public listener or real Podman attach. This did
+  not exercise native WebSockets.
 
 Option 3 is still the default: the native one-use link on localhost. Neither
 lab enables a production named or network mode.
 
 ## Final integration and publication checklist
 
-The development branch was synchronized through `c0cd1fb`, including its
-quiet preparation logs and installer failure handling. Keep those changes
-and the default web/native TUI behavior intact when integrating the feature.
-Do not infer readiness from a green check on an earlier branch commit.
+The development candidate through `2767d46` includes the quiet preparation
+logs and terminal brand mark. Keep those changes and the default web/native
+TUI behavior intact when integrating the feature. Do not infer readiness
+from a green check on an earlier branch commit.
 
 1. Review and test a separate named HTTPS ingress. It must admit every HTTP
    request and upgrade before opening private upstream work, with no public
