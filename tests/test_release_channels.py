@@ -106,6 +106,47 @@ class ReleaseChannelTests(unittest.TestCase):
         self.assertFalse(result["publish_validated"])
         self.assertEqual(result["commit"], self.git("rev-parse", "HEAD"))
 
+    def test_new_release_series_require_minor_parity_without_rewriting_history(self):
+        baseline = "VERSION_BASE_COMMIT_COUNT = 29\n"
+        for series, channel in (
+            ("1.5", "stable"),
+            ("1.7", "devel"),
+            ("1.8", "stable"),
+            ("1.9", "devel"),
+            ("2.0", "stable"),
+            ("2.1", "devel"),
+            ("2.2", "stable"),
+        ):
+            with self.subTest(series=series, channel=channel):
+                source = f"VERSION_SERIES = {series!r}\n"
+                self.assertEqual(
+                    check_release.source_identity(
+                        source + baseline + f"RELEASE_CHANNEL = {channel!r}\n"
+                    ),
+                    (series, channel, 29),
+                )
+                if tuple(map(int, series.split("."))) >= (1, 8):
+                    wrong = "devel" if channel == "stable" else "stable"
+                    with self.assertRaisesRegex(ValueError, "even stable or odd devel"):
+                        check_release.source_identity(
+                            source + baseline + f"RELEASE_CHANNEL = {wrong!r}\n"
+                        )
+
+    def test_new_stable_and_devel_series_keep_absolute_patch_baseline_and_suffix(self):
+        self.set_channel("stable", series="1.8")
+        self.git("update-ref", "refs/remotes/origin/master", "HEAD")
+        tag, release = self.release()
+        self.assertEqual(tag, "v1.8.1")
+        stable = check_release.validate(self.root, publish=True, tag=tag, release=release)
+        self.assertEqual((stable["commit_count"], stable["release_channel"]), (30, "stable"))
+        self.git("checkout", "-b", "devel")
+        self.set_channel("devel", series="1.9")
+        self.git("update-ref", "refs/remotes/origin/devel", "HEAD")
+        tag, release = self.release(channel="devel")
+        self.assertEqual(tag, "v1.9.2.dev0")
+        devel = check_release.validate(self.root, publish=True, tag=tag, release=release)
+        self.assertEqual((devel["commit_count"], devel["release_channel"]), (31, "devel"))
+
     def test_publishing_existing_release_is_not_implied_by_a_publish_flag(self):
         for release in (None, {}, [], {"draft": False}):
             with self.subTest(release=release):

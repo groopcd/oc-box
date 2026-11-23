@@ -21,19 +21,22 @@ This page covers release-channel selection and its compatibility limits.
 
 ---
 
-Stable/devel are **release choices**, not installation methods or permanent
-version-series mappings. GitHub/curl and PyPI both remain supported.
+Stable/devel are **release choices**, not installation methods. GitHub/curl and
+PyPI both remain supported.
 
 | Channel | Publication branch | GitHub publication | PyPI version |
 | --- | --- | --- | --- |
 | `stable` (default) | `master` | Final Release; current stable line is 1.6, including `v1.6.94` | `1.6.N` |
 | `devel` (explicit opt-in) | `devel` | Prerelease, for example `v1.7.N.dev0` | `1.7.N.dev0`, in the same `oc-box` project |
 
-A future accepted stable 1.7 release remains stable. Unpublished branch commits
-are not channel updates, and the installer does not advertise moving HEAD as a
-release. Both distributions retain the full source hash and absolute commit
-count in build metadata, even though PyPI versions cannot contain `+gHASH`.
-The development CLI/resource identity is `1.7.N.dev0+gHASH`.
+Starting with 1.8, **even minor numbers** are stable (`1.8`, `2.0`, `2.2`) and
+**odd minor numbers** are development (`1.9`, `2.1`, `2.3`). Stable uses final
+versions such as `1.8.N`; development uses prereleases such as `1.9.N.dev0`.
+Historical releases and tags keep their original identities. The patch number
+continues to derive from the same Git commit-count baseline across minor changes.
+Unpublished branch commits are not channel updates. Both distributions retain the
+full source hash and absolute commit count, even though PyPI versions cannot
+contain `+gHASH`.
 
 **The optional seven-tab manager and temporary sharing belong to experimental
 1.7 development releases, not stable 1.6.94.** Development publication is approved

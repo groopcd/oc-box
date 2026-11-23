@@ -211,6 +211,26 @@ class VersionTests(unittest.TestCase):
             (installed / "build-info.json").write_text(json.dumps(devel))
             self.assertEqual(version.get_version_info(installed), devel)
 
+    def test_future_source_versions_match_minor_channel_policy(self):
+        for series, channel, suffix in (
+            ("1.8", "stable", ""),
+            ("1.9", "devel", ".dev0"),
+            ("2.0", "stable", ""),
+            ("2.1", "devel", ".dev0"),
+        ):
+            with (
+                self.subTest(series=series),
+                patch.object(version, "VERSION_SERIES", series),
+            ):
+                with patch.object(version, "RELEASE_CHANNEL", channel):
+                    self.assertEqual(version.source_version(100), f"{series}.100{suffix}")
+                wrong = "devel" if channel == "stable" else "stable"
+                with (
+                    patch.object(version, "RELEASE_CHANNEL", wrong),
+                    self.assertRaisesRegex(ValueError, "even stable or odd devel"),
+                ):
+                    version.source_version(100)
+
     def test_channel_is_not_an_environment_override_and_unknown_source_fails(self):
         for channel in ("stable", "devel"):
             other = "devel" if channel == "stable" else "stable"
