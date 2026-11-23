@@ -318,6 +318,7 @@ class SessionHistoryHostFixtureTests(unittest.TestCase):
             "oc_box.workspace_service",
             "tools",
             "tools.test_global_vault_podman",
+            "tools.native_host_profile",
         ):
             for namespace in (False, True):
                 module = ModuleType(name)
@@ -490,6 +491,13 @@ class SessionHistoryHostFixtureTests(unittest.TestCase):
             with self.assertRaisesRegex(runner.Refusal, "native-changed"):
                 harness.same_identity()
             harness.native["sha256"] = runner.file_hash(harness.binary)
+            moved = self.parent / "moved-native"
+            moved.write_bytes(harness.binary.read_bytes())
+            with (
+                patch.object(harness, "binary", moved),
+                self.assertRaisesRegex(runner.Refusal, "native-changed"),
+            ):
+                harness.same_identity()
             harness.runner = "wrong"
             with self.assertRaisesRegex(runner.Refusal, "source-changed"):
                 harness.same_identity()
@@ -1281,6 +1289,9 @@ class SessionHistoryHostFixtureTests(unittest.TestCase):
         harness.lease.join.assert_called_once_with(5)
         self.assertEqual(harness.stage, "complete")
         self.assertIn("resume_no_inference", harness.checks)
+        harness.f.prepare_native_cli.assert_called_once_with(
+            harness.root, harness.binary, native_version="2.2.6"
+        )
 
     def test_resume_no_inference_covers_startup_and_post_callback_shutdown(self):
         for boundary in ("startup", "shutdown"):
@@ -1799,6 +1810,7 @@ class SessionHistoryHostFixtureTests(unittest.TestCase):
                 "auto_update": False,
             },
             "executables.json": {"2": str(harness.binary)},
+            "native-profile.json": dict(harness.native),
         }
         harness.f.private_json = lambda root, name: mapping[name]
         harness.validate_native_config()
@@ -1813,6 +1825,15 @@ class SessionHistoryHostFixtureTests(unittest.TestCase):
         with self.assertRaisesRegex(runner.Refusal, "native-changed"):
             harness.validate_native_config()
         wrapper.write_text(harness.f.native_wrapper_source())
+        harness.validate_native_config(initial=True)
+        for name in ("executables.json", "native-profile.json"):
+            marker = self.parent / name
+            marker.symlink_to(self.parent / "missing")
+            with self.subTest(stale=name), self.assertRaisesRegex(
+                runner.Refusal, "fixture-only"
+            ):
+                harness.validate_native_config(initial=True)
+            marker.unlink()
         (self.parent / "absent-vault").write_text("synthetic unexpected vault")
         with self.assertRaisesRegex(runner.Refusal, "fixture-only"):
             harness.validate_native_config()
@@ -2001,7 +2022,9 @@ class SessionHistoryHostFixtureTests(unittest.TestCase):
                 source.assert_not_called()
                 allocate.assert_not_called()
         loaded = SimpleNamespace(
-            fixture=SimpleNamespace(host_guard=Mock()),
+            fixture=SimpleNamespace(
+                host_guard=Mock(), NATIVE_VERSIONS=runner.NATIVE_VERSIONS
+            ),
             box=SimpleNamespace(DISTROS={"tumbleweed": None}),
             interactive=SimpleNamespace(
                 native_binary=lambda _path: self.source / "node_modules/.bin/opencode"
@@ -2356,10 +2379,15 @@ class SessionHistoryHostFixtureTests(unittest.TestCase):
                         with self.assertRaises(runner.Refusal):
                             harness.verify_archive("ses_source")
 
-    def recovery_harness(self, case="snapshot"):
+    def recovery_harness(self, case="snapshot", *, native_version="2.2.6"):
         old = self.harness()
         value = runner.RecoveryHarness(
-            old.loaded, self.parent, old.binary, old.runner, case
+            old.loaded,
+            self.parent,
+            old.binary,
+            old.runner,
+            case,
+            native_version=native_version,
         )
         value.box.PACKAGE = self.source
         (self.source / "history_reader.py").write_text("# pinned reader helper\n")
@@ -2368,9 +2396,180 @@ class SessionHistoryHostFixtureTests(unittest.TestCase):
         value.box.HistoryWaitTimeout = type("HistoryWaitTimeout", (Exception,), {})
         value.timeout = value.box.HistoryWaitTimeout()
         value.timeout.recovery_eligible = True
-        value.timeout.diagnostic = "History wait timeout: phase=poll-delay; last complete observation: foreground=0, jobs-running=0, jobs-completed=0, jobs-error=0, jobs-cancelled=1."
-        value.cancelled_pairs, value.elapsed, value.owner_closed = 2, 30, True
+        current = native_version == "2.3.0"
+        value.timeout.diagnostic = (
+            "History wait timeout: phase=poll-delay; last complete observation: "
+            f"foreground=0, jobs-running={int(current)}, jobs-completed=0, "
+            f"jobs-error=0, jobs-cancelled={int(not current)}."
+        )
+        value.cancelled_pairs, value.running_pairs = (0, 2) if current else (2, 0)
+        value.elapsed, value.owner_closed = 30, True
         return value
+
+    def test_exact_profiles_thread_to_current_harness_without_changing_default_checks(self):
+        old = self.harness()
+        self.assertEqual(old.native["version"], "2.2.6")
+        for case in (None, *runner.RECOVERY_CHECKS):
+            with self.subTest(case=case):
+                current = runner.build_harness(
+                    old.loaded,
+                    self.parent,
+                    old.binary,
+                    old.runner,
+                    case,
+                    native_version="2.3.0",
+                )
+                self.assertEqual(
+                    current.native,
+                    {
+                        "version": "2.3.0",
+                        "path": str(old.binary),
+                        "sha256": runner.file_hash(old.binary),
+                    },
+                )
+                self.assertEqual(current.purpose()["native"], current.native)
+                current.f.prepare_native_cli = Mock()
+                current.validate_native_config = Mock()
+                options = {} if case is None else {"history_recovery": True}
+                current.prepare_native(**options)
+                current.f.prepare_native_cli.assert_called_once_with(
+                    current.root, current.binary, native_version="2.3.0", **options
+                )
+                current.validate_native_config.assert_called_once_with()
+        self.assertEqual(len(runner.CHECKS), 42)
+        self.assertEqual(runner.EXPECTED_EXITS, (0, 0, 0, 1, 0, 0, 0, 0))
+        self.assertIn("tools/native_host_profile.py", runner.DONORS)
+        for version in ("2.2.7", "2.3.1", "2", "2.3.0+unknown"):
+            with self.subTest(version=version), self.assertRaisesRegex(
+                runner.Refusal, "invalid-options"
+            ):
+                runner.Harness(
+                    old.loaded,
+                    self.parent,
+                    old.binary,
+                    old.runner,
+                    native_version=version,
+                )
+
+    def test_workspace_release_must_match_exact_profile_before_store_access(self):
+        for version in ("2.2.6", "2.3.0"):
+            h = self.harness()
+            h.native["version"] = version
+            h.same_identity = Mock()
+            h.f.validate_fixture = Mock()
+            h.f.private_json = Mock(return_value=h.purpose())
+            h.f.require_runtime_boot = Mock()
+            h.f.validate_store = Mock()
+            opposite = "2.2.6" if version == "2.3.0" else "2.3.0"
+            for other in (None, "2.3.1", opposite):
+                h.f.workspace_records = Mock(
+                    return_value={"source-a": (None, {"opencode_version": other})}
+                )
+                with (
+                    self.subTest(version=version, other=other),
+                    self.assertRaisesRegex(runner.Refusal, "native-version"),
+                ):
+                    h.validate()
+                h.validate_native_config.assert_not_called()
+                h.f.require_runtime_boot.assert_not_called()
+                h.f.validate_store.assert_not_called()
+
+    def test_current_recovery_setup_holds_real_job_without_reload_or_release(self):
+        h = self.recovery_harness(native_version="2.3.0")
+        h.baseline_ids = {"ses_selected", "ses_baseline"}
+        h.box.session_state = Mock(return_value={"sessions": list(h.baseline_ids)})
+        h.f.verify_owned_resources = Mock(return_value={"Id": h.container_id})
+        h.owner = SimpleNamespace(
+            _history_source=SimpleNamespace(stop_token="synthetic")
+        )
+        h.data = {"project": "/synthetic/project"}
+        h.box.container_project = lambda _data: "/synthetic/project"
+        job = {
+            "id": "job_held",
+            "sessionID": "ses_selected",
+            "kind": "shell",
+            "status": "running",
+        }
+        h.request = Mock(
+            side_effect=lambda method, route: {
+                "/api/session/active": {"data": {}},
+                "/api/experimental/job": {"data": [job]},
+            }[route]
+        )
+        h.export = Mock(return_value={"messages": [{"text": "FOREGROUND_IDLE_MARKER"}]})
+        row = {
+            "id": job["id"],
+            "session_id": job["sessionID"],
+            "kind": "shell",
+            "status": "running",
+        }
+        h.metadata = lambda source=True: (
+            {"jobs": [row], "starts": "x"} if source else {"jobs": []}
+        )
+        gate = SimpleNamespace(command=Mock(return_value="held shell"), release=Mock())
+        with (
+            patch.object(runner, "FileGate", return_value=gate),
+            patch.object(runner, "Worker") as worker,
+        ):
+            h.native_run = Mock()
+            self.assertEqual(h.held_running("ses_selected"), 1)  # Scripted client.
+            worker.call_args.args[0]()
+            h.native_run.assert_called_once_with(
+                "ses_selected", "SYNTHETIC_HISTORY_RECOVERY"
+            )
+            self.assertTrue(h.provider.background["background"])
+            self.assertEqual(h.job, job)
+            self.assertEqual(h.retained_status, "running")
+            self.assertTrue(
+                all(call.args[0] == "GET" for call in h.request.call_args_list)
+            )
+            self.assertFalse(
+                any("reload" in call.args[1] for call in h.request.call_args_list)
+            )
+            gate.command.assert_called_once_with(hold_seconds=180)
+            gate.release.assert_not_called()
+            for key, wrong in (("id", "other-job"), ("status", "cancelled")):
+                with (
+                    self.subTest(key=key),
+                    patch.dict(row, {key: wrong}),
+                    self.assertRaises(runner.Refusal),
+                ):
+                    h.held_running("ses_selected")
+            with self.assertRaises(runner.Refusal):
+                h.cancelled("ses_selected")
+        gate.release.assert_not_called()
+
+    def test_current_reproduction_requires_running_pairs_and_complete_original_timeout(self):
+        for defect in (
+            None,
+            "cancelled diagnostic",
+            "cancelled pair",
+            "no pairs",
+            "short wait",
+            "owner alive",
+            "foreground",
+        ):
+            h = self.recovery_harness(native_version="2.3.0")
+            if defect == "cancelled diagnostic":
+                h.timeout.diagnostic = h.timeout.diagnostic.replace(
+                    "jobs-running=1", "jobs-running=0"
+                ).replace("jobs-cancelled=0", "jobs-cancelled=1")
+            elif defect == "cancelled pair":
+                h.cancelled_pairs = 2
+            elif defect == "no pairs":
+                h.running_pairs = 1
+            elif defect == "short wait":
+                h.elapsed = 1
+            elif defect == "owner alive":
+                h.owner_closed = False
+            elif defect == "foreground":
+                h.timeout.interrupted_foreground = True
+            with self.subTest(defect=defect):
+                if defect is None:
+                    h.reproduction()
+                else:
+                    with self.assertRaises(runner.Refusal):
+                        h.reproduction()
 
     def test_recovery_reports_keep_default_evidence_separate_and_require_real_counts(
         self,
@@ -2451,6 +2650,118 @@ class SessionHistoryHostFixtureTests(unittest.TestCase):
                     report()
             with self.assertRaises(runner.Refusal):
                 report(observations={"private-sentinel": 0})
+            with self.assertRaisesRegex(runner.Refusal, "report-schema"):
+                report(observations={**observations, "running_pairs": 2})
+
+    def test_current_recovery_report_does_not_relabel_cancelled_job_evidence(self):
+        identity = {
+            "commit": self.commit,
+            "commit_count": 80,
+            "version": "1.9.51.dev0+g" + self.commit[:7],
+            "dirty": False,
+            "sha256": {"tools/native_host_profile.py": "c" * 64},
+        }
+        native = {"version": "2.3.0", "sha256": "d" * 64, "path": "/synthetic/native"}
+        digest = "e" * 64
+        baseline = runner.result(
+            dict.fromkeys(runner.CHECKS, True),
+            identity,
+            digest,
+            native,
+            exits=runner.EXPECTED_EXITS,
+            stage="complete",
+        )
+        self.assertEqual(baseline["status"], "PASS")
+        for missing in ("archived_next_start_new_root", "unarchived_next_start_resume"):
+            self.assertEqual(
+                runner.result(
+                    dict.fromkeys(runner.CHECKS - {missing}, True),
+                    identity,
+                    digest,
+                    native,
+                    exits=runner.EXPECTED_EXITS,
+                    stage="complete",
+                )["status"],
+                "FAIL",
+            )
+        for bad in (
+            {k: v for k, v in native.items() if k != "path"},
+            {**native, "path": "relative"},
+            {**native, "path": "/synthetic/../native"},
+            {**native, "path": "/synthetic/native\n"},
+            {**native, "sha256": "Z" * 64},
+            {**native, "version": "2.3.1"},
+            {**native, "interpreter": "/synthetic/unexpected"},
+        ):
+            with self.subTest(bad=bad), self.assertRaisesRegex(
+                runner.Refusal, "report-schema"
+            ):
+                runner.result({}, identity, digest, bad)
+        with self.assertRaisesRegex(runner.Refusal, "report-schema"):
+            runner.result(
+                {},
+                {**identity, "sha256": {"src/oc_box/oc_box.py": "c" * 64}},
+                digest,
+                native,
+            )
+
+        for case in runner.RECOVERY_CHECKS:
+            observations = {
+                "cancelled_pairs": 0,
+                "running_pairs": 2,
+                "native_client_exit": 1,
+                "restarts": int(case == "snapshot"),
+                "reader_leases": int(case == "snapshot"),
+                "prepare_calls": 0,
+                "auth_calls": 0,
+                "provider_requests": 2,
+                "shell_starts": 1,
+                "explicit_stop_exit_code": 0 if case == "stop-cancel" else None,
+                "recovery_calls": 1,
+                "snapshot_completed": int(case == "snapshot"),
+            }
+
+            def report(observed, *, stage="complete"):
+                return runner.recovery_result(
+                    case,
+                    dict.fromkeys(runner.RECOVERY_CHECKS[case], True),
+                    identity,
+                    digest,
+                    native,
+                    exits=(0, 1),
+                    stage=stage,
+                    observations=observed,
+                )
+
+            current = report(observations)
+            self.assertEqual(current["status"], "PASS")
+            self.assertEqual(current["launcher_stages"], ["primer", "held_running"])
+            self.assertIn("2.3.0", current["scope"])
+            with self.assertRaisesRegex(runner.Refusal, "report-schema"):
+                report(observations, stage="cancelled")
+            for missing in ("cancelled_pairs", "running_pairs", "native_client_exit"):
+                self.assertEqual(
+                    report({k: v for k, v in observations.items() if k != missing})[
+                        "status"
+                    ],
+                    "FAIL",
+                )
+            for key, wrong in (
+                ("running_pairs", 0),
+                ("cancelled_pairs", 2),
+                ("native_client_exit", 0),
+                ("restarts", 2),
+                ("reader_leases", 2),
+                ("prepare_calls", 1),
+                ("auth_calls", 1),
+                ("provider_requests", 3),
+                ("shell_starts", 2),
+                ("recovery_calls", 2),
+                ("snapshot_completed", int(case != "snapshot")),
+            ):
+                self.assertEqual(
+                    report({**observations, key: wrong})["status"], "FAIL", key
+                )
 
     def test_recovery_option_is_opt_in_and_all_cases_keep_the_early_host_guard(self):
         base = [
@@ -2464,6 +2775,16 @@ class SessionHistoryHostFixtureTests(unittest.TestCase):
             "/synthetic/native",
         ]
         self.assertIsNone(runner.parser().parse_args(base).history_recovery_case)
+        self.assertEqual(runner.parser().parse_args(base).native_version, "2.2.6")
+        with (
+            contextlib.redirect_stderr(io.StringIO()) as errors,
+            self.assertRaises(SystemExit) as caught,
+        ):
+            runner.parser().parse_args([*base, "--native-version", "2.3.1"])
+        self.assertEqual(caught.exception.code, 2)
+        self.assertEqual(
+            errors.getvalue(), "session-history fixture: category=invalid-options\n"
+        )
         for case in (None, *runner.RECOVERY_CHECKS):
             with (
                 patch.object(runner, "Harness") as default,
@@ -2472,18 +2793,21 @@ class SessionHistoryHostFixtureTests(unittest.TestCase):
                 arguments = (object(), self.parent, Path("/synthetic/native"), "d" * 64)
                 value = runner.build_harness(*arguments, recovery_case=case)
                 if case is None:
-                    default.assert_called_once_with(*arguments)
+                    default.assert_called_once_with(*arguments, native_version="2.2.6")
                     recovery.assert_not_called()
                     self.assertIs(value, default.return_value)
                 else:
-                    recovery.assert_called_once_with(*arguments, case)
+                    recovery.assert_called_once_with(
+                        *arguments, case, native_version="2.2.6"
+                    )
                     default.assert_not_called()
                     self.assertIs(value, recovery.return_value)
         for case in runner.RECOVERY_CHECKS:
-            arguments = [*base, "--history-recovery-case", case]
+            arguments = [*base, "--history-recovery-case", case, "--native-version", "2.3.0"]
             self.assertEqual(
                 runner.parser().parse_args(arguments).history_recovery_case, case
             )
+            self.assertEqual(runner.parser().parse_args(arguments).native_version, "2.3.0")
             with (
                 patch.object(
                     runner, "host_guard", side_effect=runner.Refusal("host-only")
@@ -2870,12 +3194,112 @@ class SessionHistoryHostFixtureTests(unittest.TestCase):
         self.assertIs(raised.exception, error)
         self.assertFalse(h.closed.is_set())
 
+    def test_current_owner_shutdown_finishes_native_client_before_recovery_admission(self):
+        for exit_code in (1, 0, None, True):
+            h = self.recovery_harness(native_version="2.3.0")
+            h.stage, h.returned_at, h.data = "held_running", time.monotonic() - 30, {}
+            h.service.live_connection = lambda: None
+            h.service.socket_path = lambda *_: self.parent / "absent-socket"
+            owner = SimpleNamespace(
+                child=SimpleNamespace(returncode=0),
+                clients=0,
+                thread=SimpleNamespace(is_alive=lambda: False),
+                listener=SimpleNamespace(fileno=lambda: -1),
+                _history_timeout=h.timeout,
+            )
+            calls = []
+
+            def close(actual):
+                self.assertIs(actual, owner)
+                self.assertFalse(h.closed.is_set())
+                calls.append("owner-closed")
+                return "actual-shutdown-result"
+
+            def join(timeout):
+                self.assertEqual(timeout, 10)
+                self.assertFalse(h.closed.is_set())
+                calls.append("native-client-finished")
+                return exit_code
+
+            h.raw_shutdown = close
+            h.client = SimpleNamespace(join=join)
+            with self.subTest(exit_code=exit_code):
+                if type(exit_code) is int and exit_code == 1:
+                    self.assertEqual(
+                        h.observe_shutdown(owner), "actual-shutdown-result"
+                    )
+                    self.assertTrue(h.closed.is_set())
+                    self.assertEqual(h.observations()["native_client_exit"], 1)
+                    h.reproduction()
+                else:
+                    with self.assertRaisesRegex(runner.Refusal, "launcher-exit"):
+                        h.observe_shutdown(owner)
+                    self.assertFalse(h.closed.is_set())
+                self.assertEqual(calls, ["owner-closed", "native-client-finished"])
+
+    def test_recovery_observer_counts_only_identity_matched_complete_pairs(self):
+        for version in runner.NATIVE_VERSIONS:
+            h = self.recovery_harness(native_version=version)
+            h.stage, h.returned_at = h.recovery_stage, 1
+            h.cancelled_pairs = h.running_pairs = 0
+            h.job = {"id": "job_real", "sessionID": "ses_real"}
+            h.raw_api = Mock()
+            job = {**h.job, "kind": "shell", "status": h.retained_status}
+
+            def call(path, data):
+                response = {"data": data}
+                h.raw_api.return_value = response
+                self.assertIs(h.observe_api(h.box, {}, {}, "GET", path), response)
+
+            route, active = "/api/experimental/job", "/api/session/active"
+            call(route, [job])  # No session observation for this jobs reply.
+            for changes in (
+                {"id": "job_other"},
+                {"sessionID": "ses_other"},
+                {"kind": "subagent"},
+                {"status": "cancelled" if version == "2.3.0" else "running"},
+            ):
+                call(active, {})
+                call(route, [{**job, **changes}])
+            call(active, {"ses_real": "active"})
+            call(route, [job])
+            self.assertEqual((h.cancelled_pairs, h.running_pairs), (0, 0))
+            for _ in range(2):
+                call(active, {})
+                call(route, [job])
+            self.assertEqual(
+                (h.cancelled_pairs, h.running_pairs),
+                (0, 2) if version == "2.3.0" else (2, 0),
+            )
+
+    def test_recovery_warns_about_interruption_without_announcing_live_sync(self):
+        h = self.recovery_harness()
+        h.output = "Available history synced. Interrupted work may be incomplete.\n"
+        h.warning = ""
+        h.verify_interruption_warning()
+        for invalid in (
+            h.output + "History synced.\n",
+            "Available history synced.\n",
+            h.output * 2,
+            h.output + "Session history synced to your normal host OpenCode database.\n",
+        ):
+            with self.subTest(output=invalid), patch.object(h, "output", invalid):
+                with self.assertRaises(runner.Refusal):
+                    h.verify_interruption_warning()
+        h.output = ""
+        h.warning = (
+            "Checked persisted history snapshots were synchronized after stopping "
+            "the workspace. Execution was interrupted; completion notices or final "
+            "results may be missing. The original history-wait failure remains nonzero."
+        )
+        h.verify_interruption_warning()
+
     def test_scheduler_probe_is_read_only_and_refuses_every_row_not_only_due_work(self):
         import sqlite3
 
         database = self.parent / "native-fixture.db"
         for state in (None, "paused", "completed", "cancelled", "unknown"):
-            with sqlite3.connect(database) as db:
+            with contextlib.closing(sqlite3.connect(database)) as db, db:
                 db.execute(
                     "CREATE TABLE IF NOT EXISTS schedule(id TEXT PRIMARY KEY, session_id TEXT, status TEXT, last_message_id TEXT)"
                 )
@@ -2905,6 +3329,50 @@ class SessionHistoryHostFixtureTests(unittest.TestCase):
                             ),
                             {},
                         )
+            self.assertEqual(database.read_bytes(), before)
+
+    def test_current_metadata_probe_refuses_unknown_schemas_and_legacy_job_rows(self):
+        import sqlite3
+        from test_history_reader import JOB_SCHEMA, KV_SCHEMA, SCHEDULE_SCHEMA
+
+        for defect, statement in (
+            (None, None),
+            ("legacy schedule", "ALTER TABLE schedule DROP COLUMN last_outcome"),
+            ("later scheduler", "CREATE TABLE automation(id TEXT PRIMARY KEY)"),
+            ("unknown job schema", "ALTER TABLE job ADD COLUMN unknown TEXT"),
+            (
+                "legacy row",
+                "INSERT INTO kv VALUES ('job.background/synthetic', '{}', 0, 0)",
+            ),
+        ):
+            database = self.parent / (f"{defect}.db")
+            with contextlib.closing(sqlite3.connect(database)) as db, db:
+                for sql in (JOB_SCHEMA, KV_SCHEMA, SCHEDULE_SCHEMA):
+                    db.execute(sql)
+                db.execute(
+                    "INSERT INTO job VALUES "
+                    "('msg_notice','job_hold','ses_held',NULL,'shell',NULL,'running',"
+                    "NULL,NULL,'{}',0,0)"
+                )
+                if statement:
+                    db.execute(statement)
+            before = database.read_bytes()
+            with (
+                self.subTest(defect=defect),
+                patch.object(sys, "argv", ["probe", str(database), "--native-2.3.0"]),
+                contextlib.redirect_stdout(io.StringIO()) as output,
+            ):
+                code = compile(runner.METADATA_HELPER, "fixture-scheduler", "exec")
+                if defect is None:
+                    exec(code, {})
+                    jobs = json.loads(output.getvalue())["jobs"]
+                    self.assertEqual(len(jobs), 1)
+                    self.assertEqual(jobs[0]["status"], "running")
+                    self.assertEqual(jobs[0]["notification_id"], "msg_notice")
+                else:
+                    with self.assertRaises(AssertionError):
+                        exec(code, {})
+                    self.assertEqual(output.getvalue(), "")
             self.assertEqual(database.read_bytes(), before)
 
     def test_recovery_selector_preserves_only_public_fences_without_manufacturing_them(
