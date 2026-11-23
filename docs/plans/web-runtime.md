@@ -73,6 +73,14 @@ design, not merely a stronger workspace login.
   admitted it. Chain/name, exact Host and exact Origin checks were exercised.
   No port was forwarded to the real host, no public CA was contacted, and
   this was not an oc-box named LAN listener or an ACME test.
+- **Private native pairing:** On exact `ab0b9a0`, a disposable Fedora 44 KVM
+  guest with rootless Podman 5.8.1 and unmodified OpenCode 2.3.2 held a real
+  attach lease and exercised server-side pairing. The cookie authenticated
+  without Basic auth; foreign origins, missing/invalid credentials, owner/
+  scope mismatches and use after lease close refused. This was the private
+  adapter, not named browser authentication or native cookie revocation.
+  The guest's offline Chromium library check was incomplete, so the guest
+  did not exercise the HTTPS browser composition.
 
 Option 3 is still the default: the native one-use link on localhost. Neither
 lab enables a production named or network mode.
