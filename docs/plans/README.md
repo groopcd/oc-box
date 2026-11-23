@@ -12,6 +12,8 @@ updates are distinct; read its source and scope qualifications.
   and click authorization outside a raw PTY input stream.
 - [Browser workspace runtime](web-runtime.md): opt-in workspace layouts,
   host TLS preparation and remaining named sign-in gates.
+- [Stable 1.8 and development 1.9](stable-1.8-devel-1.9.md): initial feature
+  parity, release gates, and the bug/security backport policy.
 
 For current commands, use the [CLI reference](../cli.md). For acceptance
 status and publication requirements, use [Testing](../testing.md) and the

@@ -13,6 +13,7 @@ as oc-box 1.6/1.7 below identify launcher releases, not the OpenCode major.
 | Question | Read |
 | --- | --- |
 | Which release/channel should I install? | [Update channels](update-channels.md) |
+| How will the stable and development series split? | [Stable 1.8 / development 1.9 plan](plans/stable-1.8-devel-1.9.md) |
 | What does the experimental development series add? | [1.7 release notes](releases/1.7.md) |
 | What remains unaccepted in the dashboard? | [Manager limitations](releases/tui-v1.md) |
 | Which source/native version passed a test? | [Testing evidence](testing.md) |
@@ -20,10 +21,14 @@ as oc-box 1.6/1.7 below identify launcher releases, not the OpenCode major.
 
 ## Current development limitations
 
-The 1.7 series adds the optional card dashboard, native TUI image/PDF imports,
-shared web tabs and optional browser attachments, live host-file tools and
-guarded exit-history recovery. Merged changes are not automatically present in
-an already-published release. Stable remains the default channel.
+The 1.7 development series introduced the optional card dashboard, native TUI
+image/PDF imports, shared web tabs and optional browser attachments, live
+host-file tools and guarded exit-history recovery. The 1.9 source line continues
+that work. The initial 1.8 stable and 1.9 development releases are planned to
+share the full feature set, with tested bug and security fixes backported from
+1.9 to 1.8 after the split. This is a release plan, not a publication or
+acceptance claim. Merged changes are not automatically present in an
+already-published release. Stable remains the default channel.
 
 Experimental publication does **not** complete unfinished validation. In the
 retained manager observations, full restore returned zero but its later
@@ -84,9 +89,8 @@ Runtime code lives in `src/oc_box/`; tests/tools/docs remain in their convention
 top-level directories. Root installer/build entrypoints remain for compatibility.
 See [source development](../CONTRIBUTING.md#source-layout) for commands.
 
-Development identities use `1.7.N.dev0+gHASH`; a final stable release has no
-`.dev0`. The 1.5, 1.6 and 1.7 series retain the original 1.0.0 baseline:
-N is full-history commit count minus 29. Installed copies retain their source
-identity until upgraded/reinstalled. Existing 0.1/1.0/1.5/1.6 installations
-upgrade through their usual channels; the series number alone does not require
-a workspace reset or history migration.
+Current development source uses `1.9.N.dev0+gHASH`; the planned stable `1.8.N`
+release has no `.dev0`. These series retain the original 1.0.0 baseline: N is
+the full-history commit count minus 29. Installed copies retain their original
+source identity until upgraded or reinstalled. A new series number alone does
+not require a workspace reset or history migration.

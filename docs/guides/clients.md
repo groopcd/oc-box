@@ -10,12 +10,15 @@ optional experimental dashboard without starting them.
 
 **Prerequisites:** a configured [installation](../installation.md). Shared V2
 web/session-shell clients are available in stable 1.6.94; the Textual dashboard,
-mirrored web tabs and browser attachments described here require the explicit
-1.7 development channel. The dashboard also needs the independent `tui` extra.
+mirrored web tabs and browser attachments described here are development
+features until the planned 1.8 stable promotion. Use a published release that
+supports the feature you need. The dashboard also needs the independent `tui`
+extra.
 An installation method is not a [release channel](../update-channels.md).
 
 **Contents:** [shared native clients](#open-a-shared-web-or-session-shell-client),
 [web tabs and attachments](#choose-a-web-session-and-add-browser-files),
+[Studio layout](#try-the-studio-layout),
 [dashboard setup](#enable-the-experimental-dashboard),
 [dashboard tasks](#browse-and-act-in-the-dashboard), and
 [validation limits](#know-the-dashboard-validation-limitations).
@@ -47,8 +50,8 @@ enforcement have separate documented acceptance checks.
 
 ## Choose a web session and add browser files
 
-In experimental 1.7, the web shell shows verified open TUI tabs, including idle
-conversations, around one unmodified native web view. Any canonical stable
+On supporting development releases, the web shell shows verified open TUI tabs,
+including idle conversations, around one unmodified native web view. Any canonical stable
 native `2.x.y` release, including `2.3.2`, is eligible. oc-box checks the native
 responses or saved state rather than treating the version number as proof of
 compatibility. A fresh verified TUI report opens the current conversation and
@@ -71,6 +74,23 @@ on `2.3.2` and other versions outside that attachment allowlist. Verify native
 thumbnails/cards before pressing native Send; the adapter never submits a
 prompt automatically. Browser/native history and provider retention still apply.
 See the [web reference](../cli.md#web--browser-interface) for limits and privacy.
+
+## Try the Studio layout
+
+On a release that supports `--workspace-layout`, opt into the browser workspace
+layout from a host terminal:
+
+```sh
+oc-box web --project ~/devel/demo --workspace-layout
+```
+
+In the wide Studio layout, the left pane shows verified open TUI tabs or
+explicitly requested workspace history. The middle pane is one unmodified
+native OpenCode conversation. The right pane shows workspace-only session
+metadata, not host health, resources or privileged controls. The layout does
+not alter native one-use pairing or add browser attachments by itself.
+See the [web workspace reference](../web-shell.md) for the other layouts
+and data boundaries.
 
 ## Enable the experimental dashboard
 

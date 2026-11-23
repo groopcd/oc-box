@@ -14,11 +14,12 @@ as [legacy, with its own guide](docs/legacy/README.md).
 [Command reference](docs/cli.md) · [Security](SECURITY.md) ·
 [Contributing](CONTRIBUTING.md)
 
-> **Release channels:** stable is the default. The optional dashboard, host-file
-> workflows and other 1.7 development features require explicit opt-in. A merged
-> feature is not necessarily in a published package.
+> **Release channels:** stable is the default. Until the planned `1.8` stable
+> promotion, the dashboard and new browser workspace layout are development
+> features. Use a published development release that supports them; changes in
+> the source tree are not automatically available in installed packages.
 > [Choose a channel](docs/update-channels.md) ·
-> [Development features and limitations](docs/releases/1.7.md)
+> [Release plan](docs/plans/stable-1.8-devel-1.9.md)
 
 <!-- readme-hero -->
 ![oc-box OpenCode 2.x development dashboard with resource cards, workspace inventory and a selected-workspace inspector, using synthetic data](docs/assets/readme-hero.png)
@@ -27,6 +28,11 @@ as [legacy, with its own guide](docs/legacy/README.md).
 read-only sample data. [Read the TUI guide](docs/tui.md#tui-guide).*
 
 <!-- /readme-hero -->
+
+![Synthetic illustration of the oc-box Studio web layout: open TUI sessions on the left, one native OpenCode conversation in the center, and workspace status on the right](docs/assets/readme-web-interface.svg)
+
+*Browser workspace in Studio layout. Synthetic illustration, not a live
+screenshot. [Try the Studio layout](docs/guides/clients.md#try-the-studio-layout).*
 
 ## Why oc-box?
 
