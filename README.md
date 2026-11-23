@@ -29,12 +29,12 @@ read-only sample data. [Read the TUI guide](docs/tui.md#tui-guide).*
 
 <!-- /readme-hero -->
 
-![oc-box browser Workspace manager with Sessions selected, a TUI-style section bar, and a synthetic list of open TUI sessions](docs/assets/readme-web-interface.png)
+![Firefox screenshot of the oc-box Dashboard tab showing workspace status, open TUI sessions, and a native OpenCode conversation with synthetic data](docs/assets/readme-web-interface.png)
 
-*Browser Workspace manager → Sessions, rendered from the current web shell
-with synthetic data. The TUI-style section bar is not a live embedded
-terminal. [Browser manager guide](docs/guides/clients.md#use-the-browser-workspace-manager) ·
-[Image source](docs/assets/readme-web-interface.md).*
+*The browser **Dashboard** tab, captured in Firefox with a synthetic
+workspace and native OpenCode conversation.
+[Dashboard guide](docs/guides/clients.md#switch-to-dashboard) ·
+[Capture details](docs/assets/readme-web-interface.md).*
 
 ## Why oc-box?
 

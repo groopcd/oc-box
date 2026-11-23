@@ -92,6 +92,14 @@ not alter native one-use pairing or add browser attachments by itself.
 See the [web workspace reference](../web-shell.md) for the other layouts
 and data boundaries.
 
+### Switch to Dashboard
+
+Choose **Dashboard** in the browser workspace toolbar. It moves the workspace
+status cards above the session list and native conversation, without replacing
+or reloading the conversation. The status cards describe the private
+workspace's open TUI membership, not host health or resource usage.
+See the [Firefox screenshot and capture details](../assets/readme-web-interface.md).
+
 ### Use the browser Workspace manager
 
 With the workspace layout enabled, choose **Workspace manager → Sessions** to
@@ -101,8 +109,6 @@ that native conversation. The section bar matches the terminal dashboard's
 navigation, but it does not embed Textual or expose host-wide operations.
 **Status** and **Sessions** are available; the other sections report that they
 are unavailable in the browser manager.
-
-See the [preview and its source](../assets/readme-web-interface.md).
 
 ## Enable the experimental dashboard
 
