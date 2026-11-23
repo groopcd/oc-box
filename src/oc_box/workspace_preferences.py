@@ -31,7 +31,7 @@ import time
 DEFAULT_HOST_DROP = True
 DEFAULT_HOST_CLIPBOARD = False
 DEFAULT_HOST_CLIPBOARD_SYMLINKS = True
-DEFAULT_STARTUP_LOGO = "ascii"
+DEFAULT_STARTUP_LOGO = "graphics"
 STARTUP_LOGOS = ("ascii", "graphics")
 FILE_NAME = "ui-preferences.json"
 LOCK_NAME = ".ui-preferences.lock"
@@ -635,7 +635,7 @@ def parser():
         "--startup-logo",
         choices=STARTUP_LOGOS,
         metavar="ascii|graphics",
-        help="save the startup logo for future native TUI clients (default: ascii; graphics falls back to ASCII on unsupported terminals)",
+        help="save the startup logo for future native TUI clients (default: graphics where supported; ascii always uses [/] instead)",
     )
     result.add_argument(
         "--image-preview",

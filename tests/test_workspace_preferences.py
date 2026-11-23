@@ -1384,7 +1384,7 @@ class WorkspacePreferenceCliTests(_WorkspaceFixture):
             patch("sys.stdin.isatty", side_effect=AssertionError("TTY queried")),
         ):
             default = self.invoke(box, "--table")
-            self.assertRegex(default, r"Startup logo[^\n]*ascii[^\n]*default")
+            self.assertRegex(default, r"Startup logo[^\n]*graphics[^\n]*default")
             self.assertFalse(self.file.exists())
             for style in ("graphics", "ascii"):
                 result = json.loads(self.invoke(box, "--startup-logo", style, "--json"))

@@ -833,10 +833,11 @@ class DashboardInteractionTests(unittest.IsolatedAsyncioTestCase):
                     mark = app.query_one("#dashboard-mark")
                     self.assertEqual(mark.display, not compact)
                     if mark.display:
-                        self.assertEqual(mark.render().plain, "⡠⠒⠑⢄\n⡏⠒⡔⢹\n⠑⠢⡧⠊")
+                        self.assertEqual(mark.render().plain, "⡠⠔⠤⡀\n⡏⢢⠊⡇\n⠈⠺⠊⠀")
                         self.assertEqual(
                             (mark.region.width, mark.region.height), (4, 3)
                         )
+                        self.assertEqual(header.region.y, mark.region.y + 1)
                     app.action_tab("settings")
                     await pilot.pause()
                     self.assertEqual(

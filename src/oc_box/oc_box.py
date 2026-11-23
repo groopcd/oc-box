@@ -393,7 +393,7 @@ def _startup_tool_output():
     return progress[2]() if progress is not None else contextlib.nullcontext()
 
 
-def run_tui(command, *, file_drops=None, startup_logo="ascii"):
+def run_tui(command, *, file_drops=None, startup_logo="graphics"):
     # Lazy import also keeps noninteractive CLI/library consumers lightweight.
     if __package__:
         from .terminal_ui import run_tui as relay
@@ -415,7 +415,7 @@ def run_tui(command, *, file_drops=None, startup_logo="ascii"):
         command,
         env=getattr(command, "environment", None),
         **({"file_drops": file_drops} if file_drops is not None else {}),
-        **({"startup_logo": startup_logo} if startup_logo != "ascii" else {}),
+        **({"startup_logo": startup_logo} if startup_logo != "graphics" else {}),
         **preview_options,
     )
 
@@ -461,7 +461,9 @@ def configure_host_drop(path, data, args, version, *, saved=None):
         # Snapshot independent host choices at the same native-client boundary;
         # a start/reset or attach never writes either of these fields.
         args._saved_host_file_open = saved.get("host_file_open")
-        args._startup_logo = saved.get("startup_logo", "ascii")
+        args._startup_logo = saved.get(
+            "startup_logo", workspace_preferences.DEFAULT_STARTUP_LOGO
+        )
         wanted = saved["host_drop"] if requested is None else requested
         enabled = False
         if wanted:
@@ -668,9 +670,9 @@ def run_native_tui(
     host_drop_required=True,
     host_clipboard_reader=None,
     host_clipboard_symlinks=True,
-    startup_logo="ascii",
+    startup_logo="graphics",
 ):
-    logo_options = {"startup_logo": startup_logo} if startup_logo != "ascii" else {}
+    logo_options = {"startup_logo": startup_logo} if startup_logo != "graphics" else {}
     if not host_drop_enabled and host_clipboard_reader is None:
         return run_tui(command, **logo_options)
     required = host_drop_required or host_clipboard_reader is not None
@@ -3903,7 +3905,7 @@ def launch_client(path, data, args, version, exported, owner=None):
                 host_drop_required=getattr(args, "host_drop", None) is True,
                 **(
                     {"startup_logo": args._startup_logo}
-                    if getattr(args, "_startup_logo", "ascii") != "ascii"
+                    if getattr(args, "_startup_logo", "graphics") != "graphics"
                     else {}
                 ),
                 **(
@@ -5349,7 +5351,7 @@ def _main_command(args, argv):
                     host_drop_required=args.host_drop is True,
                     **(
                         {"startup_logo": args._startup_logo}
-                        if getattr(args, "_startup_logo", "ascii") != "ascii"
+                        if getattr(args, "_startup_logo", "graphics") != "graphics"
                         else {}
                     ),
                     **(

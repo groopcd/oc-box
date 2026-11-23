@@ -148,7 +148,7 @@ def run_tui(
     output_fd=None,
     refresh=1.0,
     show_loading=True,
-    startup_logo="ascii",
+    startup_logo="graphics",
     file_drops=None,
     preview_relay=None,
     preview_open=None,

@@ -261,8 +261,9 @@ class LogDetails(ModalScreen):
 
 class DashboardApp(ManagementActions, ClipboardActions, App):
     TITLE = "oc-box control center"
-    # A single-dot wireframe of the original cube, four cells across.
-    _CUBE = "⡠⠒⠑⢄\n⡏⠒⡔⢹\n⠑⠢⡧⠊"
+    # Mirror on an odd-width dot grid so the top, seam and bottom
+    # share one center column, not a doubled or stair-stepped seam.
+    _CUBE = "⡠⠔⠤⡀\n⡏⢢⠊⡇\n⠈⠺⠊⠀"
     AUTO_FOCUS = "#workspaces"
     SECTIONS = (
         ("Status", "status"),

@@ -912,10 +912,16 @@ class StartupProgressTests(unittest.TestCase):
             "os.write(1,b'KEY='+key+(' SIZE=%dx%d'%(size.columns,size.lines)).encode()); "
             "time.sleep(0.15); os.write(1,b'\\x1b[?1049l')"
         )
-        relay = "import os,sys; sys.path.insert(0,sys.argv[1]+'/src'); from oc_box.terminal_ui import run_tui; sys.exit(run_tui([sys.executable,'-c',sys.argv[2]],env={**os.environ,'OC_BOX_RELAY_CHECK':'present'},refresh=0.03,startup_logo=sys.argv[3]))"
-        style = "ascii" if mode == "ascii" else "graphics"
+        relay = (
+            "import os,sys; sys.path.insert(0,sys.argv[1]+'/src'); "
+            "from oc_box.terminal_ui import run_tui; "
+            "sys.exit(run_tui([sys.executable,'-c',sys.argv[2]],"
+            "env={**os.environ,'OC_BOX_RELAY_CHECK':'present'},refresh=0.03,"
+            "**({'startup_logo':sys.argv[3]} if len(sys.argv)>3 else {})))"
+        )
+        style = ["ascii"] if mode == "ascii" else []
         process = subprocess.Popen(
-            [sys.executable, "-B", "-c", relay, str(APP), fixture, style],
+            [sys.executable, "-B", "-c", relay, str(APP), fixture, *style],
             stdin=slave,
             stdout=slave,
             stderr=slave,
