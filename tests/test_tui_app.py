@@ -833,7 +833,23 @@ class DashboardInteractionTests(unittest.IsolatedAsyncioTestCase):
                     mark = app.query_one("#dashboard-mark")
                     self.assertEqual(mark.display, not compact)
                     if mark.display:
-                        self.assertEqual(mark.render().plain, "⡠⠔⠤⡀\n⡏⢢⠊⡇\n⠈⠺⠊⠀")
+                        lines = mark.render().plain.splitlines()
+                        self.assertEqual([len(line) for line in lines], [4, 4, 4])
+                        # Braille uses two columns of four vertically ordered
+                        # dots per cell; check the drawing, not glyph spellings.
+                        dot_rows = [
+                            tuple(
+                                bool((ord(cell) - 0x2800) & (1 << bit))
+                                for cell in line
+                                for bit in (left, right)
+                            )
+                            for line in lines
+                            for left, right in ((0, 3), (1, 4), (2, 5), (6, 7))
+                        ]
+                        self.assertTrue(all(row == row[::-1] for row in dot_rows))
+                        occupied = [i for i, row in enumerate(dot_rows) if any(row)]
+                        self.assertEqual((occupied[0], occupied[-1]), (1, 10))
+                        self.assertTrue(any(row[0] for row in dot_rows))
                         self.assertEqual(
                             (mark.region.width, mark.region.height), (4, 3)
                         )

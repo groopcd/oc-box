@@ -261,9 +261,9 @@ class LogDetails(ModalScreen):
 
 class DashboardApp(ManagementActions, ClipboardActions, App):
     TITLE = "oc-box control center"
-    # Mirror on an odd-width dot grid so the top, seam and bottom
-    # share one center column, not a doubled or stair-stepped seam.
-    _CUBE = "⡠⠔⠤⡀\n⡏⢢⠊⡇\n⠈⠺⠊⠀"
+    # Four Braille cells give eight dot columns. Mirror around their
+    # shared midpoint so the cube is centered in the terminal-cell slot.
+    _CUBE = "⡠⠔⠢⢄\n⡏⢢⡔⢹\n⠑⠼⠧⠊"
     AUTO_FOCUS = "#workspaces"
     SECTIONS = (
         ("Status", "status"),
@@ -292,7 +292,7 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
     Button.-style-default:disabled { border: round $primary 18%; }
     #dashboard-header { height: 3; background: $surface; }
     #dashboard-mark { width: 4; height: 3; margin-left: 1; color: $primary;
-      text-wrap: nowrap; }
+      content-align: center middle; text-wrap: nowrap; }
     #host-summary { width: 18; height: 1; margin: 1 1; text-style: bold;
       text-wrap: nowrap; text-overflow: ellipsis; }
     #view-title { width: 1fr; height: 1; margin: 1 1; color: $primary; }
