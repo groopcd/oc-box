@@ -160,6 +160,34 @@ jobs:
           "$RUNNER_TEMP/host-file-open-tests/bin/python" -B tests/smoke_file_preview_v2.py \
             --opencode "$RUNNER_TEMP/opencode-v23/node_modules/.bin/opencode"
 
+  opencode-v2-native-2-3-lifecycle:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.13'
+      - name: Install exact OpenCode 2.3.0 for the V2-only lifecycle fixtures
+        run: |
+          apt_root=$(mktemp -d /tmp/oc-box-ci-apt.XXXXXXXX)
+          chmod 755 "$apt_root"
+          apt_config=$(python3 tools/ci_ubuntu_apt.py --output "$apt_root/config" --mirror azure --force-ipv4)
+          sudo apt-get -c "$apt_config" update
+          sudo apt-get -c "$apt_config" install -y --no-install-recommends poppler-utils
+          npm install --prefix "$RUNNER_TEMP/opencode-v2-native-2-3" --no-audit --no-fund @opencode/cli@2.3.0
+      - name: Offline native integration without OpenCode 1.x
+        run: >-
+          python3 -B tests/smoke_v2.py --v2-only
+          --opencode "$RUNNER_TEMP/opencode-v2-native-2-3/node_modules/.bin/opencode"
+      - name: Offline native contract for the V2-only host lifecycle fixture
+        run: >-
+          python3 -B tools/test_v2_lifecycle_native.py --native-version 2.3.0
+          --opencode-v2 "$RUNNER_TEMP/opencode-v2-native-2-3/node_modules/.bin/opencode"
+
   opencode-v2-current-web-tabs:
     runs-on: ubuntu-latest
     timeout-minutes: 10

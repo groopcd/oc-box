@@ -103,6 +103,14 @@ and MCP dependency graphs; no private dependency names are sent to npm audit.
 The launcher still matches the exact host OpenCode version rather than
 silently switching the workspace to whatever npm currently labels latest.
 
+The exact OpenCode 2.3.0 V2-only CI job also runs the native smoke and the
+offline native contract for `tools/test_v2_lifecycle_podman.py`. That host
+runner separately covers encrypted full and portable restores, refusal before
+destructive actions, retained sessions and reset on disposable rootless Podman
+state. The CI job neither requires OpenCode 1.x nor exercises those live
+Podman operations. It does not replace the pinned dual-version regressions or
+the current-2.3 history job.
+
 ### Command help
 
 Use offline CLI contract checks for the grouped `oc-box --help` index and

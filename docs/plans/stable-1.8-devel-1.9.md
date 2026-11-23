@@ -25,11 +25,11 @@ fix and its regression tests to 1.8 with source-commit attribution, resolving an
 testing any stable-specific differences. New features stay on 1.9. Apply the
 release gates to each tested backport; do not move old tags.
 
-Before fresh external-host validation, update the source-identity readers in
-`tools/test_session_sync_podman.py` and `tools/test_home_ownership_podman.py` for
-the new version strings. Preserve historical report identities, Git-verified
-source hashes, refusal rules and retained stores. A synthetic identity-parser
-test is not a new rootless Podman run.
+The source-identity readers in `tools/test_session_sync_podman.py` and
+`tools/test_home_ownership_podman.py` recognize `1.8` finals and `1.9` `.dev0`
+identities while preserving historical report formats, exact Git-verified
+source hashes and refusal rules. Keep retained stores untouched. A synthetic
+identity-parser test is not a new rootless Podman run.
 
 Use the [release checklist](../../CONTRIBUTING.md#release-gate-and-publication-checklist)
 on each frozen candidate independently, including build-only CI and relevant
