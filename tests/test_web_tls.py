@@ -340,8 +340,16 @@ class ServerTLSTests(unittest.TestCase):
                 self._refuses("key_file", key=writable)
         writable.chmod(0o400)
         web_tls.validate(self.leaf, writable, "https://localhost")
-        with patch.object(os, "getuid", return_value=os.getuid() + 1):
-            self._refuses("key_file", key=writable)
+        # Check the private file directly: changing the effective caller in
+        # validate() also makes a non-root runner's certificate look foreign.
+        with (
+            patch.object(os, "getuid", return_value=os.getuid() + 1),
+            self.assertRaises(web_tls.WebTLSError) as failure,
+            web_tls._snapshot(writable, private=True),
+        ):
+            pass
+        self.assertEqual(failure.exception.code, "key_file")
+        self.assertNotIn(str(writable), str(failure.exception))
         os.link(writable, self.scratch / "second-name")
         self._refuses("key_file", key=writable)
         oversized = self.scratch / "oversized"
