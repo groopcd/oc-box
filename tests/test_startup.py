@@ -838,7 +838,7 @@ class StartupProgressTests(unittest.TestCase):
 
     @unittest.skipUnless(sys.platform == "linux", "Linux PTY/termios integration")
     def test_tui_progress_handoff_input_resize_and_terminal_restore(self):
-        for mode in ("ascii", "kitty", "konsole", "dumb"):
+        for mode in ("ascii", "fallback", "kitty", "konsole", "dumb"):
             with self.subTest(mode=mode):
                 self._check_tui_handoff(mode)
 
@@ -927,6 +927,7 @@ class StartupProgressTests(unittest.TestCase):
                 },
                 "TERM": {
                     "ascii": "xterm-kitty",
+                    "fallback": "xterm-256color",
                     "kitty": "xterm-kitty",
                     "konsole": "xterm-256color",
                     "dumb": "dumb",
@@ -984,6 +985,10 @@ class StartupProgressTests(unittest.TestCase):
                 self.assertLess(output.index(deletion), output.index(b"\x1b[?1049h"))
             else:
                 self.assertNotIn(b"\x1b_G", output)
+            first_frame = output.split(b"\x1b[?1049h", 1)[0]
+            self.assertEqual(
+                b"[/] oc-box:" in first_frame, mode in ("ascii", "fallback")
+            )
             self.assertIn(b"KEY=z SIZE=120x32", output)
             self.assertNotIn(b"oc-box:", bytes(output).split(b"UI_READY", 1)[1])
             self.assertEqual(termios.tcgetattr(slave), before)

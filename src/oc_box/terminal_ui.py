@@ -252,6 +252,8 @@ def run_tui(
                     text = "   " + text
                 elif mark_cleanup is not None:
                     text = "   " + text
+                else:
+                    text = "[/] " + text
             text = text[: max(size.columns - 1, 0)]
             # DECSC/DECRC save and restore cursor and rendition. This runs only
             # before the first nonblank text from the app, never over its UI.

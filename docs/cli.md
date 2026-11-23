@@ -263,10 +263,10 @@ compatible caches. See [Lifecycle output](#lifecycle-output) for transient
 progress and the final history result. The progress display distinguishes
 waiting for live activity to settle from copying history archives. A separate
 loading line covers blank TUI startup frames and disappears when OpenCode draws
-text. The default is a plain ASCII loading line. To show a tiny oc-box cube PNG,
-save `oc-box preferences --startup-logo graphics` for an existing workspace.
+text. The default is a small `[/]` ASCII mark on the loading line. To show a tiny
+oc-box cube PNG, save `oc-box preferences --startup-logo graphics` for an existing workspace.
 The launcher removes the image before forwarding native output, so it may
-appear only briefly. Unsupported terminals fall back to the plain loading line.
+appear only briefly. Unsupported terminals fall back to the ASCII mark.
 Pipes and `TERM=dumb` get neither.
 The container OpenCode version is verified against the host on every launch;
 exact upgrades and downgrades are supported, with no fallback to another release.
@@ -333,7 +333,7 @@ is read-only. The independent settings accept `on`/`off` except `--startup-logo`
 | `--host-clipboard-symlinks` | `on`: follow ordinary links for clipboard file imports |
 | `--host-file-open` | Follow the verified installation policy for Ctrl-click host opening |
 | `--image-preview` | `off`: no launcher image-preview override; keep native settings |
-| `--startup-logo ascii\|graphics` | `ascii`: plain loading line; `graphics` requests the cube PNG |
+| `--startup-logo ascii\|graphics` | `ascii`: `[/]` on the loading line; `graphics` requests the cube PNG |
 
 The symlink preference can be saved independently, even while clipboard
 importing is off; it takes effect on a later enabled client. The strict symlink
@@ -2773,9 +2773,9 @@ flag is saved or changes another client.
 ### --startup-logo ascii|graphics
 
 For `preferences` only. Save the startup display for future native `start`
-and `reset` clients of a registered workspace. `ascii` keeps the plain loading
-line. `graphics` requests a one-row PNG in direct Kitty or Konsole 22.04+
-(including Yakuake using that Konsole part). It falls back to the plain line
+and `reset` clients of a registered workspace. `ascii` uses the `[/]` mark
+on the loading line. `graphics` requests a one-row PNG in direct Kitty or
+Konsole 22.04+ (including Yakuake using that Konsole part). It falls back to ASCII
 when the terminal is unsupported or the launcher detects conflicting markers,
 SSH or a multiplexer. The PNG disappears before native output begins; the
 option does not affect web, the manager, or terminal shell clients.
