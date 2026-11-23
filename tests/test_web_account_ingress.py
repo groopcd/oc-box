@@ -10,8 +10,8 @@ from unittest.mock import Mock, patch
 
 import test_web_pake_flow as fixture
 
+from oc_box import web_account_ingress as ingress
 from oc_box import (
-    web_account_ingress as ingress,
     web_accounts,
     web_admission,
     web_handoff,
@@ -158,8 +158,10 @@ class AccountIngressTests(unittest.TestCase):
             challenge["context"], web_pake_flow._b64(self.backend.starts[0]["context"])
         )
         self.assertNotIn(challenge["challenge_id"], repr(response))
-        self.translate_nonce.assert_called_once_with(ACCOUNT_NONCE)
-        self.owner.assert_called_once_with(self.binding)
+        self.assertEqual(self.translate_nonce.call_count, 2)
+        self.translate_nonce.assert_called_with(ACCOUNT_NONCE)
+        self.assertEqual(self.owner.call_count, 2)
+        self.owner.assert_called_with(self.binding)
 
         with patch.object(self.sign_in, "finish", wraps=self.sign_in.finish) as finish:
             response = self.finish(challenge["challenge_id"])
@@ -175,6 +177,16 @@ class AccountIngressTests(unittest.TestCase):
         self.assertNotIn(result["ticket"], repr(response))
         self.assertIsNone(self.sign_in.admission.lookup(self.binding, result["ticket"]))
         self.assert_refused(self.finish(challenge["challenge_id"]))
+        self.pair_native.assert_not_called()
+
+    def test_bootstrap_lost_in_verifier_work_never_returns_challenge_or_ticket(self):
+        challenge = json.loads(self.send().body)
+        for request in (self.send, lambda: self.finish(challenge["challenge_id"])):
+            with self.subTest():
+                self.translate_nonce.side_effect = [fixture.BROWSER, None]
+                self.assert_refused(request())
+        self.assertEqual(len(self.backend.starts), 2)
+        self.assertEqual(len(self.backend.finishes), 1)
         self.pair_native.assert_not_called()
 
     def test_raw_paths_and_methods_have_no_other_dispatch_or_fallback(self):

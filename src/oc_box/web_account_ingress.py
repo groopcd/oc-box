@@ -207,6 +207,9 @@ class AccountIngress:
             dispatch = (
                 self._sign_in.start if target == START_PATH else self._sign_in.finish
             )
-            return _reply(target, dispatch(browser_nonce=nonce, **inputs))
+            result = dispatch(browser_nonce=nonce, **inputs)
+            if self._translate_nonce(account_cookie) != nonce:
+                return _REFUSAL
+            return _reply(target, result)
         except Exception:  # noqa: BLE001 - do not expose bootstrap or driver errors.
             return _REFUSAL

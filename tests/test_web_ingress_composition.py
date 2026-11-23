@@ -65,9 +65,7 @@ class LocalIngressCompositionTests(unittest.TestCase):
             app = web_app_ingress.NamedAppIngress(
                 sign_in,
                 endpoint=endpoint,
-                bootstrap_current=lambda nonce: bootstrap.paired_app_current(
-                    binding, nonce
-                ),
+                claim_bootstrap=lambda nonce: bootstrap.claim_app(binding, nonce),
             )
         ticket = bootstrap.issue(binding)
         account_cookie = bootstrap.accept(
@@ -104,8 +102,8 @@ class LocalIngressCompositionTests(unittest.TestCase):
         self.assertEqual(finish.status, 200)
         pair.assert_not_called()
         handoff = json.loads(finish.body)["ticket"]
-        # The cross-site POST is a receiver, never the confirmation itself or
-        # authority to alter a cookie. Its body goes to a script-free page.
+        # This only checks the cross-site receiver's header contract. No
+        # receiver or page is served, and this check does not admit a cookie.
         self.assertIsNone(
             web_named_headers.admit_headers(
                 origin=origins.workspace,
@@ -127,11 +125,12 @@ class LocalIngressCompositionTests(unittest.TestCase):
                 method="POST",
                 target=web_app_ingress.CONFIRM_PATH,
                 actual_tls=True,
-                ticket=handoff,
+                body=handoff.encode("ascii"),
                 headers=[
                     ("Host", app_host),
                     ("Origin", app_origin),
                     ("Cookie", "__Host-ocbox-bootstrap=" + nonce),
+                    ("Content-Length", str(len(handoff))),
                 ],
             )
 
@@ -153,7 +152,7 @@ class LocalIngressCompositionTests(unittest.TestCase):
             ("Origin", app_origin),
             ("Cookie", "__Host-ocbox-app=" + lease),
         ]
-        run = Mock(return_value="synthetic metadata receipt")
+        run = Mock(return_value=web_app_ingress.MetadataPermit.READY)
         cancel = Mock()
         self.assertEqual(
             app.dispatch(
@@ -164,7 +163,7 @@ class LocalIngressCompositionTests(unittest.TestCase):
                 cancel=cancel,
                 run=run,
             ),
-            "synthetic metadata receipt",
+            web_app_ingress.MetadataPermit.READY,
         )
         args = run.call_args.args
         self.assertEqual(args[:3], (endpoint, "GET", "/api/info"))

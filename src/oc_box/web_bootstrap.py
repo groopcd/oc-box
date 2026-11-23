@@ -67,6 +67,7 @@ class BrowserBootstrap:
         self._capacity = capacity
         self._waiting: dict[bytes, _Exchange] = {}
         self._accounts: dict[bytes, _Exchange] = {}
+        self._claimed: set[bytes] = set()
         self._issued_app_nonces: dict[bytes, float] = {}
         self._issued_account_nonces: dict[bytes, float] = {}
         self._issued_tickets: dict[bytes, float] = {}
@@ -85,6 +86,8 @@ class BrowserBootstrap:
             for key, entry in tuple(table.items()):
                 if entry.expiry <= now:
                     del table[key]
+                    if table is self._accounts:
+                        self._claimed.discard(key)
         for ledger in (
             self._issued_app_nonces,
             self._issued_account_nonces,
@@ -149,30 +152,53 @@ class BrowserBootstrap:
             return None
         with self._lock:
             self._expire(monotonic())
-            entry = self._accounts.get(_digest(account_nonce))
-            return entry.app_nonce if entry and not self._closed else None
+            key = _digest(account_nonce)
+            entry = self._accounts.get(key)
+            return (
+                entry.app_nonce
+                if entry and not self._closed and key not in self._claimed
+                else None
+            )
 
     def retire(self, binding, *, auth_origin, account_nonce):
         if not self._matches(binding, auth_origin) or not _valid(account_nonce):
             return False
         with self._lock:
             self._expire(monotonic())
-            return self._accounts.pop(_digest(account_nonce), None) is not None
+            key = _digest(account_nonce)
+            self._claimed.discard(key)
+            return self._accounts.pop(key, None) is not None
 
-    def paired_app_current(self, binding, app_nonce):
-        """Check that an app-side cookie belongs to an accepted live bootstrap."""
+    def claim_app(self, binding, app_nonce):
+        """Reserve one confirmation after a matching handoff is consumed.
+
+        Return a trusted guard for completion. Expiry, retirement or owner
+        close invalidate it; a failed pairing never restores the claim.
+        """
         if (
             type(binding) is not WebBinding
             or binding != self._binding
             or not _valid(app_nonce)
         ):
-            return False
+            return None
         with self._lock:
             self._expire(monotonic())
-            return not self._closed and any(
-                secrets.compare_digest(entry.app_nonce, app_nonce)
-                for entry in self._accounts.values()
-            )
+            for key, entry in self._accounts.items():
+                if key in self._claimed or not secrets.compare_digest(
+                    entry.app_nonce, app_nonce
+                ):
+                    continue
+                self._claimed.add(key)
+                return self._claim_guard(key, entry)
+        return None
+
+    def _claim_guard(self, key, entry):
+        def current():
+            with self._lock:
+                self._expire(monotonic())
+                return not self._closed and self._accounts.get(key) is entry
+
+        return current
 
     def expire(self):
         with self._lock:
@@ -183,6 +209,7 @@ class BrowserBootstrap:
             self._closed = True
             self._waiting.clear()
             self._accounts.clear()
+            self._claimed.clear()
             self._issued_app_nonces.clear()
             self._issued_account_nonces.clear()
             self._issued_tickets.clear()

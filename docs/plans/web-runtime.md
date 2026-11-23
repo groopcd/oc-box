@@ -23,11 +23,13 @@ admission with stream cancellation and drain hooks. The private coordinator
 does not mint a native credential until a verified principal's one-use
 handoff is redeemed by the matching browser. The native credential remains
 server-side and is fenced to a verified owner generation and current lease.
-The internal account and app dispatchers preserve separate browser cookies,
-admit bounded protocol POSTs, and gate two explicit read-only native metadata
-paths and logout. They do not serve native assets, arbitrary API or upgrades.
-No listener routes browser requests through these components. No password backend or
-browser WASM is shipped. A candidate `opaque-ke` prerelease demonstrated
+The internal account and app dispatchers use separate browser cookies and
+allow one confirmation per live bootstrap. They admit bounded protocol POSTs
+and gate two explicit read-only native metadata paths and logout. The metadata
+dispatcher can return a fixed status only, not an upstream response. They do
+not serve native assets, arbitrary API or upgrades. No runtime listener routes
+browser requests through these components. No password backend or browser
+WASM is shipped. A candidate `opaque-ke` prerelease demonstrated
 separate offline Chromium WASM and native interop with synthetic inputs;
 that did not exercise TLS, live enrollment, cookies, origin validation or
 workspace admission. See [web sign-in](../mockups/web-sign-in.md) for the
@@ -57,6 +59,17 @@ cleanup on the chosen browser and Podman target. No HTTP or plaintext-password
 fallback. Only after the loopback gate passes should a separate explicit LAN
 bind be considered. Host-wide manager features require their own authorization
 design, not merely a stronger workspace login.
+
+The [upstream stable `opaque-ke` 4.0.1](https://crates.io/crates/opaque-ke/4.0.1)
+lockfile includes a dependency affected by
+[RUSTSEC-2026-0387](https://rustsec.org/advisories/RUSTSEC-2026-0387.html).
+The lab used `5.0.0-pre.0`, which resolves a patched version of that dependency.
+This does not approve the exact native or browser artifacts, assess the
+exploitable surface of this profile, or settle distribution and
+[IPR review](https://datatracker.ietf.org/ipr/6863/). An external verifier alone
+would not close the gate: the browser still needs an independently reviewed,
+matching client served by the trusted account origin. Neither half is fetched
+or distributed by oc-box.
 
 ## Isolated feasibility results
 
@@ -122,7 +135,7 @@ from a green check on an earlier branch commit.
 4. Review the network bind separately. Private LAN TLS feasibility does not
    permit enabling a LAN listener, touching production DNS, or requesting a
    certificate. The host-wide manager also needs separate authorization.
-5. After the intended development tip is frozen and explicitly approved,
-   run the [build-only release preflight](../release-security.md). Only
-   then consider an exact-source tag and matched distributions. This
-   branch has not been tagged, pushed, or published.
+5. After the intended development tip is frozen, run the
+   [build-only release preflight](../release-security.md). Passing that
+   pipeline neither enables named sign-in nor authorizes an exact-source
+   tag, matched distributions, or publication.

@@ -9,6 +9,7 @@ Confirmation only delegates pairing to the existing trusted sign-in driver.
 """
 
 import os
+from enum import Enum
 
 if __package__:
     from . import web_named_headers, web_named_local, web_native_pair
@@ -27,6 +28,16 @@ _BOOTSTRAP_COOKIE = "__Host-ocbox-bootstrap"
 # not a native UI allowlist. In particular there are no upgrades, queries,
 # path decoding, prefix rules, pairing, or native auth/credential controls.
 _METADATA_PATHS = frozenset(("/api/info", "/api/session/active"))
+_NO_FRAMING = frozenset(
+    ("transfer-encoding", "content-encoding", "trailer", "te", "expect")
+)
+
+
+class MetadataPermit(Enum):
+    """Fixed callback results, never a native response, cookie or user string."""
+
+    READY = "ready"
+    UNAVAILABLE = "unavailable"
 
 
 class AppRequestError(ValueError):
@@ -53,22 +64,21 @@ class StaleAppStateError(AppRequestError):
 class NamedAppIngress:
     """Compose the same sign-in, browser admission and lease for one app lifetime.
 
-    The trusted ``bootstrap_current(nonce)`` must verify an independently
-    issued, still-paired account/app bootstrap for this sign-in and owner.
-    It does not mint or consume a nonce.
+    The trusted ``claim_bootstrap(nonce)`` reserves one paired bootstrap
+    after the matching handoff is consumed and returns a liveness guard.
     """
 
-    def __init__(self, sign_in, *, endpoint, bootstrap_current):
+    def __init__(self, sign_in, *, endpoint, claim_bootstrap):
         if os.environ.get("OC_BOX_CONTAINER") == "1":
             raise ValueError("Named workspace app admission is host-only.")
         if type(sign_in) is not web_named_local.LocalNamedSignIn or not callable(
-            bootstrap_current
+            claim_bootstrap
         ):
             raise ValueError("Expected a local named workspace sign-in.")
         # Endpoint is supplied by the trusted lease holder, never a request.
         web_native_pair._port(endpoint)
         self._endpoint = endpoint
-        self._bootstrap_current = bootstrap_current
+        self._claim_bootstrap = claim_bootstrap
         self._sign_in = sign_in
         self._admission = sign_in.admission
         self._binding = sign_in._binding
@@ -80,7 +90,7 @@ class NamedAppIngress:
         if not self._sign_in._live():
             raise StaleAppStateError()
 
-    def _cookie(self, *, method, headers, actual_tls, name):
+    def _cookie(self, *, method, headers, actual_tls, name, body):
         if type(headers) not in (list, tuple):
             raise AppRequestError()
         headers = tuple(headers[: web_named_headers._MAX_FIELDS + 1])
@@ -95,10 +105,22 @@ class NamedAppIngress:
         except web_named_headers.NamedRequestError:
             pass
         else:
-            # The shared gate permits some Origin-less safe navigations.
-            # This narrower metadata profile deliberately does not.
-            if any(key.lower() == "origin" for key, _ in headers):
-                return token
+            fields = {key.lower(): value.strip(" ") for key, value in headers}
+            if fields.keys() & _NO_FRAMING:
+                raise AppRequestError()
+            if fields.get("connection", "close").lower() not in ("close", "keep-alive"):
+                raise AppRequestError()
+            if type(body) is not bytes or (
+                (body and fields.get("content-length") != str(len(body)))
+                or (not body and fields.get("content-length", "0") != "0")
+            ):
+                raise AppRequestError()
+            site = fields.get("sec-fetch-site")
+            if site not in (None, "same-origin") or (
+                method == "GET" and "origin" not in fields and site is None
+            ):
+                raise AppRequestError()
+            return token
         raise AppRequestError()
 
     def _session(self, token):
@@ -109,11 +131,11 @@ class NamedAppIngress:
             raise StaleAppSessionError()
         return session
 
-    def confirm(self, *, method, target, headers, actual_tls, ticket) -> str:
+    def confirm(self, *, method, target, headers, actual_tls, body) -> str:
         """Redeem on exact same-origin POST using only the app bootstrap cookie.
 
-        The caller extracts the ticket from a bounded body, never a URL, and
-        supplies the independently minted bootstrap cookie through the headers.
+        The body is the complete fixed-size ASCII ticket, never a URL or
+        pre-decoded field. The caller bounds all reads before dispatch.
         Return only an opaque value for APP_COOKIE_NAME (Secure, HttpOnly,
         SameSite=Strict, Path=/, no Domain). No native credential is returned.
         """
@@ -121,18 +143,21 @@ class NamedAppIngress:
             raise AppRequestError()
         if type(target) is not str or target != CONFIRM_PATH:
             raise AppRequestError()
+        if type(body) is not bytes or len(body) != 54 or not body.isascii():
+            raise AppRequestError()
         nonce = self._cookie(
             method=method,
             headers=headers,
             actual_tls=actual_tls,
             name=_BOOTSTRAP_COOKIE,
+            body=body,
         )
         self._require_current()
         try:
-            token = (
-                self._sign_in.redeem(ticket, browser_nonce=nonce)
-                if self._bootstrap_current(nonce) is True
-                else None
+            token = self._sign_in.redeem(
+                body.decode("ascii"),
+                browser_nonce=nonce,
+                claim_browser=self._claim_bootstrap,
             )
         except Exception:  # noqa: BLE001 - keep bootstrap and pairing diagnostics private.
             token = None
@@ -141,7 +166,7 @@ class NamedAppIngress:
             raise AppRequestError()
         return token
 
-    def dispatch(self, *, method, target, headers, actual_tls, cancel, run):
+    def dispatch(self, *, method, target, headers, actual_tls, cancel, run, body=b""):
         """Call trusted work synchronously with a private cookie and registered use.
 
         ``cancel`` must already be installed on this unique transport, be
@@ -149,18 +174,27 @@ class NamedAppIngress:
         ``run(endpoint, method, target, upstream_headers, use)`` gets only
         reconstructed Host, Origin and private native Cookie. It must honor
         cancellation before and during startup and finish cleanup before it
-        returns. It may return only a browser-safe permit, never credentials,
+        returns. It must return a MetadataPermit, never credentials,
         raw upstream responses, or deferred work. Those transport obligations
         cannot be enforced by sampling ``use.cancelled`` alone.
         """
-        if type(method) is not str or method != "GET":
+        if (
+            type(method) is not str
+            or method != "GET"
+            or type(body) is not bytes
+            or body
+        ):
             raise AppRequestError()
         if type(target) is not str or target not in _METADATA_PATHS:
             raise AppRequestError()
         if not callable(cancel) or not callable(run):
             raise AppRequestError()
         token = self._cookie(
-            method=method, headers=headers, actual_tls=actual_tls, name=APP_COOKIE_NAME
+            method=method,
+            headers=headers,
+            actual_tls=actual_tls,
+            name=APP_COOKIE_NAME,
+            body=body,
         )
         session = self._session(token)
         with self._admission.connection(self._binding, session, cancel=cancel) as use:
@@ -206,25 +240,36 @@ class NamedAppIngress:
             self._require_current()
             if use.cancelled:
                 raise StaleAppSessionError()
-            if failed:
+            if failed or type(permit) is not MetadataPermit:
                 raise AppRequestError()
             return permit
 
-    def logout(self, *, method, target, headers, actual_tls, timeout=5.0) -> bool:
+    def logout(
+        self, *, method, target, headers, actual_tls, timeout=5.0, body=b""
+    ) -> bool:
         """Revoke this browser's session then wait for its registered uses.
 
         Call outside the revoked workers. False means revocation took effect
         but cancellation/drain was not confirmed within the deadline; it
         does not make the cookie reusable or revoke native credentials.
         """
-        if type(method) is not str or method != "POST":
+        if (
+            type(method) is not str
+            or method != "POST"
+            or type(body) is not bytes
+            or body
+        ):
             raise AppRequestError()
         if type(target) is not str or target != LOGOUT_PATH:
             raise AppRequestError()
         if type(timeout) not in (int, float) or not 0 <= timeout <= 30:
             raise AppRequestError()
         token = self._cookie(
-            method=method, headers=headers, actual_tls=actual_tls, name=APP_COOKIE_NAME
+            method=method,
+            headers=headers,
+            actual_tls=actual_tls,
+            name=APP_COOKIE_NAME,
+            body=body,
         )
         revocation = self._admission.begin_revocation(
             self._binding, self._session(token)

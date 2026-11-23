@@ -16,6 +16,12 @@ from oc_box.web_handoff import WebHandoff
 
 
 class NamedCompositionTests(unittest.TestCase):
+    @staticmethod
+    def redeem(driver, ticket, nonce=fixture.BROWSER):
+        return driver.redeem(
+            ticket.value, browser_nonce=nonce, claim_browser=lambda _: lambda: True
+        )
+
     def local_driver(self):
         case = fixture.PakeFlowTests()
         case.setUp()
@@ -59,16 +65,14 @@ class NamedCompositionTests(unittest.TestCase):
         case, origins, driver, _, pair, native = self.local_driver()
         ticket = self.local_ticket(driver)
         pair.assert_not_called()
-        self.assertIsNone(
-            driver.redeem(ticket.value, browser_nonce=fixture.OTHER_BROWSER)
-        )
+        self.assertIsNone(self.redeem(driver, ticket, fixture.OTHER_BROWSER))
         pair.assert_not_called()
-        lease = driver.redeem(ticket.value, browser_nonce=fixture.BROWSER)
+        lease = self.redeem(driver, ticket)
         self.assertIsInstance(lease, str)
         session = driver.admission.lookup(case.binding, lease)
         self.assertIs(session.native_cookie, native)
         self.assertEqual(session.principal, "in-scope")
-        self.assertIsNone(driver.redeem(ticket.value, browser_nonce=fixture.BROWSER))
+        self.assertIsNone(self.redeem(driver, ticket))
         pair.assert_called_once_with(case.binding, origins.workspace)
 
     def test_owner_change_during_native_cookie_mint_refuses_and_consumes_ticket(self):
@@ -80,9 +84,9 @@ class NamedCompositionTests(unittest.TestCase):
             return native
 
         pair.side_effect = owner_lost
-        self.assertIsNone(driver.redeem(ticket.value, browser_nonce=fixture.BROWSER))
+        self.assertIsNone(self.redeem(driver, ticket))
         current.return_value = True
-        self.assertIsNone(driver.redeem(ticket.value, browser_nonce=fixture.BROWSER))
+        self.assertIsNone(self.redeem(driver, ticket))
         self.assertIsNone(driver.admission.issue(case.binding, principal="synthetic"))
         pair.assert_called_once()
 
@@ -105,9 +109,7 @@ class NamedCompositionTests(unittest.TestCase):
             return delegate(*args, **kwargs)
 
         with patch.object(driver.admission, "issue", side_effect=delayed_issue):
-            self.assertIsNone(
-                driver.redeem(ticket.value, browser_nonce=fixture.BROWSER)
-            )
+            self.assertIsNone(self.redeem(driver, ticket))
         self.assertIsNone(driver.admission.issue(case.binding, principal="synthetic"))
         pair.assert_called_once()
 

@@ -68,9 +68,10 @@ class LocalNamedSignIn:
     def start(self, *, browser_nonce, username, ke1):
         if not self._live():
             return None
-        return self._flow.start(
+        challenge = self._flow.start(
             self._binding, browser_nonce=browser_nonce, username=username, ke1=ke1
         )
+        return challenge if challenge is not None and self._live() else None
 
     def finish(self, *, browser_nonce, challenge_id, ke3):
         if not self._live():
@@ -90,13 +91,18 @@ class LocalNamedSignIn:
             principal=principal,
         )
 
-    def redeem(self, ticket, *, browser_nonce):
+    def redeem(self, ticket, *, browser_nonce, claim_browser):
         """Only same-browser confirmation can reach native pairing.
 
-        Return the opaque app lease token or None. The raw native credential
-        remains private to the admission record for the eventual relay.
+        The trusted claim consumes this browser's bootstrap once and returns a
+        liveness check. Return only the opaque app lease; keep the native
+        credential in admission state for the eventual relay.
         """
-        if not self._live() or not self._pairs.acquire(blocking=False):
+        if (
+            not callable(claim_browser)
+            or not self._live()
+            or not self._pairs.acquire(blocking=False)
+        ):
             return None
         try:
             principal = self._handoff.consume(
@@ -107,11 +113,18 @@ class LocalNamedSignIn:
             )
             if principal is None or not self._live():
                 return None
+            current = claim_browser(browser_nonce)
+            if not callable(current) or current() is not True:
+                return None
             try:
                 native = self._pair_native(self._binding, self._workspace_origin)
             except web_native_pair.NativePairError:
                 return None
-            if type(native) is not web_native_pair.NativeCookie or not self._live():
+            if (
+                type(native) is not web_native_pair.NativeCookie
+                or not self._live()
+                or current() is not True
+            ):
                 return None
             try:
                 token = self.admission.issue(
@@ -119,9 +132,19 @@ class LocalNamedSignIn:
                 )
             except OSError:
                 return None
-            return (
-                None if self._stopped.is_set() or self._flow.cleanup_failed else token
-            )
+            if token is None:
+                return None
+            publish = False
+            try:
+                # The final check linearizes successful bootstrap confirmation.
+                # Until then the just-minted token must not leave this method.
+                publish = self._live() and current() is True
+                return token if publish else None
+            finally:
+                if not publish:
+                    session = self.admission.lookup(self._binding, token)
+                    if session is not None:
+                        self.admission.revoke(self._binding, session)
         finally:
             self._pairs.release()
 
