@@ -198,8 +198,9 @@ for up to 30 seconds after client leases drain; normal cleanup still stops the
 container on failure. Archives are mirrors, not bidirectional working copies or
 full backups of pending input and live execution. See [sync](../cli.md#sync).
 
-In experimental 1.7, eligible V2 timeouts can trigger one bounded persisted-history
-snapshot after the old owner closes and a whole-container stop is verified.
+On the supporting `1.8` and `1.9` releases, eligible V2 timeouts can trigger
+one bounded persisted-history snapshot after the old owner closes and a
+whole-container stop is verified.
 The native 2.2.6/2.2.7 profile is shell-only; canonical stable 2.3.x uses the
 guarded shell/subagent profile. Host and container binaries must match the captured
 exact patch, not merely the same series. Unsupported identities and incompatible contracts
@@ -213,7 +214,8 @@ stop all succeed. The interrupted-work/unconfirmed-completion warning remains;
 native job rows are not repaired. Client failure/cancellation, unknown status,
 partial history or failed/uncertain cleanup remain nonzero with retry-sync
 guidance. Unsafe or unsupported cases remain pending. See the
-[recovery notes and validation scope](../releases/1.7.md#exit-history-recovery).
+[current release evidence](../releases/1.8-1.9.md#validation-scope) and the
+[original recovery design](../releases/1.7.md#exit-history-recovery).
 
 An interrupted legacy 1.x assistant can remain unfinished after migration to 2.x
 even when later turns have completed. In an inactive session, sync mirrors native OpenCode's

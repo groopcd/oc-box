@@ -18,8 +18,8 @@ as [legacy, with its own guide](docs/legacy/README.md).
 > start with the same features, including the optional dashboard and browser
 > workspace layout. Older stable `1.6` releases do not include the dashboard.
 > Use a published release that supports the feature; branch HEAD is not an update.
-> [Choose a channel](docs/update-channels.md) ·
-> [Release plan](docs/plans/stable-1.8-devel-1.9.md)
+> [What changed in 1.8 and 1.9](docs/releases/1.8-1.9.md) ·
+> [Choose a channel](docs/update-channels.md)
 
 <!-- readme-hero -->
 ![oc-box OpenCode 2.x development dashboard with resource cards, workspace inventory and a selected-workspace inspector, using synthetic data](docs/assets/readme-hero.png)
@@ -78,9 +78,8 @@ oc-box --version
 oc-box doctor
 ```
 
-While stable still selects `1.6`, omit `--with-tui` or choose a published
-development target that supports the dashboard. Dependencies stay private to
-the GitHub installation. This does not initialize or unlock a vault, change credential
+Stable `1.8` supports the dashboard; older `1.6` targets do not. Dependencies
+stay private to the GitHub installation. This does not initialize or unlock a vault, change credential
 policy, launch the dashboard or start a workspace. The command downloads and
 runs the public installer; review it first if preferred. Only the verified fresh
 development bootstrap enrolls the
@@ -164,6 +163,9 @@ reading activity logs. Help does not need or change a workspace.
 | Read resource and workspace status | `oc-box --status` |
 | Stop a workspace | `oc-box stop --project ~/devel/demo` |
 | Open the existing V2 session shell | `oc-box terminal --project ~/devel/demo` |
+| Open the opt-in live browser workspace | `oc-box web --project ~/devel/demo --workspace-layout` |
+| Inspect workspaces in the optional dashboard | `oc-box tui --read-only` |
+| Read fixed startup/preparation metadata | `oc-box logs --tail` |
 | Import history, repair identity or rebuild the OS | [Manage workspaces](docs/guides/workspaces.md) |
 | Protect a workspace before changing it | [Back up and restore](docs/guides/backups.md) |
 
@@ -179,10 +181,12 @@ Reset/purge have different preservation rules—read the
 <a id="native-tui-host-imagepdf-drops-experimental"></a>
 <a id="host-screenshots-for-one-session-experimental"></a>
 
-## Explore the development features
+<a id="explore-the-development-features"></a>
 
-These features have separate prerequisites and validation scopes; they are not
-all included in stable installations.
+## Explore workspace features
+
+Stable `1.8` and devel `1.9` include these features with separate prerequisites,
+opt-ins, and validation scopes. Older releases do not necessarily include them.
 
 | Feature | Start here |
 | --- | --- |
@@ -192,7 +196,7 @@ all included in stable installations.
 | Shared web tabs and optional browser-selected attachments | [Web interface reference](docs/cli.md#web--browser-interface) |
 | Guarded history synchronization and recovery | [Workspace history](docs/guides/workspaces.md) |
 
-> **Disclosure matters:** on supported development TUI clients, host importing is
+> **Disclosure matters:** on supported native V2 TUI clients, host importing is
 > enabled by default. A qualifying path paste authorizes an image/PDF copy
 > without per-file confirmation; disable it with the saved host-drop preference
 > if that is not wanted. Clipboard imports are separately off by default:

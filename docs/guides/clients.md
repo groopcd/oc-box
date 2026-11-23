@@ -49,7 +49,7 @@ enforcement have separate documented acceptance checks.
 
 ## Choose a web session and add browser files
 
-On supporting development releases, the web shell shows verified open TUI tabs,
+On supporting stable or development releases, the web shell shows verified open TUI tabs,
 including idle conversations, around one unmodified native web view. Any canonical stable
 native `2.x.y` release, including `2.3.2`, is eligible. oc-box checks the native
 responses or saved state rather than treating the version number as proof of
@@ -111,14 +111,14 @@ are unavailable in the browser manager.
 
 ## Enable the experimental dashboard
 
-Stable 1.6.94 remains the default and does not include the manager. For an
-existing installation with a launcher release supporting upgrade extras,
-select a published development release and add the dashboard dependencies:
+Stable is the default channel. Both stable `1.8` and development `1.9` include
+the optional manager; older stable `1.6` does not. On a launcher supporting
+upgrade extras, add the dashboard dependencies on your saved channel:
 
 ```sh
-oc-box upgrade --devel --tui
+oc-box upgrade --tui
 # Or add the independent vault extra too:
-oc-box upgrade --devel --vault --tui
+oc-box upgrade --vault --tui
 oc-box tui --read-only
 ```
 
@@ -135,7 +135,8 @@ An older channel-aware launcher must first upgrade normally to a supporting
 published release; genuinely pre-channel builds retain their exceptional
 [bootstrap route](../update-channels.md#bootstrap-and-older-installations).
 Channel selection alone does not request a new extra. An explicit `--tui` request
-against stable refuses; an inherited preference survives a stable interval.
+against an older unsupported target refuses; an inherited preference survives
+a switch back to a supporting release.
 See [extras and missing-dependency guidance](../update-channels.md#enable-the-dashboard-after-a-github-channel-switch).
 
 ```sh
@@ -214,23 +215,17 @@ remain deferred; resource settings are informational.
 
 ## Know the dashboard validation limitations
 
-The owner approved an **experimental development release with incomplete UI
-acceptance disclosed**, not a stable manager release. **UI full restore returned
-0, but its later integrity verifier refused `manifest`.** Portable UI
-Create/Inspect/restore, three-scope Storage completion, designated ciphertext
-deletion, original-source removal with retained-data assertions, final
-preservation/journal attestation and latest manager Quit remain unperformed or
-unaccepted. Do not infer restored integrity or shutdown/lease cleanup.
+See the [1.8/1.9 release evidence](../releases/1.8-1.9.md#validation-scope) for
+the current scoped host and operator results. They are separate from native
+conversation-TUI, scripted lifecycle, and demo results.
 
-The [complete retained observations](../releases/tui-v1.md#retained-observations-and-known-limitations)
-preserve the verifier details, evidence identities and pending checks.
-See the [manager guide](../tui.md) for keys and source-specific actions, and the
-[stable publication gates](../releases/tui-v1.md#evidence-required-before-stable-publication).
-Earlier native conversation-TUI or scripted lifecycle passes do not accept this
-dashboard or every later development revision.
+The [historical manager record](../releases/tui-v1.md#retained-observations-and-known-limitations)
+preserves the earlier `manifest` verifier refusal and uncompleted UI checks
+on their original sources. Do not treat either a zero exit or feature
+availability as all-entry restore integrity or lease-cleanup proof.
 
 ## Related
 
 - [CLI client reference](../cli.md) · [V2 compatibility](../opencode-2.md)
 - [Host files and image/PDF importing](host-files.md) · [Backups](backups.md)
-- [Development release status](../releases/1.7.md) · [Security](../../SECURITY.md)
+- [Current release scope](../releases/1.8-1.9.md) · [Security](../../SECURITY.md)

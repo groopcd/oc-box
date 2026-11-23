@@ -1,5 +1,9 @@
 # Stable 1.8 and development 1.9
 
+For the user-facing changes and source-qualified evidence, see the
+[1.8/1.9 release guide](../releases/1.8-1.9.md). This page retains the planning
+and channel-lineage rules.
+
 The next stable series is **1.8** (final releases from `master`); the next
 development series is **1.9** (`.dev0` prereleases from `devel`). Future stable
 minors are even and future development minors are odd. Keep the existing

@@ -8,9 +8,10 @@
 Choose between temporary live read access, native TUI image/PDF importing, a
 per-image confirmation broker, or a direct image message.
 
-**Prerequisites:** the explicit experimental 1.7 development channel and a
-running/ready V2 workspace as specified below. Stable 1.6.94 is the default;
-these features are not made available merely by choosing pipx, uv or GitHub.
+**Prerequisites:** a supporting release, such as stable `1.8` or development
+`1.9`, and a running/ready V2 workspace as specified below. An older stable
+`1.6` installation does not gain these features by changing installation
+methods. Native version, terminal, and consent limits still apply.
 See [installation](../installation.md) and [channels](../update-channels.md).
 
 **Contents:** [live host reads](#share-a-file-or-folder-for-live-reads),
@@ -70,9 +71,9 @@ experimental client-MCP API. It does not expose a path to shell commands.
 Read-only and later disconnect do not undo disclosure. Hidden files and future
 additions to a shared folder are included; prefer a single file when possible.
 See [share](../cli.md#share) for confirmation, protected-path refusals, size
-limits and lifecycle details. Its 37-check scripted host acceptance belongs to
-the earlier exact `5573965` source and native 2.2.6, not automatically to every
-later development build; see [the evidence scope](../releases/1.7.md#reviewed-earlier-source-evidence).
+limits and lifecycle details. See [current source-qualified sharing evidence](../releases/1.8-1.9.md#validation-scope)
+and the [earlier `5573965` record](../releases/1.7.md#reviewed-earlier-source-evidence).
+Neither automatically certifies other sources, native versions or terminals.
 
 ## Import through native TUI path pastes
 

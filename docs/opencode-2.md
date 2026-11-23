@@ -370,6 +370,11 @@ are rewritten to their corresponding directory entrypoints. The cache uses
 Cold V2 setup installs the copied config manifest with npm; warm launches reuse
 its lockfiles/modules instead of reinstalling. Supported SDK-only and custom
 dependencies are retained; they are never installed into host Python or Node.
+For managed SDK profiles, setup resolves the lock without package scripts and
+checks the pinned SDK and protected dependency versions before clean
+installation. Both operations use the same shallow layout to avoid npm 10's
+scoped-override lock mismatch. Installed-tree verification still gates cache
+reuse. This does not change unmanaged npm installs or certify custom plugins.
 
 Copies of the reported Lemonade discovery/tool, no-nested-sandbox, output-clamp,
 Python isolation and tool-definition audit plugins all activated under native
@@ -769,8 +774,9 @@ auth cases remain separate. See [the edge workflow and limits](testing.md).
 
 ### Repeatable host validation
 
-Versions now use **1.7.N**, preserving the original commit-count patch baseline and
-upgrade ordering. Repeat relevant host validation before lifecycle/credential
+Stable **1.8.N** and development **1.9.N.dev0** preserve the original
+commit-count patch baseline and upgrade ordering. Repeat relevant host
+validation before lifecycle/credential
 releases, using only isolated disposable resources.
 
 #### Automated disposable host fixture

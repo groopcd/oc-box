@@ -2,6 +2,10 @@
 
 **Version scope:** “v1” names this web-shell contract, not OpenCode 1.x.
 
+The [1.8/1.9 release guide](releases/1.8-1.9.md) separates the live workspace
+layout from the offline design demo and the deferred sign-in, LAN, and CA
+work. This page describes the live contract.
+
 The experimental `oc-box web --workspace-layout` presentation is opt-in and
 does not change the native guest pairing boundary. Studio, Dashboard, Chat
 focus and the metadata-only workspace manager share the existing native iframe

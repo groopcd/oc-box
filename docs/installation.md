@@ -65,9 +65,9 @@ oc-box --version
 oc-box doctor
 ```
 
-While stable still selects `1.6`, omit `--with-tui` or choose a published
-development target that supports the dashboard. Dependencies stay private to
-the GitHub installation. This does not initialize or unlock a vault, change credential
+Stable `1.8` and development `1.9` support the dashboard. Older stable `1.6`
+targets do not support `--with-tui`. Dependencies stay private to the GitHub
+installation. This does not initialize or unlock a vault, change credential
 policy, launch the dashboard or start a workspace. The command downloads and
 runs the public installer; review it first if preferred.
 
@@ -108,9 +108,8 @@ pre-channel launchers have a separate
 
 **Installation method and release channel are separate choices.** New installs
 default to stable; development is an explicit opt-in to a published release,
-not moving branch HEAD. The recommended command above makes that opt-in explicit;
-it does not change the installer's no-selector default. Existing saved channel
-choices are retained.
+not moving branch HEAD. The recommended command above explicitly selects stable.
+Bootstrap without a selector retains an existing saved channel.
 Read [update channels](update-channels.md) for selections, nonmutating previews
 and older-launcher bootstrap.
 The oc-box release number/channel is also separate from the host OpenCode major
@@ -225,7 +224,8 @@ CLI or creates a competing launcher. Editable source installations must update
 their checkout separately. Package auto-update stays disabled.
 
 If more than one method is installed, check `command -v oc-box`.
-Public development versions use `1.7.N.dev0`; `oc-box --version` also records
+The current public versions are stable `1.8.N` and development `1.9.N.dev0`;
+`oc-box --version` also records
 `+gHASH` for provenance. Ordinary package installs select stable unless
 prereleases are explicitly requested. PyPI releases are separate from ordinary
 GitHub commits.

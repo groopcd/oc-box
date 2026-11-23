@@ -38,26 +38,26 @@ Unpublished branch commits are not channel updates. Both distributions retain th
 full source hash and absolute commit count, even though PyPI versions cannot
 contain `+gHASH`.
 
-**The initial `1.8` and `1.9` releases share the optional seven-tab manager and
-temporary sharing.** These were experimental development features in `1.7`,
-not part of stable `1.6.94`. The historical [1.7 acceptance limitations](releases/1.7.md#known-acceptance-limitations)
-do not establish a stable pass. The original native OpenCode **2.3.0**
+**The initial `1.8` and `1.9` releases share the optional seven-tab manager,
+temporary sharing, and opt-in browser workspace layout.** Older stable `1.6`
+does not include these features. See [the release guide](releases/1.8-1.9.md)
+for the feature and validation boundaries. The native OpenCode **2.3.0**
 persisted-history recovery extension and later guarded **stable 2.3.x**
 compatibility amendment have focused native/offline coverage, not new integrated
 external-host or dashboard acceptance. The shell/subagent storage profile still
 requires exact captured-patch agreement and compatible contracts; it does not
 certify untested future native behavior or waive refusals. Other integrations
 retain their independently documented version limits. See the
-[recovery reference](cli.md#web--browser-interface).
+[workspace history guide](guides/workspaces.md).
 
 The shared update also includes the card dashboard, saved
 per-workspace native host importing (enabled by default on supported clients),
 the shared web tabstrip/current-conversation reports and optional browser File
 attachments. Existing clients do not live-toggle; save `--no-host-drop` or use
 `oc-box preferences --host-drop off` to disable importing for future clients.
-The [final combined-browser validation gap](releases/1.7.md#attachment-and-web-validation-limitations)
-is explicit; development publication is not a browser/desktop or stable acceptance
-claim.
+The [historical combined-browser attachment gap](releases/1.7.md#attachment-and-web-validation-limitations)
+is separate from current one-use pairing and layout evidence. Feature availability
+does not extend any native, browser, or terminal support profile.
 
 ## Select or preview a channel
 
@@ -92,7 +92,7 @@ backups, and check compatibility before returning from development to stable.
 Only extras supported by the target are installed. Older stable `1.6` has no
 dashboard; selecting a target without the dashboard does not carry it into that release.
 An inherited TUI preference is retained so it can apply on a later return to
-development. An explicit `--tui` request against an unsupported target refuses.
+a supporting release. An explicit `--tui` request against an unsupported target refuses.
 
 ## Enable the dashboard after a GitHub channel switch
 
@@ -100,10 +100,10 @@ On a launcher release supporting upgrade extras, add dependencies through your
 existing installation owner, whether starting from stable or development:
 
 ```sh
-oc-box upgrade --devel --tui --check  # Validate/preview; change nothing
-oc-box upgrade --devel --tui         # Add dashboard dependencies
-oc-box upgrade --devel --vault       # Add vault dependencies independently
-oc-box upgrade --devel --vault --tui # Add both
+oc-box upgrade --tui --check  # Validate the saved channel; change nothing
+oc-box upgrade --tui          # Add dashboard dependencies
+oc-box upgrade --vault        # Add vault dependencies independently
+oc-box upgrade --vault --tui  # Add both
 ```
 
 `--vault` and `--tui` are independent, additive optional dependency requests,
@@ -130,7 +130,7 @@ None of these flags changes credential policy, initializes/unlocks a vault,
 launches the dashboard, starts a workspace, resets it or deletes history.
 
 If `oc-box tui` reports “Optional TUI dependencies are missing”, use
-`oc-box upgrade --devel --tui` on a supporting launcher; curl is not needed.
+`oc-box upgrade --tui` on a supporting launcher/channel; curl is not needed.
 If the parser lacks these upgrade flags, upgrade normally to a supporting
 published release first. A merge to a branch is not publication. Genuinely
 pre-channel launchers retain the exceptional
@@ -141,7 +141,6 @@ pre-channel launchers retain the exceptional
 GitHub automatic updates remain off by default:
 
 ```sh
-oc-box upgrade --devel
 oc-box upgrade --auto-update on
 # Later:
 oc-box upgrade --auto-update off
@@ -213,7 +212,7 @@ preserve. Automatic targets require a compatible, unyanked universal wheel.
 - **Pre-feature 1.7 builds, including `5573965`:** rerun the channel-aware
   bootstrap for the desired channel. Their old ahead-of-master check can retain
   the development build, so a plain upgrade is not a reliable bridge. For the
-  manager, select `--devel --with-tui` explicitly.
+  manager, request `--with-tui` with a supporting stable or development target.
 - **Older package copies:** update once with the package manager that owns the
   installation, explicitly allowing prereleases for development, then use the
   new channel-aware command.
@@ -228,12 +227,12 @@ are present.
 
 ## Publication policy
 
-Stable `master`, its `v1.6.94` release/tag and its PyPI files remain unchanged by
-the 1.7 development publication. Publish the channel-integrated successor of the
-earlier `5573965` candidate on `devel`; do not merge that unaccepted manager line
-into stable to obtain channel support. A new source commit derives a new N from
-full history minus the original baseline, 29; do not reuse `1.7.110` or imply
-that the successor is the exact previously tested source.
+Publish stable `1.8` from `master` and development `1.9` from `devel`.
+Keep the stable lineage separate and use the exact validated candidate for
+each release; do not move earlier tags. A new source commit derives a new N
+from full history minus the original baseline, 29. The approval for the
+earlier `1.7` development release was not stable manager acceptance; see
+the [historical record](releases/1.7.md).
 
 Run relevant source/package/native CI and guarded build-only distribution checks
 on the new source, concentrating new coverage on channel/install/version/upgrade
@@ -251,7 +250,7 @@ acceptance. Preserve previous accepted reports and failed evidence.
 
 Development requires **all three**: the `devel` publication branch, a GitHub
 prerelease, and a public `.dev0` version. A GitHub prerelease must never upload a
-regular `1.7.N` version; manual dispatch is not a guard bypass. Tag, public version,
+regular final version; manual dispatch is not a guard bypass. Tag, public version,
 source metadata and branch membership must agree. Publish only the validated
 commit, not an arbitrary later branch HEAD.
 

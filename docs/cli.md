@@ -1059,9 +1059,9 @@ client rejects it and never changes the owner's credential snapshot.
 ### tui — experimental workspace manager
 
 Open the optional Textual workspace dashboard, separate from the native OpenCode
-conversation TUI launched by `start`. This is a development-branch feature, not
-an accepted stable dashboard release; check `oc-box tui --help` for availability
-in the installed build. It requires optional dashboard dependencies, a regular
+conversation TUI launched by `start`. It is available on stable `1.8` and
+development `1.9`; older stable `1.6` has no dashboard. Check
+`oc-box tui --help` for your installed build. It requires optional dashboard dependencies, a regular
 unprivileged Linux host user, and real TTY input/output. Normal CLI commands
 retain their stdlib-only baseline.
 
@@ -1069,9 +1069,9 @@ For an existing installation with a launcher release supporting upgrade extras,
 request the dependencies through the verified existing owner:
 
 ```sh
-oc-box upgrade --devel --tui
+oc-box upgrade --tui
 # Or add both independent extras:
-oc-box upgrade --devel --vault --tui
+oc-box upgrade --vault --tui
 ```
 
 This also fixes “Optional TUI dependencies are missing” without rerunning curl.
@@ -2100,7 +2100,8 @@ removed by its unique tag; shared base images remain.
 
 ### Include host settings for migration
 
-On `devel`, `backup --host --output FILE` creates a host-only encrypted
+On supporting stable and development releases, `backup --host --output FILE`
+creates a host-only encrypted
 archive, without a workspace or Podman. Add `--project PATH` or `--workspace ID`
 to include these settings in a full workspace backup; `--portable` selects
 a workspace plus host settings without the container OS image.
@@ -2588,7 +2589,7 @@ workspace is required. Use alone, without lifecycle selectors/options.
 ### --version
 
 Print oc-box's commit-derived version and exit without Podman. Stable releases
-use `1.7.N+gHASH`; development builds use `1.7.N.dev0+gHASH`. N is the
+use `1.8.N+gHASH`; development builds use `1.9.N.dev0+gHASH`. N is the
 full-history commit count minus 29 (the original 1.0.0
 baseline). Each later commit advances N; shallow history cannot supply a release
 identity. Tracked uncommitted changes add `.dirty`. Untracked files do not. Installed
@@ -2599,8 +2600,8 @@ containers. Use alone, for example: `oc-box --version`.
 The OpenCode V2-compatible 1.5 series, 1.6 refactoring series and 1.7 manager/sharing
 series retain the same commit-derived patch count; a first published patch is
 not required to be zero. Installed older copies keep their original
-0.1/1.0/1.5/1.6 identity.
-PyPI distribution metadata uses `1.7.N` for stable releases and `1.7.N.dev0`
+0.1/1.0/1.5/1.6/1.7 identity.
+PyPI distribution metadata uses `1.8.N` for stable releases and `1.9.N.dev0`
 for development releases, because public PyPI versions
 cannot contain the local `+gHASH` suffix. Its packaged build-info still includes
 the full source identity displayed by this command, so the exact Git commit is
