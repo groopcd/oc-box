@@ -137,7 +137,7 @@ class GuestWorkerTests(unittest.TestCase):
                 guest._ready_frame(bad)
 
 
-class GuestOwnerTests(unittest.TestCase):
+class GuestOwnerFixture:
     def setUp(self):
         stack = contextlib.ExitStack()
         self.addCleanup(stack.close)
@@ -166,7 +166,7 @@ class GuestOwnerTests(unittest.TestCase):
             box, self.path, self.data, guest_stop_token=self.token
         )
 
-    def seal(self, stack):
+    def seal(self, stack, *, endpoint=_ENDPOINT):
         stack.enter_context(box.workspace_lock(self.path))
         proof = self.owner._guest_proof = guest.GuestOwnerProof(self.owner, self.token)
         self.assertEqual(proof.pinned_data()["container"], _CONTAINER)
@@ -174,10 +174,15 @@ class GuestOwnerTests(unittest.TestCase):
             proof.before_spawn()
         self.owner.child = Mock()
         self.owner.child.poll.return_value = None
-        self.owner.connection = proof.seal(wire())
+        ready = frame()
+        ready["endpoint"]["url"] = endpoint
+        ready["native"]["urls"] = [endpoint]
+        self.owner.connection = proof.seal(wire(ready))
         self.owner.publish(None)
         return proof
 
+
+class GuestOwnerTests(GuestOwnerFixture, unittest.TestCase):
     def test_registered_guest_tunnel_binds_one_providerless_exec_and_retires_it(self):
         for scenario in (
             "clean",
@@ -286,10 +291,7 @@ class GuestOwnerTests(unittest.TestCase):
                         tunnel.close.assert_called_once()
                     else:
                         supervise.assert_not_called()
-                    self.assertEqual(
-                        tunnel.abandon.call_count,
-                        int(scenario == "retirement-uncertain"),
-                    )
+                    tunnel.abandon.assert_not_called()
 
     def test_exact_original_owner_pinned_and_a_stale_connection_cannot_replace_it(self):
         with box.workspace_lock(self.path):

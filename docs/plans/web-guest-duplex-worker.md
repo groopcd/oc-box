@@ -5,9 +5,10 @@ distinct pipes and at most one TCP socket to literal `127.0.0.1`. Its sole
 argument is a trusted, canonical decimal port. It does not authenticate that
 endpoint or choose a workspace: a future caller must supply the port from the
 original owning proof and run this fixed worker in the selected namespace.
-There is no caller, Gateway path, launcher option, or change to the named or
-legacy proxies. The worker does not accept or look up credentials, add a
-listener, parse HTTP, or interpret WebSocket bytes.
+The [private managed Gateway](web-studio-managed-gateway.md) uses this worker;
+there is no launcher option or change to the named or legacy proxies. The
+worker does not accept or look up credentials, add a listener, parse HTTP,
+or interpret WebSocket bytes.
 
 ## Private wire
 
@@ -95,7 +96,7 @@ receipt evidence, a kept-open pipe, nonzero or lost reap status, and an
 observably substituted descriptor. Actual Podman stdio, owner coordination
 and live browser behavior remain separate validation gates.
 
-## Unwired browser byte pump
+## Browser byte pump
 
 `web_guest_duplex_host.pump_worker` takes the original `AcceptedWorkers`
 callback handle, a fresh same-thread `DuplexHost` for an already-admitted
@@ -120,5 +121,6 @@ handle and drain uncertainty with the caller. Closing a socket cannot undo
 already-delivered bytes or show that any admitted application work has ended.
 
 The pump tests use synthetic browser socket pairs and local native peers over
-private subprocess pipes. There is no production Gateway caller, proof of
-real Podman stdio, or owner/stop integration.
+private subprocess pipes. They are separate from the reported source-specific
+Podman stdio gate and the private Gateway composition. There is no launcher
+caller or owner/stop integration.

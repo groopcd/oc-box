@@ -28,16 +28,15 @@ stand in for a duplex native WebSocket relay. The missing evidence is an
 acknowledged native-side retirement on cancellation, followed by strict
 EOF and exact process reap, even when an upgraded stream is idle or
 backpressured. Privately tracking host workers alone is not that evidence.
-The unserved framed duplex worker and host verifier now prove this on
-local synthetic pipes and TCP. The next gate must show the same contract
-through rootless `podman exec -i`: the original exec must carry cancellation
-and stdout EOF correctly even under backpressure. Then the gateway must
-register that exact process and every other native helper before dispatch.
-The unserved exec binding now does that registration for one tunnel,
-rechecks the original owner and stop admission at spawn, and uses the
-fixed providerless worker with the owner's pinned engine environment.
-It cannot retire an attempted exec without its exact transport evidence,
-and does not authorize or account for a native application job.
+The framed duplex worker and host verifier have local pipe/TCP evidence and
+a reported source-specific OGD v3 rootless `podman exec -i` gate. The
+[private managed Gateway](web-studio-managed-gateway.md) now uses the exact
+original owner and listener, charges accepted workers before dispatch, and
+rechecks the original lease after verified transport drain. This is raw
+native transport only, exercised with synthetic fixtures; the transport gate
+does not establish this composition's live acceptance or permit owner/stop
+integration. No transport receipt authorizes or accounts for a native
+application job.
 
 A Studio grant must not outlive native cookie authority. Recheck the
 current browser cookie for every bounded protected exchange and fence an
