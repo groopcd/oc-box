@@ -241,6 +241,70 @@ def _launcher(path, prefix):
     return path.parent
 
 
+def _pipx_receipt(receipt, prefix, version):
+    """Validate recorded ownership separately from the live manager probe."""
+    try:
+        main = receipt["main_package"]
+        if (
+            receipt["pipx_metadata_version"] not in ("0.4", "0.5")
+            or prefix.parent.name != "venvs"
+            or prefix.name != "oc-box"
+            or main["package"] != "oc-box"
+            or main["package_version"] != version
+            or main.get("suffix", "")
+            or main.get("pinned", False)
+            or receipt.get("venv_args")
+            or receipt.get("injected_packages")
+            or not _pipx_options(main.get("pip_args", []))
+            or main.get("include_dependencies") is not False
+            or main.get("include_apps") is not True
+        ):
+            _refuse("The pipx receipt has unsupported ownership or manager options.")
+        extras = _requirement(main["package_or_url"])
+        if "oc-box" not in main["apps"]:
+            _refuse("The pipx receipt does not own the oc-box application.")
+        source = receipt["source_interpreter"]
+        if (
+            isinstance(source, dict)
+            and set(source) == {"__Path__", "__type__"}
+            and source["__type__"] == "Path"
+        ):
+            source = source["__Path__"]
+        if not isinstance(source, str):
+            _refuse("The original pipx Python interpreter cannot be verified.")
+        return extras, source
+    except (AttributeError, KeyError, TypeError):
+        _refuse("The pipx receipt is incomplete.")
+
+
+def _uv_receipt(receipt, prefix):
+    """Validate recorded ownership separately from the live manager probe."""
+    tool = receipt["tool"]
+    requirements = tool["requirements"]
+    if (
+        set(receipt) != {"tool"}
+        or set(tool) - {"requirements", "entrypoints", "options", "python"}
+        or ("python" in tool and tool["python"] != str(prefix / "bin/python"))
+        or not _uv_options(tool.get("options", {}))
+        or len(requirements) != 1
+        or set(requirements[0]) - {"name", "extras", "specifier"}
+        or requirements[0]["name"] != "oc-box"
+        or prefix.name != "oc-box"
+    ):
+        _refuse("The uv receipt has unsupported ownership or manager options.")
+    requirement = requirements[0]
+    extras = _extras(requirement.get("extras", []))
+    _requirement("oc-box" + requirement.get("specifier", ""))
+    points = tool["entrypoints"]
+    if (
+        len(points) != 1
+        or points[0].get("name") != "oc-box"
+        or points[0].get("from", "oc-box") != "oc-box"
+    ):
+        _refuse("The uv receipt has unsupported entry points.")
+    return extras, points[0]["install-path"]
+
+
 def _manager(prefix, before, work, env):
     pipx = prefix / "pipx_metadata.json"
     uv = prefix / "uv-receipt.toml"
@@ -248,44 +312,13 @@ def _manager(prefix, before, work, env):
         _refuse("Multiple package managers claim this environment.")
     if pipx.exists():
         receipt = _read_json(pipx)
-        try:
-            main = receipt["main_package"]
-            if (
-                receipt["pipx_metadata_version"] not in ("0.4", "0.5")
-                or prefix.parent.name != "venvs"
-                or prefix.name != "oc-box"
-                or main["package"] != "oc-box"
-                or main["package_version"] != before["version"]
-                or main.get("suffix", "")
-                or main.get("pinned", False)
-                or receipt.get("venv_args")
-                or receipt.get("injected_packages")
-                or not _pipx_options(main.get("pip_args", []))
-                or main.get("include_dependencies") is not False
-                or main.get("include_apps") is not True
-            ):
-                _refuse(
-                    "The pipx receipt has unsupported ownership or manager options."
-                )
-            extras = _requirement(main["package_or_url"])
-            if "oc-box" not in main["apps"]:
-                _refuse("The pipx receipt does not own the oc-box application.")
-            source = receipt["source_interpreter"]
-            if (
-                isinstance(source, dict)
-                and set(source) == {"__Path__", "__type__"}
-                and source["__type__"] == "Path"
-            ):
-                source = source["__Path__"]
-            if (
-                not isinstance(source, str)
-                or not Path(source).is_file()
-                or Path(source).resolve() != (prefix / "bin/python").resolve()
-            ):
-                _refuse("The original pipx Python interpreter cannot be verified.")
-            env["PIPX_DEFAULT_PYTHON"] = source
-        except (KeyError, TypeError):
-            _refuse("The pipx receipt is incomplete.")
+        extras, source = _pipx_receipt(receipt, prefix, before["version"])
+        if (
+            not Path(source).is_file()
+            or Path(source).resolve() != (prefix / "bin/python").resolve()
+        ):
+            _refuse("The original pipx Python interpreter cannot be verified.")
+        env["PIPX_DEFAULT_PYTHON"] = source
         env["PIPX_HOME"] = str(prefix.parent.parent)
         bin_dir = Path(os.environ.get("PIPX_BIN_DIR", str(Path.home() / ".local/bin")))
         env["PIPX_BIN_DIR"] = str(_launcher(bin_dir / "oc-box", prefix))
@@ -320,33 +353,10 @@ def _manager(prefix, before, work, env):
                 or mode.st_size > 1024 * 1024
             ):
                 _refuse("The uv receipt is not a bounded regular file.")
-            receipt = tomllib.loads(uv.read_text())
-            tool = receipt["tool"]
-            requirements = tool["requirements"]
-            if (
-                set(receipt) != {"tool"}
-                or set(tool) - {"requirements", "entrypoints", "options", "python"}
-                or ("python" in tool and tool["python"] != str(prefix / "bin/python"))
-                or not _uv_options(tool.get("options", {}))
-                or len(requirements) != 1
-                or set(requirements[0]) - {"name", "extras", "specifier"}
-                or requirements[0]["name"] != "oc-box"
-                or prefix.name != "oc-box"
-            ):
-                _refuse("The uv receipt has unsupported ownership or manager options.")
-            requirement = requirements[0]
-            extras = _extras(requirement.get("extras", []))
-            _requirement("oc-box" + requirement.get("specifier", ""))
-            points = tool["entrypoints"]
-            if (
-                len(points) != 1
-                or points[0].get("name") != "oc-box"
-                or points[0].get("from", "oc-box") != "oc-box"
-            ):
-                _refuse("The uv receipt has unsupported entry points.")
+            extras, entrypoint = _uv_receipt(tomllib.loads(uv.read_text()), prefix)
             env["UV_TOOL_DIR"] = str(prefix.parent)
-            env["UV_TOOL_BIN_DIR"] = str(_launcher(points[0]["install-path"], prefix))
-        except (OSError, ValueError, KeyError, TypeError):
+            env["UV_TOOL_BIN_DIR"] = str(_launcher(entrypoint, prefix))
+        except (OSError, ValueError, AttributeError, KeyError, TypeError):
             _refuse("The uv receipt cannot be validated.")
         executable = _executable("uv", work, env)
         if (
