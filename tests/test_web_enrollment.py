@@ -1,11 +1,8 @@
 import base64
 import math
-import os
 import unittest
 from concurrent.futures import ThreadPoolExecutor
-from importlib.util import find_spec
 from pathlib import Path
-from tempfile import TemporaryDirectory
 from threading import Event
 from unittest.mock import Mock, patch
 
@@ -140,7 +137,7 @@ class EnrollmentFixture(unittest.TestCase):
 
 
 class EnrollmentApprovalTests(EnrollmentFixture):
-    def test_exact_profile_and_binding_produce_host_only_single_use_result(self):
+    def test_exact_profile_and_binding_produce_only_a_single_use_fixture_record(self):
         approval = self.approval()
         self.assertIsNone(self.start(approval, account_origin=ORIGINS.workspace.value))
         self.assertIsNone(self.start(approval, account_nonce=OTHER_BROWSER))
@@ -208,14 +205,10 @@ class EnrollmentApprovalTests(EnrollmentFixture):
         self.assertTrue(approval.drained())
         self.assertFalse(self.finish(approval, reply))
 
-        accepted = approval.take_for_host()
-        self.assertIs(accepted.review, REVIEW)
-        self.assertEqual(accepted.registration, RECORD)
-        self.assertNotIn(REVIEW.username, repr(accepted))
-        self.assertTrue(accepted.current())
         self.assertIsNone(approval.take_for_host())
+        self.assertEqual(approval.take_for_fixture(), RECORD)
+        self.assertIsNone(approval.take_for_fixture())
         self.assertTrue(approval.close())
-        self.assertFalse(accepted.current())
 
     def test_structural_upload_without_possession_is_not_a_verified_enrollment(self):
         self.exchange.finish.return_value = False
@@ -226,59 +219,9 @@ class EnrollmentApprovalTests(EnrollmentFixture):
         self.assertFalse(self.finish(approval, reply))
         self.exchange.finish.assert_called_once()
         self.assertIsNone(approval.take_for_host())
+        self.assertIsNone(approval.take_for_fixture())
         self.assertTrue(approval.drained())
         self.assertFalse(approval.cleanup_failed)
-
-    @unittest.skipUnless(
-        find_spec("cryptography"), "optional cryptography not installed"
-    )
-    def test_verified_result_preserves_the_original_store_cas(self):
-        phrase = "synthetic enrollment store passphrase"
-        with (
-            patch.dict(os.environ, {"OC_BOX_CONTAINER": "0"}),
-            TemporaryDirectory() as directory,
-        ):
-            path = Path(directory) / "accounts"
-            web_accounts.initialize(path, phrase, setup=REVIEW.setup)
-            review = web_accounts.review_registration(
-                path,
-                phrase,
-                REVIEW.username,
-                workspace_ids=REVIEW.workspace_ids,
-            )
-            previous = path.read_bytes()
-            approval = self.approval(review=review)
-            reply = self.start(approval)
-            self.assertIsNotNone(self.prepare(approval, reply))
-            self.assertIsNone(approval.take_for_host())
-            self.assertEqual(path.read_bytes(), previous)
-            self.assertTrue(self.finish(approval, reply))
-            self.assertEqual(path.read_bytes(), previous)
-            result = approval.take_for_host()
-            self.assertIs(result.review, review)
-
-            web_accounts.add_account(
-                path,
-                phrase,
-                "other-synthetic",
-                workspace_ids=REVIEW.workspace_ids,
-                registration=b"synthetic other record",
-            )
-            replaced = path.read_bytes()
-            self.assertTrue(
-                result.current()
-            )  # Bootstrap is live; store review is stale.
-            with self.assertRaisesRegex(
-                web_accounts.WebAccountsError, "no longer current"
-            ):
-                web_accounts.commit_registration(
-                    path,
-                    phrase,
-                    result.review,
-                    registration=result.registration,
-                    current=result.current,
-                )
-            self.assertEqual(path.read_bytes(), replaced)
 
     def test_account_bootstrap_cannot_start_login_or_be_reused_for_another_approval(
         self,
@@ -299,10 +242,9 @@ class EnrollmentApprovalTests(EnrollmentFixture):
         reply = self.start(approval)
         self.assertIsNotNone(self.prepare(approval, reply))
         self.assertTrue(self.finish(approval, reply))
-        result = approval.take_for_host()
-        self.assertTrue(result.current())
         self.retire(bootstrap, binding)
-        self.assertFalse(result.current())
+        self.assertIsNone(approval.take_for_fixture())
+        self.assertIsNone(approval.take_for_host())
 
     def test_scope_and_exact_account_app_pair_must_match_the_reviewed_profile(self):
         with self.assertRaises(ValueError):
@@ -360,7 +302,7 @@ class EnrollmentApprovalTests(EnrollmentFixture):
         self.assertTrue(approval.drained())
         self.assertIsNone(approval.take_for_host())
 
-    def test_expiry_applies_during_backend_work_and_after_proof_before_host_take(self):
+    def test_expiry_applies_during_backend_work_and_after_direct_proof(self):
         with patch.object(web_enrollment, "monotonic", return_value=10) as clock:
             approval = self.approval(ttl=1)
             self.respond.side_effect = lambda **_: (
@@ -377,6 +319,7 @@ class EnrollmentApprovalTests(EnrollmentFixture):
             self.assertTrue(self.finish(pending, reply))
             clock.return_value = 12
             pending.expire()
+            self.assertIsNone(pending.take_for_fixture())
             self.assertIsNone(pending.take_for_host())
             self.assertTrue(pending.drained())
 

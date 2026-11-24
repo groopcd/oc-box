@@ -50,8 +50,10 @@ authoritative; the pinned workers can impose shorter I/O and proof deadlines.
 ## Unserved HTTPS dispatch contract
 
 `web_enrollment_ingress.EnrollmentIngress(origins=..., approval=...)` binds
-one existing approval and is not connected to a listener. The future caller
-selects the dedicated account TLS connection (not request-role input),
+one unused approval once, before its first round, and is not connected to a
+listener. A direct worker round and an ingress cannot share an approval, and
+neither an active proof nor a completed direct fixture can be rebound. The
+future caller selects the dedicated account TLS connection (not request-role input),
 checks exact SNI and loopback binding, and passes the raw literal target,
 entire raw header list with duplicates, and original bounded request body.
 `actual_tls=True` must mean that this connection completed the real account
@@ -91,28 +93,36 @@ connections. A synchronous worker call is not retroactively interruptible
 by the request check. An observed loss prevents publication and fences
 the approval.
 
-An `EnrollmentReply` with status 200 is provisional, not delivery. The
-writer must use both its own transport checkpoint/deadline and
-`reply.check_write()` before, during, and after its single bounded write.
-On a failed, partial, aborted, or otherwise uncertain write, invoke
-`reply.abort_write()`, stop sending, and never retry the reply or the
-request. This invalidates any tentative host result. It cannot retract
-bytes already sent or prove receipt by the browser. Do not retain response
-callbacks after that request. A generic refusal has no approval authority
-but is still subject to the transport write gate.
+An `EnrollmentReply` with status 200 is provisional, not delivery. On the final
+request, pass the **original, already checked account TLS socket** as `stream`
+to ingress. Successful KE3 and worker drain bind the original approval to that
+exact reply and socket, before any writer is admitted. No late socket binding,
+copy, replay, or second writer can acknowledge it. `reply.check_write()` only
+checks liveness; it never acknowledges delivery.
 
-`write_enrollment_reply` is the synchronous, checked write boundary for
-a future enrollment-only TLS worker. It keeps the original response
-fence, emits no headers supplied by the request or worker, and calls the
-abort hook on unconfirmed delivery. Socket fixtures verify both a checked
-final write and a partial final write that makes the host result unavailable.
-No normal named sign-in route calls this writer.
+`write_enrollment_reply` is the sole checked local write boundary for a future
+enrollment-only TLS worker. It uses both the request and writer guards before,
+during and after a complete bounded write, never extends the original cutoff,
+and then acknowledges once against the original writer under the approval lock.
+On failure, expiry or cancellation it cannot authorize the result. A dropped
+pending reply can be aborted with `reply.abort_write()`; never retry the reply
+or request. Cancellation racing an active writer fences publication and must
+not be mistaken for confirmed writer drain. Acknowledgment cannot retract bytes
+already sent or prove receipt by the browser. No normal named sign-in route calls
+this writer.
 
-Only a verified KE3 followed by a confirmed drain of both workers can make
-the result available. For HTTP enrollment, the trusted host must only call
-`take_for_host()` **after** the final successful write and post-write check;
-the dispatcher never takes it. The returned review, registration and
-`current()` guard never go to HTTP.
+Only the acknowledged delivery makes `take_for_host()` eligible. It returns
+the original review, registration and `current()` guard once, while the
+approval and claim are still current. None goes to HTTP. Cancellation after
+acknowledgment via the approval itself revokes eligibility before handoff and
+invalidates a previously taken result's `current()` guard. The consumed reply
+cannot act as a second writer or abort a later phase. This is not a transaction
+with future store publication.
+
+Transport-free ingress and CDP fixtures may exercise the provisional JSON but
+cannot later attach a socket or release a host result. Direct worker fixtures
+use `take_for_fixture()` for round-trip bytes only, with no reviewed result or
+CAS guard; neither synthetic path substitutes for checked HTTP delivery.
 Before persisting, the host still needs its local confirmation, owner
 exclusion/revocation and `commit_registration(..., current=result.current)`.
 The guard checks approval/claim liveness; it does not replace the store's

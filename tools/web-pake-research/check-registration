@@ -249,18 +249,12 @@ def staged_enrollment(registrar, profile, fixture, origins, setup, *, case):
             require(request(finish, stage) == ({"verified": True} if valid else None),
                     "staged proof outcome")
             require(request(finish, stage) is None, "enrollment proof replay accepted")
-            result = approval.take_for_host()
+            require(approval.take_for_host() is None and approval.take_for_fixture() is None,
+                    "transport-free ingress yielded a registration result")
             if valid:
-                require(
-                    result is not None and result.review is review and result.registration == upload
-                    and result.current(), "wrong host-only staged result",
-                )
-                require(bootstrap.retire(binding, auth_origin=origin, account_nonce=nonce)
-                        and not result.current(), "retired host result stayed current")
-            else:
-                require(result is None, "refused proof returned a host result")
-            require(approval.take_for_host() is None and approval.drained(),
-                    "staged result replay or unverified cleanup")
+                require(bootstrap.retire(binding, auth_origin=origin, account_nonce=nonce),
+                        "bootstrap retirement failed")
+            require(approval.drained(), "unverified staged cleanup")
     finally:
         bootstrap.close()
         require(approval.close() and not approval.cleanup_failed, "unconfirmed enrollment drain")
