@@ -115,6 +115,7 @@ class PackagingTests(unittest.TestCase):
                     "host_drop_io.py",
                     "host_drop_input.py",
                     "workspace_preferences.py",
+                    "startup_output.py",
                     "activity_log.py",
                     "tui_app.py",
                     "tui_terminal.py",
@@ -152,6 +153,7 @@ class PackagingTests(unittest.TestCase):
                     "tests/web_sessions_dom.mjs",
                     "tests/smoke_web_sessions_v2.py",
                     "tests/test_web_layout_runtime.mjs",
+                    "tests/web_studio_dom_fixture.mjs",
                     "tests/smoke_web_layout_browser.py",
                     "docs/mockups/web-manager.html",
                     *(
@@ -231,6 +233,7 @@ class PackagingTests(unittest.TestCase):
                     "src/oc_box/host_drop_io.py",
                     "src/oc_box/host_drop_input.py",
                     "src/oc_box/workspace_preferences.py",
+                    "src/oc_box/startup_output.py",
                     "tests/test_sharing_transport.py",
                     "tests/smoke_sharing_v2.py",
                     "tests/smoke_session_backups_v2.py",
