@@ -91,6 +91,8 @@ UNSETTLED = "OpenCode 2.x history is unsettled; retry sync after completion."
 CHANGED = "OpenCode 2.x history changed or omitted messages; retry sync."
 WORKER = "OpenCode 2.x history worker failed."
 HISTORY_WORKER_PROTOCOL = "oc-box.history/1"
+GUEST_OWNER_PROTOCOL = "oc-box.studio-guest-owner/1"
+GUEST_OWNER_VERSION = "2.4.1"
 HISTORY_WORKER_CONTROL = 65536
 HISTORY_WORKER_PAYLOAD = 1073741824
 FIXED_MESSAGES = frozenset(
@@ -461,10 +463,27 @@ def checked_export(request, ident):
     return exported
 
 
+def _wait_exact_child(child, timeout):
+    deadline = time.monotonic() + timeout
+    while True:
+        pid, status = os.waitpid(child.pid, os.WNOHANG)
+        if pid == child.pid and (os.WIFEXITED(status) or os.WIFSIGNALED(status)):
+            child.returncode = os.waitstatus_to_exitcode(status)
+            return
+        if pid != 0:
+            raise FixedError(READINESS)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise subprocess.TimeoutExpired("OpenCode", timeout)
+        time.sleep(min(remaining, 0.025))
+
+
 @contextlib.contextmanager
-def server(binary, *, exit_info=None, startup_deadline=None):
+def server(binary, *, exit_info=None, startup_deadline=None, strict_reap=False):
     if startup_deadline is not None:
         _deadline_timeout(startup_deadline)
+    if strict_reap and signal.getsignal(signal.SIGCHLD) != signal.SIG_DFL:
+        raise FixedError(READINESS)
     password = secrets.token_urlsafe(32)
     env = {**os.environ, "OPENCODE_PASSWORD": password}
     descriptor = os.memfd_create("oc-box-v2-errors", os.MFD_CLOEXEC)
@@ -498,6 +517,9 @@ def server(binary, *, exit_info=None, startup_deadline=None):
             address = json.loads(output.split(b"\n", 1)[0])["url"]
             request = endpoint_request({"url": address, "password": password})
             request.alive = lambda: child.poll() is None
+            # Private within this worker; never trust a requested or
+            # independently discovered process as the child just launched.
+            request.child_pid = child.pid
 
             # Migration is asynchronous in upstream. Do not mistake an empty
             # session list for successful completion and lose the resume ID.
@@ -532,14 +554,28 @@ def server(binary, *, exit_info=None, startup_deadline=None):
             forced = False
             if child.stdin:
                 child.stdin.close()
+
+            # For the proof variant, a returncode already cached by poll()
+            # means the server was gone at/ before EOF. The caller cannot
+            # accept it for normal retirement. For a still-live child require
+            # a terminal waitpid status, not a synthetic Popen ECHILD result.
+            def wait():
+                if strict_reap:
+                    if child.returncode is None:
+                        _wait_exact_child(child, 5)
+                else:
+                    child.wait(timeout=5)
+
             try:
-                child.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                forced = True
-                os.killpg(child.pid, signal.SIGKILL)
-                child.wait(timeout=5)
-            if child.stdout:
-                child.stdout.close()
+                try:
+                    wait()
+                except subprocess.TimeoutExpired:
+                    forced = True
+                    os.killpg(child.pid, signal.SIGKILL)
+                    wait()
+            finally:
+                if child.stdout:
+                    child.stdout.close()
             if exit_info is not None:
                 exit_info.update(code=child.returncode, forced=forced)
 
@@ -1105,15 +1141,35 @@ def _verify_named_owner(request, deadline, version):
     if not request.alive():
         raise FixedError(READINESS)
     try:
-        named_native_info(info, version, request.endpoint["url"])
+        return named_native_info(info, version, request.endpoint["url"])
     except ValueError:
         raise FixedError(READINESS) from None
+
+
+def _guest_owner_record(request, deadline):
+    info = _verify_named_owner(request, deadline, GUEST_OWNER_VERSION)
+    if (
+        info["pid"] != request.child_pid
+        or time.monotonic() >= deadline
+        or not request.alive()
+    ):
+        # An alternate process or an executable shim that retained its own
+        # PID cannot establish this exact direct-child contract.
+        raise FixedError(READINESS)
+    return {
+        "protocol": GUEST_OWNER_PROTOCOL,
+        "endpoint": request.endpoint,
+        "native": info,
+    }
 
 
 def main(argv):
     action, binary, *identity = argv
     if action == "named-lease":
         if len(identity) != 1 or not named_native_supports(identity[0]):
+            raise FixedError(READINESS)
+    elif action == "guest-proof-lease":
+        if identity != [GUEST_OWNER_VERSION]:
             raise FixedError(READINESS)
     elif identity:
         raise ValueError("Invalid private OpenCode arguments.")
@@ -1145,22 +1201,39 @@ def main(argv):
             endpoint_request(settings["endpoint"]), settings["members"]
         )
         print(json.dumps(value), flush=True)
-    elif action in ("lease", "named-lease"):
+    elif action in ("lease", "named-lease", "guest-proof-lease"):
         descriptor = require_control_pipe()
         # Leave time for the owner-side control wait and service teardown.
         deadline = time.monotonic() + 165
-        with server(binary, startup_deadline=deadline) as request:
+        guest = action == "guest-proof-lease"
+        exit_info = {}
+        eof = False
+        with server(
+            binary,
+            startup_deadline=deadline,
+            **({"exit_info": exit_info, "strict_reap": True} if guest else {}),
+        ) as request:
             ready_plugins(request, os.getcwd(), startup_deadline=deadline)
             if action == "named-lease":
                 _verify_named_owner(request, deadline, identity[0])
+            record = (
+                _guest_owner_record(request, deadline) if guest else request.endpoint
+            )
             # Control credentials are returned only through the owner's pipe,
             # kept in memory, and never written to the workspace or service.json.
-            write_control_record(descriptor, request.endpoint)
+            write_control_record(descriptor, record)
             while request.alive():
                 if select.select([sys.stdin], [], [], 0.2)[0] and not os.read(
                     sys.stdin.fileno(), 4096
                 ):
+                    eof = not guest or request.alive()
                     break
+        if guest and (
+            not eof
+            or exit_info.get("forced") is not False
+            or exit_info.get("code") != 0
+        ):
+            raise FixedError(READINESS)
     elif action == "history-source":
         history_source_lease(binary)
     elif action == "history-worker":

@@ -20,6 +20,30 @@ own random gateway generation. It is an opaque server-side identity; equal
 looking fields or a reused port do not recreate it. One binding can create
 only one registry, even after closure. It is not a `WebBinding`.
 
+### Original listener proof
+
+`workspace_service.Gateway` now captures the socket it actually binds,
+before transitioning that **same** socket to `listen()` and starting its
+ordinary accept thread. It pins the gateway and socket objects, descriptor,
+device/inode and exact `getsockname()` address. The checked socket is
+non-inheritable IPv4/TCP, bound to literal `127.0.0.1` with no address/port
+reuse, and not connected to a peer. For port `0`, the authority uses the
+kernel-assigned port. It is not derived from `Gateway.url`, browser headers,
+or the disposable `preflight_port()` bind. Closing and rebinding the same
+address cannot migrate the proof. An observed identity or kernel-phase
+mismatch invalidates it permanently; replacing a descriptor or restoring the
+old object after refusal does not revive it.
+
+`Gateway._listener_preflight()` is a private, unserved scope for the
+owning-only composition fixture: it borrows that same reservation mechanism,
+cannot be activated through gateway startup, and closes the original
+reservation on exit. `proof.origin(gateway, listening=False)` checks it;
+`listening=True` requires the gateway's actual startup transition. Neither
+phase check attests the owner or native service, authenticates an accepted
+exchange, makes the next I/O atomic with the check, or proves that any worker
+has drained. The proof is not an alternative to the separate owner and
+lifecycle gates below. No guest route is activated.
+
 Pin two synchronous trusted callables at setup. Neither is supplied by the
 browser, and both must honor the absolute monotonic deadline and registered
 use cancellation:
@@ -50,15 +74,14 @@ use cancellation:
   headers, cookies, or response bytes.
 
 The current legacy attach reply, a same-user PID/socket, and the optional TUI
-report generation do **not** prove the immutable owner run. Likewise,
-`Gateway.url` alone does not pin the original listener. Today's
-`web_sessions._authenticated` accepts both Cookie and Authorization; it
-doesn't establish the owner or enforce a passed cancellation/deadline and
-confirmed worker retirement. The legacy `Gateway` itself does not provide a
-positive drain of all accepted browser workers. These are still-unmet
-integration prerequisites. Do not call the old helper or trust a legacy
-`AttachedControl` as a substitute for them, invent a named owner/grant, or
-route to a standalone backend on failure.
+report generation do **not** prove the immutable owner run. Use the unserved
+[managed cookie verifier](web-studio-guest-native.md), not
+`web_sessions._authenticated`, which also accepts Authorization and cannot
+confirm its worker's retirement. The legacy `Gateway` still does not provide
+positive drain of all accepted browser workers. Original owner attestation
+and full gateway drain remain integration prerequisites. Do not trust a
+legacy `AttachedControl` as a substitute, invent a named owner/grant, or route
+to a standalone backend on failure.
 
 ## One-use confirmation and page admission
 
@@ -100,10 +123,14 @@ route to a standalone backend on failure.
    `start(binding, app=..., page=..., cancel=..., deadline=...)`. Keep the
    pair in the confirming document's memory, out of URLs, cookies, shared
    web storage, native iframe and logs. A new document must confirm anew.
-   Only a returned `(use, grant)` with the exact live grant permits work;
-   `(use, None)` is an already registered refusal. Use `current(use)` before
-   and during native startup and downstream delivery. It is not an atomic
-   guarantee around an external write. A subsequent selection adapter must
+    A returned `(use, grant)` reserves the exchange, not native dispatch;
+    `(use, None)` is an already registered refusal. On the exact use, call
+    `authorize_native(use, grant, cookie=...)` once with that request's vetted
+    Cookie header, or `None` when absent. A denial fences and cancels this
+    page/grant; a later sign-in cannot revive it. Recheck `native_current(use)`
+    before and during protected native startup and downstream delivery. A
+    successful check applies to that exchange only and is not atomic with
+    a later logout or an external write. A subsequent selection adapter must
    separately verify exact session access and page selection, without
    inferring authority from a native focus report or a request ID.
 

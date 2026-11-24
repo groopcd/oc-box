@@ -120,6 +120,8 @@ class _Active:
     grant: GuestGrant | None
     checking: bool = False
     uncertain: bool = False
+    native_attempted: bool = False
+    native_verified: bool = False
 
 
 def _token(value):
@@ -140,6 +142,24 @@ def _deadline(value, now):
     if type(value) in (int, float) and now < value < float("inf"):
         return min(value, now + _REQUEST_SECONDS)
     return None
+
+
+def _native_headers(binding, cookie):
+    if (
+        type(cookie) is not str
+        or not 0 < len(cookie) <= _MAX_COOKIE_BYTES
+        or not cookie.strip(" ")
+        or any(not 32 <= ord(char) <= 126 for char in cookie)
+    ):
+        return None
+    return (
+        "GET /api/info HTTP/1.1\r\nhost: "
+        + binding.authority
+        + "\r\norigin: "
+        + binding.origin
+        + "\r\ncookie: "
+        + cookie
+    ).encode("ascii")
 
 
 def _confirmation(binding, request):
@@ -184,7 +204,6 @@ def _confirmation(binding, request):
         ):
             return None
         fields[name] = value
-    cookie = fields.get("cookie")
     if (
         fields.get("host") != binding.authority
         or fields.get("origin") != binding.origin
@@ -193,21 +212,12 @@ def _confirmation(binding, request):
         or fields.get("sec-fetch-dest") != "empty"
         or fields.get("content-type") != "text/plain"
         or fields.get("content-length") != str(len(request.body))
-        or not cookie
-        or not cookie.strip(" ")
     ):
         return None
     # Header block shape for the legacy native authenticator, not a whole wire
     # request. Cookie syntax is not authority; only the native verifier decides.
-    headers = (
-        "GET /api/info HTTP/1.1\r\nhost: "
-        + binding.authority
-        + "\r\norigin: "
-        + binding.origin
-        + "\r\ncookie: "
-        + cookie
-    ).encode("ascii")
-    return _digest(challenge), headers
+    headers = _native_headers(binding, fields.get("cookie"))
+    return (_digest(challenge), headers) if headers is not None else None
 
 
 class GuestAdmission:
@@ -415,8 +425,9 @@ class GuestAdmission:
     def start(self, binding, *, app, page, cancel, deadline):
         """Match both bearers; return None if unregistered or (use, exact grant).
 
-        The adapter must independently already enforce its first-party request
-        policy. A registered but now stale use returns (use, None); finish it.
+        This reserves transport, not native dispatch. The adapter must already
+        enforce its first-party request policy, then require the current
+        request's native cookie. A stale registered use returns (use, None).
         """
         if (
             binding is not self._binding
@@ -442,6 +453,52 @@ class GuestAdmission:
                 self._uses[use] = _Active(cancel, grant)
         self._notify(pending)
         return (use, grant if self.current(use) else None) if use is not None else None
+
+    def authorize_native(self, use, grant, *, cookie):
+        """Spend one native authentication attempt on this protected exchange.
+
+        Accept only its vetted request Cookie (None when absent). The caller
+        validates method, path, origin and framing, and binds exact worker
+        cancellation before start. Native denial revokes the matching page;
+        the app/page bearers alone never admit this exchange.
+        """
+        with self._condition:
+            if (
+                not self._live(use)
+                or type(grant) is not GuestGrant
+                or (entry := self._uses[use]).grant is not grant
+                or entry.native_attempted
+                or entry.checking
+            ):
+                return False
+            entry.native_attempted = True
+        authorized = False
+        try:
+            headers = _native_headers(self._binding, cookie)
+            if headers is None or not self.current(use):
+                return False
+            called, verified = self._probe(
+                use,
+                self._verify_native,
+                headers=headers,
+                authority=self._binding.authority,
+            )
+            if not called or verified is not self._binding or not self.current(use):
+                return False
+            with self._condition:
+                if self._live(use) and self._uses[use] is entry:
+                    authorized = entry.native_verified = True
+            return authorized
+        finally:
+            if not authorized:
+                self.revoke(self._binding, grant)
+
+    def native_current(self, use):
+        """Recheck this same authenticated exchange, not the next request."""
+        with self._condition:
+            if not self._live(use) or not self._uses[use].native_verified:
+                return False
+        return self.current(use)
 
     def _live(self, use):
         if self._closed or type(use) is not GuestUse or use.cancelled:

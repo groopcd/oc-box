@@ -175,6 +175,67 @@ class GuestAdmissionTests(unittest.TestCase):
         self.assertTrue(gate.finish(actual_use, confirmed=True))
         self.assertFalse(gate.current(actual_use))
 
+    def test_every_protected_use_requires_its_own_vetted_cookie_once(self):
+        gate = self.gate()
+        bootstrap = self.bootstrap(gate)
+        for _ in range(2):
+            use, grant = self.start(gate, bootstrap)
+            self.assertFalse(gate.native_current(use))
+            self.verify.reset_mock()
+            self.assertFalse(gate.authorize_native(use, replace(grant), cookie=COOKIE))
+            self.verify.assert_not_called()
+            self.assertTrue(gate.authorize_native(use, grant, cookie=COOKIE))
+            self.assertTrue(gate.native_current(use))
+            self.assertFalse(gate.authorize_native(use, grant, cookie=COOKIE))
+            self.verify.assert_called_once()
+            self.assertIs(self.verify.call_args.kwargs["use"], use)
+            self.assertTrue(
+                self.verify.call_args.kwargs["headers"].endswith(COOKIE.encode())
+            )
+            self.assertTrue(gate.finish(use, confirmed=True))
+            self.assertFalse(gate.native_current(use))
+
+    def test_cookie_loss_revokes_only_the_exact_page_and_never_revives_it(self):
+        for cookie in (None, "synthetic-denied=value", "no\r\nInjected: value"):
+            with self.subTest(cookie=cookie):
+                self.binding = guest.GuestBinding(WORKSPACE, OWNER, CONTAINER, ORIGIN)
+                self.verify.side_effect = lambda binding, **_: binding
+                gate = self.gate()
+                first, other = self.bootstrap(gate), self.bootstrap(gate)
+                cancel = Mock()
+                use, grant = self.start(gate, first, cancel=cancel)
+                self.verify.reset_mock()
+                self.verify.side_effect = lambda _binding, **_: None
+                self.assertFalse(gate.authorize_native(use, grant, cookie=cookie))
+                self.assertFalse(gate.native_current(use))
+                cancel.assert_called_once_with()
+                self.assertEqual(
+                    self.verify.call_count, int(cookie == "synthetic-denied=value")
+                )
+                self.assertTrue(gate.finish(use, confirmed=True))
+                self.verify.side_effect = lambda binding, **_: binding
+                self.assertIsNone(self.start(gate, first))
+                second_use, second_grant = self.start(gate, other)
+                self.assertTrue(
+                    gate.authorize_native(second_use, second_grant, cookie=COOKIE)
+                )
+                self.assertTrue(gate.finish(second_use, confirmed=True))
+
+    def test_cancellation_during_native_recheck_never_admits_delivery(self):
+        gate = self.gate()
+        bootstrap = self.bootstrap(gate)
+        use, grant = self.start(gate, bootstrap)
+
+        def revoke(binding, **_):
+            self.assertTrue(gate.revoke(binding, grant))
+            return binding
+
+        self.verify.side_effect = revoke
+        self.assertFalse(gate.authorize_native(use, grant, cookie=COOKIE))
+        self.assertFalse(gate.native_current(use))
+        self.assertTrue(gate.finish(use, confirmed=True))
+        self.assertIsNone(self.start(gate, bootstrap))
+
     def test_lookalike_cookie_claim_truthy_result_or_verifier_failure_never_admits(
         self,
     ):
