@@ -458,6 +458,21 @@ hosting service permits this AI-assisted project. Do not create a remote or
 push to a service with incompatible policies. Do not store credentials in Git
 URLs, config, source files, or command-line arguments.
 
+For maintainer pushes, install the versioned `tools/check_push_identity.py` in the
+clone's shared Git hooks directory. It compares raw author and committer emails
+on outgoing commits against the clone-local `ocbox.pushIdentityEmail` allowlist,
+independently of `user.email` or per-command Git identity overrides. On a
+clone using the default hook path and with no existing pre-push hook:
+
+```bash
+git config --local --add ocbox.pushIdentityEmail 'maintainer@example.invalid'
+install -m 755 tools/check_push_identity.py "$(git rev-parse --git-path hooks/pre-push)"
+```
+
+Replace the example with the approved GitHub-linked address. Preserve and
+integrate any existing hook instead of overwriting it. Do not bypass identity
+refusals; approve legitimate contributor addresses explicitly before pushing.
+
 The public upstream is `https://github.com/groopcd/oc-box.git`. Use only the
 explicit `PERSONAL_GITHUB_TOKEN` for publication. Inherited `GITHUB_TOKEN` and
 `GH_TOKEN` belong to a separate Microsoft/Copilot account and must not be used
