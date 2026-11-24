@@ -5306,24 +5306,12 @@ def _main_command(args, argv):
             from updater import UpdateError, automatic_upgrade
 
         try:
-            release = automatic_upgrade(APP)
+            automatic_upgrade(APP, launch_args=sys.argv[1:] if argv is None else argv)
         except (UpdateError, OSError, ValueError) as exc:
             startup_output.line(
                 f"oc-box: automatic update unavailable: {exc}; continuing with the installed version.",
                 file=sys.stderr,
             )
-        else:
-            if release is not None:
-                environment = {**os.environ, "OC_BOX_UPDATE_CHECKED": "1"}
-                os.execve(
-                    sys.executable,
-                    [
-                        sys.executable,
-                        str(release / "oc_box.py"),
-                        *(sys.argv[1:] if argv is None else argv),
-                    ],
-                    environment,
-                )
     with loading_stage("Checking rootless Podman", stage="backend"):
         check_backend(
             **({"env": maintenance_host_env()} if args.command == "terminal" else {}),

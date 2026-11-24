@@ -16,10 +16,20 @@ else:
 
 
 class InstallRemovalError(ValueError):
-    def __init__(self, message, *, changed=False, retained=None):
+    def __init__(
+        self,
+        message,
+        *,
+        changed=False,
+        retained=None,
+        launcher_restored=False,
+        inventory_invalidated=False,
+    ):
         super().__init__(message)
         self.changed = changed
         self.retained = retained
+        self.launcher_restored = launcher_restored
+        self.inventory_invalidated = inventory_invalidated
 
 
 def _exists(parent, name):
@@ -235,6 +245,7 @@ class _LockedRemoval:
         staged = []
         committed = False
         changed = False
+        phase = "stage"
         with ExitStack() as stack:
             parents = {}
             for item in heads:
@@ -285,13 +296,14 @@ class _LockedRemoval:
                             )
 
                 _walk_release(self.release, plan.release, mount, children)
-                self._verify_detached(heads, parents, mount)
+                self._verify_heads(heads, parents, mount)
                 for item, slot in staged:
                     _match(stage, slot, mount, item, moved=True)
 
                 # The historical file-open policy binds its receipt to this
                 # inode and ctime. Keep the inode and marker (even if it is
                 # foreign); invalidate prior enrollment for old runtimes too.
+                phase = "lock-mode"
                 before = os.fstat(self.install_lock)
                 os.fchmod(self.install_lock, stat.S_IMODE(before.st_mode))
                 after = os.fstat(self.install_lock)
@@ -302,6 +314,7 @@ class _LockedRemoval:
                     raise InstallRemovalError(
                         "Previous automatic file-open enrollment could not be invalidated."
                     )
+                phase = "lock-sync"
                 os.fsync(self.install_lock)
 
                 committed = True
@@ -339,12 +352,13 @@ class _LockedRemoval:
                     else:
                         _match(stage, slot, mount, item, moved=True)
                         os.unlink(slot, dir_fd=stage)
-                self._verify_detached(heads, parents, mount)
+                self._verify_heads(heads, parents, mount)
                 self._drop_stage(stage_name, stage_anchor, mount)
                 for parent in {*parents.values(), self.root}:
                     os.fsync(parent)
             except (OSError, ValueError, KeyboardInterrupt):
                 retained = install / stage_name
+                restored = invalidated = False
                 if not committed:
                     try:
                         for item, parent, slot in reversed(attempted):
@@ -354,6 +368,23 @@ class _LockedRemoval:
                                 move(stage, slot, parent, item.path.name)
                         self._drop_stage(stage_name, stage_anchor, mount)
                         retained = None
+                        if changed:
+                            self._verify_heads(heads, parents, mount, restored=True)
+                            for parent in {*parents.values(), self.root}:
+                                os.fsync(parent)
+                            restored = True
+                            # Until the original receipt re-verifies, restoring
+                            # names does not restore uninstall authority.
+                            invalidated = True
+                            try:
+                                invalidated = (
+                                    ownership.review_installation(
+                                        plan.release, home=self.home
+                                    )
+                                    != plan
+                                )
+                            except ownership.OwnershipError:
+                                invalidated = True
                     except (OSError, ValueError, KeyboardInterrupt):
                         pass  # preserve any unresolved artifact; never overwrite a replacement
                 else:
@@ -362,12 +393,39 @@ class _LockedRemoval:
                             retained = None
                     except (OSError, KeyboardInterrupt):
                         pass
+                reason = (
+                    {
+                        "lock-mode": " Previous automatic file-open enrollment could not be invalidated.",
+                        "lock-sync": " Synchronization of the installation lock was not confirmed.",
+                    }.get(phase, "")
+                    if not committed
+                    else ""
+                )
+                if restored and invalidated:
+                    message = (
+                        "Installation removal stopped. The launcher was restored, but the "
+                        "uninstall inventory no longer verifies."
+                        + reason
+                        + " Reinstall with the verified installer before trying uninstall again."
+                    )
+                elif restored:
+                    message = (
+                        "Installation removal stopped. The launcher was restored."
+                        + reason
+                    )
+                elif changed or retained:
+                    message = (
+                        "Installation removal was not completed; inspect the installation "
+                        "and any retained staging before retrying." + reason
+                    )
+                else:
+                    message = "Installation removal was refused; nothing was removed."
                 raise InstallRemovalError(
-                    "Installation removal was not completed; inspect the retained installation before retrying."
-                    if changed or retained
-                    else "Installation removal was refused; nothing was removed.",
+                    message,
                     changed=changed or retained is not None,
                     retained=retained,
+                    launcher_restored=restored,
+                    inventory_invalidated=invalidated,
                 ) from None
         return len(plan.artifacts)
 
@@ -376,7 +434,7 @@ class _LockedRemoval:
             _check_anchor(directory, anchor)
             os.rmdir(name, dir_fd=self.root)
 
-    def _verify_detached(self, heads, parents, mount):
+    def _verify_heads(self, heads, parents, mount, *, restored=False):
         with ExitStack() as stack:
             owner = stack.enter_context(ownership._home(self.home))
             _check_anchor(owner, self.plan.anchors[0])
@@ -389,7 +447,9 @@ class _LockedRemoval:
             for item in heads:
                 directory = actual[item.path.parent]
                 _check_anchor(directory, item.parent)
-                if _exists(directory, item.path.name):
+                if restored:
+                    _match(directory, item.path.name, mount, item, moved=True)
+                elif _exists(directory, item.path.name):
                     raise InstallRemovalError(
                         "An installation artifact reappeared during removal."
                     )

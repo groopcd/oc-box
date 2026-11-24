@@ -275,24 +275,27 @@ class UpdateTests(unittest.TestCase):
             with patch.dict(os.environ, {"OC_BOX_UPDATE_CHECKED": "1"}):
                 self.assertIsNone(updater.automatic_upgrade(self.root))
             upgrade.assert_not_called()
-            updater.automatic_upgrade(self.root)
-            upgrade.assert_called_once_with(self.root)
+            self.assertIsNone(updater.automatic_upgrade(self.root))
+            self.assertFalse((self.home / ".local").exists())
 
     def test_auto_check_lock_does_not_block_another_launcher(self):
         import fcntl
 
         target = self.home / ".local/share/oc-box"
-        target.mkdir(parents=True)
         settings = self.home / ".config/oc-box/config.json"
         settings.parent.mkdir(parents=True)
         settings.write_text('{"auto_update":true}')
         with (
-            (target / ".upgrade.lock").open("a+") as lock,
+            patch.object(updater.os, "geteuid", return_value=os.getuid()),
+            patch.object(updater, "_regular_user", return_value=True),
+            patch.object(installation.shutil, "which", return_value=None),
             patch.object(updater, "_github_upgrade") as upgrade,
-            patch.object(updater.os, "geteuid", return_value=1000),
+            contextlib.redirect_stdout(io.StringIO()),
         ):
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            self.assertIsNone(updater.automatic_upgrade(self.root))
+            release = installation.install(APP, self.home)
+            with (target / ".upgrade.lock").open("r+b") as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                self.assertIsNone(updater.automatic_upgrade(release))
         upgrade.assert_not_called()
 
     def test_automatic_upgrade_restarts_new_release_with_original_args(self):
@@ -300,19 +303,16 @@ class UpdateTests(unittest.TestCase):
             pass
 
         arguments = ["--project", str(self.root / "not-yet-opened"), "--new"]
-        release = self.root / "new-release"
         with (
             patch.dict(os.environ, {"OC_BOX_CONTAINER": ""}),
-            patch.object(updater, "automatic_upgrade", return_value=release),
-            patch.object(box.os, "execve", side_effect=Restarted) as restart,
+            patch.object(
+                updater, "automatic_upgrade", side_effect=Restarted
+            ) as restart,
             patch.object(box, "check_backend") as backend,
         ):
             with self.assertRaises(Restarted):
                 box.main(arguments)
-        self.assertEqual(
-            restart.call_args.args[1][1:], [str(release / "oc_box.py"), *arguments]
-        )
-        self.assertEqual(restart.call_args.args[2]["OC_BOX_UPDATE_CHECKED"], "1")
+        restart.assert_called_once_with(box.APP, launch_args=arguments)
         backend.assert_not_called()
 
     def test_automatic_update_failure_does_not_block_existing_workspace_launch(self):

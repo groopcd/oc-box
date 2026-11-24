@@ -14,7 +14,7 @@ from unittest.mock import patch
 
 from oc_box import host_file_open_policy as layout
 from oc_box import install_ownership as ownership, install_removal as removal
-from oc_box import installation
+from oc_box import installation, updater
 
 import test_install_ownership as fixtures
 
@@ -41,6 +41,136 @@ class FlatRemovalTests(unittest.TestCase):
 
     def stages(self):
         return list(self.target.glob(".oc-box-uninstall-*"))
+
+    def opt_into_updates(self):
+        config = self.home / ".config/oc-box/config.json"
+        config.parent.mkdir(parents=True)
+        config.write_bytes(b'{"auto_update":true}\n')
+
+    def test_installed_automatic_update_is_opt_in_and_does_not_wait_for_busy_installer(
+        self,
+    ):
+        release = self.install()
+        with (
+            patch.object(updater, "_regular_user", return_value=True),
+            patch.object(updater, "_github_upgrade") as fetch,
+        ):
+            self.assertIsNone(updater.automatic_upgrade(release))
+            self.opt_into_updates()
+            with patch.dict(os.environ, {"OC_BOX_UPDATE_CHECKED": "1"}):
+                self.assertIsNone(updater.automatic_upgrade(release))
+            with (self.target / layout.INSTALL_LOCK).open("r+b") as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                self.assertIsNone(updater.automatic_upgrade(release))
+            fetch.assert_not_called()
+        self.assertEqual(self.review(release).release, release)
+
+    def test_retained_launcher_cannot_update_before_or_after_active_removal(self):
+        older = self.install()
+        active = self.install()
+        self.opt_into_updates()
+        with (
+            patch.object(updater, "_regular_user", return_value=True),
+            patch.object(updater, "_github_upgrade") as fetch,
+            patch.object(updater.dependencies, "require"),
+        ):
+            with self.assertRaisesRegex(updater.UpdateError, "active installation"):
+                updater.automatic_upgrade(older)
+            self.remove(self.review(active))
+            with self.assertRaisesRegex(updater.UpdateError, "active installation"):
+                updater.automatic_upgrade(older)
+            with self.assertRaisesRegex(updater.UpdateError, "not the active launcher"):
+                updater.upgrade(older)
+            fetch.assert_not_called()
+        self.assertFalse(self.launcher.exists())
+        self.assertFalse(os.path.lexists(self.target / "current"))
+        self.assertEqual(list((self.target / "releases").iterdir()), [older])
+
+    def test_installer_rechecks_source_when_current_changes_during_automatic_fetch(
+        self,
+    ):
+        older = self.install()
+        self.opt_into_updates()
+        token = ownership.inspect_active_installation(self.home, older).token
+
+        def fake_fetch(root, *, expected_active):
+            self.assertEqual((root, expected_active), (older, token))
+            current = self.install()  # a direct installer won during the fetch
+            with self.assertRaisesRegex(ownership.OwnershipError, "changed before"):
+                self.install(expected_active=expected_active)
+            self.assertEqual((self.target / "current").resolve(), current)
+            self.assertEqual(self.review(current).release, current)
+            self.assertEqual(
+                set((self.target / "releases").iterdir()), {older, current}
+            )
+
+        with (
+            patch.object(updater, "_regular_user", return_value=True),
+            patch.object(updater, "_github_upgrade", side_effect=fake_fetch) as fetch,
+        ):
+            self.assertIsNone(updater.automatic_upgrade(older))
+        fetch.assert_called_once()
+
+    def test_real_exec_handoff_keeps_updated_release_leased_and_original_arguments(
+        self,
+    ):
+        older = self.install()
+        self.opt_into_updates()
+        package_parent = str(Path(ownership.__file__).resolve().parents[1])
+        (self.source / "oc_box.py").write_text(
+            "import os, sys\n"
+            "from pathlib import Path\n"
+            f"sys.path.insert(0, {package_parent!r})\n"
+            "from oc_box import install_ownership as owner\n"
+            "with owner.installed_runtime_use(Path(__file__).parent):\n"
+            " assert sys.argv[1:] == ['--new', '--project', 'synthetic project']\n"
+            " assert os.environ.get('OC_BOX_UPDATE_CHECKED') == '1'\n"
+            " assert owner.HANDOFF_FD not in os.environ\n"
+            " assert not os.get_inheritable(owner._runtime_lease.fd)\n"
+            " print('ready', flush=True); sys.stdin.buffer.read()\n"
+        )
+        script = (
+            "import contextlib, io, sys\n"
+            "from pathlib import Path\n"
+            "sys.path.insert(0, sys.argv[1])\n"
+            "from oc_box import install_ownership as owner, installation, updater\n"
+            "source, older = map(Path, sys.argv[2:])\n"
+            "updater._regular_user = lambda: True\n"
+            "installation.shutil.which = lambda *a, **k: None\n"
+            "def local_upgrade(root, *, expected_active):\n"
+            " with contextlib.redirect_stdout(io.StringIO()):\n"
+            "  return installation.install(source, expected_active=expected_active)\n"
+            "updater._github_upgrade = local_upgrade\n"
+            "with owner.installed_runtime_use(older):\n"
+            " updater.automatic_upgrade(older, launch_args=['--new', '--project', 'synthetic project'])\n"
+            "raise SystemExit('the verified exec did not happen')\n"
+        )
+        with subprocess.Popen(
+            [
+                sys.executable,
+                "-B",
+                "-c",
+                script,
+                package_parent,
+                str(self.source),
+                str(older),
+            ],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        ) as child:
+            try:
+                self.assertTrue(select.select([child.stdout], [], [], 10)[0])
+                self.assertEqual(child.stdout.readline(), b"ready\n")
+                current = (self.target / "current").resolve(strict=True)
+                self.assertNotEqual(current, older)
+                plan = self.review(current)
+                with self.assertRaisesRegex(removal.InstallRemovalError, "in use"):
+                    self.remove(plan)
+            finally:
+                _, error = child.communicate(input=b"", timeout=5)
+                self.assertEqual((child.returncode, error), (0, b""))
+        self.assertEqual(self.review(current), plan)
 
     def test_exact_removal_preserves_older_release_and_never_opens_data(self):
         old = self.install()
@@ -253,6 +383,70 @@ class FlatRemovalTests(unittest.TestCase):
         )
         self.assertEqual(self.launcher.read_bytes(), b"concurrent replacement")
         self.assertTrue(release.is_dir())
+
+    def test_second_move_failure_restores_launcher_but_not_its_inventory_authority(
+        self,
+    ):
+        release = self.install()
+        plan = self.review(release)
+        original_receipt = (release / ownership.INVENTORY).read_bytes()
+        actual_move = removal._rename_method()
+        calls = 0
+
+        def move(parent, name, dst, slot):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise OSError("synthetic second move failure")
+            actual_move(parent, name, dst, slot)
+
+        with patch.object(removal, "_rename_method", return_value=move):
+            with self.assertRaises(removal.InstallRemovalError) as stopped:
+                self.remove(plan)
+        self.assertEqual(calls, 3)
+        self.assertTrue(stopped.exception.launcher_restored)
+        self.assertTrue(stopped.exception.inventory_invalidated)
+        self.assertIsNone(stopped.exception.retained)
+        self.assertIn("launcher was restored", str(stopped.exception))
+        self.assertIn("inventory no longer verifies", str(stopped.exception))
+        self.assertIn("Reinstall with the verified installer", str(stopped.exception))
+        self.assertEqual(self.launcher.read_bytes(), layout.launcher_bytes(release))
+        self.assertEqual((release / ownership.INVENTORY).read_bytes(), original_receipt)
+        with self.assertRaises(ownership.OwnershipError):
+            self.review(release)
+
+    def test_install_lock_sync_failure_reports_visible_rollback_and_invalid_inventory(
+        self,
+    ):
+        release = self.install()
+        plan = self.review(release)
+        lock = self.target / layout.INSTALL_LOCK
+        before = lock.stat()
+        original_receipt = (release / ownership.INVENTORY).read_bytes()
+        fsync = os.fsync
+
+        def fail(fd):
+            if os.readlink(f"/proc/self/fd/{fd}") == str(lock):
+                raise OSError("synthetic installation lock synchronization failure")
+            return fsync(fd)
+
+        with patch.object(os, "fsync", side_effect=fail):
+            with self.assertRaises(removal.InstallRemovalError) as stopped:
+                self.remove(plan)
+        self.assertTrue(stopped.exception.launcher_restored)
+        self.assertTrue(stopped.exception.inventory_invalidated)
+        self.assertIsNone(stopped.exception.retained)
+        self.assertIn(
+            "Synchronization of the installation lock was not confirmed",
+            str(stopped.exception),
+        )
+        self.assertEqual(self.launcher.read_bytes(), layout.launcher_bytes(release))
+        self.assertEqual(lock.stat().st_mode, before.st_mode)
+        self.assertEqual(lock.stat().st_ino, before.st_ino)
+        self.assertNotEqual(lock.stat().st_ctime_ns, before.st_ctime_ns)
+        self.assertEqual((release / ownership.INVENTORY).read_bytes(), original_receipt)
+        with self.assertRaises(ownership.OwnershipError):
+            self.review(release)
 
     def test_partial_unlink_reports_and_keeps_staging_instead_of_retrying(self):
         release = self.install()
