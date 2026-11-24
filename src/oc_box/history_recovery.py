@@ -54,6 +54,7 @@ CAPTURE_REFUSALS = frozenset(
         "automatic-container-work",
         "shared-pid-namespace",
         "mounts",
+        "runtime-executable-unverified",
     )
 )
 SKIP_REFUSALS = CAPTURE_REFUSALS | frozenset(
@@ -252,6 +253,7 @@ class Source:
     container_id: str
     stop_token: str
     mount_signature: tuple
+    runtime_digest: str | None = None
 
 
 def _signature(box, data, info):
@@ -331,7 +333,7 @@ def passive_workspace_mounts(box, data, info):
     return _signature(box, data, info)
 
 
-def capture(box, data, info, token, *, refusal=None):
+def capture(box, data, info, token, *, refusal=None, runtime_digest=None):
     """Use startup's existing inspection; never probe or start a healthy owner."""
 
     def reject(reason):
@@ -341,6 +343,11 @@ def capture(box, data, info, token, *, refusal=None):
 
     if not isinstance(token, str):
         return reject("control-unavailable")
+    if runtime_digest is not None and (
+        type(runtime_digest) is not str
+        or re.fullmatch(r"[a-f0-9]{64}", runtime_digest) is None
+    ):
+        return reject("runtime-executable-unverified")
     if history_reader.snapshot_profile(data.get("opencode_version")) is None:
         return reject("unsupported-version")
     if data.get("ready") is not True:
@@ -361,7 +368,7 @@ def capture(box, data, info, token, *, refusal=None):
         return reject(exc.reason)
     except (KeyError, TypeError):
         return reject("invalid-container")
-    return Source(info["Id"], token, signature)
+    return Source(info["Id"], token, signature, runtime_digest)
 
 
 def exit_retry_eligible(box, data, failure):
@@ -564,7 +571,9 @@ def recover(box, path, data, source):
             ),
         ):
             _unchanged(path, source)
-            with history_reader.Reader(box, pinned, remaining=remaining) as reader:
+            with history_reader.Reader(
+                box, pinned, remaining=remaining, runtime_digest=source.runtime_digest
+            ) as reader:
                 reader.assert_idle()
                 _unchanged(path, source)
                 box.sync_sessions(path, pinned, announce=False)
@@ -614,6 +623,7 @@ def recover(box, path, data, source):
             "reader-machine-state": "machine-state",
             "reader-blob-state": "blob-state",
             "reader-host-service-state": "host-service-state",
+            "reader-runtime-executable-unverified": "verification",
         }.get(category, compatibility_category(compatibility_reason) or "sync-failed")
     if report is not None:
         report.reason = reason

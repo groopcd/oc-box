@@ -957,7 +957,7 @@ timeout or a duration limit for the entire synchronization. This grace remains
 unchanged. The two paths differ:
 
 * Automatic owner exit waits up to 30 seconds before live export. An eligible
-  timeout, or a supported 2.3.x live-sync failure described below, can then use
+  timeout, or a qualifying live-sync failure on stable 2.3.x or 2.4.x, can then use
   one guarded post-stop reader attempt. Checked exports, host imports and native
   verification take additional time.
 * Explicit `oc-box sync` has no original owner's live-readiness wait. It uses
@@ -1068,13 +1068,18 @@ starts a native service, and is reaped before overall sync success. Malformed or
 failed transport is not automatically restarted or replayed; data and retry
 guidance remain. Destination imports and independent native verification remain
 unchanged. Ordinary live/manual sync and V1 retain their existing transports.
+Guarded manual sync uses the admitted executable and skips the ordinary
+unbound quiet-source optimization for native 2.3.0.
 
 This conservative path requires a passive container entrypoint, no custom Podman
 arguments or automatic health/restart/shell-loader hooks, and validated identity/home mounts.
 It also refuses native scheduler rows (including paused/completed rows), unknown
 scheduler schemas, unsafe stores and nonempty system OpenCode configuration.
 Read-only executable-version probes must match the captured supported release
-on both sides; a binary changed during the session does not inherit that proof.
+on both sides. On runtime-guarded workspaces, the post-stop reader also checks
+the captured executable digest and uses the verified descriptor for startup
+and each later native helper. Different bytes that still report the same
+patch version are refused.
 The host and container must match the captured exact patch version, not merely
 belong to the same minor series. Unsupported versions are warned about before the
 owning client opens; they retain normal live sync and manual-sync retry guidance,
