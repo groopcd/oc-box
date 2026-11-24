@@ -1570,10 +1570,10 @@ def create_container(path, data, *, environment=None):
         "--env",
         "PATH=/opt/oc-box/runtime/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
         "--entrypoint",
-        "/bin/sh",
+        history_recovery.PASSIVE_ENTRYPOINT,
         data["image"],
         "-c",
-        "exec sleep infinity",
+        history_recovery.PASSIVE_COMMAND,
         preparation="container-image",
     )
     data["ready"] = False
@@ -1654,7 +1654,7 @@ def start_container(path, data):
         data["container"],
         "/bin/sh",
         "-c",
-        'test -r "$1" && test -w "$1" && ls -A "$1" >/dev/null',
+        'test -r "$1" && test -w "$1" && /bin/ls -A "$1" >/dev/null',
         "oc-box",
         container_project(data),
         capture=True,

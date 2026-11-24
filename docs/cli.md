@@ -323,6 +323,13 @@ admits a changed version. Guarded `web`,
 workspaces. An existing private owner still serves additional clients without
 starting a preflight or refreshing its credentials.
 
+New containers use an absolute `/bin/sleep` path for their passive entrypoint.
+The safeguard refuses older containers whose stored entrypoint would look up
+`sleep` on the workspace `PATH`. It does not modify or replace those containers,
+or fall back from guarded to unguarded startup. Ordinary unguarded startup of
+existing containers is unchanged. Preserve existing workspace data; do not
+reset or downgrade to bypass a refusal.
+
 Before normal preparation can write state, oc-box durably records the admitted
 version. An interruption, late startup failure or missing readiness does not
 permit an older version to reopen that state. The guard is not a rollback and
@@ -1073,6 +1080,9 @@ unbound quiet-source optimization for native 2.3.0.
 
 This conservative path requires a passive container entrypoint, no custom Podman
 arguments or automatic health/restart/shell-loader hooks, and validated identity/home mounts.
+An older entrypoint that looks up `sleep` on `PATH` cannot be used for automatic
+post-stop recovery. oc-box does not attempt a restart for that snapshot or
+replace the container to change its entrypoint.
 It also refuses native scheduler rows (including paused/completed rows), unknown
 scheduler schemas, unsafe stores and nonempty system OpenCode configuration.
 Read-only executable-version probes must match the captured supported release
