@@ -5,15 +5,19 @@
 import argparse
 import base64
 import hashlib
+import json
 import os
 import runpy
 import subprocess
 from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from select import select
+from time import monotonic
 
 CHECK = runpy.run_path(str(Path(__file__).with_name("check")))
-from oc_box import web_bootstrap, web_enrollment, web_registration_worker  # noqa: E402
+from oc_box import (  # noqa: E402
+    web_bootstrap, web_enrollment, web_enrollment_ingress, web_registration_worker,
+)
 
 require = CHECK["require"]
 read_exact = CHECK["read_exact"]
@@ -170,24 +174,55 @@ def staged_enrollment(registrar, profile, fixture, origins, setup, *, case):
         review=review, origins=origins, claim=claim,
         registration_worker=registrar, proof_profile=profile,
     )
-    browser = dict(account_origin=origin, account_nonce=nonce)
+    ingress = web_enrollment_ingress.EnrollmentIngress(origins=origins, approval=approval)
+    b64 = CHECK["b64"]
+
+    def request(path, fields, cookie=nonce):
+        body = json.dumps(fields, separators=(",", ":")).encode("ascii")
+        # Synthesized already-admitted HTTPS metadata; no sockets or TLS here.
+        reply = ingress(
+            method="POST", target=path, actual_tls=True, body=body,
+            deadline=monotonic() + 5, check=lambda: None,
+            headers=(
+                ("Host", origin.removeprefix("https://")),
+                ("Origin", origin),
+                ("Cookie", "__Host-ocbox-account=" + cookie),
+                ("Content-Type", "application/json"),
+                ("Content-Length", str(len(body))),
+                ("Sec-Fetch-Site", "same-origin"),
+                ("Sec-Fetch-Mode", "same-origin"),
+                ("Sec-Fetch-Dest", "empty"),
+            ),
+        )
+        if reply.status != 200:
+            require(reply.status == 403 and reply.body == b'{"error":"Named enrollment refused."}',
+                    "unexpected enrollment ingress refusal")
+            return None
+        reply.check_write()
+        fields = json.loads(reply.body)
+        reply.check_write()
+        return fields
+
     try:
         with process(fixture) as child:
             child.stdin.write(client + verifier)
             blinded = read_exact(child.stdout, 32)
-            registration = approval.start(**browser, request=blinded)
+            registration = request(web_enrollment_ingress.START_PATH, {"request": b64(blinded)})
             require(registration is not None, "staged registration refused")
-            child.stdin.write(registration.response)
+            child.stdin.write(base64.b64decode(registration["response"], validate=True))
             upload_and_ke1 = read_exact(child.stdout, 192 + 96)
             upload, ke1 = upload_and_ke1[:192], upload_and_ke1[192:]
-            stage = browser | dict(challenge=registration.challenge)
+            challenge = registration["challenge"]
             require(approval.take_for_host() is None, "unproved registration result")
-            proof = approval.start_proof(**stage, registration=upload, ke1=ke1)
+            proof = request(web_enrollment_ingress.PROOF_START_PATH, {
+                "challenge": challenge, "registration": b64(upload), "ke1": b64(ke1),
+            })
             require(proof is not None and not approval.drained(), "no live OCOP attempt")
             context = CHECK["digest"](
-                b"enrollment-proof", f"{origin}\n{registration.challenge}".encode("ascii"),
+                b"enrollment-proof", f"{origin}\n{challenge}".encode("ascii"),
             )
-            require(proof.context == context and len(proof.ke2) == 320, "wrong proof context")
+            ke2 = base64.b64decode(proof["ke2"], validate=True)
+            require(proof["context"] == b64(context) and len(ke2) == 320, "wrong proof context")
             require(approval.take_for_host() is None, "KE2 is not possession")
             if case == "retired":
                 require(bootstrap.retire(binding, auth_origin=origin, account_nonce=nonce),
@@ -196,7 +231,7 @@ def staged_enrollment(registrar, profile, fixture, origins, setup, *, case):
                 require(approval.drained(), "retirement did not drain OCOP")
             if case == "different context":
                 context = bytes([context[0] ^ 1]) + context[1:]
-            child.stdin.write(context + proof.ke2)
+            child.stdin.write(context + ke2)
             child.stdin.close()
             status = read_exact(child.stdout, 1)
             has_proof = case not in ("different context", "different verifier")
@@ -205,12 +240,15 @@ def staged_enrollment(registrar, profile, fixture, origins, setup, *, case):
             require(child.wait(timeout=5) == 0 and not child.stdout.read(1), "client did not drain")
             if case == "changed proof":
                 ke3 = bytes([ke3[0] ^ 1]) + ke3[1:]
+            stage = {"challenge": challenge, "ke3": b64(ke3)}
+            finish = web_enrollment_ingress.PROOF_FINISH_PATH
             if case == "valid":
-                require(not approval.finish_proof(**(stage | {"account_nonce": CHECK["OTHER"]}), ke3=ke3),
+                require(request(finish, stage, cookie=CHECK["OTHER"]) is None,
                         "wrong browser consumed proof")
             valid = case == "valid"
-            require(approval.finish_proof(**stage, ke3=ke3) is valid, "staged proof outcome")
-            require(not approval.finish_proof(**stage, ke3=ke3), "enrollment proof replay accepted")
+            require(request(finish, stage) == ({"verified": True} if valid else None),
+                    "staged proof outcome")
+            require(request(finish, stage) is None, "enrollment proof replay accepted")
             result = approval.take_for_host()
             if valid:
                 require(
@@ -226,7 +264,7 @@ def staged_enrollment(registrar, profile, fixture, origins, setup, *, case):
     finally:
         bootstrap.close()
         require(approval.close() and not approval.cleanup_failed, "unconfirmed enrollment drain")
-    print(f"PASS staged EnrollmentApproval with real OCOR/OCOP: {case}")
+    print(f"PASS staged enrollment ingress with real OCOR/OCOP: {case}")
 
 
 @contextmanager

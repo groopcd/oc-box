@@ -7,6 +7,7 @@ values out of logs/URLs. Only the trusted host may take the verified result;
 it must still enforce local confirmation, owner exclusion and the store CAS.
 """
 
+import math
 import secrets
 from collections.abc import Callable
 from contextlib import contextmanager
@@ -53,6 +54,21 @@ def _frame(value, size):
 
 def _digest(token):
     return sha256(token.encode("ascii")).digest()
+
+
+def _checkpoint(check, deadline):
+    """Trusted request liveness check; never retain it across browser rounds."""
+    if monotonic() >= deadline:
+        raise TimeoutError("Web enrollment request is no longer current.")
+    if check is not None:
+        try:
+            result = check()
+        except Exception:
+            raise TimeoutError("Web enrollment request is no longer current.") from None
+        if result is not None and result is not True:
+            raise TimeoutError("Web enrollment request is no longer current.")
+    if monotonic() >= deadline:
+        raise TimeoutError("Web enrollment request is no longer current.")
 
 
 class EnrollmentCleanupError(RuntimeError):
@@ -150,6 +166,30 @@ class EnrollmentApproval:
         self._cleanup_uncertain = True
         self._close_locked()
 
+    def matches_origins(self, origins):
+        return (
+            type(origins) is web_local_origins.LocalOrigins
+            and origins.account.value == self._origin
+            and origins.workspace.value == self._claim.workspace_origin
+        )
+
+    def reply_current(self, *, account_origin, account_nonce):
+        """Check the original claim again before disclosing a prepared reply."""
+        matching = self._claim.matches(account_origin, account_nonce)
+        with self._lock:
+            closed = self._current_locked("closed")
+            current = matching and not closed and not self._cleanup_uncertain
+        if closed:
+            self._drain_closed()
+        return current
+
+    def _request_deadline(self, deadline):
+        if deadline is None:
+            return self._deadline
+        if type(deadline) not in (int, float) or not 0 < deadline < math.inf:
+            raise ValueError("Invalid web enrollment request deadline.")
+        return min(self._deadline, deadline)
+
     @property
     def cleanup_failed(self):
         """Sticky uncertainty; a later confirmed reap never restores authority."""
@@ -244,7 +284,9 @@ class EnrollmentApproval:
                     self._busy = False
                 self._drain_closed()
 
-    def start(self, *, account_origin, account_nonce, request):
+    def start(
+        self, *, account_origin, account_nonce, request, check=None, deadline=None
+    ):
         """One blinded registration response, with a browser-bound challenge."""
         with self._step(
             account_origin,
@@ -256,12 +298,15 @@ class EnrollmentApproval:
             if admitted is None:
                 return None
             review, _ = admitted
+            cutoff = self._request_deadline(deadline)
+            _checkpoint(check, cutoff)
             response = self._registrar.respond(
                 setup=review.setup,
                 credential_identifier=self._credential,
                 registration_request=request,
-                deadline=self._deadline,
+                deadline=cutoff,
             )
+            _checkpoint(check, cutoff)
             if not _frame(response, _RESPONSE_SIZE):
                 return None
             challenge = secrets.token_urlsafe(32)
@@ -270,7 +315,7 @@ class EnrollmentApproval:
             ):
                 return None
             with self._lock:
-                if not self._current_locked("responding"):
+                if monotonic() >= cutoff or not self._current_locked("responding"):
                     return None
                 self._challenge = _digest(challenge)
                 self._phase = "upload"
@@ -278,7 +323,15 @@ class EnrollmentApproval:
         return None
 
     def start_proof(
-        self, *, account_origin, account_nonce, challenge, registration, ke1
+        self,
+        *,
+        account_origin,
+        account_nonce,
+        challenge,
+        registration,
+        ke1,
+        check=None,
+        deadline=None,
     ):
         """Validate one canonical upload, then return KE2 for its fresh KE1."""
         with self._step(
@@ -292,9 +345,10 @@ class EnrollmentApproval:
             if admitted is None:
                 return None
             review, _ = admitted
-            record = self._registrar.validate_upload(
-                registration, deadline=self._deadline
-            )
+            cutoff = self._request_deadline(deadline)
+            _checkpoint(check, cutoff)
+            record = self._registrar.validate_upload(registration, deadline=cutoff)
+            _checkpoint(check, cutoff)
             if not _frame(record, _RECORD_SIZE) or not secrets.compare_digest(
                 record, registration
             ):
@@ -315,19 +369,31 @@ class EnrollmentApproval:
                 ke1=ke1,
                 deadline=self._deadline,
             )
+            # The proof child may outlive this request. Its short internal I/O
+            # bound still applies; this request cannot publish after its cutoff.
+            _checkpoint(check, cutoff)
             if not _frame(ke2, _SIZES.ke2) or not callable(
                 getattr(proof, "finish", None)
             ):
                 return None
             with self._lock:
-                if not self._current_locked("starting-proof"):
+                if monotonic() >= cutoff or not self._current_locked("starting-proof"):
                     return None
                 self._record, self._proof = record, proof
                 self._phase = "proof"
             return EnrollmentProofChallenge(ke2, context)
         return None
 
-    def finish_proof(self, *, account_origin, account_nonce, challenge, ke3):
+    def finish_proof(
+        self,
+        *,
+        account_origin,
+        account_nonce,
+        challenge,
+        ke3,
+        check=None,
+        deadline=None,
+    ):
         """Consume the exact KE3; only a verified, drained proof becomes ready."""
         with self._step(
             account_origin,
@@ -340,12 +406,20 @@ class EnrollmentApproval:
             if admitted is None:
                 return False
             _, proof = admitted
+            cutoff = self._request_deadline(deadline)
+            _checkpoint(check, cutoff)
             if proof.finish(ke3) is not True:
                 return False
+            _checkpoint(check, cutoff)
             if not self._drain_workers():
                 return False
+            _checkpoint(check, cutoff)
             with self._lock:
-                if not self._current_locked("finishing") or self._cleanup_uncertain:
+                if (
+                    monotonic() >= cutoff
+                    or not self._current_locked("finishing")
+                    or self._cleanup_uncertain
+                ):
                     return False
                 self._challenge = None
                 self._phase = "ready"
@@ -377,6 +451,12 @@ class EnrollmentApproval:
     def expire(self):
         with self._lock:
             self._current_locked("closed")
+        self._drain_closed()
+
+    def cancel(self):
+        """Fence on request loss and attempt the first cleanup, never retry it."""
+        with self._lock:
+            self._close_locked()
         self._drain_closed()
 
     def close(self):

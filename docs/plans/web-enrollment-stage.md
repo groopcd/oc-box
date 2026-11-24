@@ -47,9 +47,65 @@ round. The rightful browser gets one attempt; a malformed frame or worker
 refusal does not allow retry. The approval TTL and live bootstrap remain
 authoritative; the pinned workers can impose shorter I/O and proof deadlines.
 
+## Unserved HTTPS dispatch contract
+
+`web_enrollment_ingress.EnrollmentIngress(origins=..., approval=...)` binds
+one existing approval and is not connected to a listener. The future caller
+selects the dedicated account TLS connection (not request-role input),
+checks exact SNI and loopback binding, and passes the raw literal target,
+entire raw header list with duplicates, and original bounded request body.
+`actual_tls=True` must mean that this connection completed the real account
+TLS handshake; never derive it from request headers or an upstream proxy.
+
+The ingress independently requires exact account `Host` and `Origin`,
+and `Sec-Fetch-Site: same-origin`, `Sec-Fetch-Mode: same-origin`,
+`Sec-Fetch-Dest: empty`. It uses the original `__Host-ocbox-account` cookie
+directly against the verified enrollment claim, **not** the sign-in
+app-nonce translation. It accepts `application/json`, exact decimal
+`Content-Length`, and compact ASCII JSON in the following key order. All
+binary fields use canonical padded standard base64; `challenge` is the
+original 43-character base64url text. A rejected header or body never
+calls a worker.
+
+| Literal POST target | JSON keys in order | Exact request bytes | Success JSON |
+|---|---|---:|---|
+| `/enroll/start` | `request` | 58 | `challenge`, `response` |
+| `/enroll/proof/start` | `challenge`, `registration`, `ke1` | 470 | `ke2`, `context` |
+| `/enroll/proof/finish` | `challenge`, `ke3` | 156 | `{"verified":true}` |
+
+Use the ingress ceiling (`MAX_BODY_BYTES`, 470) before reading a body; pass
+one fully framed request and close it rather than attempting a second.
+Invalid requests return fixed 403 JSON. Never fall through to ordinary
+login. Success has fixed no-store headers and no token, cookie, redirect
+or native access. Request headers, bodies, response protocol bytes and
+worker details must not appear in logs.
+
+### Trusted response writer and store handoff
+
+Supply the real connection's absolute monotonic `deadline` and its trusted
+`check()` (`None` or `True` on success; raise or return `False` on loss).
+The coordinator checks the request around each worker call and again
+before publication. OCOR receives the tighter request cutoff; OCOP keeps
+its own shorter bounded I/O and independent proof-attempt lifetime across
+connections. A synchronous worker call is not retroactively interruptible
+by the request check. An observed loss prevents publication and fences
+the approval.
+
+An `EnrollmentReply` with status 200 is provisional, not delivery. The
+writer must use both its own transport checkpoint/deadline and
+`reply.check_write()` before, during, and after its single bounded write.
+On a failed, partial, aborted, or otherwise uncertain write, invoke
+`reply.abort_write()`, stop sending, and never retry the reply or the
+request. This invalidates any tentative host result. It cannot retract
+bytes already sent or prove receipt by the browser. Do not retain response
+callbacks after that request. A generic refusal has no approval authority
+but is still subject to the transport write gate.
+
 Only a verified KE3 followed by a confirmed drain of both workers can make
-the result available. Only the trusted host calls `take_for_host()`, once;
-the returned review, registration and `current()` guard never go to HTTP.
+the result available. For HTTP enrollment, the trusted host must only call
+`take_for_host()` **after** the final successful write and post-write check;
+the dispatcher never takes it. The returned review, registration and
+`current()` guard never go to HTTP.
 Before persisting, the host still needs its local confirmation, owner
 exclusion/revocation and `commit_registration(..., current=result.current)`.
 The guard checks approval/claim liveness; it does not replace the store's
@@ -64,6 +120,19 @@ have drained. Keep the outer teardown fence when it returns `False`.
 `EnrollmentCleanupError` and `cleanup_failed` indicate uncertainty, and
 the latter is sticky. A subsequent explicit `close()` may verify cleanup of
 the **same** workers without reopening approval or replaying a round.
+
+### Browser registration seam still missing
+
+The existing pinned browser artifact exposes login only. There is no
+reviewed browser registration API to call here. A later trusted account-page
+binding needs matching client registration request/response/upload
+operations plus a fresh, separate login proof using the same locally
+held password and approved account identity. Independently derive the
+context and identifiers, use same-origin JSON fetches on these exact
+routes, and discard both client attempts on cancellation without password,
+session/export-key, plaintext, or grant transport. Password preparation,
+the account-page UI and any new combined WASM artifact need their own
+review; this change adds none and does not approve any compiled PAKE artifact.
 
 ## Host account snapshot for named-site preparation
 
@@ -88,9 +157,9 @@ another generation is a new explicit authentication, not a fallback or live
 refresh. Neither opening nor checking a snapshot writes account data.
 
 The checkout-only `tools/web-pake-research/check-registration` fixture uses
-the existing pinned OCOR/OCOP binaries. It passes synthetic proof, altered
-KE3, wrong context or verifier, wrong browser, replay, and bootstrap
-retirement tests without a listener or account store. Separate Python tests
-exercise the encrypted store's stale-review refusal. These are not live HTTPS
-or host-enrollment acceptance, nor do they close the artifact, dependency,
-license, or IPR review gates.
+the existing pinned OCOR/OCOP binaries through this unserved dispatcher.
+It passes synthetic proof, altered KE3, wrong context or verifier, wrong
+browser, replay, and bootstrap retirement tests without a listener, actual
+TLS, or account store. Separate Python tests exercise the encrypted store's
+stale-review refusal. These are not live HTTPS or host-enrollment acceptance,
+nor do they close the artifact, dependency, license, or IPR review gates.

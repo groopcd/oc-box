@@ -46,7 +46,7 @@ REVIEW = web_accounts.RegistrationReview(
 BROWSER = {"account_origin": ACCOUNT, "account_nonce": NONCE}
 
 
-class EnrollmentApprovalTests(unittest.TestCase):
+class EnrollmentFixture(unittest.TestCase):
     def setUp(self):
         self.respond = Mock(return_value=RESPONSE)
         self.validate = Mock(return_value=RECORD)
@@ -137,6 +137,8 @@ class EnrollmentApprovalTests(unittest.TestCase):
             bootstrap.retire(binding, auth_origin=ACCOUNT, account_nonce=NONCE)
         )
 
+
+class EnrollmentApprovalTests(EnrollmentFixture):
     def test_exact_profile_and_binding_produce_host_only_single_use_result(self):
         approval = self.approval()
         self.assertIsNone(self.start(approval, account_origin=ORIGINS.workspace.value))
