@@ -519,6 +519,6 @@ class RuntimeSafeguardTests(unittest.TestCase):
         options = run.call_args.kwargs
         self.assertEqual(options["cwd"], "/")
         self.assertEqual(set(options["env"]), {"HOME", "PATH", "LANG"})
-        self.assertEqual(options["env"]["PATH"], "/usr/bin:/bin")
+        self.assertEqual(options["env"]["PATH"], "/usr/local/bin:/usr/bin:/bin")
         self.assertIn("--userconfig=" + options["env"]["HOME"] + "/user.npmrc", command)
         self.assertIn("--globalconfig=/dev/null", command)

@@ -50,10 +50,12 @@ _INCOMPATIBLE = {
 # npm rejects loading the same path for both config roles, even when it is
 # /dev/null. Use a fresh private HOME/user config and an independent global
 # config path, and never expand project or workspace .npmrc values here.
+# System Node distributions may install under /usr/local/bin; neither
+# lookup nor npm's interpreter should search the writable runtime prefix.
 _INSTALL_SOURCE = """
 import os, subprocess, sys, tempfile
 with tempfile.TemporaryDirectory(prefix="oc-box-native-install-") as home:
-    env = {"HOME": home, "PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"}
+    env = {"HOME": home, "PATH": "/usr/local/bin:/usr/bin:/bin", "LANG": "C.UTF-8"}
     options = [
         "npm", "install", "--global", "--force", "--ignore-scripts", "--prefix", sys.argv[1],
         "--no-audit", "--no-fund", "--userconfig=" + home + "/user.npmrc",
