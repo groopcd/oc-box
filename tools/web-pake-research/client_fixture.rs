@@ -17,26 +17,37 @@ fn run() -> Option<()> {
     let (mut input, mut output) = (io::stdin().lock(), io::stdout().lock());
     let mut start = [0; 97];
     input.read_exact(&mut start).ok()?;
-    if start[0] > 1 {
-        return None;
-    }
+    let size = match start[0] {
+        0 | 1 => 24,
+        2 => 37,
+        3 => 1024,
+        _ => return None,
+    };
     let ids = Identifiers { client: Some(&start[33..65]), server: Some(&start[65..]) };
     let mut rng = UnwrapErr(SysRng);
-    let mut password = Zeroizing::new([0; 24]);
-    rng.fill_bytes(password.as_mut());
+    let mut password = Zeroizing::new([0; 1024]);
+    if start[0] >= 2 {
+        // Public test vectors only: the separate browser harness can derive
+        // the same synthetic bytes locally without sending any password.
+        for (i, byte) in password[..size].iter_mut().enumerate() {
+            *byte = b'A' + (i % 26) as u8;
+        }
+    } else {
+        rng.fill_bytes(&mut password[..size]);
+    }
     let setup = ServerSetup::<Suite>::new(&mut rng);
-    let request = ClientRegistration::<Suite>::start(&mut rng, password.as_ref()).ok()?;
+    let request = ClientRegistration::<Suite>::start(&mut rng, &password[..size]).ok()?;
     let response = ServerRegistration::<Suite>::start(&setup, request.message, &start[1..33]).ok()?;
     let mut upload = request.state.finish(
         &mut rng,
-        password.as_ref(),
+        &password[..size],
         response.message,
         ClientRegistrationFinishParameters::new(ids, None),
     ).ok()?;
     upload.export_key.zeroize();
     let record = ServerRegistration::<Suite>::finish(upload.message);
-    password[0] ^= start[0]; // Select a wrong synthetic password for the KE1/KE3 attempt.
-    let login = ClientLogin::<Suite>::start(&mut rng, password.as_ref()).ok()?;
+    password[0] ^= u8::from(start[0] == 1); // Select a wrong synthetic password for login.
+    let login = ClientLogin::<Suite>::start(&mut rng, &password[..size]).ok()?;
     let setup_wire = Zeroizing::new(setup.serialize());
     let record_wire = Zeroizing::new(record.serialize());
     output.write_all(setup_wire.as_slice()).ok()?;
@@ -57,7 +68,7 @@ fn run() -> Option<()> {
     let ke2 = CredentialResponse::deserialize(&finish[96..]).ok()?;
     let result = login.state.finish(
         &mut rng,
-        password.as_ref(),
+        &password[..size],
         ke2,
         ClientLoginFinishParameters::new(Some(&finish[64..96]), ids, None),
     );
