@@ -85,6 +85,16 @@ def exercise(binary, root, *, private_mounts=False, hook_state="ready"):
         (plugin / "file_preview_tui.tsx").write_text(
             'export function install() { throw new Error("synthetic incompatible hook") }\n'
         )
+    elif hook_state == "dragging":
+        entry = plugin / "file_preview_tui.tsx"
+        script = entry.read_text()
+        guard = "if (event.isDragging)"
+        assert script.count(guard) == 1
+        # Exercise the stale-drag refusal with a real native assistant hit,
+        # without modifying the renderer or softening the host gesture.
+        entry.write_text(
+            script.replace(guard, 'if (event.isDragging || event.type === "up")')
+        )
     manifest = plugin / "package.json"
     manifest.write_text(
         json.dumps(
@@ -255,6 +265,11 @@ sys.stdout.buffer.write(path.read_bytes())
             private_mounts=private_mounts,
             hook_state=hook_state,
         )
+    if hook_state == "dragging":
+        print(
+            f"PASS: OpenCode {version} native drag refusal warned without transferring."
+        )
+        return
     if hook_state != "ready":
         print(f"PASS: OpenCode {version} native {hook_state} hook left opening off.")
         return
@@ -393,6 +408,14 @@ def run_client(
         wait("END_PROBE", 16)
         pump(0.7)
         assert not log() and not opened.exists() and not candidates
+        if hook_state == "dragging":
+            click("ABS_LINK", authorized=False)
+            click("BARE_FILE", offset=12)
+            assert not locate("handling a drag")
+            click("ABS_LINK")
+            wait("handling a drag")
+            assert not log() and not opened.exists() and not candidates
+            return
         if hook_state != "ready":
             if hook_state == "incompatible":
                 wait("Host file opening is off")
@@ -496,7 +519,9 @@ if __name__ == "__main__":
     parser.add_argument("--opencode", required=True)
     parser.add_argument("--private-mounts", action="store_true")
     parser.add_argument(
-        "--hook-state", choices=("ready", "missing", "incompatible"), default="ready"
+        "--hook-state",
+        choices=("ready", "missing", "incompatible", "dragging"),
+        default="ready",
     )
     args = parser.parse_args()
     binary = str(Path(shutil.which(args.opencode) or args.opencode).absolute())

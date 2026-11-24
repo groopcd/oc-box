@@ -360,6 +360,10 @@ and the requirement for a new matched click after readiness.
 The native smoke's `--hook-state missing` and `--hook-state incompatible`
 cases verify that neither client receives a grant and that the incompatible
 hook reports its refusal using the native TUI.
+`--hook-state dragging` injects the observed native drag flag at the release
+of a real assistant-link hit. A fresh host click can report that refusal but
+cannot open the file, and neither an ungranted click nor an unlinked path
+can trigger the warning.
 
 Exercise verified fresh GitHub setup versus upgrade, early failure,
 reinstallation, existing/symlinked state, and an unverified installation

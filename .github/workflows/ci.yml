@@ -223,7 +223,7 @@ jobs:
           "$RUNNER_TEMP/host-file-open-current-tests/bin/python" -m pip install 'pyte>=0.8.2,<0.9'
           "$RUNNER_TEMP/host-file-open-current-tests/bin/python" -B tests/smoke_file_preview_v2.py \
             --opencode "$RUNNER_TEMP/opencode-v2-web/node_modules/.bin/opencode"
-          for hook in missing incompatible; do
+          for hook in missing incompatible dragging; do
             "$RUNNER_TEMP/host-file-open-current-tests/bin/python" -B tests/smoke_file_preview_v2.py \
               --opencode "$RUNNER_TEMP/opencode-v2-web/node_modules/.bin/opencode" --hook-state "$hook"
           done

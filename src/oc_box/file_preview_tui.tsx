@@ -168,7 +168,7 @@ export function install(context) {
     if (!["up", "down"].includes(event.type) || event.button !== 0) return
     const before = pressed
     pressed = undefined
-    if (event.defaultPrevented || event.isDragging || !event.modifiers.ctrl ||
+    if (event.defaultPrevented || !event.modifiers.ctrl ||
         event.modifiers.shift || event.modifiers.alt) return
     const session = activeSession()
     const id = messageID(event.target)
@@ -176,6 +176,13 @@ export function install(context) {
     const href = renderer.getLinkAt(event.x, event.y)
     const item = targetPath(href, context.data.session.get(session)?.location?.directory, mounts)
     if (!item) return
+    // Some native mouse handlers retain a drag state from an earlier gesture.
+    // A verified release can explain the refusal, but it can never stand in for
+    // a matching native press, even when the host observed a valid click.
+    if (event.isDragging) {
+      if (event.type === "up") clicked = { retry: true, session, generation, x: event.x, y: event.y }
+      return
+    }
     if (event.type === "down") {
       pressed = { ...item, session, id, href, generation, node: event.target, x: event.x, y: event.y }
       return
@@ -199,7 +206,16 @@ export function install(context) {
     clicked = undefined
     if (match && item && item.generation === generation &&
         Number(match[2]) === item.x + 1 && Number(match[3]) === item.y + 1) {
-      void open(match[1], item)
+      if (item.retry) {
+        try {
+          if (item.session === activeSession()) context.ui.toast.show({
+            message: "Host file open refused: the native TUI is still handling a drag. Clear the selection and Ctrl-click the link again.",
+            variant: "warning",
+          })
+        } catch { /* The warning never substitutes for an accepted native click. */ }
+      } else {
+        void open(match[1], item)
+      }
     }
     return true
   }
