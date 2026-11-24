@@ -87,6 +87,9 @@ explicitly requested workspace history. The middle pane is one unmodified
 native OpenCode conversation. The right pane shows workspace-only session
 metadata, not host health, resources or privileged controls. The layout does
 not alter native one-use pairing or add browser attachments by itself.
+On a narrow screen or in **Chat focus**, open **Sessions** or **Inspector**
+without replacing the conversation. Escape closes the open pane and returns
+focus to its button.
 On the initial 1.8/1.9 releases, use `--workspace-layout` to select Studio.
 See the [web workspace reference](../web-shell.md) for the other layouts
 and data boundaries.

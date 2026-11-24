@@ -135,20 +135,23 @@ body { margin: 0; }
   grid-template-areas: "overview" "library" "chat";
   grid-template-rows: auto auto minmax(max(25rem, 65dvh), 1fr);
 }
-[data-layout="focus"] #workspace-content {
+[data-layout="focus"] #workspace-content, [data-workspace-drawers="true"] #workspace-content {
   grid-template-areas: "chat";
   grid-template-rows: minmax(0, 1fr);
 }
-[data-layout="focus"] #workspace-library {
+[data-workspace-drawers="true"] :is(#workspace-library, #workspace-overview) {
   grid-area: auto;
   position: absolute;
   z-index: 1;
-  inset: 0 auto auto 0;
+  inset-block: 0 auto;
   box-sizing: border-box;
   width: min(24rem, 100%);
   max-height: 100%;
   border: 1px solid var(--workspace-edge);
+  overflow: auto;
 }
+[data-workspace-drawers="true"] #workspace-library { inset-inline-start: 0; }
+[data-workspace-drawers="true"] #workspace-overview { inset-inline-end: 0; }
 [data-layout="manager"] #workspace-content {
   grid-template-areas: "overview" "library" "unavailable";
   grid-template-rows: auto auto auto;

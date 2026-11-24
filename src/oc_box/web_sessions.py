@@ -311,7 +311,9 @@ def _workspace_layout_body(state, conversation, fallback, attachments):
         '<button type="button" data-view="focus" aria-pressed="false">Chat focus</button>'
         '<button type="button" data-view="manager" aria-pressed="false">Workspace manager</button>'
         '</nav><button id="workspace-sessions-toggle" type="button" hidden '
-        'aria-expanded="false" aria-controls="workspace-library">Open TUI tabs</button>'
+        'aria-expanded="false" aria-controls="workspace-library">Sessions</button>'
+        '<button id="workspace-inspector-toggle" type="button" hidden '
+        'aria-expanded="false" aria-controls="workspace-overview">Inspector</button>'
         + NATIVE_HOME
         + '</header><nav id="workspace-manager-nav" aria-label="Workspace manager sections" hidden>'
         + "".join(
@@ -358,7 +360,7 @@ def _workspace_layout_body(state, conversation, fallback, attachments):
         'role="separator" aria-orientation="vertical" aria-label="Status pane width" '
         'aria-controls="workspace-overview"></div>'
         '<section id="workspace-overview" aria-labelledby="workspace-overview-title">'
-        '<h2 id="workspace-overview-title">Workspace overview</h2><div class="workspace-cards">'
+        '<h2 id="workspace-overview-title" tabindex="-1">Workspace overview</h2><div class="workspace-cards">'
         '<section><h3>Open TUI membership</h3><p id="catalog-status" role="status"></p></section>'
         '<section><h3>Browser selection</h3><p id="workspace-current-session">No conversation selected.</p></section>'
         "<section><h3>Private workspace only</h3><p>This browser view shows verified open TUI tabs, "

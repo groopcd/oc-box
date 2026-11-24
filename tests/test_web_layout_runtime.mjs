@@ -144,7 +144,7 @@ class Element extends Events {
 const origin = "http://127.0.0.1:4242";
 const bootstrap = JSON.parse(markup["web-shell"]["data-bootstrap"]);
 const [alpha, bravo] = bootstrap.sessions;
-function boot({ failInitialRoute = false } = {}) {
+function boot({ failInitialRoute = false, initialWidth = 1200 } = {}) {
   const nodes = Object.fromEntries(Object.entries(markup).map(([key, attrs]) => [key, new Element(attrs)]));
   const get = id => nodes[id];
   const root = get("web-shell");
@@ -178,17 +178,21 @@ function boot({ failInitialRoute = false } = {}) {
   window.setInterval = fn => { observe = fn; return 1; };
   for (const name of ["localStorage", "indexedDB", "sessionStorage"])
     Object.defineProperty(window, name, { get() { assert.fail("shell read browser state"); } });
-  const wide = new Events();
+  const wide = new Events(), roomy = new Events();
   window.matchMedia = query => {
-    assert.equal(query, "(min-width: 66rem)");
-    return wide;
+    if (query === "(min-width: 66rem)") return wide;
+    assert.equal(query, "(min-width: 46rem)");
+    return roomy;
   };
   function resize(width, desktop) {
     get("workspace-content").clientWidth = width;
     wide.matches = desktop;
+    const changed = roomy.matches !== (width >= 736);
+    roomy.matches = width >= 736;
+    if (changed) roomy.emit("change");
     window.emit("resize");
   }
-  resize(1200, true);
+  resize(initialWidth, initialWidth >= 1056);
   const generations = [];
   window.addEventListener("oc-box:selection-changed", event => generations.push(event.detail?.sessionID ?? null));
   const network = { calls: [], catalog: bootstrap, selected: bravo, pending: null, history: null };
@@ -216,10 +220,16 @@ function boot({ failInitialRoute = false } = {}) {
 const settle = async () => { for (let i = 0; i < 12; i++) await Promise.resolve(); };
 
 {
-  const f = boot({ failInitialRoute: true });
+  const f = boot({ failInitialRoute: true, initialWidth: 390 });
   assert.equal(f.shell, undefined);
+  assert.equal(f.get("workspace-library").hidden, false);
   assert.equal(f.get("fallback-links").hidden, false);
   assert.match(f.get("catalog-status").textContent, /explicit fallback links or native Home/);
+  f.resize(1200, true);
+  f.resize(390, false);
+  f.switchView("manager");
+  assert.equal(f.root.dataset.layout, "studio");
+  assert.equal(f.get("workspace-library").hidden, false);
   assert.equal(f.frame.srcWrites, 0);
   assert.deepEqual(f.network.calls, []);
 }
@@ -284,7 +294,7 @@ const settle = async () => { for (let i = 0; i < 12; i++) await Promise.resolve(
   toggle.click();
   assert.equal(get("workspace-library").hidden, false);
   assert.equal(toggle.getAttribute("aria-expanded"), "true");
-  get("workspace-library").emit("keydown", { key: "Escape" });
+  root.emit("keydown", { key: "Escape" });
   assert.equal(toggle.getAttribute("aria-expanded"), "false");
   f.switchView("manager");
   assert.equal(shell.selection(), null);
@@ -334,6 +344,38 @@ const settle = async () => { for (let i = 0; i < 12; i++) await Promise.resolve(
   assert.deepEqual(generations.slice(-2), [alpha.id, alpha.id]);
   assert.equal(frame.srcWrites, 0);
   assert.equal(frame.draft, "synthetic unsent draft");
+}
+
+{
+  const f = boot();
+  const { get, frame } = f;
+  f.resize(390, false);
+  const sessions = get("workspace-sessions-toggle");
+  const inspector = get("workspace-inspector-toggle");
+  assert.equal(get("workspace-chat").hidden, false);
+  assert.equal(get("workspace-library").hidden, true);
+  assert.equal(get("workspace-overview").hidden, true);
+  sessions.click();
+  assert.equal(sessions.getAttribute("aria-expanded"), "true");
+  assert.equal(get("workspace-search").focused, true);
+  inspector.click();
+  assert.equal(sessions.getAttribute("aria-expanded"), "false");
+  assert.equal(inspector.getAttribute("aria-expanded"), "true");
+  assert.equal(get("workspace-library").hidden, true);
+  assert.equal(get("workspace-overview-title").focused, true);
+  assert.equal(get("workspace-chat").inert, true);
+  f.root.emit("keydown", { key: "Escape", defaultPrevented: true });
+  assert.equal(inspector.getAttribute("aria-expanded"), "true");
+  f.root.emit("keydown", { key: "Escape" });
+  assert.equal(inspector.getAttribute("aria-expanded"), "false");
+  assert.equal(inspector.focused, true);
+  assert.equal(get("workspace-chat").inert, false);
+  f.resize(1200, true);
+  assert.equal(inspector.hidden, true);
+  assert.equal(get("workspace-overview").hidden, false);
+  assert.equal(frame.srcWrites, 0);
+  assert.equal(frame.draft, "synthetic unsent draft");
+  assert.deepEqual(f.network.calls, []);
 }
 
 {

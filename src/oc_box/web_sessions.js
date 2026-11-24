@@ -28,6 +28,7 @@
   let sawFrameLoad = false;
   let membershipKnown = false;
   let workspace = null;
+  let ready = false;
 
   function row(value) {
     if (!value || typeof value.id !== "string" || !idPattern.test(value.id) || typeof value.title !== "string" ||
@@ -283,7 +284,7 @@
       const handle = handles[side];
       const direction = side === "left" ? 1 : -1;
       handle.addEventListener("pointerdown", event => {
-        if (drag || event.button !== 0 || !event.isPrimary || !wide.matches) return;
+        if (!ready || drag || event.button !== 0 || !event.isPrimary || !wide.matches) return;
         handle.setPointerCapture(event.pointerId);
         drag = { handle, id: event.pointerId, startX: event.clientX, startWidth: widths[side] };
         root.dataset.resizing = side;
@@ -299,8 +300,9 @@
           if (drag?.handle === handle && drag.id === event.pointerId) cancel();
         });
       }
-      handle.addEventListener("dblclick", () => resize(side, defaults[side]));
+      handle.addEventListener("dblclick", () => { if (ready) resize(side, defaults[side]); });
       handle.addEventListener("keydown", event => {
+        if (!ready) return;
         const step = event.shiftKey ? 64 : 16;
         let next;
         if (event.key === "ArrowLeft") next = widths[side] - direction * step;
@@ -313,8 +315,9 @@
         resize(side, next);
       });
     }
-    wide.addEventListener("change", fit);
-    window.addEventListener("resize", fit);
+    const refit = () => { if (ready) fit(); };
+    wide.addEventListener("change", refit);
+    window.addEventListener("resize", refit);
     return { fit, cancel };
   }
   function workspaceLayout() {
@@ -324,16 +327,19 @@
     const sections = buttons("manager-nav");
     const search = byId("search");
     const library = byId("library");
-    const toggle = byId("sessions-toggle");
+    const toggles = { sessions: byId("sessions-toggle"), inspector: byId("inspector-toggle") };
+    const overview = byId("overview"), overviewTitle = byId("overview-title"), chat = byId("chat");
+    const roomy = window.matchMedia("(min-width: 46rem)");
     const openTabs = byId("open-tabs"), historyTabs = byId("history-tabs");
     const dividers = studioDividers(byId("content"));
     let view = "studio";
     let lastChat = view;
     let section = "status";
-    let focusList = false;
+    let panel = null;
     let source = "tabs", historyState = "idle", historyRows = [];
     let historyController, verifyingHistory = false;
     const manager = () => view === "manager";
+    const drawers = () => view === "focus" || (view === "studio" && !roomy.matches);
 
     async function loadHistory() {
       historyController?.abort();
@@ -391,16 +397,20 @@
       for (const button of views) button.setAttribute("aria-pressed", String(button.dataset.view === view));
       for (const button of sections) button.setAttribute("aria-pressed", String(button.dataset.section === section));
       byId("manager-nav").hidden = !manager();
-      byId("chat").hidden = manager(); // Never move the frame or write its src here.
-      byId("overview").hidden = view === "focus" || (manager() && section !== "status");
+      chat.hidden = manager(); // Never move the frame or write its src here.
+      chat.inert = drawers() && panel !== null;
+      overview.hidden = manager() ? section !== "status" : drawers() && panel !== "inspector";
       const unavailable = manager() && section !== "status" && section !== "sessions";
       byId("unavailable").hidden = !unavailable;
       if (unavailable) byId("unavailable-title").textContent =
         sections.find(button => button.dataset.section === section).textContent;
-      library.hidden = manager() ? section !== "sessions" : view === "focus" && !focusList;
+      library.hidden = manager() ? section !== "sessions" : drawers() && panel !== "sessions";
       tabs.setAttribute("role", manager() ? "group" : "tablist");
-      toggle.hidden = view !== "focus";
-      toggle.setAttribute("aria-expanded", String(focusList));
+      root.dataset.workspaceDrawers = drawers() ? "true" : "false";
+      for (const [name, button] of Object.entries(toggles)) {
+        button.hidden = !drawers();
+        button.setAttribute("aria-expanded", String(drawers() && panel === name));
+      }
       dividers.fit();
     }
     function show(next) {
@@ -408,35 +418,45 @@
       if (!manager()) lastChat = view;
       dividers.cancel();
       view = next;
-      focusList = false;
+      panel = null;
       apply();
       navigation += 1; // Invalidate outstanding native route checks as well.
       render();
       changed(); // Invalidate File reads even for a round trip to the same selection.
       if (!manager()) void observeNativeRoute();
     }
-    function toggleList(open) {
-      if (focusList !== open) navigation += 1;
-      focusList = open;
+    function togglePanel(name) {
+      if (!drawers()) return;
+      navigation += 1;
+      panel = panel === name ? null : name;
       apply();
-      (open ? search : toggle).focus();
+      (panel ? (panel === "sessions" ? search : overviewTitle) : toggles[name]).focus();
     }
-    for (const button of views) button.addEventListener("click", () => show(button.dataset.view));
-    for (const button of sections) button.addEventListener("click", () => {
+    const on = (target, type, listener) =>
+      target.addEventListener(type, event => { if (ready) listener(event); });
+    for (const button of views) on(button, "click", () => show(button.dataset.view));
+    for (const button of sections) on(button, "click", () => {
       if (section !== button.dataset.section) navigation += 1;
       section = button.dataset.section;
       apply();
     });
-    toggle.addEventListener("click", () => toggleList(!focusList));
-    openTabs.addEventListener("click", () => setSource("tabs"));
-    historyTabs.addEventListener("click", () => setSource("history"));
-    library.addEventListener("keydown", event => {
-      if (view === "focus" && focusList && event.key === "Escape" && !event.defaultPrevented) {
+    for (const [name, button] of Object.entries(toggles)) on(button, "click", () => togglePanel(name));
+    on(root, "keydown", event => {
+      if (drawers() && panel && event.key === "Escape" && !event.defaultPrevented) {
         event.preventDefault();
-        toggleList(false);
+        togglePanel(panel);
       }
     });
-    search.addEventListener("input", render);
+    on(roomy, "change", () => {
+      if (view !== "studio") return;
+      const focused = document.activeElement;
+      panel = drawers() && focused && library.contains(focused) ? "sessions" :
+        drawers() && focused && overview.contains(focused) ? "inspector" : null;
+      apply();
+    });
+    on(openTabs, "click", () => setSource("tabs"));
+    on(historyTabs, "click", () => setSource("history"));
+    on(search, "input", render);
     apply();
     return {
       manager,
@@ -470,6 +490,7 @@
         return visible;
       },
       async open(item) {
+        if (!ready) return;
         if (source === "history") {
           if (verifyingHistory || historyState !== "valid" || !historyRows.includes(item)) return;
           verifyingHistory = true;
@@ -498,7 +519,7 @@
         if (manager()) {
           show(lastChat);
           views.find(button => button.dataset.view === view).focus();
-        } else if (view === "focus") toggleList(false);
+        } else if (drawers() && panel === "sessions") togglePanel("sessions");
       },
     };
   }
@@ -518,9 +539,9 @@
     notice.textContent = data.selectionNotice;
     render();
     if (selected) select(selected, selected.origin); // Existing src is not reassigned.
-    refresh.addEventListener("click", () => workspace.refresh());
-    frame.addEventListener("load", () => { sawFrameLoad = true; frameReady(); });
-    window.addEventListener("load", () => { if (!sawFrameLoad) frameReady(); }, { once: true });
+    refresh.addEventListener("click", () => { if (ready) workspace.refresh(); });
+    frame.addEventListener("load", () => { if (ready) { sawFrameLoad = true; frameReady(); } });
+    window.addEventListener("load", () => { if (ready && !sawFrameLoad) frameReady(); }, { once: true });
     const startObserver = () => {
       if (timer === null) timer = window.setInterval(() => { void observeNativeRoute(); }, 1000);
     };
@@ -530,15 +551,21 @@
       timer = null;
       workspace.cancel();
     });
-    window.addEventListener("pageshow", () => { startObserver(); void observeNativeRoute(); });
+    window.addEventListener("pageshow", () => { if (ready) { startObserver(); void observeNativeRoute(); } });
     // Keep the server-rendered links available unless the shell finishes starting.
     document.getElementById("fallback-links").hidden = true;
     window.ocBoxWebShell = Object.freeze({
       version: 1, frame, controls: document.getElementById("session-controls"),
       status: document.getElementById("addon-status"), selection, refresh: refreshTabs
     });
+    ready = true;
   } catch {
-    if (timer !== null) window.clearInterval(timer);
+    if (timer !== null) { window.clearInterval(timer); timer = null; }
+    // On a narrow viewport the script may already have hidden the library.
+    // Fall back to the stacked layout so the verified links are reachable.
+    delete root.dataset.workspaceDrawers;
+    document.getElementById("workspace-library").hidden = false;
+    document.getElementById("workspace-overview").hidden = false;
     document.getElementById("fallback-links").hidden = false;
     status.textContent = "The shell could not initialize. Use explicit fallback links or native Home.";
   }
