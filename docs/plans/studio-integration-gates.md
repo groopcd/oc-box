@@ -95,6 +95,47 @@ A fresh-registration-only model needs an enforced compatibility boundary,
 not a rule that treats a missing fence as an ordinary workspace. Backup,
 reset, sync and purge must honor the same lifetime rules.
 
+The unserved `studio_registry.select` reader is the first part of this
+boundary. It accepts exactly one absolute, no-symlink project path or raw
+32-hex ID. Both forms require the same `.oc-box-id` value `studio-v1:<id>`
+and the private host record `studio-workspaces/<id>/registration.json`
+under the selected state root. The record's only version is integer `1`
+and its only role is `studio` (not a browser authentication role). The
+record also contains the exact ID, canonical project path and Linux VFS
+identity. A recorded persistent filesystem identity cannot fall back to
+device/inode alone.
+
+The reader refuses missing, unsafe, ambiguous, or observably changing
+state. It checks overlap in both directions against protected application,
+credential and state paths, and against paths recorded in either active
+namespace, including stale entries. It also refuses active legacy ID
+collisions and matching peer directory identities. A malformed record or
+an over-capacity scan is not evidence that no overlap exists. Legacy
+records are used only to exclude conflicts; retired history is not used for
+selection.
+
+An offline audit extracted each exact published source revision
+(`7c2efb754c567916731a168443be35b2a9efadf4` and
+`df2d003053f26977bf43310fbc4918ca4ca76396`) and ran its own CLI entrypoint
+against synthetic records. Each refused 44 invocations: selected status,
+start, web, reset, stop, sync, terminal, repair, purge, credentials,
+preferences, share, attach and portable backup with `--project`, raw
+`--workspace` ID and prefixed `--workspace` token; plus explicit and implicit
+start from the project directory. `list` omitted the Studio record, and
+ordinary legacy project and raw-ID lookups succeeded as controls. The audit
+stubbed preflights (including TTY and backup host/dependency checks), native
+version detection, update and logging. Engine commands, workspace creation
+and lifecycle locks were forbidden. The old commands may run their usual
+preflights before selection; this was not live host acceptance.
+
+No launcher entrypoint uses this reader. The snapshot does not reserve a
+project, authorize a mount, discover all bind-mount aliases or prove
+exclusion after the check. Older launchers still see an unmarked parent or
+child, or a project whose Studio marker has vanished, as unregistered.
+Creation must still prove a fresh project/ID and publish the marker and
+record safely; integration must recheck under lifetime guards and preserve
+the compatibility fence through retirement and interrupted operations.
+
 Enrollment also needs a trusted browser entry and a separate local
 approval before atomically comparing and replacing the exact encrypted
 account store. The tested final reply gate only makes a proof eligible for
