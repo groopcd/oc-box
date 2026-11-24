@@ -71,6 +71,31 @@ would not close the gate: the browser still needs an independently reviewed,
 matching client served by the trusted account origin. Neither half is fetched
 or distributed by oc-box.
 
+### Source-only browser transport
+
+`src/oc_box/web_pake_client.mjs` is an offline-tested adapter, not an installed
+or served browser asset. It has no page, password field, enrollment, WASM
+loader, handoff POST or runtime caller. It binds to the configured local
+account and workspace origins, verifies the public transcript context and
+supplies the separate client and verifier IDs. It sends only the username
+and KE1 on `/start`, then the challenge ID and KE3 on `/finish`, both as
+bounded, same-origin HTTPS JSON POSTs without redirects or fallback.
+Cancellation stops this client's transport; it cannot undo a POST already
+processed by the ingress. A successful response yields only a one-use
+in-memory ticket carrier, not app admission.
+
+The session interface is for a trusted, independently reviewed WASM binding
+that prepares the password locally, verifies the server proof before
+emitting KE3 and confirms cleanup. The adapter does not validate artifact
+provenance or establish memory erasure. The Node fixture checks both origins
+and the exact Python wire format with a synthetic session that checks its
+arguments; it does not verify a password, make browser requests, or establish
+browser trust. Run it from a source checkout with
+`PYTHONPATH=src python3 -B -m unittest discover -s tests -p test_web_pake_client.py -v`.
+Activation still requires independent review of the exact native/WASM
+artifacts and interface, matching host-authorized enrollment (including
+password input encoding), a trusted account page, and the live gates above.
+
 ## Isolated feasibility results
 
 - **Local HTTPS:** Two fresh, sandboxed Chromium 159 lab runs each passed
