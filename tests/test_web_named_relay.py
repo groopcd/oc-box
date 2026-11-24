@@ -1,5 +1,6 @@
 """Synthetic one-shot HTTPS and private upstream; no listener in the component."""
 
+import json
 import os
 import socket
 import ssl
@@ -15,6 +16,7 @@ from time import monotonic, sleep
 from unittest.mock import Mock, patch
 
 import test_web_local_origins as certificates
+from test_web_native_pair import native_info
 import test_web_pake_flow as pake
 
 from oc_box import (
@@ -94,6 +96,7 @@ class NamedNativeRelayTests(unittest.TestCase):
             self.endpoint,
             self.authority,
             _NATIVE_VALUE,
+            version="2.3.2",
             owner_current=self.owner,
         )
         self.pair = Mock(return_value=native)
@@ -121,6 +124,7 @@ class NamedNativeRelayTests(unittest.TestCase):
             self.ingress = app.NamedAppIngress(
                 self.sign_in,
                 endpoint=self.endpoint,
+                version="2.3.2",
                 claim_bootstrap=lambda nonce: self.boot.claim_app(binding, nonce),
             )
         self.addCleanup(self.ingress.close)
@@ -148,7 +152,7 @@ class NamedNativeRelayTests(unittest.TestCase):
             self.binding.workspace_id,
             "b" * 32,
             "d" * 64,
-            web_native_pair._VERSION,
+            "2.3.2",
             self.endpoint,
         )
 
@@ -254,9 +258,10 @@ class NamedNativeRelayTests(unittest.TestCase):
         return self.admission.lookup(self.binding, token)
 
     def info(self):
-        return (
-            f'{{ "version" : "2.3.2", "pid" : 42, "urls" : ["{self.endpoint}"] }}\n'
-        ).encode()
+        return json.dumps(native_info(self.endpoint, pid=42)).encode()
+
+    def public_info(self):
+        return f'{{"version":"2.3.2","pid":42,"urls":["{self.endpoint}"]}}'.encode()
 
     def native_response(self, reply, *, ready=None, hold=False):
         def serve():
@@ -357,7 +362,10 @@ class NamedNativeRelayTests(unittest.TestCase):
         token = self.confirm(ticket, matched)
         self.pair.assert_called_once_with(self.binding, self.origins.workspace)
         native = self.native_cookie.upstream_cookie(
-            binding=self.binding, endpoint=self.endpoint, origin=self.origins.workspace
+            binding=self.binding,
+            endpoint=self.endpoint,
+            origin=self.origins.workspace,
+            version="2.3.2",
         )
         for route, body in ((_INFO, self.info()), ("/api/session/active", _ACTIVE)):
             with self.subTest(route=route):
@@ -379,7 +387,8 @@ class NamedNativeRelayTests(unittest.TestCase):
                     response = self.read_response(stream)
                     exchanged.result(timeout=_TIMEOUT)
                 head, _, payload = response.partition(b"\r\n\r\n")
-                self.assertEqual(payload, body)
+                expected = self.public_info() if route == _INFO else body
+                self.assertEqual(payload, expected)
                 self.assertEqual(
                     head.split(b"\r\n"),
                     [
@@ -387,7 +396,7 @@ class NamedNativeRelayTests(unittest.TestCase):
                         *web_named_transport._RESPONSE_HEADERS.rstrip(b"\r\n").split(
                             b"\r\n"
                         ),
-                        f"Content-Length: {len(body)}".encode(),
+                        f"Content-Length: {len(expected)}".encode(),
                     ],
                 )
                 self.assertNotIn(_NATIVE_VALUE.encode(), response)
@@ -470,6 +479,24 @@ class NamedNativeRelayTests(unittest.TestCase):
             self.endpoint,
             self.authority,
             _NATIVE_VALUE,
+            version="2.3.2",
+            owner_current=self.owner,
+        )
+        token = self.issue(native=mismatched)
+        with self.exchange(token=token) as result:
+            self.assert_refused(*result)
+        self.assertIsNone(self.session(token))
+        self.pair.assert_not_called()
+        self.dial.assert_not_called()
+        self.assert_no_upstream()
+
+    def test_cookie_for_another_audited_version_cannot_reach_the_owner(self):
+        mismatched = web_native_pair.NativeCookie(
+            self.binding,
+            self.endpoint,
+            self.authority,
+            _NATIVE_VALUE,
+            version="2.4.1",
             owner_current=self.owner,
         )
         token = self.issue(native=mismatched)
@@ -520,6 +547,8 @@ class NamedNativeRelayTests(unittest.TestCase):
             ("extra metadata", _reply(good.replace(b"{", b'{"extra":"private",', 1))),
             ("foreign metadata", _reply(good.replace(b"127.0.0.1", b"127.0.0.2"))),
             ("wrong native patch", _reply(good.replace(b"2.3.2", b"2.3.3"))),
+            ("other audited patch", _reply(good.replace(b"2.3.2", b"2.4.1"))),
+            ("partial native info", _reply(self.public_info())),
             ("duplicate key", _reply(good.replace(b"{", b'{"pid":42,', 1))),
             ("invalid JSON", _reply(b'{"version":"\xff"}')),
             ("invalid active shape represented as info", _reply(_ACTIVE)),
@@ -679,7 +708,7 @@ class NamedNativeRelayTests(unittest.TestCase):
         # A distinct app grant may have the identical private native cookie.
         upstream = self.native_response(_reply(self.info()))
         with self.exchange(token=independent) as (stream, exchanged):
-            self.assertTrue(self.read_response(stream).endswith(self.info()))
+            self.assertTrue(self.read_response(stream).endswith(self.public_info()))
             exchanged.result(timeout=_TIMEOUT)
         upstream.result(timeout=_TIMEOUT)
 
@@ -760,7 +789,9 @@ except SystemExit as result:
                     finally:
                         exit_now.touch()
                         stream.settimeout(_TIMEOUT)
-                    self.assertTrue(self.read_response(stream).endswith(self.info()))
+                    self.assertTrue(
+                        self.read_response(stream).endswith(self.public_info())
+                    )
                     pending.result(timeout=_TIMEOUT)
                 start.assert_called_once()
                 self.assert_reaped(children[0])

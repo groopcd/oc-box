@@ -33,6 +33,7 @@ RUNTIME_FILES = (
     "web_local_origins.py",
     "web_handoff.py",
     "web_native_pair.py",
+    "web_named_native_profile.py",
     "web_named_local.py",
     "web_named_headers.py",
     "web_bootstrap.py",

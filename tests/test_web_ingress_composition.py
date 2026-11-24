@@ -36,6 +36,7 @@ class LocalIngressCompositionTests(unittest.TestCase):
             endpoint,
             origins.workspace.value.removeprefix("https://"),
             "a" * 10 + "." + "b" * 43,
+            version="2.3.2",
             owner_current=owner,
         )
         pair = Mock(return_value=native)
@@ -65,6 +66,7 @@ class LocalIngressCompositionTests(unittest.TestCase):
             app = web_app_ingress.NamedAppIngress(
                 sign_in,
                 endpoint=endpoint,
+                version="2.3.2",
                 claim_bootstrap=lambda nonce: bootstrap.claim_app(binding, nonce),
             )
         ticket = bootstrap.issue(binding)
@@ -170,7 +172,10 @@ class LocalIngressCompositionTests(unittest.TestCase):
         self.assertEqual(
             dict(args[3])["Cookie"],
             native.upstream_cookie(
-                binding=binding, endpoint=endpoint, origin=origins.workspace
+                binding=binding,
+                endpoint=endpoint,
+                origin=origins.workspace,
+                version="2.3.2",
             ),
         )
         self.assertNotIn(lease, repr(args[3]))

@@ -1128,6 +1128,7 @@ class Owner:
                     )
         script = (box.PACKAGE / "opencode_v2_io.py").read_text()
         execution_data = self.data
+        worker = ["python3", "-c", script, "lease", box.CONTAINER_OPENCODE]
         if named:
             if __package__:
                 from . import web_named_protocol
@@ -1140,6 +1141,9 @@ class Owner:
                     self, self._named_stop_token
                 )
                 execution_data = self._named_control.pinned_data()
+                worker = self._named_control.worker_arguments(
+                    script, box.CONTAINER_OPENCODE
+                )
             except (
                 box.BoxError,
                 OSError,
@@ -1152,16 +1156,7 @@ class Owner:
                 raise box.BoxError(
                     "Named workspace owner could not be verified."
                 ) from None
-        command = box.exec_command(
-            execution_data,
-            [
-                "python3",
-                "-c",
-                script,
-                "named-lease" if named else "lease",
-                box.CONTAINER_OPENCODE,
-            ],
-        )
+        command = box.exec_command(execution_data, worker)
         self.errors = box.captured_output(private=True)
         self.error_file = self.errors.__enter__()
         try:

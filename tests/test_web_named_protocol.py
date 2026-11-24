@@ -13,6 +13,8 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+from test_web_native_pair import native_info
+
 from oc_box import (
     oc_box as box,
     opencode_v2_io as worker,
@@ -20,7 +22,6 @@ from oc_box import (
     web_local_origins,
     web_named_owner,
     web_named_protocol as protocol,
-    web_native_pair,
     workspace_control,
     workspace_service as service,
 )
@@ -114,9 +115,13 @@ class OwnerProtocolTests(unittest.TestCase):
 
     def local_exec(self, data, arguments):
         # Replace ONLY the actual Podman exec/native process with a held pipe.
-        self.assertIn(arguments[-2], ("lease", "named-lease"))
+        self.assertIn(arguments[3], ("lease", "named-lease"))
         expected = (
-            _CONTAINER if arguments[-2] == "named-lease" else self.data["container"]
+            _CONTAINER if arguments[3] == "named-lease" else self.data["container"]
+        )
+        self.assertEqual(
+            arguments[5:],
+            [data["opencode_version"]] if arguments[3] == "named-lease" else [],
         )
         self.assertEqual(data["container"], expected)
         program = (
@@ -207,7 +212,9 @@ class OwnerProtocolTests(unittest.TestCase):
                     self.assertEqual(captured[0].connection["started_at"], _STARTED)
                     self.assertEqual(lease.identity.container_id, _CONTAINER)
                     self.assertEqual(lease.identity.endpoint, _ENDPOINT)
-                    self.assertEqual(lease.identity.version, web_native_pair._VERSION)
+                    self.assertEqual(
+                        lease.identity.version, self.data["opencode_version"]
+                    )
                     self.assertNotEqual(
                         lease.identity.generation,
                         owner.connection["ui_state"]["generation"],
@@ -429,19 +436,22 @@ class OwnerProtocolTests(unittest.TestCase):
 
 
 class NamedNativeWorkerTests(unittest.TestCase):
-    def test_only_named_startup_requires_bounded_actual_2_3_2_native_info(self):
-        good = {"version": web_native_pair._VERSION, "pid": 42, "urls": [_ENDPOINT]}
-        for update in (
-            None,
-            {},
-            {"version": "2.3.3"},
-            {"version": "2.3.2-pre.0"},
-            {"urls": ["http://127.0.0.2:51303"]},
-            {"pid": True},
+    def test_only_named_startup_requires_bounded_exact_native_info(self):
+        for expected, update in (
+            (None, {}),
+            ("2.3.2", {}),
+            ("2.4.1", {}),
+            ("2.3.2", {"version": "2.4.1"}),
+            ("2.4.1", {"version": "2.4.2"}),
+            ("2.3.2", {"version": "2.3.3"}),
+            ("2.3.2", {"version": "2.3.2-pre.0"}),
+            ("2.4.1", {"urls": ["http://127.0.0.2:51303"]}),
+            ("2.3.2", {"pid": True}),
+            ("2.4.1", {"capabilities": {"persistentPty": 1}}),
         ):
-            with self.subTest(update=update):
-                is_named = update is not None
-                request = Mock(return_value=good | (update or {}))
+            with self.subTest(expected=expected, update=update):
+                is_named = expected is not None
+                request = Mock(return_value=native_info(_ENDPOINT, expected) | update)
                 request.endpoint = {"url": _ENDPOINT, "password": _SECRET}
                 request.alive.side_effect = [True, False] if is_named else [False]
                 with (
@@ -456,6 +466,8 @@ class NamedNativeWorkerTests(unittest.TestCase):
                         "named-lease" if is_named else "lease",
                         "/synthetic/opencode",
                     ]
+                    if is_named:
+                        argv.append(expected)
                     if not update:
                         worker.main(argv)
                         write.assert_called_once_with(17, request.endpoint)
@@ -471,6 +483,16 @@ class NamedNativeWorkerTests(unittest.TestCase):
                         )
                     else:
                         request.assert_not_called()
+
+    def test_unaudited_or_missing_named_version_refuses_before_service_start(self):
+        for extra in ([], ["2.4.1-dev"], ["2.4.2"], ["v2.4.1"], ["2.3.2", "2.4.1"]):
+            with (
+                self.subTest(extra=extra),
+                patch.object(worker, "server") as start,
+                self.assertRaises(worker.FixedError),
+            ):
+                worker.main(["named-lease", "/synthetic/opencode", *extra])
+            start.assert_not_called()
 
 
 if __name__ == "__main__":
