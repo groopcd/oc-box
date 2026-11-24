@@ -65,6 +65,8 @@ class StoreRefusalTests(StoreFixture):
         with self.assertRaisesRegex(accounts.WebAccountsError, "not initialized"):
             accounts.load(self.path, PHRASE)
         with self.assertRaisesRegex(accounts.WebAccountsError, "not initialized"):
+            accounts.load_snapshot(self.path, PHRASE)
+        with self.assertRaisesRegex(accounts.WebAccountsError, "not initialized"):
             self.add()
         with self.assertRaisesRegex(accounts.WebAccountsError, "not initialized"):
             accounts.remove_account(self.path, PHRASE, USERNAME)
@@ -91,6 +93,7 @@ class StoreRefusalTests(StoreFixture):
             for operation in (
                 self.create,
                 lambda: accounts.load(self.path, PHRASE),
+                lambda: accounts.load_snapshot(self.path, PHRASE),
                 self.add,
                 lambda: accounts.remove_account(self.path, PHRASE, USERNAME),
             ):
@@ -241,6 +244,213 @@ class StoreRefusalTests(StoreFixture):
             self.create()
         self.assertNotIn("private dependency detail", str(raised.exception))
         self.assertEqual(list(self.directory.iterdir()), [])
+
+
+@unittest.skipUnless(HAS_CRYPTO, "optional cryptography not installed")
+class AccountSnapshotTests(StoreFixture):
+    def test_authenticates_once_and_close_fences_a_retained_callback(self):
+        self.create()
+        self.add()
+        raw = self.path.read_bytes()
+        with (
+            patch.object(
+                accounts, "_open_envelope", wraps=accounts._open_envelope
+            ) as unlock,
+            patch.object(accounts, "_locked", wraps=accounts._locked) as exclusive,
+            accounts.load_snapshot(self.path, PHRASE) as snapshot,
+        ):
+            self.assertEqual(
+                snapshot.store,
+                accounts.AccountStore(
+                    SETUP, (accounts.Account(USERNAME, (WORKSPACE,), REGISTRATION),)
+                ),
+            )
+            current = snapshot.current  # The callable intended for prepare_sites.
+            guard = current.__self__
+            descriptors = (guard._dir, guard._file)
+            self.assertIsNot(guard, snapshot)
+            self.assertTrue(all(not os.get_inheritable(fd) for fd in descriptors))
+            for _ in range(3):
+                self.assertIs(current(), True)
+            unlock.assert_called_once()
+            exclusive.assert_called_once()
+            self.assertNotIn(USERNAME, repr(snapshot))
+            self.assertNotIn(str(self.path), repr(snapshot))
+        for fd in descriptors:
+            with self.assertRaises(OSError):
+                os.fstat(fd)
+        snapshot.close()
+        with patch.object(accounts, "_check_directory") as inspect:
+            self.assertIs(current(), False)
+            inspect.assert_not_called()
+        self.assert_unchanged(raw)
+
+    def test_wrong_passphrase_and_damaged_ciphertext_never_return_a_guard(self):
+        self.create()
+        raw = self.path.read_bytes()
+        with self.assertRaisesRegex(accounts.WebAccountsError, "incorrect passphrase"):
+            accounts.load_snapshot(self.path, "another synthetic phrase")
+        self.assert_unchanged(raw)
+        damaged = raw[:-1] + bytes([raw[-1] ^ 1])
+        self.path.write_bytes(damaged)
+        with self.assertRaisesRegex(accounts.WebAccountsError, "damaged data"):
+            accounts.load_snapshot(self.path, PHRASE)
+        self.assert_unchanged(damaged)
+
+    def test_load_refuses_a_replacement_during_authentication(self):
+        self.create()
+        original = self.path.read_bytes()
+        replacement = self.directory / "synthetic-racing-replacement"
+        replacement.touch(mode=0o600)
+        replacement.write_bytes(original)
+        unlock = accounts._open_envelope
+
+        def unlock_and_replace(*args):
+            result = unlock(*args)
+            os.replace(replacement, self.path)
+            return result
+
+        with (
+            patch.object(accounts, "_open_envelope", side_effect=unlock_and_replace),
+            self.assertRaisesRegex(accounts.WebAccountsError, "unsafe"),
+        ):
+            accounts.load_snapshot(self.path, PHRASE)
+        self.assert_unchanged(original)
+
+    def test_in_place_change_with_preserved_size_and_mtime_is_sticky(self):
+        self.create()
+        original = self.path.read_bytes()
+        modified = original[:-1] + bytes([original[-1] ^ 1])
+        with accounts.load_snapshot(self.path, PHRASE) as snapshot:
+            before = self.path.stat()
+            self.path.write_bytes(modified)
+            os.utime(self.path, ns=(before.st_atime_ns, before.st_mtime_ns))
+            after = self.path.stat()
+            self.assertEqual(
+                (before.st_ino, before.st_size, before.st_mtime_ns),
+                (after.st_ino, after.st_size, after.st_mtime_ns),
+            )
+            self.assertIs(snapshot.current(), False)
+            self.path.write_bytes(original)
+            self.assertIs(snapshot.current(), False)
+
+    def test_digest_refuses_in_place_change_even_if_observed_times_do_not_change(self):
+        self.create()
+        original = self.path.read_bytes()
+        stamp = accounts._stamp
+
+        def fixed_times(info):
+            value = stamp(info)
+            return None if value is None else value[:-2]
+
+        # Model a check whose observed timestamps alone cannot reveal an edit.
+        with (
+            patch.object(accounts, "_stamp", side_effect=fixed_times),
+            accounts.load_snapshot(self.path, PHRASE) as snapshot,
+        ):
+            self.assertIs(snapshot.current(), True)
+            self.path.write_bytes(bytes([original[0] ^ 1]) + original[1:])
+            with patch.object(accounts.os, "pread", wraps=os.pread) as read:
+                self.assertIs(snapshot.current(), False)
+                read.assert_called()
+
+    def test_byte_identical_atomic_file_replacement_is_not_read_or_adopted(self):
+        self.create()
+        original = self.path.read_bytes()
+        with accounts.load_snapshot(self.path, PHRASE) as snapshot:
+            replacement = self.directory / "synthetic-replacement"
+            replacement.touch(mode=0o600)
+            replacement.write_bytes(original)
+            os.replace(replacement, self.path)
+            with patch.object(accounts.os, "pread", wraps=os.pread) as read:
+                self.assertIs(snapshot.current(), False)
+                read.assert_not_called()
+            self.assert_unchanged(original)
+
+    def test_parent_swaps_refuse_before_read_even_with_matching_filename(self):
+        self.create()
+        original = self.path.read_bytes()
+        displaced = self.root / "displaced"
+        with accounts.load_snapshot(self.path, PHRASE) as snapshot:
+            self.directory.rename(displaced)
+            self.directory.mkdir(mode=0o700)
+            self.write_fixture(original)
+            with patch.object(accounts.os, "pread", wraps=os.pread) as read:
+                self.assertIs(snapshot.current(), False)
+                read.assert_not_called()
+        with accounts.load_snapshot(self.path, PHRASE) as snapshot:
+            second = self.root / "second"
+            self.directory.rename(second)
+            self.directory.symlink_to(second, target_is_directory=True)
+            with patch.object(accounts.os, "pread", wraps=os.pread) as read:
+                self.assertIs(snapshot.current(), False)
+                read.assert_not_called()
+
+    def test_path_replaced_during_read_is_rechecked_and_only_original_fd_is_read(self):
+        self.create()
+        original = self.path.read_bytes()
+        before = self.path.stat()
+        replacement = self.directory / "pending"
+        replacement.touch(mode=0o600)
+        replacement.write_bytes(original)
+        pread = os.pread
+        replaced = False
+        identities = []
+
+        def substitute(fd, count, offset):
+            nonlocal replaced
+            opened = os.fstat(fd)
+            identities.append((opened.st_ino, opened.st_dev))
+            if not replaced:
+                os.replace(replacement, self.path)
+                replaced = True
+            return pread(fd, count, offset)
+
+        with accounts.load_snapshot(self.path, PHRASE) as snapshot:
+            with patch.object(accounts.os, "pread", side_effect=substitute):
+                self.assertIs(snapshot.current(), False)
+            self.assertTrue(replaced)
+            self.assertEqual(set(identities), {(before.st_ino, before.st_dev)})
+            self.assert_unchanged(original)
+
+    def test_guard_does_not_hold_or_wait_for_lock_and_enrollment_fences_it(self):
+        self.create()
+        with (
+            accounts.load_snapshot(self.path, PHRASE) as snapshot,
+            patch.object(accounts, "_LOCK_TIMEOUT", 0.02),
+        ):
+            review = accounts.review_registration(
+                self.path, PHRASE, USERNAME, workspace_ids=(WORKSPACE,)
+            )
+            accounts.commit_registration(
+                self.path,
+                PHRASE,
+                review,
+                registration=REGISTRATION,
+                current=snapshot.current,
+            )
+            self.assertFalse(snapshot.current())
+            self.assertEqual(snapshot.store.accounts, ())
+        with accounts.load_snapshot(self.path, PHRASE) as reopened:
+            self.assertTrue(reopened.current())
+            self.assertEqual(reopened.store.accounts[0].registration, REGISTRATION)
+
+    def test_storage_errors_and_container_use_refuse_without_rechecking(self):
+        self.create()
+        with accounts.load_snapshot(self.path, PHRASE) as snapshot:
+            with patch.object(
+                accounts.os, "pread", side_effect=OSError("private file error")
+            ):
+                self.assertIs(snapshot.current(), False)
+            self.assertIs(snapshot.current(), False)
+        with accounts.load_snapshot(self.path, PHRASE) as snapshot:
+            with (
+                patch.dict(os.environ, {"OC_BOX_CONTAINER": "1"}),
+                patch.object(accounts, "_check_directory") as inspect,
+            ):
+                self.assertIs(snapshot.current(), False)
+                inspect.assert_not_called()
+            self.assertIs(snapshot.current(), False)
 
 
 @unittest.skipUnless(HAS_CRYPTO, "optional cryptography not installed")
