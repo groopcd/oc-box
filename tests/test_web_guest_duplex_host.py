@@ -178,6 +178,19 @@ class DuplexHostTests(unittest.TestCase):
                 self.assertFalse(tunnel.close())
             self.assertFalse(tunnel.close())
 
+    def test_an_unexpected_duplicate_stdin_writer_is_not_eof(self):
+        with self.listener() as (peer, proc, tunnel), self.open(peer, tunnel) as native:
+            leaked = os.dup(tunnel._tx_pin[0])
+            try:
+                self.assertFalse(tunnel.close(timeout=0.25))
+                self.assertFalse(tunnel._receipt)
+                self.assertEqual(native.recv(1), b"")
+            finally:
+                os.close(leaked)
+            self.assertFalse(tunnel.close())
+            tunnel.abandon()
+            self.assertIsNotNone(proc.returncode)
+
     def test_substituted_pipe_survives_abandon_and_object_collection(self):
         read, write = os.pipe()
         displaced = None
