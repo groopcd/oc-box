@@ -840,7 +840,7 @@ class StartupProgressTests(unittest.TestCase):
                         # The mock child writes to the original (unproxied) stream.
                         output.write("native installer warning\n")
                 tick()
-                self.assertEqual(output.getvalue().count("Preparing configuration"), 2)
+                self.assertEqual(output.getvalue().count("Preparing configuration"), 1)
                 self.assertIsNot(sys.stderr, output)
             self.assertIs(sys.stdout, output)
             self.assertIs(sys.stderr, output)
@@ -848,12 +848,18 @@ class StartupProgressTests(unittest.TestCase):
             worker.return_value.join.assert_called_once()
         rendered = output.getvalue()
         self.assertIn("\r\x1b[Kplugin refused to load\n", rendered)
-        self.assertIn("native installer warning\n", rendered)
-        self.assertTrue(rendered.endswith("\r\x1b[K"), rendered)
-        self.assertEqual(rendered.count("\n"), 2)
+        self.assertTrue(rendered.endswith("native installer warning\n\n"), rendered)
+        self.assertEqual(rendered.count("\n"), 3)
 
-    def test_verbose_live_preparation_pauses_all_active_painters_on_inherited_fds(self):
+    def test_verbose_live_preparation_retires_all_painters_without_erasing_child(self):
+        for nested in (False, True):
+            for newline in ("", "\n"):
+                with self.subTest(nested=nested, child_ends_in_lf=bool(newline)):
+                    self._check_verbose_live_preparation(nested, newline)
+
+    def _check_verbose_live_preparation(self, nested, newline):
         output = self.TTY()
+        child_text = "unmodified tool warning" + newline
         image = "\x1b_Ga=T,q=2;TEST\x1b\\"
         erase = "\x1b_Ga=d,q=2;TEST\x1b\\"
         with (
@@ -879,7 +885,7 @@ class StartupProgressTests(unittest.TestCase):
             def live_child(command, **kwargs):
                 self.assertEqual(kwargs, {"text": True})
                 self.assertTrue(output.getvalue().endswith(erase + "\r\x1b[K"))
-                for text in ("\x1b#", "8", "unmodified tool output\n"):
+                for text in ("\x1b#", "8", child_text):
                     # Inherited FDs bypass the launcher Python streams.
                     output.write(text)
                     before = output.getvalue()
@@ -889,19 +895,29 @@ class StartupProgressTests(unittest.TestCase):
                 return subprocess.CompletedProcess(command, 0)
 
             with box.loading_stage("Preparing configuration", stage="configuration"):
-                with box.loading_stage("Installing packages", stage="dependencies"):
+                with (
+                    box.loading_stage("Installing packages", stage="dependencies")
+                    if nested
+                    else contextlib.nullcontext()
+                ):
                     with mock.patch.object(
                         box.subprocess, "run", side_effect=live_child
                     ):
                         box.run(["synthetic-tool"], preparation="container-image")
                     before = output.getvalue()
-                    tick(workers.call_args.kwargs["target"])
-                    self.assertTrue(
-                        output.getvalue()[len(before) :].startswith("\r\x1b[K" + image)
-                    )
-            self.assertEqual(workers.call_count, 2)
+                    for call in workers.call_args_list:
+                        tick(call.kwargs["target"])
+                    self.assertEqual(output.getvalue(), before)
+            self.assertEqual(workers.call_count, 2 if nested else 1)
             self.assertIs(sys.stderr, output)
-        self.assertIn("\x1b#8unmodified tool output\n", output.getvalue())
+        before, separator, after = output.getvalue().partition("\x1b#8" + child_text)
+        self.assertTrue(before.endswith(erase + "\r\x1b[K"))
+        self.assertTrue(separator)
+        self.assertNotIn("\r", after)
+        self.assertNotIn("\x1b", after)
+        self.assertRegex(after, r"^\noc-box: ")
+        self.assertEqual("Installing packages done" in after, nested)
+        self.assertIn("Preparing configuration done", after)
 
     def test_fixed_fallback_notices_only_carry_badges_in_native_launch_scope(self):
         output = self.TTY()
@@ -1078,63 +1094,88 @@ class StartupProgressTests(unittest.TestCase):
         self.assertFalse(detector.safe_to_draw())
         self.assertTrue(detector.feed(b"\x80"))
         self.assertTrue(detector.safe_to_draw())
+        for prefix, final in ((b"\x1b#", b"8"), (b"\x1b%", b"G"), (b"\x1b$(", b"B")):
+            with self.subTest(prefix=prefix):
+                for char in prefix:
+                    self.assertFalse(detector.feed(bytes((char,))))
+                    self.assertFalse(detector.safe_to_draw())
+                self.assertFalse(detector.feed(final))
+                self.assertTrue(detector.safe_to_draw())
 
-    def test_kitty_drop_boundary_fences_draws_between_split_designation_bytes(self):
-        mark = startup_output.Badge("\x1b_Ga=T;TEST\x1b\\", 2, "\x1b_Ga=d;TEST\x1b\\")
-        for prefix, final in ((b"\x1b#", b"8"), (b"\x1b%", b"G")):
+    def test_tui_designations_are_transparent_and_do_not_end_loading(self):
+        for profile in ("konsole", "kitty", "kitty-with-drops"):
+            for prefix, final in ((b"\x1b#", b"8"), (b"\x1b%", b"G")):
+                with self.subTest(profile=profile, prefix=prefix):
+                    self._check_tui_split_designation(profile, prefix, final)
+
+    def _check_tui_split_designation(self, profile, prefix, final):
+        environ = (
+            {"TERM": "xterm-256color", "KONSOLE_VERSION": "260803"}
+            if profile == "konsole"
+            else {"TERM": "xterm-kitty", "KITTY_WINDOW_ID": "42"}
+        )
+        with (
+            self.terminal(),
+            mock.patch.dict(os.environ, environ, clear=True),
+            mock.patch.object(host_drop.sharing, "protected_paths", return_value=[]),
+        ):
+            drops = (
+                host_drop.Relay(box, {}, {}, profile="kitty")
+                if profile == "kitty-with-drops"
+                else None
+            )
             with (
-                self.subTest(prefix=prefix),
-                self.terminal(),
+                mock.patch.object(drops, "start")
+                if drops is not None
+                else contextlib.nullcontext(),
+                mock.patch.object(ui, "write_all") as output,
+                mock.patch.object(ui.os, "isatty", return_value=True),
+                mock.patch.object(ui.os, "ttyname", return_value="/dev/pts/1"),
+                mock.patch.object(ui.os, "close"),
                 mock.patch.object(
-                    host_drop.sharing, "protected_paths", return_value=[]
+                    ui.os, "read", side_effect=[prefix, final, b"UI_READY", b""]
+                ),
+                mock.patch.object(ui.pty, "openpty", return_value=(20, 21)),
+                mock.patch.object(ui.fcntl, "ioctl"),
+                mock.patch.object(ui.termios, "tcgetattr"),
+                mock.patch.object(ui.termios, "tcsetattr"),
+                mock.patch.object(ui.tty, "setraw"),
+                mock.patch.object(ui.signal, "signal"),
+                mock.patch.object(ui.subprocess, "Popen") as child,
+                mock.patch.object(
+                    ui.select,
+                    "select",
+                    side_effect=[
+                        ([20], [], []),
+                        ([], [], []),
+                        ([], [], []),
+                        ([20], [], []),
+                        ([20], [], []),
+                        ([20], [], []),
+                    ],
                 ),
             ):
-                drops = host_drop.Relay(box, {}, {}, profile="kitty")
-                with (
-                    mock.patch.object(drops, "start"),
-                    mock.patch.object(ui, "write_all") as output,
-                    mock.patch.object(ui.os, "isatty", return_value=True),
-                    mock.patch.object(ui.os, "close"),
-                    mock.patch.object(
-                        ui.os, "read", side_effect=[prefix, final, b"UI_READY", b""]
+                child.return_value.poll.return_value = None
+                child.return_value.wait.return_value = 0
+                self.assertEqual(
+                    ui.run_tui(
+                        ["synthetic"],
+                        input_fd=10,
+                        output_fd=11,
+                        refresh=0,
+                        startup_logo="graphics",
+                        file_drops=drops,
                     ),
-                    mock.patch.object(ui.pty, "openpty", return_value=(20, 21)),
-                    mock.patch.object(ui.fcntl, "ioctl"),
-                    mock.patch.object(ui.termios, "tcgetattr"),
-                    mock.patch.object(ui.termios, "tcsetattr"),
-                    mock.patch.object(ui.tty, "setraw"),
-                    mock.patch.object(ui.signal, "signal"),
-                    mock.patch.object(ui.subprocess, "Popen") as child,
-                    mock.patch.object(
-                        ui.select,
-                        "select",
-                        side_effect=[
-                            ([20], [], []),
-                            ([], [], []),
-                            ([], [], []),
-                            ([20], [], []),
-                            ([20], [], []),
-                            ([20], [], []),
-                        ],
-                    ),
-                    mock.patch.object(startup_output, "relay_badge", return_value=mark),
-                ):
-                    child.return_value.poll.return_value = None
-                    child.return_value.wait.return_value = 0
-                    self.assertEqual(
-                        ui.run_tui(
-                            ["synthetic"],
-                            input_fd=10,
-                            output_fd=11,
-                            refresh=0,
-                            file_drops=drops,
-                        ),
-                        0,
-                    )
-                wire = b"".join(call.args[1] for call in output.call_args_list)
-                self.assertIn(prefix + final + b"UI_READY", wire)
-                self.assertEqual(wire.count(mark.wire.encode()), 1)
-                self.assertLess(wire.index(mark.erase.encode()), wire.index(prefix))
+                    0,
+                )
+        wire = b"".join(call.args[1] for call in output.call_args_list)
+        before, designation, after = wire.partition(prefix + final)
+        self.assertEqual(designation, prefix + final)
+        self.assertEqual(before.count(b"\x1b_Ga=T"), 1)
+        self.assertEqual(before.count(b"\x1b_Ga=d"), 1)
+        self.assertEqual(after.count(b"\x1b_Ga=T"), 1)
+        self.assertLess(after.index(b"\x1b_Ga=d"), after.index(b"UI_READY"))
+        self.assertTrue(after.endswith(b"UI_READY"))
 
     @unittest.skipUnless(sys.platform == "linux", "Linux PTY/termios integration")
     def test_tui_progress_handoff_input_resize_and_terminal_restore(self):
@@ -1224,11 +1265,17 @@ class StartupProgressTests(unittest.TestCase):
                 for style, arguments in (
                     ("graphics", ["--project", str(project)]),
                     ("ascii", ["reset", "--workspace", data["id"]]),
+                    ("malformed-registry", ["--project", str(project)]),
                 ):
                     with self.subTest(style=style):
-                        workspace_preferences.set_preferences(
-                            path, data["id"], startup_logo=style
-                        )
+                        if style == "malformed-registry":
+                            # A parsed nonmapping must not abort the display-only
+                            # lookup, before the authoritative backend preflight.
+                            path.write_text("[]")
+                        else:
+                            workspace_preferences.set_preferences(
+                                path, data["id"], startup_logo=style
+                            )
                         master, slave = pty.openpty()
                         try:
                             fcntl.ioctl(
