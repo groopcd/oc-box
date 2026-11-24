@@ -105,7 +105,9 @@ _WEB_RUNTIME_FILES = (
     "web_pake_profile.py",
     "web_pake_worker.py",
     "web_enrollment.py",
+    "web_enrollment_commit.py",
     "web_enrollment_ingress.py",
+    "uninstall_recovery.py",
     "web_registration_worker.py",
 )
 
