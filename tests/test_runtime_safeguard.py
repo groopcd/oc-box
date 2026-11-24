@@ -394,14 +394,20 @@ class RuntimeSafeguardTests(unittest.TestCase):
         self.assertIsNotNone(source, "requires a system printf executable")
         source = Path(source)
         self.assertTrue(source.is_file())
-        limit = 8 * 1024 * 1024
-        with source.open("rb") as stream:
-            binary = stream.read(limit + 1)
-        self.assertLessEqual(len(binary), limit)
-        self.assertEqual(binary[:4], b"\x7fELF", "system printf must be an ELF")
-
+        # A system printf can be part of a larger multicall binary. Use the
+        # production size bound and copy a fixed amount in bounded chunks.
         actual = self.root / "fixture-printf"
-        actual.write_bytes(binary)
+        with source.open("rb") as stream, actual.open("xb") as target:
+            size = os.fstat(stream.fileno()).st_size
+            self.assertLessEqual(size, guard._MAX_BINARY)
+            self.assertEqual(stream.read(4), b"\x7fELF", "system printf must be an ELF")
+            stream.seek(0)
+            while size:
+                block = stream.read(min(size, 1024 * 1024))
+                self.assertTrue(block, "system printf changed during the fixture copy")
+                target.write(block)
+                size -= len(block)
+            self.assertEqual(stream.read(1), b"")
         actual.chmod(0o700)
         alias = self.root / "opencode"
         alias.symlink_to(actual.name)
