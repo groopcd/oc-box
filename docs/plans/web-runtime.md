@@ -109,7 +109,8 @@ The TLS handshake, headers (16 KiB, 64 fields), body and response (8 KiB each)
 share a five-second I/O deadline. A trusted synchronous dispatch callback
 receives that deadline and must honor it. A late result cannot start a response,
 but this does not preempt the callback, roll back its effects or verify its
-cleanup. There is no production dispatcher, listener or handoff receiver.
+cleanup. This writer has no production dispatcher, listener or browser
+document handoff route.
 
 The separate unserved authenticated native relay is not the fixed status
 dispatcher or guest Gateway. It accepts only `GET /api/info` and
@@ -314,16 +315,51 @@ Activation still requires independent review of the exact native/WASM
 artifacts and interface, matching host-authorized enrollment (including
 password input encoding), a trusted account page, and the live gates above.
 
+### Unserved browser handoff
+
+The trusted account page may take the adapter's opaque ticket only to submit
+one `ticket` field in a top-level `POST /oc-box/handoff` to the configured
+workspace origin. Its CSP permits only that form destination; the credential
+controls have no form names and their native form action is blocked. The
+transfer helper clears and removes its submission form. No grant, credential
+or return URL is taken from a query or a workspace-supplied setting.
+
+[`NamedHandoffIngress`](../../src/oc_box/web_named_handoff.py) is an unserved
+helper for the workspace side. The transport must first select the exact TLS
+role from the listener and SNI and bound the whole request. The receiver
+requires the opposite account Origin, `cross-site` / `navigate` / `document`,
+no Cookie header, and exactly 61 bytes of form data: `ticket=` and one canonical
+54-byte token. It checks that the ticket is still pending; it does not claim
+the bootstrap or mint a credential. The no-store document carries the token
+only in its nonce-bound script, which removes itself and retains the token in
+a private closure. The page drops its reference on submission, page exit, or
+a local 30-second timer; only the server decides expiry. It has no third-party
+content, script asset, fallback form, or token in a URL, DOM field, cookie or
+storage. The POST body and protected
+response still carry an opaque ticket; this is not browser-memory or history
+erasure, and the transport must not log either body.
+
+An explicit click sends a non-redirecting same-origin `POST /oc-box/confirm`
+with exactly the 54 ticket bytes as `text/plain`. The helper requires workspace
+Origin and `same-origin` / `same-origin` / `empty` Fetch Metadata and delegates
+to `NamedAppIngress.confirm`. That method alone matches and consumes the ticket
+and claims the actual HttpOnly workspace bootstrap before native pairing. The
+wrapper returns an empty `204` with only the opaque `__Host-ocbox-app` cookie,
+not the native credential. The page then replaces its URL with `/`; the named
+server must independently gate that landing and every app request, with no
+guest fallback. Expiry/replay or a different browser cannot redeem a ticket
+even if a document was already issued. A failure is not proof that a
+pairing already in progress was undone.
+
 ### Synthetic two-site browser composition
 
 [`smoke_named_pake_browser.py`](../../tests/smoke_named_pake_browser.py) composes
 the exact bootstrap handlers, `AccountIngress`, `LocalNamedSignIn`, and the
 Python worker with the pinned Rust verifier and real browser WASM. It serves a
 test-only account card adapted from the [Studio sign-in markup](../mockups/web-manager.html).
-The controls start disabled and never have form names; the CSP forbids native form
-submission. Only the local byte reader handles the masked input, and the field is
-cleared on submission and page exit. The page has no guest, raw-password, app
-handoff or vault-unlock fallback.
+Only the local byte reader handles the masked input, and the field is cleared
+on submission and page exit. The page uses the real transfer helper, not the
+mockup's demo authentication. It has no guest, raw-password or vault-unlock fallback.
 
 The fixture starts two disposable IPv4 loopback HTTPS endpoints in a private
 network namespace. A fresh untrusted Chromium profile refuses both sites;
@@ -332,13 +368,20 @@ The real cross-site bootstrap POST sets separate host-only, HttpOnly, Secure,
 `SameSite=Strict` cookies. A second browser context cannot replay that entry
 ticket. An unpaired browser cannot load the WASM asset. A wrong password sends
 KE1 but no KE3, and a matching password sends only the declared PAKE fields.
-The server issues a real ticket; an in-process check against the two browsers'
-actual workspace nonces verifies mismatch refusal, one successful consume and
-replay refusal. That check does not exercise browser handoff or app admission.
+The earlier `8867358` run stopped at an in-process ticket check. The expanded
+smoke issues real tickets and exercises both POSTs in Chromium. It refuses a
+wrong transfer origin, a copied ticket confirmed by another bootstrapped
+browser, replay at both endpoints, and expiry (a fixture-only advance of the
+server handoff clock). Only the matching browser lands on a static admitted
+marker. The native pairing worker really mints and verifies one cookie with
+unmodified OpenCode 2.3.2 on private loopback. The tested browser receives only
+the separate opaque app cookie, and an independent request confirms the
+retained native cookie still authenticates that same private service.
 
 Only a synthetic recorded account is used, seeded in memory by the pinned
-fixture. The browser, WASM, verifier and seed inputs are checked against the
-existing SHA-256 pins; no artifacts are downloaded, rebuilt or installed.
+fixture. The browser, WASM, verifier, seed and OpenCode 2.3.2 binaries are
+checked against the existing SHA-256 pins; no artifacts are downloaded,
+rebuilt or installed.
 Run with already-available Playwright, OpenSSL and certutil (NSS tools). Example
 on a Linux host with user/network namespaces and `ip`:
 
@@ -349,13 +392,15 @@ unshare --user --map-root-user --net sh -c '
     env -i PATH=/usr/bin:/bin PYTHONPATH=src "$@"
 ' sh /path/to/offline-playwright-python -B tests/smoke_named_pake_browser.py \
   --chromium /path/to/pinned/chrome-headless-shell \
-  --build-dir /path/to/verified-first-build
+  --build-dir /path/to/verified-first-build \
+  --opencode /path/to/pinned/opencode-2.3.2
 ```
 
-The fixture uses no real vault, enrollment, private owner, native grant,
-workspace/Studio admission or production listener. Its TLS and PAKE result
-does not enable named mode, change the existing guest link, or establish live
-owner-relay, security-review or publication acceptance.
+The owner liveness and worker exec bridge are synthetic; the private native
+process, PAKE, TLS and browser cookies are real. No real vault, enrollment,
+workspace owner attach, Studio relay, Podman, VM or production listener is
+used. This does not enable named mode, change the existing guest link, or
+establish live owner-relay, security-review or publication acceptance.
 
 ## Isolated feasibility results
 

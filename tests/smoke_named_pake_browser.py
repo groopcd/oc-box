@@ -1,4 +1,4 @@
-"""Disposable two-site TLS bootstrap and real browser PAKE; no native admission."""
+"""Disposable two-site TLS, real browser PAKE and a pinned local native service."""
 
 import argparse
 import base64
@@ -17,6 +17,8 @@ import struct
 from tempfile import TemporaryDirectory
 from threading import BoundedSemaphore, Thread
 from time import monotonic
+from traceback import extract_tb
+from unittest.mock import patch
 
 from playwright.sync_api import Error as BrowserError, sync_playwright
 
@@ -24,15 +26,20 @@ from oc_box import (
     web_account_ingress,
     web_accounts,
     web_admission,
+    web_app_ingress,
     web_bootstrap,
+    web_handoff,
     web_local_origins,
     web_named_bootstrap,
+    web_named_handoff,
     web_named_headers,
     web_named_local,
     web_named_transport,
+    web_native_pair,
     web_pake_flow,
     web_pake_profile,
 )
+from named_browser_native_fixture import native_fixture
 from smoke_named_bootstrap_browser import material, require, run
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -43,10 +50,6 @@ WORKSPACE_COOKIE = "__Host-ocbox-bootstrap"
 USERNAME = "synthetic-browser"
 VECTOR_SIZE = 37
 ASSETS = "/account-assets/"
-POLICY = (
-    "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; "
-    "connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
-)
 FIXED = (
     ("Cache-Control", "no-store"),
     ("Referrer-Policy", "origin"),
@@ -54,6 +57,9 @@ FIXED = (
     ("Cross-Origin-Resource-Policy", "same-origin"),
 )
 REFUSED = (403, b"Refused", FIXED + (("Content-Type", "text/plain"),))
+HANDOFF = web_named_handoff.HANDOFF_PATH
+CONFIRM = web_named_handoff.CONFIRM_PATH
+OPAQUE_DOCUMENT = "data:text/html,<!doctype html><title>Foreign fixture</title>"
 SLOT_SHA = "e8272c8e4e3bc675afa5325cefef3493864681d44dcd6144959e2811a3cb0c34"
 
 
@@ -123,7 +129,7 @@ def read_fixture_request(stream, deadline):
 
 class FixtureRequest(BaseRequestHandler):
     def handle(self):
-        deadline = monotonic() + 5
+        deadline = monotonic() + 9
         try:
             with self.server.tls.wrap_socket(
                 self.request, server_side=True, do_handshake_on_connect=False
@@ -137,8 +143,10 @@ class FixtureRequest(BaseRequestHandler):
                     )
                 except web_named_headers.NamedRequestError:
                     status, body, headers = REFUSED
-                reason = "OK" if status == 200 else "Forbidden"
-                head = f"HTTP/1.1 {status} {reason}\r\nConnection: close\r\nContent-Length: {len(body)}\r\n"
+                reason = {200: "OK", 204: "No Content", 403: "Forbidden"}[status]
+                head = f"HTTP/1.1 {status} {reason}\r\nConnection: close\r\n"
+                if status != 204:
+                    head += f"Content-Length: {len(body)}\r\n"
                 head += "".join(
                     f"{key}: {value}\r\n"
                     for key, value in headers
@@ -201,17 +209,28 @@ class FixtureServer(ThreadingMixIn, TCPServer):
 
 
 class Composition:
-    def __init__(self, origins, binding, bootstrap, sign_in, assets):
+    def __init__(
+        self, origins, binding, bootstrap, sign_in, assets, native, owner_current
+    ):
         self.origins = origins
         self.binding = binding
         self.bootstrap = bootstrap
         self.sign_in = sign_in
         self.assets = assets
+        self.native = native
         self.entry = web_named_bootstrap.NamedBootstrapIngress(
             origins=origins,
             binding=binding,
             bootstrap=bootstrap,
-            owner_current=lambda actual: actual == binding,
+            owner_current=owner_current,
+        )
+        self.app = web_app_ingress.NamedAppIngress(
+            sign_in,
+            endpoint=native.endpoint,
+            claim_bootstrap=lambda nonce: bootstrap.claim_app(binding, nonce),
+        )
+        self.handoff = web_named_handoff.NamedHandoffIngress(
+            origins=origins, app=self.app
         )
         self.pake = web_account_ingress.AccountIngress(
             origins=origins,
@@ -244,6 +263,15 @@ class Composition:
         ):
             result = self.entry.workspace(**request)
             return 200, result.html, result.headers()
+        if role == "workspace" and (method, target) in (
+            ("POST", HANDOFF),
+            ("POST", CONFIRM),
+        ):
+            handle = self.handoff.receive if target == HANDOFF else self.handoff.confirm
+            result = handle(**request)
+            return result.status, result.body, result.headers
+        if role == "workspace" and (method, target) == ("GET", "/"):
+            return self.landing(request)
         if (
             role == "account"
             and target == web_named_bootstrap.ACCOUNT_ENTRY
@@ -256,7 +284,10 @@ class Composition:
                 FIXED
                 + (
                     ("Content-Type", "text/html; charset=utf-8"),
-                    ("Content-Security-Policy", POLICY),
+                    (
+                        "Content-Security-Policy",
+                        web_named_handoff.account_policy(self.origins),
+                    ),
                     ("Set-Cookie", result.cookie),
                 ),
             )
@@ -328,27 +359,37 @@ class Composition:
         except Exception:
             raise RuntimeError("Account wire audit failed.") from None
 
-    def check_ticket(self, app, other):
+    def take_ticket(self):
         ticket, self.ticket = self.ticket, None
-        require(
-            ticket is not None and app != other, "No real ticket or distinct bootstrap."
+        require(ticket is not None, "No real PAKE ticket was issued.")
+        return ticket
+
+    def landing(self, request):
+        # A fixed authenticated marker only. This is not Studio or a native relay.
+        token = web_named_headers.admit_headers(
+            origin=self.origins.workspace,
+            headers=request["headers"],
+            method="GET",
+            actual_tls=request["actual_tls"],
+            cookie_name=web_app_ingress.APP_COOKIE_NAME,
         )
-
-        # Check the real handoff's binding and one-use semantics in process.
-        # This is NOT a browser handoff/confirmation route or app admission.
-        def consume(nonce):
-            return self.sign_in._handoff.consume(
-                self.binding,
-                ticket,
-                auth_origin=self.origins.account.value,
-                browser_nonce=nonce,
-            )
-
-        require(
-            consume(other) is None
-            and consume(app) == USERNAME
-            and consume(app) is None,
-            "Ticket was not browser-bound and one-use.",
+        try:
+            session = self.app._session(token)
+        except web_app_ingress.AppRequestError:
+            return REFUSED
+        require(session.principal == USERNAME, "Unexpected landing principal.")
+        return (
+            200,
+            b"<!doctype html><h1>Disposable workspace admitted</h1>",
+            FIXED
+            + (
+                ("Content-Type", "text/html; charset=utf-8"),
+                (
+                    "Content-Security-Policy",
+                    "default-src 'none'; base-uri 'none'; frame-ancestors 'none'; "
+                    f"form-action 'none'; connect-src {self.origins.workspace.value}{CONFIRM}",
+                ),
+            ),
         )
 
 
@@ -419,14 +460,16 @@ def bootstrap_page(page, workspace, account, *, replay=None):
     return value
 
 
-def cookies(context, origins):
+def cookies(context, origins, *, admitted=False):
     result = {(item["domain"], item["name"]): item for item in context.cookies()}
+    expected = {
+        (origins.account.hostname, ACCOUNT_COOKIE),
+        (origins.workspace.hostname, WORKSPACE_COOKIE),
+    }
+    if admitted:
+        expected.add((origins.workspace.hostname, web_app_ingress.APP_COOKIE_NAME))
     require(
-        set(result)
-        == {
-            (origins.account.hostname, ACCOUNT_COOKIE),
-            (origins.workspace.hostname, WORKSPACE_COOKIE),
-        }
+        set(result) == expected
         and all(
             item["secure"]
             and item["httpOnly"]
@@ -439,6 +482,12 @@ def cookies(context, origins):
     app = result[(origins.workspace.hostname, WORKSPACE_COOKIE)]["value"]
     account = result[(origins.account.hostname, ACCOUNT_COOKIE)]["value"]
     require(app != account, "Bootstrap cookies must differ.")
+    if admitted:
+        token = result[(origins.workspace.hostname, web_app_ingress.APP_COOKIE_NAME)][
+            "value"
+        ]
+        require(token not in (app, account), "App cookie matched a bootstrap cookie.")
+        return app, account, token
     return app, account
 
 
@@ -466,7 +515,7 @@ def submit(page, wrong):
         page.get_by_role("button", name="Sign in", exact=True).click()
     except BrowserError:
         raise RuntimeError("Synthetic form interaction did not complete.") from None
-    expected = "refused" if wrong else "complete"
+    expected = "refused" if wrong else "verified"
     try:
         wait_state(page, expected)
     except BrowserError:
@@ -477,10 +526,98 @@ def submit(page, wrong):
     )
 
 
+def transfer(page, url, *, expected, copied=None):
+    with page.expect_response(
+        lambda response: response.url == url, timeout=10_000
+    ) as pending:
+        if copied is None:
+            page.get_by_role("button", name="Continue to workspace", exact=True).click()
+        else:
+            # Only negative cases copy a real token through the private
+            # automation pipe. Do not retain, print or use it to fake a proof.
+            page.evaluate(
+                """({url, ticket}) => {
+              const form = document.createElement("form");
+              form.method = "post";
+              form.action = url;
+              const field = document.createElement("input");
+              field.type = "hidden"; field.name = "ticket"; field.value = ticket;
+              form.append(field);
+              document.body.append(form);
+              try { form.submit(); }
+              finally { field.value = ""; form.remove(); }
+            }""",
+                {"url": url, "ticket": copied},
+            )
+    response = pending.value
+    require(
+        response.status == expected and response.header_value("set-cookie") is None,
+        "Unexpected handoff document result or cookie.",
+    )
+    page.wait_for_url(url, wait_until="load")
+    if expected == 200:
+        page.get_by_role(
+            "button", name="Confirm workspace sign-in", exact=True
+        ).wait_for()
+        require(
+            page.evaluate("""() => location.search === "" && location.hash === "" &&
+          document.cookie === "" && !document.querySelector("script,input,form")"""),
+            "The confirmation page exposed a ticket or cookie to its DOM.",
+        )
+
+
+def click_confirm(page, url, expected):
+    with page.expect_response(
+        lambda response: response.url == url, timeout=10_000
+    ) as pending:
+        page.get_by_role("button", name="Confirm workspace sign-in", exact=True).click()
+    response = pending.value
+    require(response.status == expected, "Unexpected same-origin confirmation result.")
+    if expected == 403:
+        require(response.header_value("set-cookie") is None, "Refusal issued a cookie.")
+        page.get_by_text("Named sign-in refused.", exact=False).wait_for()
+    return response
+
+
+def check_native_boundary(fixture, token, confirmed):
+    session = fixture.sign_in.admission.lookup(fixture.binding, token)
+    require(
+        session is not None, "The app did not retain the confirmed browser session."
+    )
+    origin, native = fixture.origins.workspace, fixture.native
+    cookie = session.native_cookie.upstream_cookie(
+        binding=fixture.binding,
+        endpoint=native.endpoint,
+        origin=origin,
+    )
+    header = confirmed.header_value("set-cookie")
+    require(
+        header
+        == f"{web_app_ingress.APP_COOKIE_NAME}={token}; Secure; HttpOnly; SameSite=Strict; Path=/"
+        and cookie.split("=", 1)[1] not in header
+        and confirmed.header_value("content-length") is None,
+        "The native credential leaked or the browser cookie contract changed.",
+    )
+    reply = web_native_pair._exchange(
+        web_native_pair._port(native.endpoint),
+        origin.value.removeprefix("https://"),
+        monotonic() + 4,
+        "/api/info",
+        cookie=cookie,
+    )
+    require(
+        web_native_pair._json_reply(reply) == native.identity,
+        "The retained private cookie did not authenticate the pinned native service.",
+    )
+
+
 def browser_checks(pw, chrome, homes, hosts, fixture, product):
     origins = fixture.origins
     workspace = origins.workspace.value + web_named_bootstrap.WORKSPACE_ENTRY
     account = origins.account.value + web_named_bootstrap.ACCOUNT_ENTRY
+    handoff, confirm, landing = (
+        origins.workspace.value + path for path in (HANDOFF, CONFIRM, "/")
+    )
     untrusted = launch(pw, chrome, homes[0], hosts)
     try:
         with untrusted.new_context() as context:
@@ -508,6 +645,10 @@ def browser_checks(pw, chrome, homes, hosts, fixture, product):
         with browser.new_context() as context, browser.new_context() as other:
             allowed = {
                 ("GET", workspace),
+                ("GET", landing),
+                ("GET", OPAQUE_DOCUMENT),
+                ("POST", handoff),
+                ("POST", confirm),
                 ("POST", account),
                 ("POST", origins.account.value + "/start"),
                 ("POST", origins.account.value + "/finish"),
@@ -588,20 +729,108 @@ def browser_checks(pw, chrome, homes, hosts, fixture, product):
                 and cookies(context, origins) == (app, account_cookie),
                 "Matching login did not produce only a PAKE ticket.",
             )
-            fixture.check_ticket(app, other_app)
+            ticket = fixture.take_ticket()
+            transfer(page, handoff, expected=200)
+            require(
+                page.url == handoff
+                and cookies(context, origins) == (app, account_cookie)
+                and fixture.native.pairs == 0,
+                "Cross-site transfer admitted before confirmation.",
+            )
+
+            # A workspace document is the wrong Origin for cross-site transfer.
+            foreign = other.new_page()
+            response = foreign.goto(landing)
+            require(
+                response is not None and response.status == 403,
+                "Unadmitted workspace opened.",
+            )
+            transfer(foreign, handoff, expected=403, copied=ticket)
+            foreign.goto(OPAQUE_DOCUMENT)
+            require(
+                foreign.evaluate("origin === 'null'"),
+                "Expected the opaque foreign test document.",
+            )
+            transfer(foreign, handoff, expected=403, copied=ticket)
+            foreign.close()
+
+            # The right account origin can transfer a copied token, but the
+            # confirmation is authorized by the real workspace bootstrap only.
+            bootstrap_page(second, workspace, account)
+            wait_state(second, "ready")
+            other_app, other_account = cookies(other, origins)
+            require(
+                other_app != app, "The second browser did not get a distinct bootstrap."
+            )
+            transfer(second, handoff, expected=200, copied=ticket)
+            click_confirm(second, confirm, 403)
+            require(
+                cookies(other, origins) == (other_app, other_account)
+                and fixture.native.pairs == 0,
+                "The wrong browser attempted native issuance.",
+            )
+
+            confirmed = click_confirm(page, confirm, 204)
+            page.wait_for_url(landing)
+            page.get_by_role("heading", name="Disposable workspace admitted").wait_for()
+            _, _, app_token = cookies(context, origins, admitted=True)
+            check_native_boundary(fixture, app_token, confirmed)
+            response_status = page.evaluate(
+                """({url, ticket}) => fetch(url, {
+              method: "POST", mode: "same-origin", credentials: "same-origin",
+              headers: {"Content-Type": "text/plain"}, body: ticket,
+            }).then(response => response.status)""",
+                {"url": confirm, "ticket": ticket},
+            )
+            require(
+                response_status == 403 and fixture.native.pairs == 1,
+                "Confirmation replay was accepted.",
+            )
+
+            bootstrap_page(second, workspace, account)
+            wait_state(second, "ready")
+            transfer(second, handoff, expected=403, copied=ticket)
+            bootstrap_page(second, workspace, account)
+            wait_state(second, "ready")
+            submit(second, wrong=False)
+            expired = fixture.take_ticket()
+            transfer(second, handoff, expected=200)
+            # Advance only the server-side handoff clock after the actual TLS
+            # receiver accepted the fresh PAKE ticket. No real-time wait.
+            with patch.object(web_handoff, "monotonic", new=lambda: monotonic() + 31):
+                click_confirm(second, confirm, 403)
+                bootstrap_page(second, workspace, account)
+                wait_state(second, "ready")
+                transfer(second, handoff, expected=403, copied=expired)
+            require(
+                fixture.native.pairs == 1
+                and fixture.traffic
+                == [
+                    ("/start", 200),
+                    ("/start", 200),
+                    ("/finish", 200),
+                    ("/start", 200),
+                    ("/finish", 200),
+                ],
+                "Wrong, replayed or expired input opened extra native work.",
+            )
             require(
                 not unexpected,
                 "The browser requested a URL outside the exact fixture routes.",
             )
             print(
-                "PASS no form fallback; wrong password sent no proof; real ticket was bound and single-use",
+                "PASS no form fallback; real PAKE, document handoff and same-origin confirmation",
+                flush=True,
+            )
+            print(
+                "PASS foreign, wrong-browser, replay and expired refusals; native cookie stayed private",
                 flush=True,
             )
     finally:
         browser.close()
 
 
-def exercise(root, chrome, build_dir):
+def exercise(root, chrome, build_dir, native_binary):
     research = runpy.run_path(str(RESEARCH / "check_browser"))
     pinned = research["pinned"]
     with chrome.open("rb") as stream:
@@ -628,6 +857,10 @@ def exercise(root, chrome, build_dir):
             (PAGE / "sign-in.mjs").read_bytes(),
         ),
         ASSETS + "sign-in.css": ("text/css", (PAGE / "sign-in.css").read_bytes()),
+        ASSETS + "transfer.mjs": (
+            "text/javascript",
+            (ROOT / "src/oc_box/web_named_handoff_client.mjs").read_bytes(),
+        ),
         ASSETS + "client.wasm": (
             "application/wasm",
             pinned(
@@ -644,6 +877,7 @@ def exercise(root, chrome, build_dir):
     ca, pairs = material(root, hosts)
     homes = browser_home(root, "untrusted"), browser_home(root, "trusted", ca)
     with ExitStack() as cleanup:
+        native = cleanup.enter_context(native_fixture(root, native_binary))
         servers = [cleanup.enter_context(FixtureServer(role)) for role in hosts]
         origins = web_local_origins.LocalOrigins(
             *(server.server_address[1] for server in servers)
@@ -675,20 +909,17 @@ def exercise(root, chrome, build_dir):
             sizes=backend.sizes,
             auth_origin=origins.account.value,
         )
-        native_calls = []
-
-        def forbid_native(*_):
-            native_calls.append(True)
-            raise RuntimeError("Fixture does not permit native issuance.")
-
+        owner_current, pair_native = native.bind(binding, origins.workspace)
         sign_in = web_named_local.LocalNamedSignIn(
             origins=origins,
             binding=binding,
             flow=flow,
-            owner_current=lambda actual: actual == binding,
-            pair_native=forbid_native,
+            owner_current=owner_current,
+            pair_native=pair_native,
         )
-        fixture = Composition(origins, binding, bootstrap, sign_in, assets)
+        fixture = Composition(
+            origins, binding, bootstrap, sign_in, assets, native, owner_current
+        )
         try:
             with ExitStack() as listeners:
                 for server in servers:
@@ -700,7 +931,7 @@ def exercise(root, chrome, build_dir):
                         pw, chrome, homes, hosts.values(), fixture, research["PRODUCT"]
                     )
                 require(
-                    not native_calls and len(backend._worker._active) == 1,
+                    native.pairs == 1 and len(backend._worker._active) == 1,
                     "Unexpected native issuance or retained verifier count.",
                 )
         finally:
@@ -715,6 +946,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--chromium", type=Path, required=True)
     parser.add_argument("--build-dir", type=Path, required=True)
+    parser.add_argument(
+        "--opencode", type=Path, required=True, help="already-reviewed OpenCode 2.3.2"
+    )
     args = parser.parse_args()
     loopback_namespace()
     os.umask(0o077)
@@ -724,14 +958,25 @@ def main():
                 Path(directory),
                 args.chromium.resolve(strict=True),
                 args.build_dir.resolve(strict=True),
+                args.opencode.resolve(strict=True),
             )
-        except BrowserError:
-            raise RuntimeError("Chromium fixture failed or timed out.") from None
+        except BrowserError as error:
+            location = next(
+                (
+                    f"{frame.name}:{frame.lineno}"
+                    for frame in reversed(extract_tb(error.__traceback__))
+                    if frame.filename == __file__
+                ),
+                "browser",
+            )
+            raise RuntimeError(
+                f"Chromium fixture failed or timed out at {location}."
+            ) from None
     print(
-        "PASS Chromium 159 real TLS and PAKE; workers drained; private NSS homes removed"
+        "PASS Chromium 159 real TLS, PAKE, handoff and private native pairing; temporary homes removed"
     )
     print(
-        "Synthetic record only. No enrollment, native issuance, Studio admission, or deployment evidence."
+        "Synthetic account and owner bridge only. No enrollment, live owner, Studio relay or deployment evidence."
     )
 
 
