@@ -785,7 +785,8 @@ Native Home and the shell's direct native fallback links remain available;
 those separate direct views do not load this addon.
 The addon uses only the existing loopback relay and native pairing/authentication.
 The adapter is available only on native releases with verified browser draft
-and no-automatic-Send behavior. An unverified composer, failed browser
+and no-automatic-Send behavior: 2.2.6, 2.2.7, 2.3.0, 2.3.2, and 2.4.1.
+An unverified composer, failed browser
 authentication, or unavailable native service is reported explicitly. Omit
 the option for the common shell with no attachment addon, or use the native
 TUI's host import on a supported terminal.

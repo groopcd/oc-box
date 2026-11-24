@@ -431,6 +431,9 @@ check with draft semantics. Test an unlisted release by adding it in a
 disposable source copy for the synthetic fixture before changing launcher
 support. This is not a physical Spectacle drag, installed browser profile,
 or live Podman acceptance test.
+Native 2.4.0 passed the HTTP fixture with candidate eligibility enabled, but
+the Chromium fixture did not verify completed PDF staging. Its production
+refusal remains intentional; the HTTP result is not a composer pass.
 
 The common shell alone owns selection, tabstrip, metadata endpoints and its
 single native iframe; attachments use only its frozen v1 API, events and optional

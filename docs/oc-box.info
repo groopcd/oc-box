@@ -908,13 +908,13 @@ another target.  Native Home and the shell's direct native fallback
 links remain available; those separate direct views do not load this
 addon.  The addon uses only the existing loopback relay and native
 pairing/authentication.  The adapter is available only on native
-releases with verified browser draft and no-automatic-Send behavior.  An
-unverified composer, failed browser authentication, or unavailable
-native service is reported explicitly.  Omit the option for the common
-shell with no attachment addon, or use the native TUI's host import on a
-supported terminal.  Its fixed authenticated script is
-‘/auth/oc-box-attachments.js’; the earlier independent
-‘/auth/oc-box-attachments?session=...’ wrapper is retired.
+releases with verified browser draft and no-automatic-Send behavior:
+2.2.6, 2.2.7, 2.3.0, 2.3.2, and 2.4.1.  An unverified composer, failed
+browser authentication, or unavailable native service is reported
+explicitly.  Omit the option for the common shell with no attachment
+addon, or use the native TUI's host import on a supported terminal.  Its
+fixed authenticated script is ‘/auth/oc-box-attachments.js’; the earlier
+independent ‘/auth/oc-box-attachments?session=...’ wrapper is retired.
 
 Wait for the native composer to load, then drag the screenshot from
 Spectacle into it (or use the shell addon's drop area/file chooser).
@@ -5209,20 +5209,20 @@ Node: Name769
 Node: Synopsis930
 Node: Description5132
 Node: Commands10952
-Node: Options145129
-Node: Lifecycle and persistence209154
-Node: Distribution images211454
-Node: Sessions and recovery216531
-Node: Devices and host permissions223116
-Node: Resource reports225462
-Node: Configuration and environment227573
-Node: Files238954
-Node: Exit status249864
-Node: Examples251272
-Node: Troubleshooting253411
-Node: Installation and manuals265903
-Node: Authors and license276093
-Node: See also276700
+Node: Options145168
+Node: Lifecycle and persistence209193
+Node: Distribution images211493
+Node: Sessions and recovery216570
+Node: Devices and host permissions223155
+Node: Resource reports225501
+Node: Configuration and environment227612
+Node: Files238993
+Node: Exit status249903
+Node: Examples251311
+Node: Troubleshooting253450
+Node: Installation and manuals265942
+Node: Authors and license276132
+Node: See also276739
 
 End Tag Table
 
