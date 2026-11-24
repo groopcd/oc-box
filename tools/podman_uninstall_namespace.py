@@ -2,6 +2,7 @@
 
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
+from enum import Enum
 import fcntl
 import os
 from pathlib import Path
@@ -22,12 +23,39 @@ _NS_TYPE = 0xB703  # NS_GET_NSTYPE
 _PID = re.compile(rb"[1-9][0-9]{0,8}")
 _NUMBER = re.compile(rb"(?:0|[1-9][0-9]{0,9})")
 _PAUSE_HELPERS = ("/usr/libexec/podman/catatonit", "/usr/bin/catatonit")
+_FEDORA_CATATONIT = "/usr/libexec/catatonit/catatonit"
+_CATATONIT_ARGV = b"catatonit\0-P\0"
 _TOTAL = 40
 _COMMAND = 5
 
 
 class ProofRefused(ValueError):
     pass
+
+
+class _PreflightReason(Enum):
+    PREREQUISITES = "prerequisites"
+    PAUSE_FILE_MISSING = "pause_file_missing"
+    PAUSE_FILE_REJECTED = "pause_file_rejected"
+    PROCESS_ACCESS = "process_access"
+    HELPER_IDENTITY = "helper_identity"
+    MAPPING_PROOF = "mapping_proof"
+
+
+class _PreflightRefused(ProofRefused):
+    def __init__(self, reason):
+        self.reason = reason
+        super().__init__(reason.value)
+
+
+@contextmanager
+def _preflight(reason):
+    try:
+        yield
+    except _PreflightRefused:
+        raise
+    except Exception:
+        raise _PreflightRefused(reason) from None
 
 
 def _require(condition):
@@ -96,14 +124,11 @@ def _mappings(raw, outside):
     return tuple(rows)
 
 
-def _pause_executable(engine, stack, proc, name):
-    observed = _identity(os.stat("exe", dir_fd=proc))
+def _pause_executable(engine, stack, name, argv, observed):
     if name == b"podman pause":
         _require(observed == engine.executable.stamp[:2])
         return engine.executable
-    _require(
-        name == b"catatonit" and _read_at(proc, "cmdline", 64) == b"catatonit\0-P\0"
-    )
+    _require(name == b"catatonit" and argv == _CATATONIT_ARGV)
     for path in _PAUSE_HELPERS:
         try:
             pin = engine.native._pin(stack, path, 0, owner=0, directory=False)
@@ -116,6 +141,40 @@ def _pause_executable(engine, stack, proc, name):
         ):
             return pin
     raise ProofRefused
+
+
+def _fedora_pause_executable(
+    engine, stack, marker, pid, proc, pidfd, process_stamp, argv, observed
+):
+    """Keep the one canonical Fedora pin for the existing guest anchor checks."""
+    _require(process_stamp[0] == b"catatonit" and argv == _CATATONIT_ARGV)
+
+    def unchanged_process():
+        engine.check()
+        marker.recheck()
+        _require(not _ready(pidfd, 0))
+        live = os.stat(f"/proc/{pid}", follow_symlinks=False)
+        _require(
+            live.st_uid == engine.uid and _identity(live) == _identity(os.fstat(proc))
+        )
+        _require(_process_stamp(_read_at(proc, "stat", 8192), pid) == process_stamp)
+        _require(_read_at(proc, "cmdline", 64) == _CATATONIT_ARGV)
+        _require(
+            _identity(os.stat("exe", dir_fd=proc)) == observed and not _ready(pidfd, 0)
+        )
+
+    unchanged_process()
+    pin = engine.native._pin(stack, _FEDORA_CATATONIT, 0, owner=0, directory=False)
+    _require(
+        pin.stamp[:2] == observed
+        and pin.stamp[4] & 0o111
+        and not pin.stamp[4] & 0o6000
+        and engine.native._read_pin(pin, 4) == b"\x7fELF"
+    )
+    pin.recheck()
+    unchanged_process()
+    pin.recheck()
+    return pin
 
 
 @dataclass(frozen=True)
@@ -150,6 +209,8 @@ class _Pause:
         _require(
             _identity(os.stat("exe", dir_fd=self.proc)) == self.executable.stamp[:2]
         )
+        if self.executable.path == _FEDORA_CATATONIT:
+            _require(_read_at(self.proc, "cmdline", 64) == _CATATONIT_ARGV)
         _require(_identity(os.stat("root", dir_fd=self.proc)) == self.root)
         for kind, fd in zip(("user", "mnt"), self.namespaces):
             _require(
@@ -166,65 +227,100 @@ class _Pause:
 
 @contextmanager
 def _pause_fence(engine):
-    _require(
-        hasattr(os, "setns")
-        and hasattr(os, "pidfd_open")
-        and os.execve in os.supports_fd
-        and os.getuid() == os.geteuid() == engine.uid > 0
-        and os.getgid() == os.getegid() > 0
-    )
-    expected_runtime = str(engine.root / "runtime")
-    _require(engine.environment.get("XDG_RUNTIME_DIR") == expected_runtime)
+    with _preflight(_PreflightReason.PREREQUISITES):
+        _require(
+            hasattr(os, "setns")
+            and hasattr(os, "pidfd_open")
+            and os.execve in os.supports_fd
+            and os.getuid() == os.geteuid() == engine.uid > 0
+            and os.getgid() == os.getegid() > 0
+        )
+        expected_runtime = str(engine.root / "runtime")
+        _require(engine.environment.get("XDG_RUNTIME_DIR") == expected_runtime)
     with ExitStack() as stack:
 
         def keep(fd):
             stack.callback(os.close, fd)
             return fd
 
-        marker = engine.native._pin(
-            stack,
-            expected_runtime + "/libpod/tmp/pause.pid",
-            engine.uid,
-            owner=engine.uid,
-            directory=False,
-        )
-        value = engine.native._read_pin(marker, 11)
-        _require(stat.S_IMODE(marker.stamp[4]) == 0o600 and _PID.fullmatch(value))
-        pid = int(value)
-        _require(pid > 1 and pid != os.getpid())
-        procfs = keep(os.open("/proc", _DIR))
-        proc = keep(os.open(str(pid), _DIR, dir_fd=procfs))
-        _require(os.fstat(proc).st_uid == engine.uid)
-        pidfd = keep(os.pidfd_open(pid, 0))
-        process_stamp = _process_stamp(_read_at(proc, "stat", 8192), pid)
-        executable = _pause_executable(engine, stack, proc, process_stamp[0])
-        ns_dir = keep(os.open("ns", _DIR, dir_fd=proc))
-        namespaces = []
-        for kind, flag in (("user", _USER), ("mnt", _MOUNT)):
-            # Only these two kernel proc namespace links may be followed.
-            fd = keep(os.open(kind, os.O_RDONLY | os.O_CLOEXEC, dir_fd=ns_dir))
-            _require(fcntl.ioctl(fd, _NS_TYPE) == flag)
-            _require(
-                _identity(os.fstat(fd)) != _identity(os.stat("/proc/self/ns/" + kind))
+        with _preflight(_PreflightReason.PAUSE_FILE_REJECTED):
+            try:
+                marker = engine.native._pin(
+                    stack,
+                    expected_runtime + "/libpod/tmp/pause.pid",
+                    engine.uid,
+                    owner=engine.uid,
+                    directory=False,
+                )
+            except FileNotFoundError:
+                raise _PreflightRefused(_PreflightReason.PAUSE_FILE_MISSING) from None
+            value = engine.native._read_pin(marker, 11)
+            _require(stat.S_IMODE(marker.stamp[4]) == 0o600 and _PID.fullmatch(value))
+            pid = int(value)
+            _require(pid > 1 and pid != os.getpid())
+        with _preflight(_PreflightReason.PROCESS_ACCESS):
+            procfs = keep(os.open("/proc", _DIR))
+            proc = keep(os.open(str(pid), _DIR, dir_fd=procfs))
+            _require(os.fstat(proc).st_uid == engine.uid)
+            pidfd = keep(os.pidfd_open(pid, 0))
+            process_stamp = _process_stamp(_read_at(proc, "stat", 8192), pid)
+            observed = _identity(os.stat("exe", dir_fd=proc))
+            argv = (
+                _read_at(proc, "cmdline", 64)
+                if process_stamp[0] == b"catatonit"
+                else None
             )
-            namespaces.append(fd)
-        gid = os.getegid()
-        anchor = _Pause(
-            pid,
-            marker,
-            executable,
-            proc,
-            pidfd,
-            ns_dir,
-            tuple(namespaces),
-            _identity(os.stat("root", dir_fd=proc)),
-            process_stamp,
-            engine.uid,
-            gid,
-            _mappings(_read_at(proc, "uid_map", 2048), engine.uid),
-            _mappings(_read_at(proc, "gid_map", 2048), gid),
-        )
-        anchor.check()
+        try:
+            executable = _pause_executable(
+                engine, stack, process_stamp[0], argv, observed
+            )
+        except (ProofRefused, engine.native.InventoryError):
+            # The packaged alias remains rejected. Try only the fixed actual
+            # Fedora file, without resolving an alias or relaxing any anchor
+            # or store checks below.
+            with _preflight(_PreflightReason.HELPER_IDENTITY):
+                executable = _fedora_pause_executable(
+                    engine,
+                    stack,
+                    marker,
+                    pid,
+                    proc,
+                    pidfd,
+                    process_stamp,
+                    argv,
+                    observed,
+                )
+        except Exception:
+            raise _PreflightRefused(_PreflightReason.HELPER_IDENTITY) from None
+        with _preflight(_PreflightReason.MAPPING_PROOF):
+            ns_dir = keep(os.open("ns", _DIR, dir_fd=proc))
+            namespaces = []
+            for kind, flag in (("user", _USER), ("mnt", _MOUNT)):
+                # Only these two kernel proc namespace links may be followed.
+                fd = keep(os.open(kind, os.O_RDONLY | os.O_CLOEXEC, dir_fd=ns_dir))
+                _require(fcntl.ioctl(fd, _NS_TYPE) == flag)
+                _require(
+                    _identity(os.fstat(fd))
+                    != _identity(os.stat("/proc/self/ns/" + kind))
+                )
+                namespaces.append(fd)
+            gid = os.getegid()
+            anchor = _Pause(
+                pid,
+                marker,
+                executable,
+                proc,
+                pidfd,
+                ns_dir,
+                tuple(namespaces),
+                _identity(os.stat("root", dir_fd=proc)),
+                process_stamp,
+                engine.uid,
+                gid,
+                _mappings(_read_at(proc, "uid_map", 2048), engine.uid),
+                _mappings(_read_at(proc, "gid_map", 2048), gid),
+            )
+            anchor.check()
         yield anchor
 
 
@@ -426,6 +522,7 @@ def probe(engine, snapshot, *, fence=_pause_fence, capture=_capture):
     """Add separate guest diagnostic facts; never replace the direct snapshot."""
     result = {
         "namespace_probe": "namespace_unavailable",
+        "namespace_preflight_reason": _PreflightReason.PREREQUISITES.value,
         "namespace_context_verified": False,
         "namespace_both_observed_unmounted": False,
     }
@@ -436,6 +533,7 @@ def probe(engine, snapshot, *, fence=_pause_fence, capture=_capture):
         deadline = min(engine.deadline, time.monotonic() + _TOTAL)
         with fence(engine) as anchor, ExitStack() as stack:
             result["namespace_probe"] = "namespace_unverified"
+            result.pop("namespace_preflight_reason")
             _require(anchor.uid == engine.uid and anchor.gid > 0)
             storage = (
                 *[item.writable for item in snapshot.containers],
@@ -510,6 +608,11 @@ def probe(engine, snapshot, *, fence=_pause_fence, capture=_capture):
             namespace_context_verified=True,
             namespace_both_observed_unmounted=not first,
         )
+    except _PreflightRefused as refusal:
+        if result["namespace_probe"] == "namespace_unavailable":
+            result["namespace_preflight_reason"] = refusal.reason.value
+            if refusal.reason is _PreflightReason.HELPER_IDENTITY:
+                result["fedora_helper_inode_matches"] = False
     except (Exception, KeyboardInterrupt):
         pass
     return result

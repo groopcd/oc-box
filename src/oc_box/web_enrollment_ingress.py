@@ -51,6 +51,7 @@ _BODY_SIZES = {
 }
 MAX_BODY_BYTES = max(_BODY_SIZES.values())
 _MAX_TARGET = max(map(len, _SHAPES))
+_MAX_REPLY_BYTES = 1024
 
 
 @dataclass(frozen=True, slots=True, repr=False)
@@ -76,6 +77,61 @@ class EnrollmentReply:
 
 
 _REFUSAL = EnrollmentReply(403, b'{"error":"Named enrollment refused."}')
+
+
+def write_enrollment_reply(stream, reply, deadline, *, check):
+    """Write one checked reply from an enrollment-only TLS worker.
+
+    The caller owns the verified account TLS stream and closes it after this
+    exchange. Do not retain callbacks or write another response on failure.
+    A successful 200 for ``PROOF_FINISH_PATH`` is only verified local
+    delivery; the host still authorizes and performs the store CAS separately.
+    """
+    if __package__:
+        from . import web_named_transport
+    else:
+        import web_named_transport
+    if type(reply) is not EnrollmentReply:
+        raise web_named_headers.NamedRequestError()
+    delivered = False
+    try:
+        if (
+            type(reply.status) is not int
+            or reply.status not in (200, 403)
+            or type(reply.body) is not bytes
+            or not 0 < len(reply.body) <= _MAX_REPLY_BYTES
+            or (reply.status == 403 and reply is not _REFUSAL)
+            or (
+                reply.status == 200
+                and (not callable(reply._write_check) or not callable(reply._abort))
+            )
+            or not callable(check)
+        ):
+            raise web_named_headers.NamedRequestError()
+
+        def current():
+            web_enrollment._checkpoint(check, deadline)
+            reply.check_write()
+            web_enrollment._checkpoint(check, deadline)
+
+        web_named_transport._write_response(
+            stream,
+            web_named_transport.NamedResponse(reply.status, reply.body),
+            deadline,
+            check=current,
+        )
+        delivered = True
+        return reply.status
+    except Exception:
+        raise web_named_headers.NamedRequestError() from None
+    finally:
+        if not delivered:
+            try:
+                reply.abort_write()
+            except Exception:
+                # Never return a successful verdict or a second HTTP frame.
+                # The approval owns the sticky teardown fence.
+                raise web_named_headers.NamedRequestError() from None
 
 
 def _inputs(target, body):

@@ -498,7 +498,14 @@ class NamespaceProbeTests(unittest.TestCase):
             yield store, baseline
 
     def conduct(
-        self, store, baseline, *, mounts=(b"[]", b"[]"), fault=None, changed_exit=False
+        self,
+        store,
+        baseline,
+        *,
+        mounts=(b"[]", b"[]"),
+        fault=None,
+        changed_exit=False,
+        fedora=False,
     ):
         commands = []
         anchor = SimpleNamespace(uid=_UID, gid=4711, check=Mock())
@@ -512,7 +519,14 @@ class NamespaceProbeTests(unittest.TestCase):
                 raise OSError("PRIVATE_FENCE_CLOSE")
 
         def capture(actual_anchor, binary, argv, environment, pins, deadline, limit):
-            self.assertIs(actual_anchor, anchor)
+            if fedora:
+                self.assertIsInstance(actual_anchor, namespace._Pause)
+                self.assertEqual(
+                    actual_anchor.executable.path, namespace._FEDORA_CATATONIT
+                )
+                self.assertEqual(actual_anchor.namespaces, (74, 75))
+            else:
+                self.assertIs(actual_anchor, anchor)
             self.assertIs(binary, store.executable)
             self.assertEqual(argv[: len(store.engine.prefix)], store.engine.prefix)
             self.assertEqual(
@@ -521,7 +535,7 @@ class NamespaceProbeTests(unittest.TestCase):
                     **store.engine.environment,
                     "_CONTAINERS_USERNS_CONFIGURED": "done",
                     "_CONTAINERS_ROOTLESS_UID": str(_UID),
-                    "_CONTAINERS_ROOTLESS_GID": "4711",
+                    "_CONTAINERS_ROOTLESS_GID": str(_UID) if fedora else "4711",
                 },
             )
             self.assertEqual(len(pins), len(store.engine.pins) + 3)
@@ -541,8 +555,282 @@ class NamespaceProbeTests(unittest.TestCase):
             self.assertEqual(code, 0)
             return out
 
-        report = namespace.probe(store.engine, baseline, fence=fenced, capture=capture)
+        report = namespace.probe(
+            store.engine,
+            baseline,
+            fence=namespace._pause_fence if fedora else fenced,
+            capture=capture,
+        )
         return report, commands, anchor
+
+    @contextmanager
+    def pause_window(self, store, *, failure=None, canonical_inode=83):
+        uid, pid = _UID, 1234
+        runtime = str(store.root / "runtime")
+        marker_path = runtime + "/libpod/tmp/pause.pid"
+        marker = SimpleNamespace(stamp=(10, 81, 7, uid, 0o100600), recheck=Mock())
+        canonical = SimpleNamespace(
+            path=namespace._FEDORA_CATATONIT,
+            stamp=(10, canonical_inode, 7, 0, 0o100755),
+            recheck=Mock(),
+        )
+        requested = []
+        cmdline_reads = 0
+
+        def pin(_stack, path, selected_uid, *, owner, directory):
+            requested.append(path)
+            if directory:
+                self.assertEqual((selected_uid, owner), (uid, uid))
+                self.assertTrue(path.startswith(str(store.root / "graph") + "/"))
+                return FixturePin(path)
+            if path == marker_path:
+                self.assertEqual((selected_uid, owner), (uid, uid))
+                if failure == "pause_file_missing":
+                    raise FileNotFoundError("PRIVATE_PAUSE")
+                if failure == "pause_alias":
+                    raise native.InventoryError("path-unverified")
+                return marker
+            self.assertEqual((selected_uid, owner), (0, 0))
+            if path == namespace._PAUSE_HELPERS[0]:
+                if failure == "mapping_proof":
+                    return canonical
+                raise native.InventoryError("path-unverified")
+            self.assertEqual(path, "/usr/libexec/catatonit/catatonit")
+            if failure == "canonical_alias":
+                raise native.InventoryError("path-unverified")
+            return canonical
+
+        def open_entry(path, *_flags, **_options):
+            if path == "ns" and failure == "mapping_proof":
+                raise PermissionError("PRIVATE_NAMESPACE")
+            return {"/proc": 70, str(pid): 71, "ns": 73, "user": 74, "mnt": 75}[path]
+
+        def metadata(path, **_options):
+            if path == "exe":
+                if failure == "process_access":
+                    raise PermissionError("PRIVATE_EXE")
+                return SimpleNamespace(st_dev=10, st_ino=83)
+            inode = {
+                f"/proc/{pid}": 82,
+                "root": 85,
+                "user": 74,
+                "mnt": 75,
+                "/proc/self/ns/user": 100,
+                "/proc/self/ns/mnt": 101,
+            }[path]
+            return SimpleNamespace(st_dev=10, st_ino=inode, st_uid=uid)
+
+        def read_at(fd, name, limit):
+            nonlocal cmdline_reads
+            self.assertEqual(fd, 71)
+            self.assertIn(limit, (64, 2048, 8192))
+            if name == "stat":
+                return b"1234 (catatonit) S " + b"0 " * 18 + b"42 0\n"
+            if name in ("uid_map", "gid_map"):
+                outside = uid + int(failure == "fedora_mapping_proof")
+                return f"0 {outside} 1\n".encode()
+            self.assertEqual(name, "cmdline")
+            cmdline_reads += 1
+            return (
+                b"catatonit\0-P\0extra\0"
+                if failure == "wrong_helper_argv"
+                or (failure == "argv_drift" and cmdline_reads >= 4)
+                else b"catatonit\0-P\0"
+            )
+
+        with (
+            patch.object(store.engine, "environment", {"XDG_RUNTIME_DIR": runtime}),
+            patch.object(native, "_pin", side_effect=pin),
+            patch.object(
+                native,
+                "_read_pin",
+                side_effect=lambda pin, _: (
+                    (b"01234" if failure == "pause_file_rejected" else b"1234")
+                    if pin is marker
+                    else (b"NOPE" if failure == "not_elf" else b"\x7fELF")
+                ),
+            ),
+            patch.object(namespace.os, "setns", create=True) as enter,
+            patch.object(namespace.os, "supports_fd", {namespace.os.execve}),
+            patch.object(namespace.os, "getuid", return_value=uid),
+            patch.object(
+                namespace.os, "geteuid", return_value=uid + (failure == "prerequisites")
+            ),
+            patch.object(namespace.os, "getgid", return_value=uid),
+            patch.object(namespace.os, "getegid", return_value=uid),
+            patch.object(namespace.os, "open", side_effect=open_entry),
+            patch.object(namespace.os, "close"),
+            patch.object(namespace.os, "stat", side_effect=metadata),
+            patch.object(
+                namespace.os,
+                "fstat",
+                side_effect=lambda fd: SimpleNamespace(
+                    st_dev=10, st_ino=82 if fd == 71 else fd, st_uid=uid
+                ),
+            ),
+            patch.object(
+                namespace.fcntl,
+                "ioctl",
+                side_effect=lambda fd, _: {74: namespace._USER, 75: namespace._MOUNT}[
+                    fd
+                ],
+            ),
+            patch.object(namespace.os, "pidfd_open", return_value=72),
+            patch.object(namespace.os, "getpid", return_value=99),
+            patch.object(namespace, "_ready", return_value=failure == "pause_gone"),
+            patch.object(namespace, "_read_at", side_effect=read_at),
+        ):
+            yield requested
+            enter.assert_not_called()
+
+    def test_preflight_names_are_closed_and_never_dispatch(self):
+        with self.fixture() as (store, baseline):
+            for failure in (
+                "prerequisites",
+                "pause_file_missing",
+                "pause_file_rejected",
+                "pause_alias",
+                "process_access",
+                "mapping_proof",
+            ):
+                with (
+                    self.subTest(failure=failure),
+                    self.pause_window(store, failure=failure) as requested,
+                ):
+                    capture = Mock()
+                    result = namespace.probe(store.engine, baseline, capture=capture)
+                    expected = (
+                        "pause_file_rejected" if failure == "pause_alias" else failure
+                    )
+                    self.assertEqual(
+                        result,
+                        {
+                            "namespace_probe": "namespace_unavailable",
+                            "namespace_preflight_reason": expected,
+                            "namespace_context_verified": False,
+                            "namespace_both_observed_unmounted": False,
+                        },
+                    )
+                    self.assertNotIn("/usr/libexec/catatonit/catatonit", requested)
+                    capture.assert_not_called()
+
+    def test_wrong_helper_arguments_never_open_fedora_candidate(self):
+        with (
+            self.fixture() as (store, baseline),
+            self.pause_window(store, failure="wrong_helper_argv") as requested,
+        ):
+            capture = Mock()
+            result = namespace.probe(store.engine, baseline, capture=capture)
+            self.assertEqual(result["namespace_preflight_reason"], "helper_identity")
+            self.assertIs(result["fedora_helper_inode_matches"], False)
+            self.assertEqual(len(requested), 1)
+            capture.assert_not_called()
+
+    def test_unverified_fedora_executable_never_dispatches(self):
+        with self.fixture() as (store, baseline):
+            for failure, inode in (
+                ("wrong_inode", 99),
+                ("canonical_alias", 83),
+                ("not_elf", 83),
+                ("pause_gone", 83),
+            ):
+                with (
+                    self.subTest(failure=failure),
+                    self.pause_window(
+                        store, failure=failure, canonical_inode=inode
+                    ) as requested,
+                ):
+                    capture = Mock()
+                    result = namespace.probe(store.engine, baseline, capture=capture)
+                    self.assertEqual(
+                        result,
+                        {
+                            "namespace_probe": "namespace_unavailable",
+                            "namespace_preflight_reason": "helper_identity",
+                            "fedora_helper_inode_matches": False,
+                            "namespace_context_verified": False,
+                            "namespace_both_observed_unmounted": False,
+                        },
+                    )
+                    self.assertEqual(
+                        requested[1:],
+                        ["/usr/libexec/podman/catatonit"]
+                        + (
+                            []
+                            if failure == "pause_gone"
+                            else ["/usr/libexec/catatonit/catatonit"]
+                        ),
+                    )
+                    capture.assert_not_called()
+
+    def test_verified_fedora_pin_uses_existing_namespace_and_store_checks(self):
+        with self.fixture() as (store, baseline), self.pause_window(store) as requested:
+            original = guest._report(baseline, _IDS, (True, True))
+            observed, commands, _ = self.conduct(store, baseline, fedora=True)
+            self.assertEqual(
+                observed,
+                {
+                    "namespace_probe": "namespace_observed",
+                    "namespace_context_verified": True,
+                    "namespace_both_observed_unmounted": True,
+                },
+            )
+            self.assertEqual(
+                requested[1:3],
+                [
+                    "/usr/libexec/podman/catatonit",
+                    "/usr/libexec/catatonit/catatonit",
+                ],
+            )
+            self.assertEqual(commands.count(native._MOUNT_LIST), 2)
+            self.assertEqual(commands.count(native._INFO), 2)
+            self.assertEqual(
+                {**original, **observed}["result"], "descriptor_incomplete"
+            )
+            self.assertFalse(original["populated_planner_admission"])
+            with patch.object(
+                store.engine, "scan", return_value=replace(baseline, volumes=())
+            ):
+                drifting, _, _ = self.conduct(store, baseline, fedora=True)
+            self.assertEqual(drifting["namespace_probe"], "namespace_unverified")
+            self.assertFalse(drifting["namespace_context_verified"])
+            self.assertFalse(drifting["namespace_both_observed_unmounted"])
+
+    def test_matching_fedora_helper_cannot_bypass_mapping_or_process_recheck(self):
+        with self.fixture() as (store, baseline):
+            for failure in ("fedora_mapping_proof", "argv_drift"):
+                with (
+                    self.subTest(failure=failure),
+                    self.pause_window(store, failure=failure) as requested,
+                ):
+                    capture = Mock()
+                    result = namespace.probe(store.engine, baseline, capture=capture)
+                    self.assertIn("/usr/libexec/catatonit/catatonit", requested)
+                    self.assertEqual(
+                        result["namespace_preflight_reason"], "mapping_proof"
+                    )
+                    self.assertNotIn("fedora_helper_inode_matches", result)
+                    self.assertFalse(result["namespace_context_verified"])
+                    capture.assert_not_called()
+
+    def test_loader_refusal_is_distinct_from_unadmitted_baseline(self):
+        with patch.object(
+            guest, "_descriptor", side_effect=PermissionError("PRIVATE_PROBE")
+        ) as load:
+            baseline = guest._namespace_facts(None, None, "adapter_incomplete")
+            load.assert_not_called()
+            loader = guest._namespace_facts(None, None, "descriptor_incomplete")
+        self.assertEqual(baseline["namespace_probe"], "baseline_unverified")
+        self.assertNotIn("namespace_preflight_reason", baseline)
+        self.assertEqual(
+            loader,
+            {
+                "namespace_probe": "namespace_unavailable",
+                "namespace_preflight_reason": "loader",
+                "namespace_context_verified": False,
+                "namespace_both_observed_unmounted": False,
+            },
+        )
 
     def test_namespace_observation_is_separate_and_rechecks_full_scope(self):
         with self.fixture() as (store, baseline):

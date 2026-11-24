@@ -1,0 +1,280 @@
+#!/usr/bin/python3 -I
+# SPDX-License-Identifier: GPL-3.0-or-later
+"""Synthetic Chromium/OCOR/OCOP enrollment via a disconnected CDP pipe."""
+
+import argparse
+import base64
+import hashlib
+import json
+import runpy
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from time import monotonic
+
+HERE = Path(__file__).resolve().parent
+CDP = runpy.run_path(str(HERE / "check_browser"))
+from oc_box import (  # noqa: E402
+    web_accounts, web_admission, web_bootstrap, web_enrollment, web_enrollment_ingress,
+    web_local_origins, web_pake_profile, web_registration_worker,
+)
+
+require, pinned, b64 = (CDP[name] for name in ("require", "pinned", "b64"))
+REGISTRATION_SHA = "e42ddb75cac3335cbc9c6e9efd32907c6071f433e696ebf3384e3661191e38d2"
+START, PROVE, FINISH = (
+    web_enrollment_ingress.START_PATH,
+    web_enrollment_ingress.PROOF_START_PATH,
+    web_enrollment_ingress.PROOF_FINISH_PATH,
+)
+SHAPES = {
+    START: (("request", 32),),
+    PROVE: (("challenge", None), ("registration", 192), ("ke1", 96)),
+    FINISH: (("challenge", None), ("ke3", 64)),
+}
+P1, P2, P3 = (START, 200), (PROVE, 200), (FINISH, 200)
+
+# (case, expected POST/status, open/read/register/prove calls, discard, outcome)
+CASES = (
+    ("valid", (P1, P2, P3), (1, 1, 1, 1), [True], True),
+    ("different-account", (P1, P2), (1, 1, 1, 1), [True], False),
+    ("changed-verifier", (P1, P2), (1, 1, 1, 1), [True], False),
+    ("changed-context", (P1, P2), (1, 1, 1, 0), [True], False),
+    ("changed-ke2", (P1, P2), (1, 1, 1, 1), [True], False),
+    ("corrupt-response", (P1,), (1, 1, 1, 0), [True], False),
+    ("tampered-proof", (P1, P2, (FINISH, 403)), (1, 1, 1, 1), [True], False),
+    ("foreign-cookie", ((START, 403),), (1, 1, 0, 0), [True], False),
+    ("abort-start", (P1,), (1, 1, 0, 0), [True], False),
+    ("abort-proof", (P1, P2), (1, 1, 1, 0), [True], False),
+    ("abort-final", (P1, P2, P3), (1, 1, 1, 1), [True], False),
+    ("pre-aborted", (), (0, 0, 0, 0), [], False),
+    ("entropy-trap", (), (1, 1, 0, 0), [False], False),
+    ("oversized", (), (1, 1, 0, 0), [True], False),
+    ("login-module", (), (1, 0, 0, 0), [True], False),
+)
+
+
+def canonical(value):
+    return json.dumps(value, separators=(",", ":"), ensure_ascii=True).encode("ascii")
+
+
+class EnrollmentRoute:
+    def __init__(self, *, origin, nonce, ingress, assets, mode, size):
+        self.origin, self.nonce, self.ingress = origin, nonce, ingress
+        self.assets, self.mode, self.size = assets, mode, size
+        self.challenge = None
+        self.calls = []
+
+    def wire(self, request, path):
+        try:
+            body = request["postData"].encode("ascii")
+            require(len(body) <= web_enrollment_ingress.MAX_BODY_BYTES, "browser request bound")
+            value = json.loads(body)
+            shape = SHAPES[path]
+            require(tuple(value) == tuple(key for key, _ in shape) and body == canonical(value),
+                    "unexpected enrollment wire fields")
+            # Only a synthetic alphabet vector. Check raw JSON and all decoded
+            # messages; secret/password substitution is not a request option.
+            vector = bytes(65 + (index % 26) for index in range(min(self.size, 37)))
+            require(vector not in body and base64.b64encode(vector) not in body,
+                    "local test vector appeared in browser JSON")
+            for key, width in shape:
+                if width is None:
+                    require(value[key] == self.challenge, "original challenge not echoed")
+                else:
+                    wire = base64.b64decode(value[key], validate=True)
+                    require(len(wire) == width and b64(wire) == value[key] and vector not in wire,
+                            "noncanonical message or test vector on wire")
+            fields = {key.lower(): value for key, value in request["headers"].items()}
+            require(fields.get("content-type") == "application/json" and
+                    fields.get("origin") == self.origin, "unexpected browser origin or type")
+            for key, expected in (("sec-fetch-site", "same-origin"),
+                                  ("sec-fetch-mode", "same-origin"), ("sec-fetch-dest", "empty")):
+                require(fields.get(key, expected) == expected, "conflicting browser Fetch Metadata")
+            return body, fields
+        except Exception:
+            raise RuntimeError("browser enrollment wire refused") from None
+
+    def post(self, api, session, event, path):
+        raw, fields = self.wire(event["request"], path)
+        nonce = "Z" * 42 + "E" if self.mode == "foreign-cookie" else self.nonce
+        # CDP does not create a TLS connection. Bind the real approval to
+        # synthetic SNI/Host/cookie/framing metadata and the observed Origin.
+        reply = self.ingress(
+            method="POST", target=path, actual_tls=True, body=raw,
+            deadline=monotonic() + 5, check=lambda: None,
+            headers=(
+                ("Host", self.origin.removeprefix("https://")),
+                ("Origin", fields["origin"]), ("Content-Type", fields["content-type"]),
+                ("Cookie", "__Host-ocbox-account=" + nonce),
+                ("Content-Length", str(len(raw))),
+                ("Sec-Fetch-Site", "same-origin"), ("Sec-Fetch-Mode", "same-origin"),
+                ("Sec-Fetch-Dest", "empty"),
+            ),
+        )
+        self.calls.append((path, reply.status))
+        if (self.mode, path) in (("abort-start", START), ("abort-proof", PROVE), ("abort-final", FINISH)):
+            require(reply.status == 200, "abort case did not reach coordinator")
+            reply.abort_write()
+            api.send("Runtime.evaluate", {"expression": "cancelEnrollmentFixture()"}, session)
+            return None
+        body = reply.body
+        if reply.status == 200:
+            result = json.loads(body)
+            if path == START:
+                self.challenge = result["challenge"]
+            if self.mode == "corrupt-response" and path == START:
+                result["response"] = b64(b"\xff" * 64)
+            if self.mode in ("changed-context", "changed-ke2") and path == PROVE:
+                key = "context" if self.mode == "changed-context" else "ke2"
+                binary = bytearray(base64.b64decode(result[key], validate=True))
+                binary[-1] ^= 1
+                result[key] = b64(binary)
+            body = canonical(result)
+        return reply, body
+
+    def __call__(self, api, session, event):
+        request = event["request"]
+        method, url = request["method"], request["url"]
+        require(url.startswith(self.origin + "/"), "foreign enrollment URL")
+        path = url[len(self.origin):]
+        reply = None
+        if method == "GET":
+            require(path in self.assets and "postData" not in request, "unexpected enrollment asset")
+            content_type, body = self.assets[path]
+            headers = [("Cache-Control", "no-store"), ("Content-Type", content_type)]
+            if path == "/fixture":
+                headers.append(("Content-Security-Policy", CDP["CSP"]))
+            status = 200
+        else:
+            require(method == "POST" and path in SHAPES, "unexpected enrollment route")
+            result = self.post(api, session, event, path)
+            if result is None:
+                return
+            reply, body = result
+            status = reply.status
+            headers = [(key, value) for key, value in reply.headers if key != "Content-Length"]
+        headers.append(("Content-Length", str(len(body))))
+        try:
+            if reply is not None:
+                reply.check_write()
+            api.send("Fetch.fulfillRequest", {
+                "requestId": event["requestId"], "responseCode": status, "body": b64(body),
+                "responseHeaders": [{"name": key, "value": value} for key, value in headers],
+            }, session)
+            if reply is not None:
+                reply.check_write()
+        except BaseException:
+            if reply is not None:
+                reply.abort_write()
+            raise
+
+
+def run_case(api, worker_fd, registration_fd, assets, case, size=37):
+    mode, traffic, counts, cleanup, verified = case
+    origins = web_local_origins.LocalOrigins(9443, 9444) if size == 37 else (
+        web_local_origins.LocalOrigins(9741, 9742))
+    name = "synthetic-first" if size == 37 else "synthetic-second"
+    workspace = CDP["WORKSPACE"]
+    binding = web_admission.WebBinding(workspace, "synthetic-owner", origins.workspace.value)
+    bootstrap = web_bootstrap.BrowserBootstrap(origins=origins, binding=binding)
+    origin = origins.account.value
+    issued = bootstrap.issue(binding)
+    nonce = bootstrap.accept(binding, auth_origin=origin, ticket=issued.value)
+    claim = bootstrap.claim_enrollment(binding, auth_origin=origin, account_nonce=nonce)
+    require(claim is not None, "synthetic browser claim refused")
+    registrar = web_registration_worker.RegistrationWorker(
+        registration_fd, expected_sha256=bytes.fromhex(REGISTRATION_SHA))
+    profile = approval = None
+    try:
+        profile = web_pake_profile.LocalPakeProfile(
+            worker_fd, expected_sha256=bytes.fromhex(CDP["WORKER_SHA"]), origins=origins)
+        review = web_accounts.RegistrationReview(
+            Path("/synthetic/accounts"), (1, 2), (3, 4), name, (workspace,),
+            registrar.generate_setup(), False, bytes(32),
+        )
+        approval = web_enrollment.EnrollmentApproval(
+            review=review, origins=origins, claim=claim,
+            registration_worker=registrar, proof_profile=profile,
+        )
+        ingress = web_enrollment_ingress.EnrollmentIngress(origins=origins, approval=approval)
+        route = EnrollmentRoute(origin=origin, nonce=nonce, ingress=ingress,
+                                assets=assets, mode=mode, size=size)
+        config = json.dumps(dict(username=name, mode=mode, size=size, accountOrigin=origin,
+                                 workspaceOrigin=origins.workspace.value))
+        with CDP["browser_document"](api, route, origin) as session:
+            result = api.call("Runtime.evaluate", {
+                "expression": "(async () => { for (let i=0; i<100 && !globalThis.exerciseEnrollment; i++) "
+                              "await new Promise(r=>setTimeout(r,25)); "
+                              f"return exerciseEnrollment({config}); }})()",
+                "awaitPromise": True, "returnByValue": True,
+            }, session)
+            require("exceptionDetails" not in result, "Chromium enrollment fixture failed")
+            result = result["result"]["value"]
+            require(result["verified"] is verified and not result["reused"] and result["cleared"],
+                    "browser proof or cleanup mismatch")
+            require(tuple(result[key] for key in ("opens", "reads", "registers", "proofs")) == counts
+                    and result["cleanup"] == cleanup, "browser attempt lifetime mismatch")
+            expected_entropy = 1 if mode == "entropy-trap" else 0 if not counts[1] or mode == "oversized" else None
+            require(result["entropy"] > 0 if expected_entropy is None else result["entropy"] == expected_entropy,
+                    "unexpected entropy path")
+            require(tuple(route.calls) == traffic, "unexpected browser enrollment POSTs")
+            accepted = approval.take_for_host()
+            if verified:
+                require(accepted is not None and accepted.review is review and accepted.current()
+                        and len(accepted.registration) == 192 and approval.take_for_host() is None,
+                        "wrong host-only result")
+            else:
+                require(accepted is None, "refused browser flow yielded a host result")
+    finally:
+        bootstrap.close()
+        if approval is not None:
+            require(approval.close() and not approval.cleanup_failed, "unconfirmed enrollment teardown")
+        else:
+            profile_closed = profile is None or profile.close()
+            require(registrar.close() and profile_closed, "unconfirmed preparation teardown")
+    print(f"PASS {mode}, {size} bytes, {len(traffic)} protocol POST(s)", flush=True)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--enrollment-wasm", required=True, type=Path)
+    parser.add_argument("--enrollment-sha256", required=True, help="exact local research build digest")
+    parser.add_argument("--login-wasm", required=True, type=Path)
+    parser.add_argument("--native-build-dir", required=True, type=Path)
+    parser.add_argument("--chromium", required=True, type=Path)
+    args = parser.parse_args()
+    CDP["network_off"]()
+    wasm_path = args.enrollment_wasm.resolve(strict=True)
+    size = wasm_path.stat().st_size
+    require(0 < size <= 512 * 1024, "research enrollment WASM exceeds fixture limit")
+    wasm = pinned(wasm_path, size, args.enrollment_sha256)
+    old_login = pinned(args.login_wasm, 204_179, CDP["WASM_SHA"])
+    release = args.native_build_dir.resolve(strict=True) / "target/release"
+    worker = pinned(release / "ocop-worker", 524_480, CDP["WORKER_SHA"])
+    registrar = pinned(release / "ocor-registration", 460_408, REGISTRATION_SHA)
+    with args.chromium.open("rb") as stream:
+        require(hashlib.file_digest(stream, "sha256").hexdigest() == CDP["CHROME_SHA"],
+                "Chromium source identity mismatch")
+    assets = {
+        "/fixture": ("text/html", CDP["PAGE"]),
+        "/fixture.mjs": ("text/javascript", (HERE / "browser_enrollment_fixture.mjs").read_bytes()),
+        "/enrollment-client.mjs": ("text/javascript", (HERE / "browser_enrollment_client.mjs").read_bytes()),
+        "/enrollment-slot.mjs": ("text/javascript", (HERE / "browser_enrollment_slot.mjs").read_bytes()),
+        "/enrollment.wasm": ("application/wasm", wasm),
+        "/old-login.wasm": ("application/wasm", old_login),
+        "/favicon.ico": ("text/plain", b""),
+    }
+    with CDP["sealed"](worker) as worker_fd, CDP["sealed"](registrar) as registration_fd:
+        with TemporaryDirectory(prefix="ocor-browser-cdp-") as directory, CDP["chromium"](
+            args.chromium.resolve(strict=True), directory
+        ) as api:
+            product = api.call("Browser.getVersion")["product"]
+            require(product == CDP["PRODUCT"], "Chromium product mismatch")
+            print(product, flush=True)
+            for case in CASES:
+                run_case(api, worker_fd, registration_fd, assets, case)
+            run_case(api, worker_fd, registration_fd, assets, CASES[0], size=1024)
+    print("ALL PASS: approvals, workers and Chromium drained; temporary profile removed")
+
+
+if __name__ == "__main__":
+    main()

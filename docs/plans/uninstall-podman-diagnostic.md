@@ -31,8 +31,29 @@ and the distinct-descriptor negative control still passed. The runner
 confirmed guest shutdown, reaping, and removal of the writable disk, ISO
 and socket. Sanitized receipt SHA-256:
 `e4000ba2576207e898807b7a1f0073ade2cb52404ed79f8b3460a699a8f6143c`.
+
+On clean `0b9f99823977df26e2a3934ce205199be2f2f127`, a separate guest
+with the same RPM-pinned Podman observed the verified rootless namespace:
+`namespace_observed`, `namespace_context_verified=true`, and
+`namespace_both_observed_unmounted=true` for the two exact stopped synthetic
+containers. The direct descriptor result remained `descriptor_incomplete`
+and populated planner admission stayed false. Unmount, guest, and QEMU
+exits were zero; the guest was reaped and the disk, ISO, and QMP socket
+removed. Sanitized receipt SHA-256:
+`3e5e90f8a67cb9b42c9c97ac38f0a5c4bcda6406290264eded04abf9a1acc9e0`.
 None of these runs validates positive mounted/alias controls, normal-host
 compatibility, or uninstall.
+
+On clean `37487078a19331ec3ca66d97b2573b823d3bec3c`, a fresh Fedora 44/KVM
+run recorded `descriptor_incomplete`, with `namespace_unavailable`,
+`namespace_preflight_reason=helper_identity`, and
+`fedora_helper_inode_matches=true`. It did not establish an unmounted
+verdict, and populated planner admission stayed false. The runner verified
+guest reaping and removal of all disposable guest storage. Sanitized receipt
+SHA-256:
+`1a93ab00d39b8f5396a313583053487751bf1f1a51d80f1e1893d6122096e4e6`.
+The helper match on that source remained a refusal. It is not a native pass
+of the subsequent guest-only admission change.
 
 ## What the pinned source establishes
 
@@ -143,6 +164,15 @@ ELF or source-listed root-owned `catatonit -P`, the parent UID/GID mappings,
 and typed user/mount namespace descriptors. It neither creates nor signals
 the pause process and does not invoke `podman unshare`.
 
+The guest-only helper check now also admits the exact canonical Fedora
+`/usr/libexec/catatonit/catatonit` file. It opens that fixed path without
+following links and requires a root-owned executable ELF matching the
+observed executable device and inode. The pinned process, UID, start stamp,
+live pidfd, and exact `catatonit -P` arguments must agree before and after
+the pin. The packaged symlink is never used to resolve the target. The
+canonical pin remains part of the existing namespace and store proof; it
+does not bypass any recheck or execute `catatonit`.
+
 Each bounded child joins just those two descriptors before exec of the
 pinned Podman file descriptor. It verifies the entered namespaces, mapped
 IDs, root and no-follow configuration/storage identities. It supplies the
@@ -166,6 +196,29 @@ On an opted-in run the receipt adds `namespace_probe` (`baseline_unverified`,
 For example, the rootless probe may independently observe both unmounted
 while the direct fixture remains `descriptor_incomplete` with exit 1.
 These fields are diagnostic observations, never populated planner authority.
+
+For new receipts only, `namespace_unavailable` adds exactly one
+`namespace_preflight_reason` from this closed set:
+
+| Reason | Refusal point |
+| --- | --- |
+| `loader` | The trusted guest-side diagnostic helper could not be loaded or used. |
+| `prerequisites` | The frozen store, budget, identity, Python/kernel API or selected runtime preflight did not hold. |
+| `pause_file_missing` | The fixed private pause file was not found. |
+| `pause_file_rejected` | The pause file or its contents did not meet the existing no-follow, ownership, mode or PID checks. |
+| `process_access` | The pinned pause process or its required metadata could not be verified. |
+| `helper_identity` | The pause executable did not satisfy the existing helper check. |
+| `mapping_proof` | Namespace descriptors, UID/GID mappings or final anchor recheck did not agree. |
+
+Only `helper_identity` adds the boolean `fedora_helper_inode_matches`.
+On `3748707`, `true` corroborated the canonical Fedora helper's identity
+but did not admit it. With the new guest-only admission check, a verified
+match proceeds to the unchanged namespace and store checks and does not
+emit `helper_identity`. A helper refusal still emits
+`fedora_helper_inode_matches=false` and dispatches no namespace query.
+Neither field appears on `baseline_unverified`, `namespace_unverified`, or
+`namespace_observed`. The recorded `9dc7844` refusal predates this schema
+and is not attributed to any of these reasons.
 
 ## Result and interpretation
 

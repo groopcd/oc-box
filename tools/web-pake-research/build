@@ -106,8 +106,8 @@ def stage(cache, root, with_browser):
     return source, rust
 
 
-def build(cache, root, with_fixture, with_browser, with_registration):
-    source, rust = stage(cache, root, with_browser)
+def build(cache, root, with_fixture, with_browser, with_registration, with_browser_enrollment):
+    source, rust = stage(cache, root, with_browser or with_browser_enrollment)
     bins = source / "src/bin"
     profile = bins / "ocbox_profile"
     profile.mkdir(parents=True)
@@ -119,10 +119,19 @@ def build(cache, root, with_fixture, with_browser, with_registration):
         targets["ocop-fixture"] = "client_fixture.rs"
         if with_registration:
             targets["ocor-fixture"] = "registration_fixture.rs"
-    browser = "ocop-browser"
+    browser_targets = {}
+    if with_browser:
+        browser_targets["ocop-browser"] = (
+            "browser_login.rs", ("io_addr", "io_size", "login_start", "login_finish", "discard")
+        )
+    if with_browser_enrollment:
+        browser_targets["ocor-browser-enrollment"] = (
+            "browser_enrollment.rs",
+            ("io_addr", "io_size", "registration_start", "registration_finish", "proof_finish", "discard"),
+        )
     manifest = source / "Cargo.toml"
     with manifest.open("a", encoding="utf-8") as stream:
-        sources = {**targets, browser: "browser_login.rs"} if with_browser else targets
+        sources = {**targets, **{name: data[0] for name, data in browser_targets.items()}}
         for target, filename in sources.items():
             path = bins / filename
             shutil.copyfile(SOURCE / filename, path)
@@ -170,17 +179,17 @@ def build(cache, root, with_fixture, with_browser, with_registration):
     with (root / "native-tree.txt").open("xb") as graph:
         run(cargo, "tree", *native, "--target", HOST, "-e", "normal,build,features", stdout=graph)
     artifacts = [root / "target/release" / name for name in targets]
-    if with_browser:
+    if browser_targets:
         # The WASM target imports only the trusted entropy function; it must
         # not inherit the native OS RNG feature.
         wasm = (*config, "--features", "ristretto255,argon2", "--target", BROWSER)
-        exports = ("io_addr", "io_size", "login_start", "login_finish", "discard")
-        flags = [arg for name in exports for arg in ("-C", f"link-arg=--export={name}")]
-        run(cargo, "rustc", *wasm, "--release", "--bin", browser, "--",
-            "-C", "link-arg=--max-memory=67108864", *flags)
+        for browser, (_, exports) in browser_targets.items():
+            flags = [arg for name in exports for arg in ("-C", f"link-arg=--export={name}")]
+            run(cargo, "rustc", *wasm, "--release", "--bin", browser, "--",
+                "-C", "link-arg=--max-memory=67108864", *flags)
+            artifacts.append(root / "target" / BROWSER / "release" / f"{browser}.wasm")
         with (root / "wasm-tree.txt").open("xb") as graph:
             run(cargo, "tree", *wasm, "-e", "normal,build,features", stdout=graph)
-        artifacts.append(root / "target" / BROWSER / "release" / f"{browser}.wasm")
     if digest(source / "Cargo.lock") != LOCK:
         raise ValueError("Build changed the pinned lockfile.")
     for artifact in artifacts:
@@ -194,6 +203,9 @@ def main():
     parser.add_argument("--with-fixture", action="store_true", help="also build a test-only client")
     parser.add_argument("--with-browser", action="store_true", help="also build the research WASM slot")
     parser.add_argument(
+        "--with-browser-enrollment", action="store_true", help="also build the separate research enrollment WASM slot"
+    )
+    parser.add_argument(
         "--with-registration", action="store_true", help="also build the separate research registration helper"
     )
     args = parser.parse_args()
@@ -204,7 +216,10 @@ def main():
         parser.error("output must be outside the cache and checkout")
     os.umask(0o077)
     output.mkdir()
-    build(cache, output, args.with_fixture, args.with_browser, args.with_registration)
+    build(
+        cache, output, args.with_fixture, args.with_browser,
+        args.with_registration, args.with_browser_enrollment,
+    )
 
 
 if __name__ == "__main__":

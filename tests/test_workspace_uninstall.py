@@ -264,6 +264,16 @@ class WorkspaceReviewTest(WorkspaceFixture, unittest.TestCase):
         self.refused("unsafe-registry", source=source)
         source.assert_not_called()
 
+    def test_exact_registry_root_symlink_is_not_a_reviewed_selector(self):
+        path, _ = self.register()
+        before = path.read_bytes()
+        alias = self.root / "registry-alias"
+        alias.symlink_to(self.state, target_is_directory=True)
+        engine = Mock()
+        self.refused("unsafe-registry", selector=alias, source=engine)
+        engine.assert_not_called()
+        self.assertEqual(path.read_bytes(), before)
+
     def test_permission_and_same_device_mount_boundary_vetoes(self):
         path, _ = self.register()
         source = Mock()

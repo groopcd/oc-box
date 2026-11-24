@@ -751,7 +751,7 @@ def _namespace_facts(engine, snapshot, result):
             finally:
                 sys.modules.pop(name, None)
     except (Exception, KeyboardInterrupt):
-        return unavailable
+        return {**unavailable, "namespace_preflight_reason": "loader"}
 
 
 def _run_guest(permit, mounts, *, namespace_diagnostic=False):

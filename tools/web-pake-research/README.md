@@ -2,9 +2,9 @@
 
 This checkout-only candidate connects the existing Python `PakeWorker` and
 `LocalPakeProfile` to the real `opaque-ke` library over private pipes. The
-optional matching browser WASM slot is login-only; a separate helper
-implements technical registration primitives. None of these targets is
-installed, selected by the launcher or usable as a web sign-in command.
+matching browser login WASM remains separate from the optional enrollment
+WASM, and a native registration helper implements the server primitives.
+None is installed, selected by the launcher or usable as a web sign-in command.
 They do not provision TLS, read an account store, listen or require
 OpenCode/Podman. Neither the Python artifacts nor the flat installer use
 this directory.
@@ -162,6 +162,35 @@ over and must not allocate an unbounded view for the slot.
   refuses a proof without confirmed cleanup and fences the rest of that account
   document on uncertainty. None of this guarantees erasure of all copies.
 
+## Optional browser enrollment slot
+
+`browser_enrollment.rs` is a different WASM target from `browser_login.rs`.
+It uses the same pinned upstream OPAQUE suite and no fixture credentials or
+origins. It consumes one password from a private 1–1024-byte browser buffer
+and uses `ClientRegistration` for the upload, then a fresh `ClientLogin`
+for possession. It does not expose a session key, export key, client state
+or password. The two 32-byte identities supplied at registration finish
+remain the identities for that same slot's proof finish.
+
+The existing bounded 1024-byte shared I/O pattern and sole `entropy.fill`
+import are retained. The distinct enrollment ABI is:
+
+| Export | Fixed input to shared I/O | Success output |
+|---|---|---|
+| `registration_start(size)` | Password of `size` (1–1024) | Blinded request (32) |
+| `registration_finish()` | Response (64), client ID (32), verifier ID (32) | Upload (192), fresh KE1 (96) |
+| `proof_finish()` | KE2 (320), enrollment context (32) | KE3 (64), only after the library verifies the server proof |
+| `discard()` | None | Fixed cleanup status; the slot cannot reopen |
+
+`browser_enrollment_slot.mjs` accepts only an already reviewed module;
+it preflights the exact ABI before taking password bytes, uses WebCrypto
+with no fallback, wipes its input and shared output views, and does not
+re-enter a trapped instance. `browser_enrollment_client.mjs` uses the
+[exact unserved enroll envelopes](../../docs/plans/web-enrollment-stage.md#unserved-https-dispatch-contract).
+It takes the approved username from trusted configuration rather than
+request input. These sources do not select, load or distribute a module.
+There is no installed input form, app grant, login fallback or store write.
+
 ## Reproduce with existing inputs
 
 Run from the checkout root on x86-64 glibc Linux with Python 3.12+ (including
@@ -193,6 +222,38 @@ Pass `--with-browser` to each build to include `ocop-browser.wasm` under
 `target/wasm32-unknown-unknown/release/`. That target uses the pinned
 `wasm32-unknown-unknown` Rust standard-library archive and records its separate
 feature graph in `wasm-tree.txt`. It does not enable `rand/sys_rng`.
+
+Use `--with-browser-enrollment` instead to build the separate research
+`ocor-browser-enrollment.wasm` in that target directory, without rebuilding
+or changing the login WASM. Run `check_browser_enrollment` with the exact
+local enrollment digest, the existing pinned login artifact (a negative
+control), existing native OCOR/OCOP binaries, and the cached Chromium.
+It requires the same non-root, disconnected namespace as `check_browser`
+(only loopback, down), and uses no socket listener or certificate trust
+changes. Example with already-local artifacts:
+
+```sh
+research=tools/web-pake-research
+env -i PATH=/usr/bin:/bin timeout --kill-after=5s 115s \
+  unshare --user --map-root-user --net \
+  unshare --user --map-user=1000 --map-group=1000 \
+  /usr/bin/python3 -I -B "$research/check_browser_enrollment" \
+  --enrollment-wasm "$enrollment_wasm" --enrollment-sha256 "$local_enrollment_digest" \
+  --login-wasm "$existing_login_wasm" --native-build-dir "$existing_native_build" \
+  --chromium "$cached_chromium"
+```
+
+In the local research run, two relocated builds matched (204,853 bytes;
+SHA-256 `4aa52d08a3e2c9c0486e7d1f44b50fd80b68bda6d33e9ac3277aa9c85f86c4cd`).
+That hash identifies tested local bytes, not an installed asset pin.
+Chromium 159 passed 16 synthetic cases with real WASM, OCOR, OCOP and
+the unserved ingress. It covered correct enrollment/possession, false
+identity/context/proof, corrupt responses, foreign-cookie refusal, abort
+at all three stages, local limits and entropy failure, and refusal of the
+old login ABI before reading a password. It checked the exact observed
+protocol bodies, local cleanup and private subprocess/profile teardown.
+CDP supplied synthetic HTTPS/Host/cookie metadata; it did not test TLS,
+live host review or persistence, native pairing, or workspace admission.
 
 Pass `--with-registration` to include `target/release/ocor-registration`.
 Also passing `--with-fixture` adds a **separate** `ocor-fixture` synthetic
