@@ -7,6 +7,8 @@ import json
 import os
 from pathlib import Path
 import stat
+import subprocess
+import sys
 import tempfile
 import threading
 import unittest
@@ -453,8 +455,263 @@ class AccountSnapshotTests(StoreFixture):
             self.assertIs(snapshot.current(), False)
 
 
+class HeldRegistrationTests(StoreFixture):
+    """Real store framing, lock and file publication; synthetic envelopes."""
+
+    before = b"synthetic old ciphertext"
+    after = b"synthetic new ciphertext"
+
+    def setUp(self):
+        super().setUp()
+        self.write_fixture(self.before)
+        store = accounts.AccountStore(SETUP, ())
+        authentication = patch.object(accounts, "_open_envelope", return_value=store)
+        sealing = patch.object(accounts, "_seal", return_value=self.after)
+        self.authentication = authentication.start()
+        self.sealing = sealing.start()
+        self.addCleanup(authentication.stop)
+        self.addCleanup(sealing.stop)
+
+    def hold(self):
+        return accounts._hold_registration(
+            self.path, PHRASE, USERNAME, workspace_ids=(WORKSPACE,)
+        )
+
+    def commit(self, transaction, review, *, current=lambda: True):
+        transaction.commit(PHRASE, review, registration=REGISTRATION, current=current)
+
+    def competing_initializer(self, stage, *, excluded=True):
+        # Use the existing, unmodified writer API in a separate process that
+        # cannot inherit the locked descriptor. Existing-store refusal avoids
+        # invoking optional crypto if the contender did acquire the lock.
+        program = """
+import sys
+from pathlib import Path
+
+sys.path.insert(0, sys.argv[1])
+from oc_box import web_accounts
+
+web_accounts._LOCK_TIMEOUT = 0.035
+try:
+    web_accounts.initialize(
+        Path(sys.argv[2]), "synthetic competing phrase", setup=b"synthetic setup"
+    )
+except web_accounts.WebAccountsError as exc:
+    if str(exc) == "Web account storage is busy; retry later.":
+        sys.exit(10)
+    if str(exc) == (
+        "Web account store already exists; initialization will not overwrite it."
+    ):
+        sys.exit(11)
+    sys.exit(12)
+sys.exit(13)
+"""
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-I",
+                "-B",
+                "-c",
+                program,
+                str(Path(accounts.__file__).resolve().parents[1]),
+                str(self.path),
+            ],
+            env={"OC_BOX_CONTAINER": "0"},
+            cwd=self.root,
+            capture_output=True,
+            timeout=5,
+        )
+        self.assertEqual(result.returncode, 10 if excluded else 11, stage)
+        self.assertEqual((result.stdout, result.stderr), (b"", b""), stage)
+
+    def test_existing_writer_is_excluded_from_review_through_publication_postcheck(
+        self,
+    ):
+        stages = []
+        descriptors = set()
+        prior_check = accounts._unchanged
+
+        def recheck(path, directory, expected):
+            descriptors.add(directory)
+            prior_check(path, directory, expected)
+            if self.path.read_bytes() == self.after:
+                self.competing_initializer("published; doing postcheck")
+                stages.append("postcheck")
+
+        def at_authentication(_raw, _secret):
+            if not stages:
+                self.competing_initializer("authenticating original review")
+                stages.append("review")
+            return self.authentication.return_value
+
+        def guarded():
+            self.assertEqual(self.path.read_bytes(), self.before)
+            self.assertEqual(len(list(self.directory.glob(".web-accounts-*.tmp"))), 1)
+            self.competing_initializer("staged; about to compare and replace")
+            stages.append("staged")
+            return True
+
+        self.authentication.side_effect = at_authentication
+        with (
+            patch.object(accounts, "_locked", wraps=accounts._locked) as exclusive,
+            patch.object(accounts, "_unchanged", side_effect=recheck),
+            self.hold() as transaction,
+        ):
+            self.assertEqual(transaction.review._path, self.path)
+            self.assert_unchanged(self.before)
+            self.competing_initializer("after review; before CAS admission")
+            self.commit(transaction, transaction.review, current=guarded)
+            self.competing_initializer("after verified CAS; before scope exit")
+        exclusive.assert_called_once_with(self.path)
+        self.assertEqual(stages, ["review", "staged", "postcheck"])
+        self.assertEqual(len(descriptors), 1)
+        self.competing_initializer("after scope exit", excluded=False)
+        self.assert_unchanged(self.after)
+        self.sealing.assert_called_once_with(
+            accounts.AccountStore(
+                SETUP, (accounts.Account(USERNAME, (WORKSPACE,), REGISTRATION),)
+            ),
+            PHRASE.encode(),
+        )
+
+    def test_standalone_review_releases_lock_and_commit_still_accepts_no_guard(self):
+        review = accounts.review_registration(
+            self.path, PHRASE, USERNAME, workspace_ids=(WORKSPACE,)
+        )
+        self.competing_initializer("after standalone review", excluded=False)
+        accounts.commit_registration(
+            self.path, PHRASE, review, registration=REGISTRATION
+        )
+        self.competing_initializer("after standalone commit", excluded=False)
+        self.assert_unchanged(self.after)
+
+    def test_copied_foreign_closed_and_cross_thread_bindings_refuse(self):
+        with self.hold() as expired:
+            pass
+        with self.hold() as transaction:
+            for other, review in (
+                (expired, expired.review),
+                (replace(transaction), transaction.review),
+                (transaction, expired.review),
+                (transaction, replace(transaction.review)),
+            ):
+                with self.assertRaisesRegex(
+                    accounts.WebAccountsError, "no longer current"
+                ):
+                    self.commit(other, review)
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                pending = pool.submit(self.commit, transaction, transaction.review)
+                with self.assertRaisesRegex(
+                    accounts.WebAccountsError, "no longer current"
+                ):
+                    pending.result(timeout=2)
+            self.sealing.assert_not_called()
+            self.commit(transaction, transaction.review)
+        with self.assertRaisesRegex(accounts.WebAccountsError, "no longer current"):
+            self.commit(transaction, transaction.review)
+        self.assert_unchanged(self.after)
+
+    def test_rejected_checked_cas_spends_attempt_but_retains_flock(self):
+        for verdict in (False, 1, None):
+            with self.subTest(verdict=verdict), self.hold() as transaction:
+                with self.assertRaisesRegex(
+                    accounts.WebAccountsError, "no longer current"
+                ):
+                    self.commit(
+                        transaction, transaction.review, current=lambda: verdict
+                    )
+                with self.assertRaisesRegex(
+                    accounts.WebAccountsError, "no longer current"
+                ):
+                    self.commit(transaction, transaction.review)
+                self.competing_initializer("after refusal; before scope exit")
+                self.assert_unchanged(self.before)
+        self.competing_initializer("after refused scope exit", excluded=False)
+
+    def test_directory_substitution_refuses_before_second_authentication(self):
+        displaced = self.root / "displaced"
+        with self.hold() as transaction:
+            self.directory.rename(displaced)
+            self.directory.mkdir(mode=0o700)
+            self.write_fixture(self.before)
+            with self.assertRaisesRegex(accounts.WebAccountsError, "unsafe"):
+                self.commit(transaction, transaction.review)
+        self.authentication.assert_called_once()
+        self.sealing.assert_not_called()
+        self.assertEqual(list(displaced.iterdir()), [displaced / self.path.name])
+        self.assertEqual((displaced / self.path.name).read_bytes(), self.before)
+        self.assert_unchanged(self.before)
+
+    def test_missing_directory_during_commit_is_a_fixed_refusal_inside_scope(self):
+        with self.hold() as transaction:
+            self.directory.rename(self.root / "displaced")
+            with self.assertRaisesRegex(accounts.WebAccountsError, "unsafe"):
+                self.commit(transaction, transaction.review)
+        self.authentication.assert_called_once()
+        self.sealing.assert_not_called()
+        self.assertFalse(self.directory.exists())
+
+    def test_substitution_observed_at_last_guard_does_not_replace_either_file(self):
+        displaced = self.root / "displaced"
+
+        def move_directory():
+            self.directory.rename(displaced)
+            self.directory.mkdir(mode=0o700)
+            self.write_fixture(self.before)
+            return True
+
+        with self.hold() as transaction:
+            with self.assertRaisesRegex(accounts.WebAccountsError, "unsafe"):
+                self.commit(transaction, transaction.review, current=move_directory)
+        self.assertEqual(list(displaced.iterdir()), [displaced / self.path.name])
+        self.assertEqual((displaced / self.path.name).read_bytes(), self.before)
+        self.assert_unchanged(self.before)
+
+    def test_publication_uncertainty_spends_attempt_and_is_not_reported_as_refusal(
+        self,
+    ):
+        sync = os.fsync
+
+        def fail_directory_sync(fd):
+            if stat.S_ISDIR(os.fstat(fd).st_mode):
+                raise OSError("synthetic post-replace failure")
+            return sync(fd)
+
+        with self.hold() as transaction:
+            with (
+                patch.object(accounts.os, "fsync", side_effect=fail_directory_sync),
+                self.assertRaisesRegex(
+                    accounts.WebAccountsError, "could not be verified"
+                ),
+            ):
+                self.commit(transaction, transaction.review)
+            self.assert_unchanged(self.after)
+            with self.assertRaisesRegex(accounts.WebAccountsError, "no longer current"):
+                self.commit(transaction, transaction.review)
+            self.competing_initializer("after unverified CAS; before scope exit")
+        self.competing_initializer("after unverified scope exit", excluded=False)
+
+
 @unittest.skipUnless(HAS_CRYPTO, "optional cryptography not installed")
 class EncryptedStoreTests(StoreFixture):
+    def test_held_registration_reauthenticates_and_roundtrips_with_standalone_read(
+        self,
+    ):
+        self.create()
+        with accounts._hold_registration(
+            self.path, PHRASE, USERNAME, workspace_ids=(WORKSPACE,)
+        ) as transaction:
+            transaction.commit(
+                PHRASE,
+                transaction.review,
+                registration=REGISTRATION,
+                current=lambda: True,
+            )
+        self.assertEqual(
+            accounts.load(self.path, PHRASE).accounts,
+            (accounts.Account(USERNAME, (WORKSPACE,), REGISTRATION),),
+        )
+
     def test_registration_rechecks_scope_generation_and_current_proof_before_publish(
         self,
     ):

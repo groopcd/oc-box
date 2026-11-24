@@ -169,6 +169,27 @@ the proof workers and writer to drain. The primitive retires the taken
 approval at the end; it does not release the external fence or establish
 native owner drain.
 
+### Unserved held-store transaction
+
+The private `web_accounts._hold_registration(...)` context authenticates an
+existing exact store and returns a capability bound to its original review.
+It takes the same exclusive parent-directory flock that the standalone
+account writers use. The original process and thread can make one checked
+CAS attempt through that capability with the exact review object and a
+trusted current guard. It reauthenticates for the write and uses the
+original locked directory descriptor through staging, replacement, fsync,
+and postcheck. Leaving the context retires the capability and releases the
+flock; refusal or an unverified write does not release it early.
+
+This storage primitive is not wired to the host enrollment commit or any
+listener. A future caller must obtain and hold the independent workspace
+exclusion, verify the live browser proof, and bound the human approval
+interval without closing the bootstrap. The flock excludes cooperating
+writers on that directory, including older account writers using the same
+lock. It does not prevent non-cooperating file or directory replacement;
+observed substitutions refuse, and cancellation is not a transaction with
+replacement. The store format and standalone API are unchanged.
+
 ### Approval retirement
 
 The owner calls `expire()` periodically and on bootstrap retirement. This
