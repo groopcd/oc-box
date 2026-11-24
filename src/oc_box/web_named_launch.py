@@ -1,19 +1,21 @@
 """Host preflight and retained resources for an explicitly prepared named launch."""
 
-from contextlib import ExitStack
+from contextlib import ExitStack, suppress
 from dataclasses import dataclass
 import json
 import os
 from pathlib import Path
 import re
+import signal
 import stat
 import subprocess
 import sys
-from time import monotonic
+from time import monotonic, sleep
 
 if __package__:
     from . import (
         secret_prompt,
+        startup_output,
         web_accounts,
         web_named_account_assets,
         web_named_foreground,
@@ -23,6 +25,7 @@ if __package__:
     )
 else:
     import secret_prompt
+    import startup_output
     import web_accounts
     import web_named_account_assets
     import web_named_foreground
@@ -375,7 +378,7 @@ def _activate_browser(box, url):
         pass
 
 
-def run_named_client(box, owner, prepared, *, no_open):
+def run_named_client(box, owner, prepared, *, no_open, interrupted=None):
     """Run the actual scoped Studio client loop, not an ordinary owner exit.
 
     The calling lifecycle owns the controlling terminal and verified owner,
@@ -384,16 +387,24 @@ def run_named_client(box, owner, prepared, *, no_open):
     without confirmed drain. Nothing here opens or refreshes the provider
     vault, mutates native history, starts a workspace, or falls back to pairing.
     """
-    if type(prepared) is not PreparedNamedLaunch or type(no_open) is not bool:
+    if (
+        type(prepared) is not PreparedNamedLaunch
+        or type(no_open) is not bool
+        or (interrupted is not None and not callable(interrupted))
+    ):
         raise NamedLaunchError("Invalid prepared named Studio client.")
     try:
+        if interrupted is not None and interrupted():
+            return 130
         url = prepared.start(owner, expires_at=monotonic() + 8 * 60 * 60, studio=True)
         expected = prepared._profile.origins.workspace.value + "/auth/oc-box-entry"
         if url != expected:
             raise NamedLaunchError(
                 "Named Studio did not produce the verified workspace entry URL."
             )
-        print(
+        if interrupted is not None and interrupted():
+            return 130
+        startup_output.line(
             "oc-box: Named workspace Studio\n"
             + url
             + "\nKeep this host command open. Browser login never asks for your host vault.",
@@ -401,9 +412,16 @@ def run_named_client(box, owner, prepared, *, no_open):
         )
         if not no_open:
             _activate_browser(box, url)
-        if (
-            prepared.wait_stopped() is not True
-            or prepared.stop_reason is not web_named_site_lifecycle.StopReason.REQUESTED
+        if interrupted is None:
+            stopped = prepared.wait_stopped()
+        else:
+            stopped = False
+            while not interrupted() and stopped is not True:
+                stopped = prepared.wait_stopped(timeout=0.25)
+            if interrupted():
+                return 130
+        if stopped is not True or (
+            prepared.stop_reason is not web_named_site_lifecycle.StopReason.REQUESTED
         ):
             raise NamedLaunchError(
                 "The named Studio site stopped; reopen it from the host."
@@ -421,3 +439,53 @@ def run_named_client(box, owner, prepared, *, no_open):
             raise NamedClientUndrained() from None
         if drained is not True:
             raise NamedClientUndrained() from None
+
+
+def run_retained_named_client(box, owner, prepared, *, no_open):
+    """Keep the original foreground scopes live if teardown was unconfirmed.
+
+    Internal seam only: the owning caller must already hold the original
+    workspace lifecycle lock and a durable named stop fence. Revocation starts
+    at the first close; recheck only the same drain, never start another site.
+    If drain never verifies, this call deliberately does not return. A process
+    crash is not a normal exit; the durable caller-owned fence must outlive it.
+    """
+    interrupted = False
+
+    def interrupt(_signum, _frame):
+        nonlocal interrupted
+        # A second Ctrl-C must neither unwind the owner nor acquire a lock.
+        interrupted = True
+
+    previous = signal.signal(signal.SIGINT, interrupt)
+    try:
+        try:
+            return run_named_client(
+                box, owner, prepared, no_open=no_open, interrupted=lambda: interrupted
+            )
+        except NamedClientUndrained:
+            with suppress(OSError, ValueError):
+                startup_output.line(
+                    "oc-box: Named Studio drain is not yet verified. Keeping the original "
+                    "workspace owner open; history sync and stop are on hold.",
+                    file=sys.stderr,
+                    flush=True,
+                )
+            while True:
+                try:
+                    if prepared.close() is True:
+                        break
+                except BaseException:
+                    # The signal handler above prevents real Ctrl-C from
+                    # interrupting this hold; a failed check isn't proof either.
+                    pass
+                sleep(1)
+            with suppress(OSError, ValueError):
+                startup_output.line(
+                    "oc-box: Named Studio drain verified after a shutdown delay.",
+                    file=sys.stderr,
+                    flush=True,
+                )
+            return 130 if interrupted else 1
+    finally:
+        signal.signal(signal.SIGINT, previous)
