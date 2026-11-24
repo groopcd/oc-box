@@ -17,6 +17,8 @@ const maxProjection = 512 * 1024;
 const maxSendBody = 8 * 1024;
 const maxText = 4 * 1024;
 const exchangeMS = 7000;
+const refreshOffsetsMS = Object.freeze([250, 1000, 2500]);
+const refreshStartLimitMS = 3000;
 const controls = /[\x00-\x08\x0b-\x1f\x7f-\x9f\p{Cs}]/u;
 const encoder = new TextEncoder();
 const decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
@@ -105,6 +107,7 @@ export function createNamedStudioController(root, bootstrap) {
   let change = null;
   let approved = null;
   const requests = new Set();
+  const refreshTimers = new Set();
   const gestures = new WeakSet();
 
   function liveSite() {
@@ -191,7 +194,13 @@ export function createNamedStudioController(root, bootstrap) {
         const { status, value } = await exchange(sendPath, body, scopeHeaders(exact),
           chatJSON, maxChange, outcome, () => liveSelection() === exact);
         const [result] = exactFields(value, ["status"]);
-        if (result === outcome[status] && liveSelection() === exact) return result;
+        if (result === outcome[status] && liveSelection() === exact) {
+          if (result === "queued") {
+            try { refreshAfterQueue(exact); }
+            catch { stopRefreshes(); } // A view refresh cannot change the verified receipt.
+          }
+          return result;
+        }
       } catch {
         // A missing, malformed, expired or interrupted reply is not refusal.
       }
@@ -201,8 +210,36 @@ export function createNamedStudioController(root, bootstrap) {
   if (!view) return null;
   mounted.add(document);
 
+  function stopRefreshes() {
+    for (const timer of refreshTimers) window.clearTimeout(timer);
+    refreshTimers.clear();
+  }
+
+  function refreshAfterQueue(scope) {
+    stopRefreshes(); // A newer verified acknowledgement replaces pending samples.
+    const latestStart = window.performance.now() + refreshStartLimitMS;
+    for (const offset of refreshOffsetsMS) {
+      const timer = window.setTimeout(() => {
+        if (!refreshTimers.delete(timer)) return;
+        if (liveSelection() !== scope) {
+          if (approved === scope) invalidate();
+          return;
+        }
+        // A delayed/background timer cannot extend this burst. The view also
+        // skips a sample when an earlier read is still in flight.
+        if (window.performance.now() >= latestStart) {
+          stopRefreshes();
+          return;
+        }
+        void view.refresh(scope).catch(() => { /* Keep the last valid projection. */ });
+      }, offset);
+      refreshTimers.add(timer);
+    }
+  }
+
   function invalidate() {
     change = approved = null;
+    stopRefreshes();
     try {
       view.invalidate();
     } finally {

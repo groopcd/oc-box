@@ -43,8 +43,8 @@ _PINNED = (
     ),
     (
         "web_studio_shell.mjs",
-        6221,
-        "dc78d20318f9235b57242ea3cd19f532a5c828bba94927bb1bb202e13b17d18b",
+        7096,
+        "0ddf7d75fe81e3077aa39fdcf8ee3e41767117ec12185390c333847e93836866",
     ),
     (
         "web_studio_transcript.css",
@@ -53,8 +53,8 @@ _PINNED = (
     ),
     (
         "web_studio_transcript.mjs",
-        7401,
-        "306d1d756cf78ad0ea69aeda404a5d2d4bb58ba13d9aafcf0c4f6d3c3ac56b79",
+        7990,
+        "b1138a246a0623680583e4a2d9dee42c0b5f83e2021998b633bb3b1460a57bb8",
     ),
     (
         "web_studio_composer.css",
@@ -68,8 +68,8 @@ _PINNED = (
     ),
     (
         "web_named_studio_client.mjs",
-        10699,
-        "463ff82ee59308ae43125a5f398f5edeec1ede60c605ba81d97e81af8fc4bd21",
+        12042,
+        "1c9ad79192663694885d7179b6cb07fdf691cfe8ec8d3f06e661763ca8894170",
     ),
     (
         "web_named_studio_entry.mjs",

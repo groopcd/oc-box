@@ -138,5 +138,29 @@ export function createStudioShellView(root, controller) {
     return true;
   }
 
-  return Object.freeze({ present, invalidate });
+  async function refresh(scope) {
+    if (!visible || reading) return false;
+    const expected = selectedBinding();
+    if (expected === null || scope?.sessionID !== expected.sessionID ||
+        scope.generation !== expected.generation) return false;
+    const ticket = transcript.beginRefresh();
+    if (ticket === null) return false;
+    reading = true;
+    try {
+      let result = null;
+      try { result = await readTranscript(ticket); }
+      catch { /* Keep the last valid transcript for a still-current scope. */ }
+      if (binding !== expected) return false;
+      if (selectedBinding() !== expected) {
+        if (binding === expected) invalidate();
+        return false;
+      }
+      // This never remounts, refreshes or focuses the separate composer.
+      return transcript.commit(ticket, result);
+    } finally {
+      reading = false;
+    }
+  }
+
+  return Object.freeze({ present, refresh, invalidate });
 }
