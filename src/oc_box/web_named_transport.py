@@ -191,7 +191,7 @@ def _read(stream, *, role, origin, deadline):
     return NamedRequest(role, method, target, headers, bytes(body))
 
 
-def _write_response(stream, response, deadline):
+def _write_response(stream, response, deadline, *, check=None):
     if (
         type(response) is not NamedResponse
         or type(response.status) is not int
@@ -213,11 +213,15 @@ def _write_response(stream, response, deadline):
     with memoryview(wire) as data:
         offset = 0
         while offset < len(data):
+            if check is not None:
+                check()
             stream.settimeout(_remaining(deadline))
             count = stream.send(data[offset:])
             if not count:
                 _refuse()
             offset += count
+    if check is not None:
+        check()
     _remaining(deadline)
 
 
@@ -267,7 +271,7 @@ class NamedHTTPSReader:
         """
         self._exchange(peer, handlers={"account": account, "workspace": workspace})
 
-    def _exchange(self, peer, *, handlers):
+    def _exchange(self, peer, *, handlers, native=None):
         deadline = monotonic() + _REQUEST_TIMEOUT
         try:
             with peer:
@@ -282,6 +286,8 @@ class NamedHTTPSReader:
                 ):
                     _refuse()
                 role, origin, context = endpoint
+                if native is not None and role != "workspace":
+                    _refuse()
                 with context.wrap_socket(
                     peer,
                     server_side=True,
@@ -297,10 +303,13 @@ class NamedHTTPSReader:
                     ):
                         _refuse()
                     request = _read(stream, role=role, origin=origin, deadline=deadline)
-                    if handlers is None:
+                    if handlers is None and native is None:
                         return request
                     _remaining(deadline)
                     try:
+                        if native is not None:
+                            native(stream, request, deadline)
+                            return
                         response = handlers[role](request, deadline=deadline)
                     except Exception:  # noqa: BLE001 - never echo handler diagnostics.
                         pass

@@ -50,8 +50,8 @@ selects a validated TLS context and role by the actual IPv4 loopback endpoint,
 then checks that role's exact HTTP/1.1 method, route and origin. Before reading
 the remaining body, it requires nonempty `application/json` for account POSTs,
 exactly 54 bytes for confirmation, and no bytes for logout or metadata. It
-closes after a read-only probe or, in the scoped exchange, after using one
-explicit role handler to produce one bounded, fixed-length JSON envelope.
+closes after a read-only probe or, in the fixed-response exchange, after using
+one explicit role handler to produce one bounded, fixed-length JSON envelope.
 The response writer cannot set cookies, redirect, upgrade or relay a stream.
 The transport refuses surplus it sees while framing or during one immediate
 probe; it cannot detect every byte still in flight and never parses or forwards
@@ -61,10 +61,39 @@ The TLS handshake, headers (16 KiB, 64 fields), body and response (8 KiB each)
 share a five-second I/O deadline. A trusted synchronous dispatch callback
 receives that deadline and must honor it. A late result cannot start a response,
 but this does not preempt the callback, roll back its effects or verify its
-cleanup. There is no production dispatcher, listener, handoff receiver or
-authority to perform upstream work. A future owner integration must separately
-verify its binds and bound concurrent work, cancellation and drain. Synthetic
-TLS coverage does not establish a browser or host deployment pass.
+cleanup. There is no production dispatcher, listener or handoff receiver.
+
+The separate unserved authenticated native relay is not the fixed status
+dispatcher or guest Gateway. It accepts only `GET /api/info` and
+`GET /api/session/active`, with no body, query or alias. It requires the exact
+workspace Origin even on GET, plus the app cookie, a bound browser grant and
+the current private owner. It registers cancellation before credential
+resolution or connecting, reconstructs the native Host, Origin and private
+Cookie, and keeps the request registered through response writes and socket
+cleanup. Refusals close without sending a native error body or falling back to
+guest admission. Revocation interrupts the tracked sockets. It is not atomic
+with a write already in progress, cannot recall sent bytes, and does not prove
+that native work stopped.
+
+Only complete, fixed-length JSON replies of at most 8 KiB are eligible (8 KiB
+header limit, one response followed by EOF). The narrow 2.3.2 schemas permit
+the version, positive PID and pinned private loopback URL, or a map of native
+session IDs with `running` state only. Unexpected fields or values refuse. The
+body bytes are preserved, but all browser response headers are generated
+locally: no native `Set-Cookie`, challenge or redirect is forwarded. The
+exchange uses the earlier of the TLS I/O deadline or the session's absolute
+expiry. It has no default connector; the private endpoint's container loopback
+port must never be treated as a host loopback destination.
+
+Synthetic HTTPS and private socket tests cover matching handoff, byte-exact
+replies, route/lease refusals, malformed native replies, and cancellation
+before registration, during startup, during native reads and before browser
+write. They do not establish native wire/schema compatibility on a real owner,
+browser deployment, or live cleanup. Before serving anything, a future
+integration must verify the owner-bound bridge, exact native replies, binds,
+concurrency, owner/expiry sweeps, browser compatibility, and drain before lease
+release. There is no native asset or arbitrary API routing, SSE, WebSocket,
+listener, CLI or installation integration in this slice.
 
 A later LAN instance can use distinct existing sites and certificates under
 operator control. Isolated guest LAN tests can establish transport behavior
