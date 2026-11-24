@@ -167,6 +167,30 @@ For example, the rootless probe may independently observe both unmounted
 while the direct fixture remains `descriptor_incomplete` with exit 1.
 These fields are diagnostic observations, never populated planner authority.
 
+For new receipts only, `namespace_unavailable` adds exactly one
+`namespace_preflight_reason` from this closed set:
+
+| Reason | Refusal point |
+| --- | --- |
+| `loader` | The trusted guest-side diagnostic helper could not be loaded or used. |
+| `prerequisites` | The frozen store, budget, identity, Python/kernel API or selected runtime preflight did not hold. |
+| `pause_file_missing` | The fixed private pause file was not found. |
+| `pause_file_rejected` | The pause file or its contents did not meet the existing no-follow, ownership, mode or PID checks. |
+| `process_access` | The pinned pause process or its required metadata could not be verified. |
+| `helper_identity` | The pause executable did not satisfy the existing helper check. |
+| `mapping_proof` | Namespace descriptors, UID/GID mappings or final anchor recheck did not agree. |
+
+Only `helper_identity` adds the boolean `fedora_helper_inode_matches`. A
+`true` means an independent no-follow pin of the fixed root-owned Fedora
+`/usr/libexec/catatonit/catatonit` ELF matched the still-verified pause
+process's executable, with the expected `catatonit -P` arguments. A `false`
+means the check could not establish that match. Either result **still
+refuses**: the Fedora path is not on the admission list, no symlink is
+followed, and no namespace join or additional Podman command occurs. Neither
+new field appears on `baseline_unverified`, `namespace_unverified`, or
+`namespace_observed`. The recorded `9dc7844` refusal predates this schema
+and is not attributed to any of these reasons.
+
 ## Result and interpretation
 
 Stdout is one bounded JSON line with fixed keys and only booleans or enum
