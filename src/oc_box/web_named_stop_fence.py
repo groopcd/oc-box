@@ -1,6 +1,7 @@
-"""Unwired host-private routing fence for a named foreground lifetime."""
+"""Unwired host-private routing fences for foreground Studio lifetimes."""
 
 from contextlib import ExitStack, contextmanager
+from dataclasses import dataclass
 from enum import Enum
 import fcntl
 import hashlib
@@ -13,14 +14,17 @@ from threading import get_ident
 import time
 
 if __package__:
-    from . import workspace_control as control, workspace_service
+    from . import studio_registry, workspace_control as control, workspace_service
 else:
+    import studio_registry
     import workspace_control as control
     import workspace_service
 
 
 _NAME = "named-stop.lock"
 _MAGIC = b"OCBNAM1\n"
+_STUDIO_NAME = "studio-stop.lock"
+_STUDIO_MAGIC = b"OCBSTU1\n"
 # Version, directory and gate identities, generation, state/intent byte.
 _FRAME = struct.Struct(">8sQQQQ32sB")
 _SIZE = _FRAME.size + 32
@@ -68,7 +72,7 @@ def _errors():
         raise FenceError(
             "busy" if exc.category == "control-timeout" else "unsafe-storage"
         ) from None
-    except (OSError, ValueError, TypeError, OverflowError):
+    except (OSError, ValueError, TypeError, OverflowError, RecursionError):
         raise FenceError("unsafe-storage") from None
 
 
@@ -86,6 +90,75 @@ def _path(path):
         return path
     except (TypeError, ValueError, OSError):
         raise FenceError("invalid-request") from None
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class _StudioScope:
+    state: Path
+    workspace: studio_registry.StudioWorkspace
+    seal: bytes
+
+    @property
+    def path(self):
+        return (
+            self.state
+            / studio_registry.NAMESPACE
+            / self.workspace.id
+            / studio_registry.RECORD_NAME
+        )
+
+
+def _studio_seal(directory, name, workspace):
+    studio_registry._owned(os.fstat(directory), private=0o700)
+    raw, stamp = studio_registry._read(
+        directory, name, studio_registry._MAX_RECORD, private=0o600
+    )
+    project, _ = studio_registry._record(raw, workspace.id, studio=True)
+    if project != workspace.project:
+        raise FenceError("wrong-lifetime")
+    # Bind the internal record, not a requester-provided path, project
+    # label, or native PID. Include descriptor and immutable record stamps
+    # so replacing the bytes with an identical copy cannot adopt a fence.
+    return hashlib.sha256(
+        repr((_identity(directory), stamp)).encode("ascii") + b"\0" + raw
+    ).digest()
+
+
+def studio_scope(state_root, workspace_id):
+    """Select the disjoint read-only Studio registration; not provisioning."""
+    with _errors():
+        state = studio_registry._path(state_root)
+        workspace = studio_registry.select(state, workspace_id=workspace_id)
+        path = (
+            state
+            / studio_registry.NAMESPACE
+            / workspace.id
+            / studio_registry.RECORD_NAME
+        )
+        with studio_registry._absolute_directory(path.parent) as directory:
+            scope = _StudioScope(
+                state, workspace, _studio_seal(directory, path.name, workspace)
+            )
+            if studio_registry.select(state, workspace_id=workspace_id) != workspace:
+                raise FenceError("wrong-lifetime")
+            return scope
+
+
+@contextmanager
+def _directory(path, scope):
+    if scope is None:
+        with control._workspace_directory(path) as directory:
+            yield directory
+        return
+    if (
+        studio_registry.select(scope.state, workspace_id=scope.workspace.id)
+        != scope.workspace
+    ):
+        raise FenceError("wrong-lifetime")
+    with studio_registry._absolute_directory(path.parent) as directory:
+        if _studio_seal(directory, path.name, scope.workspace) != scope.seal:
+            raise FenceError("wrong-lifetime")
+        yield directory
 
 
 def _deadline(timeout):
@@ -144,18 +217,22 @@ class _OwnerLock:
 
 
 class _Gate:
-    def __init__(self, path, directory, fd, owner):
+    def __init__(self, path, directory, fd, owner, scope):
         self.path, self.directory, self.fd, self.owner = path, directory, fd, owner
         self.identity = (*_identity(directory), *_identity(fd))
+        self.scope = scope
+        self.name = _NAME if scope is None else _STUDIO_NAME
+        self.magic = _MAGIC if scope is None else _STUDIO_MAGIC
 
     def digest(self, frame):
-        return hashlib.sha256(os.fsencode(self.path) + b"\0" + frame).digest()
+        binding = b"" if self.scope is None else self.scope.seal
+        return hashlib.sha256(os.fsencode(self.path) + b"\0" + binding + frame).digest()
 
     def check(self):
-        with control._workspace_directory(self.path) as current:
+        with _directory(self.path, self.scope) as current:
             if (*_identity(current), *_identity(self.fd)) != self.identity:
                 raise FenceError("unsafe-storage")
-            control._same_file(current, _NAME, self.fd)
+            control._same_file(current, self.name, self.fd)
             if self.owner is not None:
                 self.owner.check(current)
 
@@ -186,7 +263,7 @@ class _Gate:
             raise FenceError("invalid-state")
         magic, *identity, generation, status = _FRAME.unpack(raw[:-32])
         if (
-            magic != _MAGIC
+            magic != self.magic
             or tuple(identity) != self.identity
             or status not in ((0, 2) if generation == _EMPTY[0] else (0, 1))
         ):
@@ -202,7 +279,7 @@ class _Gate:
         existing = None if os.fstat(self.fd).st_size == 0 else self.read()
         if existing != previous:
             raise FenceError("invalid-state")
-        frame = _FRAME.pack(_MAGIC, *self.identity, *state)
+        frame = _FRAME.pack(self.magic, *self.identity, *state)
         raw = frame + self.digest(frame)
         # This inode IS the lock: never replace it. A torn frame is not
         # admissible; no reader repairs it or authorizes direct stop.
@@ -222,21 +299,23 @@ class _Gate:
 
 
 @contextmanager
-def _gate(path, *, owning=False, fresh=False):
-    path = _path(path)
+def _gate(target, *, owning=False, fresh=False):
+    scope = target if type(target) is _StudioScope else None
+    path = scope.path if scope is not None else _path(target)
+    name = _NAME if scope is None else _STUDIO_NAME
     stack = ExitStack()
     try:
         with _errors():
-            directory = stack.enter_context(control._workspace_directory(path))
+            directory = stack.enter_context(_directory(path, scope))
             owner = _OwnerLock(path, directory, stack) if owning else None
             try:
-                fd = control._open_file(directory, _NAME, write=True, create=fresh)
+                fd = control._open_file(directory, name, write=True, create=fresh)
             except FileNotFoundError:
                 raise FenceError("not-enrolled") from None
             except FileExistsError:
                 raise FenceError("already-enrolled") from None
             stack.callback(os.close, fd)
-            gate = _Gate(path, directory, fd, owner)
+            gate = _Gate(path, directory, fd, owner, scope)
         yield gate
     finally:
         with _errors():
