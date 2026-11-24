@@ -21,12 +21,14 @@ _SCRIPT = Path(worker.__file__).resolve()
 _TAG = b"\x9a" * 16
 _OTHER_TAG = b"\xbd" * 16
 _CHALLENGE = b"\xc1" * 16
+_CREDIT = b"\xd2" * 16
 _HEADER = struct.Struct("!4sBH")
 _SERIAL = struct.Struct("!Q")
+_CREDIT_SIZE = _SERIAL.size + len(_CREDIT)
 
 
 def _wire(op, payload=b""):
-    return _HEADER.pack(b"OGD\x02", op, len(payload)) + payload
+    return _HEADER.pack(b"OGD\x03", op, len(payload)) + payload
 
 
 def _cancel_frame(tag=_TAG):
@@ -34,11 +36,11 @@ def _cancel_frame(tag=_TAG):
 
 
 def _data(serial, payload):
-    return _wire(worker.Op.DATA, _SERIAL.pack(serial) + payload)
+    return _wire(worker.Op.DATA, _SERIAL.pack(serial) + _CREDIT + payload)
 
 
 def _ack(serial):
-    return _wire(worker.Op.ACK, _SERIAL.pack(serial))
+    return _wire(worker.Op.ACK, _SERIAL.pack(serial) + _CREDIT)
 
 
 class DuplexWorkerTests(unittest.TestCase):
@@ -106,8 +108,8 @@ class DuplexWorkerTests(unittest.TestCase):
         head = self._read(proc, _HEADER.size)
         self.assertEqual(len(head), _HEADER.size)
         magic, code, size = _HEADER.unpack(head)
-        self.assertEqual(magic, b"OGD\x02")
-        self.assertLessEqual(size, worker.MAX_DATA + _SERIAL.size)
+        self.assertEqual(magic, b"OGD\x03")
+        self.assertLessEqual(size, worker.MAX_DATA + _CREDIT_SIZE)
         payload = self._read(proc, size)
         self.assertEqual(len(payload), size)
         return worker.Op(code), payload
@@ -159,8 +161,8 @@ class DuplexWorkerTests(unittest.TestCase):
         for op, payload in (
             (worker.Op.OPEN, _TAG),
             (worker.Op.READY, _TAG),
-            (worker.Op.DATA, _SERIAL.pack(1) + b"\x00" * worker.MAX_DATA),
-            (worker.Op.ACK, _SERIAL.pack(1)),
+            (worker.Op.DATA, _SERIAL.pack(1) + _CREDIT + b"\x00" * worker.MAX_DATA),
+            (worker.Op.ACK, _SERIAL.pack(1) + _CREDIT),
             (worker.Op.END, b""),
             (worker.Op.CANCEL, _TAG + _CHALLENGE),
             (worker.Op.CLOSED, _TAG + _CHALLENGE + b"\x01"),
@@ -173,15 +175,15 @@ class DuplexWorkerTests(unittest.TestCase):
                 )
         for raw in (
             b"OGD",
-            _HEADER.pack(b"OGD\x01", worker.Op.OPEN, len(_TAG)),
-            _HEADER.pack(b"OGD\x02", 255, 0),
+            _HEADER.pack(b"OGD\x02", worker.Op.OPEN, len(_TAG)),
+            _HEADER.pack(b"OGD\x03", 255, 0),
             _HEADER.pack(
-                b"OGD\x02", worker.Op.DATA, _SERIAL.size + worker.MAX_DATA + 1
+                b"OGD\x03", worker.Op.DATA, _CREDIT_SIZE + worker.MAX_DATA + 1
             ),
-            _HEADER.pack(b"OGD\x02", worker.Op.DATA, _SERIAL.size),
-            _HEADER.pack(b"OGD\x02", worker.Op.ACK, 0),
-            _HEADER.pack(b"OGD\x02", worker.Op.CANCEL, len(_TAG)),
-            _HEADER.pack(b"OGD\x02", worker.Op.CLOSED, len(_TAG)),
+            _HEADER.pack(b"OGD\x03", worker.Op.DATA, _CREDIT_SIZE),
+            _HEADER.pack(b"OGD\x03", worker.Op.ACK, _SERIAL.size),
+            _HEADER.pack(b"OGD\x03", worker.Op.CANCEL, len(_TAG)),
+            _HEADER.pack(b"OGD\x03", worker.Op.CLOSED, len(_TAG)),
         ):
             with self.assertRaises(worker.DuplexError):
                 worker.decode_header(raw)
@@ -214,20 +216,24 @@ class DuplexWorkerTests(unittest.TestCase):
             response = b"HTTP/1.1 101 Switching Protocols\r\n\r\n\x82\x02\x00\xff"
             peer.sendall(response)
             op, payload = self._frame(proc)
-            self.assertEqual(
-                (op, payload), (worker.Op.DATA, _SERIAL.pack(1) + response)
-            )
+            self.assertEqual(op, worker.Op.DATA)
+            self.assertEqual(payload[:8], _SERIAL.pack(1))
+            self.assertEqual(payload[_CREDIT_SIZE:], response)
+            credit = payload[:_CREDIT_SIZE]
             request = b"\x82\x02\xff\x00"
             self._write(proc, _data(1, request))
             self.assertEqual(self._peer_read(peer, len(request)), request)
-            self.assertEqual(self._frame(proc), (worker.Op.ACK, _SERIAL.pack(1)))
+            self.assertEqual(
+                self._frame(proc), (worker.Op.ACK, _SERIAL.pack(1) + _CREDIT)
+            )
             # Native output is withheld until the exact credit returns.
             peer.sendall(b"\x00next")
             self.assertFalse(select.select([proc.stdout], [], [], 0.1)[0])
-            self._write(proc, _ack(1))
-            self.assertEqual(
-                self._frame(proc), (worker.Op.DATA, _SERIAL.pack(2) + b"\x00next")
-            )
+            self._write(proc, _wire(worker.Op.ACK, credit))
+            op, payload = self._frame(proc)
+            self.assertEqual(op, worker.Op.DATA)
+            self.assertEqual(payload[:8], _SERIAL.pack(2))
+            self.assertEqual(payload[_CREDIT_SIZE:], b"\x00next")
             self._cancel(proc)
             self._retired(proc)
             self.assertEqual(peer.recv(1), b"")
@@ -286,7 +292,7 @@ class DuplexWorkerTests(unittest.TestCase):
     def test_cancel_closes_native_before_blocked_stdout_is_drained(self):
         with self._open(small_output=True) as (proc, peer):
             capacity = fcntl.fcntl(proc.stdout.fileno(), fcntl.F_GETPIPE_SZ)
-            if capacity >= worker.MAX_DATA + _HEADER.size + _SERIAL.size:
+            if capacity >= worker.MAX_DATA + _HEADER.size + _CREDIT_SIZE:
                 self.skipTest("Minimum pipe capacity exceeds one maximum data record.")
             payload = b"\x00" * worker.MAX_DATA
             peer.sendall(payload)
@@ -305,7 +311,9 @@ class DuplexWorkerTests(unittest.TestCase):
             op, data = self._frame(proc)
             self.assertEqual(op, worker.Op.DATA)
             self.assertEqual(data[:8], _SERIAL.pack(1))
-            self.assertTrue(data[8:] and payload.startswith(data[8:]))
+            self.assertTrue(
+                data[_CREDIT_SIZE:] and payload.startswith(data[_CREDIT_SIZE:])
+            )
             self._retired(proc)
 
     def test_cancel_bypasses_a_blocked_native_write(self):
@@ -316,7 +324,7 @@ class DuplexWorkerTests(unittest.TestCase):
                 if not select.select([proc.stdout], [], [], 0.2)[0]:
                     break
                 self.assertEqual(
-                    self._frame(proc), (worker.Op.ACK, _SERIAL.pack(serial))
+                    self._frame(proc), (worker.Op.ACK, _SERIAL.pack(serial) + _CREDIT)
                 )
             else:
                 self.fail("Fixture could not fill the native TCP send path.")
@@ -334,7 +342,7 @@ class DuplexWorkerTests(unittest.TestCase):
             _cancel_frame() + b"\x00",
             _cancel_frame() * 2,
             _data(1, b"before open"),
-            _HEADER.pack(b"OGD\x02", worker.Op.DATA, 0xFFFF),
+            _HEADER.pack(b"OGD\x03", worker.Op.DATA, 0xFFFF),
         ):
             with self.subTest(size=len(data)), self._listener() as (listener, proc):
                 self._write(proc, data)
@@ -360,10 +368,12 @@ class DuplexWorkerTests(unittest.TestCase):
                 self._failed(proc)
         with self._open() as (proc, peer):
             peer.sendall(b"first")
-            self.assertEqual(
-                self._frame(proc), (worker.Op.DATA, _SERIAL.pack(1) + b"first")
-            )
-            self._write(proc, _ack(1) + _ack(1) + _cancel_frame())
+            op, payload = self._frame(proc)
+            self.assertEqual(op, worker.Op.DATA)
+            self.assertEqual(payload[:8], _SERIAL.pack(1))
+            self.assertEqual(payload[_CREDIT_SIZE:], b"first")
+            seen = _wire(worker.Op.ACK, payload[:_CREDIT_SIZE])
+            self._write(proc, seen + seen + _cancel_frame())
             proc.stdin.close()
             self._failed(proc)
 

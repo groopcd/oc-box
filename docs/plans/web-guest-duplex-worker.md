@@ -11,10 +11,10 @@ listener, parse HTTP, or interpret WebSocket bytes.
 
 ## Private wire
 
-Each record is `OGD\x02`, one opcode byte, a big-endian unsigned 16-bit
+Each record is `OGD\x03`, one opcode byte, a big-endian unsigned 16-bit
 payload length, and exactly that payload. Tags are opaque 16-byte per-attempt
 labels, not credentials. A separate fresh 16-byte challenge first appears in
-`CANCEL` and is echoed only in the terminal receipt. Version 1 is refused.
+`CANCEL` and is echoed only in the terminal receipt. Older versions are refused.
 Serial numbers are unsigned 64-bit big-endian integers starting at one
 independently in each direction, with no wrap.
 
@@ -22,8 +22,8 @@ independently in each direction, with no wrap.
 | --- | --- | --- |
 | 1 `OPEN` | to worker | Tag; start the only nonblocking connect. |
 | 2 `READY` | from worker | Same tag; connect succeeded. No stream data before this record. |
-| 3 `DATA` | both | Serial followed by 1–16,384 opaque bytes. |
-| 4 `ACK` | both | Matching serial; returns one `DATA` credit. |
+| 3 `DATA` | both | Serial, fresh 16-byte credit challenge, then 1–16,384 opaque bytes. |
+| 4 `ACK` | both | Exact serial and credit challenge; returns one `DATA` credit. |
 | 5 `END` | from worker | Empty; native read EOF and local socket close, not a retirement receipt. |
 | 6 `CANCEL` | to worker | Original tag (the first tag if no `OPEN` occurred), then the fresh challenge. |
 | 7 `CLOSED` | from worker | Tag, challenge, then one byte: `0` never opened, `1` worker's exact socket closed. |
@@ -32,7 +32,10 @@ After `READY`, each direction has one `DATA` credit. The worker returns
 incoming credit only after the whole payload was accepted by the local TCP
 socket and its ACK was emitted; that does not establish server consumption.
 The host must return output credit as it consumes bytes into bounded capacity.
-An ACK for an un-emitted, unknown, or old serial is a protocol failure. A
+An ACK for an un-emitted, unknown, or old data frame is a protocol failure.
+An ACK already queued before transmission cannot know that frame's fresh
+credit challenge. This is frame sequencing, not proof of application
+consumption or protection against a replaced worker. A
 second `OPEN` never reconnects. After native read EOF, a single already
 in-flight host `DATA` can cross `END`; it is neither written nor credited.
 `END` requires the caller to finish the exchange with `CANCEL`; there is no
