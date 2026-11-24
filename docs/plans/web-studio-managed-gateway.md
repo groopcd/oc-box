@@ -88,6 +88,15 @@ that native work finished or that it is safe to sync or stop.
 There is no installed `oc-box web` caller or attach-only activation. All
 current local composition tests remain distinct from host acceptance.
 
+The loopback-only browser smoke uses real Chromium and unmodified native
+2.4.1. It checks native pairing into Studio, explicit confirmation,
+native catalog and transcript, one queue acknowledgement and one completed
+request to a local no-tool fixture provider, same-transcript refresh,
+spent-link refusal and exact relay drain before releasing the fixture
+owner. Outer container inspect and exec are substituted. The native
+fixture owner's clean exit is not `oc-box stop`, a managed history pass,
+or an external Podman acceptance.
+
 The private caller must keep the original handle and owner/lock scope on
 `False` or interruption. A join timeout permits only another observation of
 the **same** drain; there is no replacement. Do not raise a false verdict

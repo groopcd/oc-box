@@ -1,6 +1,7 @@
 """Run the unserved owning guest proof with pinned native 2.4.1, not Podman."""
 
 import argparse
+import json
 import os
 from pathlib import Path
 import signal
@@ -23,8 +24,12 @@ from oc_box import web_studio_guest_binding, workspace_control, workspace_servic
 _NATIVE_SHA = "ec93043f18f8a6b4d8e71ec9260e292ba6f91b66b142782135d40f0b58b0c152"
 
 
-def exercise(root, binary, *, verify_binding=None):
+def exercise(root, binary, *, verify_binding=None, test_gateway=None, configure=None):
     env = build_environment(root / "native", "2.4.1")
+    if configure is not None:
+        env["OPENCODE_CONFIG_CONTENT"] = json.dumps(
+            configure(json.loads(env["OPENCODE_CONFIG_CONTENT"]))
+        )
     env["OC_BOX_STATE_HOME"] = str(root / "state")
     env["XDG_RUNTIME_DIR"] = str(root)
     project = root / "project"
@@ -78,37 +83,44 @@ def exercise(root, binary, *, verify_binding=None):
                         and owner._guest_proof.current() is identity,
                         "The original native child was not verified.",
                     )
-                    gateway = workspace_service.Gateway(
-                        box, owner._guest_proof.pinned_data(), owner.connection
-                    )
-                    with gateway._listener_preflight() as listener:
-                        binding = web_studio_guest_binding.bind_unserved(
-                            gateway, listener, owner._guest_proof
-                        )
-                        require(
-                            binding.current() is binding.native.binding
-                            and binding.native.native_pid == identity.native_pid
-                            and binding.native.binding.origin
-                            == listener.origin(gateway, listening=False),
-                            "The proof did not join the same worker and socket.",
-                        )
-                        if verify_binding is not None:
-                            verify_binding(binding, project)
-                        # A real V2 stop intent retires this proof even while
-                        # the worker and the workspace lock are still held.
-                        workspace_control.request_stop(path)
-                        require(
-                            binding.current() is None
-                            and owner._guest_proof.current() is None
-                            and owner.child.poll() is None,
-                            "Stop intent did not fence the original gateway and owner.",
-                        )
+                    if test_gateway is not None:
+                        test_gateway(owner, project)
+                    else:
+                        _test_probe(owner, path, identity, project, verify_binding)
                 require(
                     owner.child.returncode == 0 and not owner.address.exists(),
                     "Native worker did not observe EOF and cleanly reap its server.",
                 )
     finally:
         os.chdir(previous)
+
+
+def _test_probe(owner, path, identity, project, verify_binding):
+    gateway = workspace_service.Gateway(
+        box, owner._guest_proof.pinned_data(), owner.connection
+    )
+    with gateway._listener_preflight() as listener:
+        binding = web_studio_guest_binding.bind_unserved(
+            gateway, listener, owner._guest_proof
+        )
+        require(
+            binding.current() is binding.native.binding
+            and binding.native.native_pid == identity.native_pid
+            and binding.native.binding.origin
+            == listener.origin(gateway, listening=False),
+            "The proof did not join the same worker and socket.",
+        )
+        if verify_binding is not None:
+            verify_binding(binding, project)
+        # A real V2 stop intent retires this proof even while
+        # the worker and the workspace lock are still held.
+        workspace_control.request_stop(path)
+        require(
+            binding.current() is None
+            and owner._guest_proof.current() is None
+            and owner.child.poll() is None,
+            "Stop intent did not fence the original gateway and owner.",
+        )
 
 
 def main():
