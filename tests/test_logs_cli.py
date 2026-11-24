@@ -171,8 +171,10 @@ class LogsCliTests(unittest.TestCase):
             [
                 sys.executable,
                 "-B",
-                "-m",
-                "oc_box",
+                "-c",
+                "import runpy, signal;"
+                "signal.signal(signal.SIGINT, signal.default_int_handler);"
+                "runpy.run_module('oc_box', run_name='__main__', alter_sys=True)",
                 "logs",
                 "--tail",
                 "-f",
