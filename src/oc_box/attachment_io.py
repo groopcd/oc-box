@@ -17,7 +17,9 @@ from urllib.parse import urlparse
 MAX_BODY = 12 * 1024 * 1024
 MAX_REPLY = 12 * 1024 * 1024
 BUDGET = 30
-SUPPORTED = frozenset(("2.2.6", "2.2.7", "2.3.0"))
+# Only direct admission depends on demonstrated scheduler behavior. A matching
+# OpenAPI declaration is not evidence that a new runtime honors resume:false.
+DIRECT_RELEASES = frozenset(("2.2.6", "2.2.7", "2.3.0", "2.3.2", "2.4.0", "2.4.1"))
 CATEGORIES = frozenset(
     (
         "invalid-request",
@@ -25,6 +27,7 @@ CATEGORIES = frozenset(
         "session-scope",
         "session-revert",
         "session-archived",
+        "private-auth",
         "native-version",
         "delivery-unverified",
     )
@@ -33,6 +36,15 @@ CATEGORIES = frozenset(
 
 class Refused(ValueError):
     pass
+
+
+def canonical_v2(version):
+    return (
+        isinstance(version, str)
+        and len(version) <= 64
+        and re.fullmatch(r"2\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)", version)
+        is not None
+    )
 
 
 def target(request, session, directory):
@@ -67,6 +79,7 @@ def deliver(request, value):
     session, directory, version = (
         value.get(k) for k in ("session", "directory", "version")
     )
+    operation = value.get("operation")
     if (
         not isinstance(session, str)
         or not re.fullmatch(r"ses[A-Za-z0-9_-]{1,125}", session)
@@ -74,9 +87,10 @@ def deliver(request, value):
         or not directory.startswith("/")
         or "\0" in directory
         or len(directory.encode()) > 4096
-        or not isinstance(version, str)
-        or version not in SUPPORTED
-        or value.get("operation") not in ("check", "send")
+        or not canonical_v2(version)
+        or operation not in ("check", "send", "broker-check")
+        or (operation != "broker-check" and version not in DIRECT_RELEASES)
+        or (operation != "send" and "prompt" in value)
     ):
         raise Refused("invalid-request")
     info = request("GET", "/api/info")
@@ -85,9 +99,7 @@ def deliver(request, value):
     if not isinstance(info, dict) or info.get("version") != version:
         raise Refused("native-version")
     target(request, session, directory)
-    if value["operation"] == "check":
-        if "prompt" in value:
-            raise Refused("invalid-request")
+    if operation != "send":
         return {"ok": True}
     prompt = value.get("prompt")
     if not isinstance(prompt, dict) or set(prompt) != {
@@ -196,6 +208,8 @@ def connection(address, password):
             )
             sock.settimeout(remaining())
             with stream.getresponse() as response:
+                if response.status in (401, 403):
+                    raise Refused("private-auth")
                 if response.status != 200:
                     raise Refused("session-unavailable")
                 chunks, size = [], 0

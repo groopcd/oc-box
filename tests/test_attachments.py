@@ -15,7 +15,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
-from oc_box import attachments, oc_box as box, sharing, workspace_service
+from oc_box import attachment_io, attachments, oc_box as box, sharing, workspace_service
 
 PNG = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
@@ -23,6 +23,53 @@ PNG = base64.b64decode(
 SESSION = "ses_attachment_fixture"
 OTHER = "ses_other_fixture"
 REAL_NATIVE = attachments.native
+
+
+class AttachmentEligibilityTests(unittest.TestCase):
+    def test_broker_check_verifies_exact_version_and_target_without_prompt_route(self):
+        release = "2.99.0"
+        request = Mock(
+            side_effect=[
+                {"version": release},
+                {
+                    "data": {
+                        "id": SESSION,
+                        "location": {"directory": "/synthetic/project"},
+                        "time": {},
+                    }
+                },
+            ]
+        )
+        value = {
+            "operation": "broker-check",
+            "version": release,
+            "session": SESSION,
+            "directory": "/synthetic/project",
+        }
+        self.assertEqual(attachment_io.deliver(request, value), {"ok": True})
+        self.assertEqual(
+            [call.args for call in request.call_args_list],
+            [("GET", "/api/info"), ("GET", "/api/session/" + SESSION)],
+        )
+        request.reset_mock(side_effect=True)
+        request.return_value = {"version": "2.99.1"}
+        with self.assertRaisesRegex(attachment_io.Refused, "^native-version$"):
+            attachment_io.deliver(request, value)
+        request.assert_called_once_with("GET", "/api/info")
+        for change in (
+            {"operation": "check"},
+            {"operation": "send"},
+            {"prompt": {}},
+            {"version": "2.099.0"},
+            {"version": "2.99.0-rc.1"},
+        ):
+            request.reset_mock()
+            with (
+                self.subTest(change=change),
+                self.assertRaisesRegex(attachment_io.Refused, "^invalid-request$"),
+            ):
+                attachment_io.deliver(request, {**value, **change})
+            request.assert_not_called()
 
 
 class AttachmentBrokerTests(unittest.TestCase):
@@ -226,14 +273,34 @@ class AttachmentBrokerTests(unittest.TestCase):
 
 
 class AttachmentMCPTests(unittest.TestCase):
+    INITIALIZE = {
+        "jsonrpc": "2.0",
+        "id": 0,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-11-25",
+            "clientInfo": {"name": "opencode", "version": "2.4.1"},
+        },
+    }
+
     def setUp(self):
         AttachmentBrokerTests.setUp(self)
         self.consent = Mock(return_value=True)
         self.check = Mock()
-        self.protocol = attachments.MCP(
-            self.broker, SESSION, consent=self.consent, check=self.check
+        self.protocol = self.protocol_instance()
+        self.protocol.reply(self.INITIALIZE)
+        self.protocol.reply({"jsonrpc": "2.0", "method": "notifications/initialized"})
+        self.protocol.reply({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+        self.protocol.activate()
+
+    def protocol_instance(self):
+        return attachments.MCP(
+            self.broker,
+            SESSION,
+            version="2.4.1",
+            consent=self.consent,
+            check=self.check,
         )
-        self.protocol.reply({"jsonrpc": "2.0", "id": 0, "method": "initialize"})
 
     def call(self, name, arguments, *, session=SESSION, meta=None):
         return self.protocol.reply(
@@ -373,18 +440,42 @@ class AttachmentMCPTests(unittest.TestCase):
                 {"jsonrpc": "2.0", "method": "notifications/initialized"}
             )
         )
-        self.protocol.initialized = False
+        self.protocol.negotiated = False
         result = self.protocol.reply(
             {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}
         )
         self.assertEqual(result["error"]["code"], -32000)
-        self.protocol.initialized = True
+        self.protocol.negotiated = True
         self.consent.side_effect = OSError("private-error-sentinel")
         result = self.call("request_image", {"path": str(self.path)})
         self.assertTrue(result["isError"])
         self.assertNotIn("private-error-sentinel", json.dumps(result))
 
+    def test_requires_matching_native_handshake_before_tool_authority(self):
+        self.protocol = self.protocol_instance()
+        bad_identity = {
+            **self.INITIALIZE,
+            "params": {
+                **self.INITIALIZE["params"],
+                "clientInfo": {"name": "opencode", "version": "2.4.0"},
+            },
+        }
+        with self.assertRaisesRegex(attachments.AttachmentError, "handshake"):
+            self.protocol.reply(bad_identity)
+        self.protocol.reply(self.INITIALIZE)
+        catalog = {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}
+        self.assertIn("error", self.protocol.reply(catalog))
+        with self.assertRaisesRegex(attachments.AttachmentError, "handshake"):
+            self.protocol.activate()
+        self.protocol.reply({"jsonrpc": "2.0", "method": "notifications/initialized"})
+        self.assertIn("tools", self.protocol.reply(catalog)["result"])
+        self.assertTrue(self.call("request_image", {"path": str(self.path)})["isError"])
+        self.check.assert_not_called()
+        self.consent.assert_not_called()
+        self.assertFalse(self.broker.grants)
+
     def test_coalesced_large_one_use_redemptions_are_backpressured_not_lost(self):
+        self.protocol = self.protocol_instance()
         content = PNG + b"x" * (6 * 1024 * 1024 - len(PNG))
         self.path.write_bytes(content)
         first = self.broker.offer(self.path, SESSION, consent=lambda _: True)
@@ -398,8 +489,12 @@ def send(value):
     os.write(1, json.dumps(value).encode() + b'\n')
 def reply():
     return json.loads(sys.stdin.buffer.readline(12 * 1024 * 1024 + 1))
-send(request(1, 'initialize'))
+send(request(1, 'initialize', {
+    'protocolVersion': '2025-11-25',
+    'clientInfo': {'name': 'opencode', 'version': '2.4.1'}
+}))
 assert reply()['id'] == 1
+send({'jsonrpc': '2.0', 'method': 'notifications/initialized'})
 send(request(2, 'tools/list'))
 assert reply()['id'] == 2
 batch = b''.join(json.dumps(request(ident, 'tools/call', {
@@ -433,7 +528,9 @@ sys.stderr.write('DELIVERED_BOTH\n')
             stderr=subprocess.PIPE,
         )
         try:
-            sharing.serve(child, None, protocol=self.protocol)
+            sharing.serve(
+                child, None, protocol=self.protocol, ready=self.protocol.activate
+            )
             self.assertEqual(child.wait(timeout=5), 0)
             self.assertEqual(child.stderr.read(), b"DELIVERED_BOTH\n")
             self.assertEqual(self.broker.grants, {})
@@ -499,7 +596,7 @@ class AttachmentCLITests(unittest.TestCase):
             setattr(self.facade, name, self.forbidden[name])
         self.requests = []
 
-        def native(_, data, connection, session, *, prompt=None):
+        def native(_, data, connection, session, *, prompt=None, broker=False):
             self.assertIs(data, self.data)
             self.assertIs(connection, self.connection)
             self.assertEqual(session, SESSION)
@@ -575,6 +672,8 @@ class AttachmentCLITests(unittest.TestCase):
             {},
             {"opencode_version": "1.19.5"},
             {"opencode_version": "2.99.0"},
+            {"opencode_version": "2.4.1-rc.1"},
+            {"opencode_version": "2.04.1"},
             {"opencode_version": {}},
         ):
             self.facade.find_workspace.return_value = (
@@ -585,6 +684,33 @@ class AttachmentCLITests(unittest.TestCase):
                 self.cli(str(self.image), "--acknowledge-risk")
         self.facade.check_backend.assert_not_called()
         self.facade.workspace_service.attach.assert_not_called()
+
+    def test_future_stable_release_uses_broker_but_never_direct_preflight(self):
+        self.data["opencode_version"] = "2.99.0"
+        with self.assertRaisesRegex(box.BoxError, "Use 'oc-box attach --broker'"):
+            self.cli(str(self.image), "--acknowledge-risk")
+        self.facade.workspace_service.attach.assert_not_called()
+        self.native.assert_not_called()
+        with (
+            patch.object(attachments.sys.stdin, "isatty", return_value=True),
+            patch.object(attachments.sys.stderr, "isatty", return_value=True),
+            patch.object(attachments, "serve") as serve,
+        ):
+            self.assertEqual(self.cli("--broker"), 0)
+        self.native.assert_called_once_with(
+            self.facade, self.data, self.connection, SESSION, broker=True
+        )
+        serve.assert_called_once()
+
+    def test_lease_failure_is_distinct_from_unverified_admission(self):
+        self.facade.workspace_service.attach.side_effect = box.BoxError(
+            "raw-private-owner-error"
+        )
+        with self.assertRaisesRegex(
+            box.BoxError, "^No verified running private workspace owner"
+        ):
+            self.cli(str(self.image), "--acknowledge-risk")
+        self.native.assert_not_called()
 
     def test_broker_requires_host_tty_and_pins_explicit_session_with_one_lease(self):
         with (
@@ -669,6 +795,58 @@ class AttachmentCLITests(unittest.TestCase):
                     self.facade, self.data, self.connection, SESSION, prompt=prompt
                 )
             self.assertNotIn("private-", str(raised.exception))
+
+    def test_broker_adapter_only_performs_read_only_target_preflight(self):
+        self.facade.run.return_value = subprocess.CompletedProcess(
+            [], 0, json.dumps({"ok": True}), ""
+        )
+        self.assertEqual(
+            REAL_NATIVE(self.facade, self.data, self.connection, SESSION, broker=True),
+            {"ok": True},
+        )
+        value = json.loads(self.facade.run.call_args.kwargs["input"])
+        self.assertEqual(value["operation"], "broker-check")
+        self.assertNotIn("prompt", value)
+
+    def test_broker_relay_eof_refuses_before_or_after_readiness(self):
+        for negotiated in (False, True):
+            with self.subTest(negotiated=negotiated), attachments.Broker() as broker:
+                relay = Mock()
+                relay.poll.return_value = None
+
+                def pump(process, export, *, ready, protocol):
+                    if negotiated:
+                        protocol.reply(AttachmentMCPTests.INITIALIZE)
+                        protocol.reply(
+                            {"jsonrpc": "2.0", "method": "notifications/initialized"}
+                        )
+                        protocol.reply(
+                            {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}
+                        )
+                        ready()
+                    # Unexpected EOF can look like a clean child exit.
+                    return None
+
+                self.data["opencode_version"] = "2.4.1"
+                with (
+                    patch.object(attachments.subprocess, "Popen", return_value=relay),
+                    patch.object(sharing, "serve", side_effect=pump),
+                    self.assertRaises(attachments.AttachmentError) as raised,
+                ):
+                    attachments.serve(
+                        self.facade, self.data, self.connection, SESSION, broker
+                    )
+                self.assertEqual(
+                    str(raised.exception),
+                    attachments.BROKER_DISCONNECTED
+                    if negotiated
+                    else attachments.BROKER_UNVERIFIED,
+                )
+                self.assertEqual(
+                    "handshake verified:" in self.stdout.getvalue(), negotiated
+                )
+                self.assertTrue(broker.closed)
+        self.native.assert_not_called()
 
 
 class HostImageApprovalTests(unittest.TestCase):

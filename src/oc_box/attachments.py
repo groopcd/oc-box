@@ -23,13 +23,38 @@ import time
 import uuid
 
 if __package__:
-    from . import sharing
+    from . import attachment_io, sharing
 else:
+    import attachment_io
     import sharing
 
 MAX_PENDING = 4
 GRANT_LIFETIME = 120
-SUPPORTED = frozenset(("2.2.6", "2.2.7", "2.3.0"))
+DIRECT_UNVERIFIED = (
+    "Direct image queue behavior is not verified for this OpenCode release. "
+    "Use 'oc-box attach --broker' in a host terminal, or update oc-box."
+)
+BROKER_UNVERIFIED = (
+    "Native image broker handshake was not verified. Check that the private "
+    "OpenCode owner supports ClientMCP; no image was granted."
+)
+BROKER_DISCONNECTED = (
+    "Native image broker disconnected unexpectedly. No further images can be granted; "
+    "previously disclosed images may remain in history or provider systems."
+)
+ADMISSION_UNVERIFIED = (
+    "Image admission was not verified; it may already exist in the session. "
+    "Inspect before retrying."
+)
+TARGET_REFUSALS = {
+    "private-auth": "Private OpenCode authentication was refused. Check the running workspace owner.",
+    "native-version": "Native OpenCode identity does not match the workspace version. Check the running workspace owner.",
+    "session-unavailable": "Native target could not be verified; choose a current session in this workspace.",
+    "session-scope": "Native target is outside the registered workspace directory; choose a session in this workspace.",
+    "session-revert": "Target has a staged revert; resolve it in OpenCode before attaching.",
+    "session-archived": "Target session is archived; choose an open session.",
+    "delivery-unverified": ADMISSION_UNVERIFIED,
+}
 WARNING = (
     "SECURITY WARNING: The selected host image will be disclosed to OpenCode "
     "and may reach the model provider, history, backups or copies. Revocation "
@@ -183,9 +208,9 @@ class Broker:
         self.close()
 
 
-def native(box, data, connection, session, *, prompt=None):
+def native(box, data, connection, session, *, prompt=None, broker=False):
     """Fixed private transport; file bytes never enter native argv or env."""
-    operation = "send" if prompt is not None else "check"
+    operation = "broker-check" if broker else "send" if prompt is not None else "check"
     payload = {
         "operation": operation,
         "session": session,
@@ -194,21 +219,21 @@ def native(box, data, connection, session, *, prompt=None):
     }
     if prompt is not None:
         payload["prompt"] = prompt
-    command = box.workspace_service.client_command(
-        box,
-        data,
-        connection,
-        [
-            "python3",
-            "-I",
-            "-S",
-            "-B",
-            "-c",
-            (box.PACKAGE / "attachment_io.py").read_text(),
-            connection["url"],
-        ],
-    )
     try:
+        command = box.workspace_service.client_command(
+            box,
+            data,
+            connection,
+            [
+                "python3",
+                "-I",
+                "-S",
+                "-B",
+                "-c",
+                (box.PACKAGE / "attachment_io.py").read_text(),
+                connection["url"],
+            ],
+        )
         result = box.run(
             command,
             env=command.environment,
@@ -224,22 +249,12 @@ def native(box, data, connection, session, *, prompt=None):
             and isinstance(response, dict)
             and response.get("ok") is True
         ):
-            if operation == "check" or response.get("message") == prompt["id"]:
+            if operation != "send" or response.get("message") == prompt["id"]:
                 return response
         if isinstance(response, dict):
             reason = response.get("category")
-            if reason == "session-revert":
-                raise AttachmentError(
-                    "Target has a staged revert; resolve it in OpenCode before attaching."
-                )
-            if reason == "session-archived":
-                raise AttachmentError(
-                    "Target session is archived; choose an open session."
-                )
-            if reason == "delivery-unverified":
-                raise AttachmentError(
-                    "Image admission was not verified; it may already exist in the session. Inspect before retrying."
-                )
+            if isinstance(reason, str) and reason in TARGET_REFUSALS:
+                raise AttachmentError(TARGET_REFUSALS[reason])
     except AttachmentError:
         raise
     except (
@@ -251,9 +266,9 @@ def native(box, data, connection, session, *, prompt=None):
     ):
         pass
     raise AttachmentError(
-        "Image admission was not verified; inspect the session before retrying."
+        ADMISSION_UNVERIFIED
         if operation == "send"
-        else "Native target could not be verified; choose a current session in this workspace."
+        else TARGET_REFUSALS["session-unavailable"]
     ) from None
 
 
@@ -314,10 +329,16 @@ def broker_tools():
 class MCP:
     """Remote requests may propose, but cannot authorize, a host file read."""
 
-    def __init__(self, broker, session, *, consent, check):
+    def __init__(self, broker, session, *, version, consent, check):
         self.broker, self.session = broker, session
+        self.version = version
         self.consent, self.check = consent, check
-        self.initialized = self.catalogued = False
+        self.initialized = self.negotiated = self.catalogued = self.enabled = False
+
+    def activate(self):
+        if not self.catalogued:
+            raise AttachmentError(BROKER_UNVERIFIED)
+        self.enabled = True
 
     def reply(self, request):
         if (
@@ -326,9 +347,12 @@ class MCP:
             or not isinstance(request.get("method"), str)
         ):
             raise sharing.ShareError("Invalid client MCP request.")
+        method = request["method"]
         if "id" not in request:
+            if method == "notifications/initialized" and self.initialized:
+                self.negotiated = True
             return None
-        ident, method = request["id"], request["method"]
+        ident = request["id"]
         if not isinstance(ident, (str, int)) or isinstance(ident, bool):
             raise sharing.ShareError("Invalid client MCP request identifier.")
         response = {"jsonrpc": "2.0", "id": ident}
@@ -340,6 +364,17 @@ class MCP:
         if not isinstance(params, dict):
             return error(-32602, "Invalid broker parameters.")
         if method == "initialize":
+            client = params.get("clientInfo")
+            protocol = params.get("protocolVersion")
+            if (
+                self.initialized
+                or not isinstance(client, dict)
+                or client.get("name") != "opencode"
+                or client.get("version") != self.version
+                or not isinstance(protocol, str)
+                or re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", protocol) is None
+            ):
+                raise AttachmentError(BROKER_UNVERIFIED)
             self.initialized = True
             return {
                 **response,
@@ -352,7 +387,7 @@ class MCP:
             }
         if method == "ping":
             return {**response, "result": {}}
-        if not self.initialized:
+        if not self.negotiated:
             return error(-32000, "Initialize this broker first.")
         if method == "tools/list":
             self.catalogued = True
@@ -360,6 +395,8 @@ class MCP:
         if method != "tools/call":
             return error(-32601, "Unsupported attachment broker method.")
         try:
+            if not self.enabled:
+                raise AttachmentError("Host image broker is not ready.")
             metadata = params.get("_meta")
             if (
                 not isinstance(metadata, dict)
@@ -430,44 +467,62 @@ def serve(box, data, connection, session, broker):
     protocol = MCP(
         broker,
         session,
+        version=data["opencode_version"],
         consent=lambda path: approve(path, session),
-        check=lambda: native(box, data, connection, session),
+        check=lambda: native(box, data, connection, session, broker=True),
     )
     name = "oc_box_attachments_" + uuid.uuid4().hex
-    command = box.workspace_service.client_command(
-        box,
-        data,
-        connection,
-        [
-            "python3",
-            "-I",
-            "-B",
-            "-c",
-            sharing.transport_source(box),
-            connection["url"],
-            box.container_project(data),
-            name,
-        ],
-    )
-    process = subprocess.Popen(
-        command,
-        env=command.environment,
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-        start_new_session=True,
-    )
     try:
-        sharing.serve(
-            process,
-            None,
-            protocol=protocol,
-            ready=lambda: print(
-                "oc-box: Image broker ready: "
-                + name
-                + ". Ask OpenCode to request_image, approve here, then read_attachment. Ctrl-C closes it.",
-                flush=True,
-            ),
+        command = box.workspace_service.client_command(
+            box,
+            data,
+            connection,
+            [
+                "python3",
+                "-I",
+                "-B",
+                "-c",
+                sharing.transport_source(box),
+                connection["url"],
+                box.container_project(data),
+                name,
+            ],
+        )
+        process = subprocess.Popen(
+            command,
+            env=command.environment,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except (box.BoxError, OSError, ValueError, subprocess.SubprocessError):
+        raise AttachmentError(BROKER_UNVERIFIED) from None
+
+    def ready():
+        if process.poll() is not None:
+            raise AttachmentError(BROKER_UNVERIFIED)
+        protocol.activate()
+        print(
+            "oc-box: Native image broker handshake verified: "
+            + name
+            + ". Ask OpenCode to request_image, approve here, then read_attachment. Ctrl-C closes it.",
+            flush=True,
+        )
+
+    try:
+        sharing.serve(process, None, protocol=protocol, ready=ready)
+    except KeyboardInterrupt:
+        if not protocol.enabled:
+            raise AttachmentError(BROKER_UNVERIFIED) from None
+    except (OSError, ValueError):
+        raise AttachmentError(
+            BROKER_DISCONNECTED if protocol.enabled else BROKER_UNVERIFIED
+        ) from None
+    else:
+        # A relay EOF is not an explicit operator close, even if its exit is 0.
+        raise AttachmentError(
+            BROKER_DISCONNECTED if protocol.enabled else BROKER_UNVERIFIED
         )
     finally:
         broker.close()
@@ -489,9 +544,10 @@ def parser():
         prog="oc-box attach",
         description="Attach one host image, or run a host-approved image broker, in an existing V2 session.",
         epilog=(
-            "Run on the host with an existing private workspace using OpenCode 2.2.6, 2.2.7 or 2.3.0. "
+            "Run on the host with an existing private OpenCode V2 workspace. "
+            "Direct attachment requires verified native queue behavior. "
             "Use PATH for one image. Direct attachment queues input, not a draft: a running session may consume it without --send. "
-            "Use --broker for independent per-image approval on the host terminal; "
+            "Use --broker for ClientMCP and independent per-image approval on the host terminal; "
             "it forbids PATH, --text, --send and --acknowledge-risk."
         ),
     )
@@ -572,18 +628,26 @@ def cli(box, arguments):
             "Use a separate host terminal for image approval; a direct file may use --acknowledge-risk."
         )
     path, data = box.find_workspace(args.project, args.workspace)
-    if (
-        not isinstance(data, dict)
-        or not isinstance(data.get("opencode_version"), str)
-        or data["opencode_version"] not in SUPPORTED
-    ):
+    version = data.get("opencode_version") if isinstance(data, dict) else None
+    if not attachment_io.canonical_v2(version):
         raise box.BoxError(
-            "Host image attachments require an existing supported OpenCode V2 workspace (2.2.6, 2.2.7 or 2.3.0)."
+            "Host image attachments require a registered workspace using a stable OpenCode V2 release."
         )
+    if not args.broker and version not in attachment_io.DIRECT_RELEASES:
+        raise box.BoxError(DIRECT_UNVERIFIED)
     try:
-        box.check_backend(env=box.maintenance_host_env())
-        with box.workspace_service.attach(box, path, data) as connection:
-            native(box, data, connection, args.session)
+        with contextlib.ExitStack() as lease:
+            try:
+                box.check_backend(env=box.maintenance_host_env())
+                connection = lease.enter_context(
+                    box.workspace_service.attach(box, path, data)
+                )
+            except (box.BoxError, OSError, ValueError, subprocess.SubprocessError):
+                raise AttachmentError(
+                    "No verified running private workspace owner. Check 'oc-box status' "
+                    "and start the workspace if it is stopped."
+                ) from None
+            native(box, data, connection, args.session, broker=args.broker)
             with Broker(protected=sharing.protected_paths(box)) as broker:
                 if args.broker:
                     print("oc-box: " + WARNING, file=sys.stderr, flush=True)
@@ -596,8 +660,6 @@ def cli(box, arguments):
                     )
                     try:
                         serve(box, data, connection, args.session, broker)
-                    except KeyboardInterrupt:
-                        pass
                     finally:
                         print(
                             "oc-box: Image broker closed; previously disclosed images may remain in history or provider systems.",

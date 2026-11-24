@@ -457,7 +457,7 @@ see the focused validation requirements in `docs/testing.md`.
 
 ### attach
 
-**Experimental, host-only, V2 2.2.6/2.2.7/2.3.0 only:** disclose one host image
+**Experimental, host-only, OpenCode V2:** disclose one host image
 to an explicitly selected native session in an already running workspace.
 `--session` is required in both modes. The session must belong to the workspace's
 exact native project directory; observed archived targets or staged native
@@ -489,6 +489,10 @@ and examine the screenshot.” The host terminal shows each proposed file and it
 disclosure warning. Independently type `attach` there to authorize **each file**;
 an agent's request, native permission approval, earlier approval or pasted path
 is never host consent.
+Stable V2 broker clients are eligible without a patch list. The launcher
+verifies the existing private owner's identity and a native ClientMCP
+initialization and tool catalog before it enables the broker. Failed
+verification or an unexpected disconnect returns a fixed error.
 
 `request_image` captures an approved image and returns only an opaque expiring
 ID. `read_attachment(id)` returns that captured image at most once, to the same
@@ -517,6 +521,11 @@ draft attachment chip**. Without `--send`, oc-box requests native `resume: false
 with `--send`, it requests queueing plus `resume: true`. An already active native
 execution may consume queued input even without `--send`: neither mode promises
 that inference stays stopped. Direct mode requires PATH.
+Direct mode is restricted to releases with verified queue behavior:
+2.2.6, 2.2.7, 2.3.0, 2.3.2, 2.4.0, and 2.4.1. On another release it refuses
+before selecting a file and recommends broker mode. If native admission
+cannot be confirmed, inspect the target session before retrying; oc-box
+does not retry the operation.
 
 Both modes capture a single regular, single-link PNG/JPEG/GIF/WebP image of at
 most 8 MiB using the sharing path/content guards. Folders, symlinks, special

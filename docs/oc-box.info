@@ -549,15 +549,15 @@ requirements in ‘docs/testing.md’.
 4.7 attach
 ==========
 
-**Experimental, host-only, V2 2.2.6/2.2.7/2.3.0 only:** disclose one
-host image to an explicitly selected native session in an already
-running workspace.  ‘--session’ is required in both modes.  The session
-must belong to the workspace's exact native project directory; observed
-archived targets or staged native reverts are refused.  This command
-never starts a workspace, refreshes auth/config, unlocks the vault, or
-selects a session automatically.  Put ‘attach’ first.  The native API
-has no atomic precondition for this check: a revert staged between the
-final target check and prompt admission can still be committed by native
+**Experimental, host-only, OpenCode V2:** disclose one host image to an
+explicitly selected native session in an already running workspace.
+‘--session’ is required in both modes.  The session must belong to the
+workspace's exact native project directory; observed archived targets or
+staged native reverts are refused.  This command never starts a
+workspace, refreshes auth/config, unlocks the vault, or selects a
+session automatically.  Put ‘attach’ first.  The native API has no
+atomic precondition for this check: a revert staged between the final
+target check and prompt admission can still be committed by native
 OpenCode.  Do not stage/revise a revert concurrently with direct
 attachment.
 
@@ -582,7 +582,11 @@ example, ask: “Use request_image for
 returned ID and examine the screenshot.” The host terminal shows each
 proposed file and its disclosure warning.  Independently type ‘attach’
 there to authorize **each file**; an agent's request, native permission
-approval, earlier approval or pasted path is never host consent.
+approval, earlier approval or pasted path is never host consent.  Stable
+V2 broker clients are eligible without a patch list.  The launcher
+verifies the existing private owner's identity and a native ClientMCP
+initialization and tool catalog before it enables the broker.  Failed
+verification or an unexpected disconnect returns a fixed error.
 
 ‘request_image’ captures an approved image and returns only an opaque
 expiring ID. ‘read_attachment(id)’ returns that captured image at most
@@ -611,7 +615,12 @@ native user message, **not a draft attachment chip**.  Without ‘--send’,
 oc-box requests native ‘resume: false’; with ‘--send’, it requests
 queueing plus ‘resume: true’.  An already active native execution may
 consume queued input even without ‘--send’: neither mode promises that
-inference stays stopped.  Direct mode requires PATH.
+inference stays stopped.  Direct mode requires PATH. Direct mode is
+restricted to releases with verified queue behavior: 2.2.6, 2.2.7,
+2.3.0, 2.3.2, 2.4.0, and 2.4.1.  On another release it refuses before
+selecting a file and recommends broker mode.  If native admission cannot
+be confirmed, inspect the target session before retrying; oc-box does
+not retry the operation.
 
 Both modes capture a single regular, single-link PNG/JPEG/GIF/WebP image
 of at most 8 MiB using the sharing path/content guards.  Folders,
@@ -5195,20 +5204,20 @@ Node: Name769
 Node: Synopsis930
 Node: Description5132
 Node: Commands10952
-Node: Options144396
-Node: Lifecycle and persistence208268
-Node: Distribution images210568
-Node: Sessions and recovery215645
-Node: Devices and host permissions222230
-Node: Resource reports224576
-Node: Configuration and environment226687
-Node: Files238068
-Node: Exit status248978
-Node: Examples250386
-Node: Troubleshooting252525
-Node: Installation and manuals265017
-Node: Authors and license275207
-Node: See also275814
+Node: Options144980
+Node: Lifecycle and persistence208852
+Node: Distribution images211152
+Node: Sessions and recovery216229
+Node: Devices and host permissions222814
+Node: Resource reports225160
+Node: Configuration and environment227271
+Node: Files238652
+Node: Exit status249562
+Node: Examples250970
+Node: Troubleshooting253109
+Node: Installation and manuals265601
+Node: Authors and license275791
+Node: See also276398
 
 End Tag Table
 

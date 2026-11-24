@@ -744,7 +744,13 @@ with the retained baseline and current development native binaries:
 ```sh
 python3 -B tests/smoke_attachments_v2.py --opencode /path/to/opencode-2.2.6
 python3 -B tests/smoke_attachments_v2.py --opencode /path/to/opencode-2.3.0
+python3 -B tests/smoke_attachments_v2.py --opencode /path/to/current-stable-opencode-2
 ```
+
+Keep the native startup/broker and direct-queue checks separate. The broker
+must complete initialize and tool-catalog negotiation with the existing
+authenticated owner before exposing any grants. Do not treat API schemas as
+proof that a new release will honor the direct queue/resume semantics.
 
 Its approval callback is synthetic. The separate real-PTY approval unit cases
 do not turn that callback into an interactive desktop/Podman acceptance pass.
