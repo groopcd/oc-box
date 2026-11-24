@@ -67,6 +67,11 @@ workspace catalog, selected generation and retained message against the
 pinned OpenCode 2.4.1 executable. It uses real loopback sockets and
 worker pipes, with synthetic outer inspect and exec. It serves no HTTP
 routes and does not establish installed, browser or Podman acceptance.
+The disconnected smoke also verifies cookie-only authentication over
+counted OGD v3 relays. Each attempt observes the exact anonymous
+refusal and authenticated native identity, retires both execs, and
+refuses a bad cookie before dispatching its catalog read. This does
+not validate actual Podman cancellation on the installed path.
 
 The separate first-party browser entry requires an explicit confirmation
 after native pairing. It keeps both guest bearers in document memory,
