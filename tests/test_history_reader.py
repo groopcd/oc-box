@@ -1312,6 +1312,23 @@ class EnvironmentTests(unittest.TestCase):
 
 
 class ReaderTests(unittest.TestCase):
+    def test_guarded_exec_refusal_closing_stdin_preserves_fixed_category(self):
+        lease = reader.Reader(
+            fake_box(), DATA, remaining=lambda: 5, runtime_digest="a" * 64
+        )
+        lease.child = Mock(returncode=126)
+        lease.child.stdin.fileno.return_value = 9
+        lease.error_file = io.BytesIO()
+        with (
+            patch.object(reader.os, "set_blocking"),
+            patch.object(reader.select, "select", return_value=([], [9], [])),
+            patch.object(reader.os, "write", side_effect=BrokenPipeError),
+            self.assertRaises(reader.Refusal) as failure,
+        ):
+            lease._write_payload(b"{}\n", reader.time.monotonic() + 2)
+        lease.child.wait.assert_called_once()
+        self.assertEqual(failure.exception.category, "runtime-executable-unverified")
+
     def setUp(self):
         self.box = fake_box()
         self.remaining = Mock(return_value=4)

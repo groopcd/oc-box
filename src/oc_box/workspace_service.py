@@ -637,13 +637,14 @@ def client_command(
         else "xterm-256color"
     )
     bridge = "import os,sys,json; env=json.loads(sys.argv[1]); env['OPENCODE_PASSWORD']=os.environ['OPENCODE_PASSWORD']; os.execvpe(sys.argv[2],sys.argv[2:],env)"
-    if (
-        guarded_digest
-        and safeguard
-        and (interactive or (guarded and guarded.launching))
-    ):
+    if guarded_digest and safeguard:
         arguments = safeguard.bound_command(arguments, guarded_digest)
-    command.extend(["python3", "-I", "-S", "-c", bridge, json.dumps(names), *arguments])
+    interpreter = (
+        safeguard.SYSTEM_HELPER
+        if guarded_digest and safeguard
+        else ("python3", "-I", "-S")
+    )
+    command.extend([*interpreter, "-c", bridge, json.dumps(names), *arguments])
     result = box.ContainerCommand(command, env)
     if guarded:
         result.guarded_spawn = True

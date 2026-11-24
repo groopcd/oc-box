@@ -386,6 +386,11 @@ def guarded_reader_executable(binary, release, root, path, data, environment, di
     alias = prefix / "bin/opencode"
     alias.parent.mkdir()
     alias.symlink_to("../lib/node_modules/@opencode/cli/bin/opencode.exe")
+    marker = root / "shadow-interpreter-ran"
+    shadow = alias.with_name("python3")
+    shadow.write_text(f"#!/bin/sh\n: > {shlex.quote(str(marker))}\nexit 42\n")
+    shadow.chmod(0o700)
+    shadowed_path = str(alias.parent) + ":/usr/bin:/bin"
     changed = executable.with_suffix(".changed")
     shutil.copyfile(executable, changed)
     changed.chmod(0o700)
@@ -418,9 +423,25 @@ def guarded_reader_executable(binary, release, root, path, data, environment, di
         patch.dict(os.environ, environment, clear=True),
         patch.object(box, "CONTAINER_OPENCODE", str(alias)),
         patch.object(runtime_safeguard, "PREFIX", str(prefix)),
+        patch.object(history_reader, "PATH", shadowed_path),
         box.workspace_lock(path),
     ):
         with reader() as original:
+            worker = original.command(
+                [
+                    "python3",
+                    "-I",
+                    "-S",
+                    "-c",
+                    (box.PACKAGE / "opencode_v2_io.py").read_text(),
+                    "history-worker",
+                    str(alias),
+                ]
+            )
+            require(
+                "python3" not in worker and worker.count("/usr/bin/python3") == 4,
+                "The pass-local reader helper did not use only trusted interpreters.",
+            )
             executable.replace(saved)
             changed.replace(executable)
             try:
@@ -446,15 +467,23 @@ def guarded_reader_executable(binary, release, root, path, data, environment, di
                     "A guarded reader started native on replaced bytes."
                 )
         except box.BoxError as error:
+            category = getattr(error, "history_reader_category", None)
+            fixed = (
+                category
+                if isinstance(category, str) and category in history_reader.CATEGORIES
+                else "unexpected"
+            )
             require(
-                getattr(error, "history_reader_category", None)
-                == "runtime-executable-unverified",
-                "The guarded reader did not report the fixed executable refusal.",
+                fixed == "runtime-executable-unverified",
+                f"The guarded reader did not report the fixed executable refusal ({fixed}).",
             )
         require(
             history_reader.current() is None
             and workspace_service.live_connection() is None,
             "The guarded executable refusal retained a reader connection.",
+        )
+        require(
+            not marker.exists(), "A guarded helper used the runtime PATH interpreter."
         )
 
 

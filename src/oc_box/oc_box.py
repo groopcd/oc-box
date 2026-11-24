@@ -2081,15 +2081,18 @@ def exec_command(data, command, *, interactive=False, isolated_owner_env=None):
             container_cli(data, command[1:]) if "--version" not in command else command
         )
     guarded = runtime_safeguard.current()
-    if guarded and guarded.launching:
+    if guarded:
         command = runtime_safeguard.bound_command(command, guarded.record.digest)
-        result.guarded_spawn = True
+        if guarded.launching:
+            result.guarded_spawn = True
     if opencode_compat.major(data.get("opencode_version", "1.0.0")) == 2:
         # Clear image/create-time environment first. Public variable NAMES are
         # argv; values arrive only via Podman's inherited --env NAME mechanism.
         bridge = "import os,sys; keys=sys.argv[1].split(','); env={k:os.environ[k] for k in keys if k in os.environ}; os.execvpe(sys.argv[2],sys.argv[2:],env)"
         interpreter = (
-            ["/usr/bin/python3", "-I", "-S", "-B"] if isolated_owner else ["python3"]
+            list(runtime_safeguard.SYSTEM_HELPER)
+            if guarded or isolated_owner
+            else ["python3"]
         )
         command = [*interpreter, "-c", bridge, ",".join([*forwarded, "PATH"]), *command]
     result.extend(

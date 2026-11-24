@@ -1079,7 +1079,9 @@ Read-only executable-version probes must match the captured supported release
 on both sides. On runtime-guarded workspaces, the post-stop reader also checks
 the captured executable digest and uses the verified descriptor for startup
 and each later native helper. Different bytes that still report the same
-patch version are refused.
+patch version are refused. Launcher-private guarded checks and helpers use
+the system interpreter, not a `python3` from the workspace runtime's `PATH`;
+native session tool lookup is unchanged.
 The host and container must match the captured exact patch version, not merely
 belong to the same minor series. Unsupported versions are warned about before the
 owning client opens; they retain normal live sync and manual-sync retry guidance,
