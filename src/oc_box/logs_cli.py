@@ -266,6 +266,12 @@ def _new_records(previous, current):
 
 def _preparation_text(record):
     task = activity_log.PREPARATION_TASKS[record["stage"]]
+    metrics = record.get("metrics", {})
+    version_fields = ("opencode_major", "opencode_minor", "opencode_patch")
+    if record["stage"].startswith("native-preflight") and all(
+        key in metrics for key in version_fields
+    ):
+        task += " (" + ".".join(str(metrics[key]) for key in version_fields) + ")"
     state = record.get("outcome", "started")
     code = record.get("exit_code")
     elapsed = record.get("duration_ms")
@@ -277,6 +283,11 @@ def _preparation_text(record):
         if code
         else ""
     )
+    if record["stage"].startswith("native-preflight") and record.get("reason") not in (
+        None,
+        "timeout",
+    ):
+        detail += f" ({record['reason']})"
     return f"{record['command']}: {task} — {state}{detail}{duration}"
 
 

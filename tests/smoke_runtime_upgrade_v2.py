@@ -18,6 +18,7 @@ from oc_box import oc_box as box, opencode_v2_io as bridge
 OLD = "2.3.0"
 COLD_REGRESSION = "2.2.6"
 REGRESSION = "2.4.0"
+INCIDENT_SOURCE = "2.3.2"
 ENV_KEY = "OC_BOX_UPGRADE_FIXTURE_API_KEY"
 
 
@@ -68,12 +69,21 @@ def smoke(version, parent, network, *, initial=OLD):
                     # installing it. A registry/audit failure is not a pass.
                     if args[1] == "install":
                         npm(
-                            "install", *flags, "--package-lock-only", "--ignore-scripts",
-                            "--no-audit", env=env, cwd=project,
+                            "install",
+                            *flags,
+                            "--package-lock-only",
+                            "--ignore-scripts",
+                            "--no-audit",
+                            env=env,
+                            cwd=project,
                         )
                     npm(
-                        "audit", *flags, "--omit=dev", "--audit-level=info",
-                        env=env, cwd=project,
+                        "audit",
+                        *flags,
+                        "--omit=dev",
+                        "--audit-level=info",
+                        env=env,
+                        cwd=project,
                     )
                     audited[workspace["opencode_version"]] = json.loads(
                         lockfile.read_text()
@@ -96,24 +106,38 @@ def smoke(version, parent, network, *, initial=OLD):
             ) as child:
                 try:
                     assert select.select([child.stdout], [], [], 30)[0]
-                    request = bridge.endpoint_request(json.loads(child.stdout.readline()))
+                    request = bridge.endpoint_request(
+                        json.loads(child.stdout.readline())
+                    )
                     catalog = request("GET", "/api/plugin")["data"]
                     assert any(
                         item.get("id") == "oc-box.build-permissions"
                         and item["state"]["status"] == "active"
                         for item in catalog
                     )
-                    probe = request("POST", "/api/session", {
-                        "title": "Synthetic environment check",
-                        "location": {"directory": str(project)},
-                    })["data"]["id"]
+                    probe = request(
+                        "POST",
+                        "/api/session",
+                        {
+                            "title": "Synthetic environment check",
+                            "location": {"directory": str(project)},
+                        },
+                    )["data"]["id"]
                     marker = project / ".synthetic-env"
                     marker.unlink(missing_ok=True)
-                    request("POST", f"/api/session/{probe}/shell", {
-                        "command": f'test "${ENV_KEY}" = synthetic && touch .synthetic-env',
-                    })
-                    assert marker.is_file(), "native shell did not inherit the owner environment"
-                    assert not (config / "service.json").exists(), "unexpected shared-service config"
+                    request(
+                        "POST",
+                        f"/api/session/{probe}/shell",
+                        {
+                            "command": f'test "${ENV_KEY}" = synthetic && touch .synthetic-env',
+                        },
+                    )
+                    assert marker.is_file(), (
+                        "native shell did not inherit the owner environment"
+                    )
+                    assert not (config / "service.json").exists(), (
+                        "unexpected shared-service config"
+                    )
                     child.stdin.close()
                     assert child.wait(timeout=15) == 0
                 finally:
@@ -188,7 +212,9 @@ def smoke(version, parent, network, *, initial=OLD):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--cold-only", action="store_true")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--cold-only", action="store_true")
+    mode.add_argument("--incident-only", action="store_true")
     args = parser.parse_args()
     network = {
         key: value
@@ -206,9 +232,13 @@ if __name__ == "__main__":
         ):
             subprocess.run(["node", "--version"], check=True, timeout=15)
             npm("--version")
+            if args.incident_only:
+                smoke(REGRESSION, root, network, initial=INCIDENT_SOURCE)
+                raise SystemExit(0)
             smoke(COLD_REGRESSION, root, network, initial=COLD_REGRESSION)
             if args.cold_only:
                 raise SystemExit(0)
+            smoke(REGRESSION, root, network, initial=INCIDENT_SOURCE)
             releases = json.loads(
                 npm(
                     "view",

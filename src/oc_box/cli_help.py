@@ -45,6 +45,7 @@ _COMMAND_GROUPS = (
             ("logs", "Read launcher activity or follow environment preparation"),
             ("distros", "List supported container distributions"),
             ("doctor", "Check prerequisites and show installation guidance"),
+            ("runtime-check", "Check an exact OpenCode 2.x release in isolation"),
         ),
     ),
     (
@@ -95,6 +96,7 @@ _OPTION_GROUPS = {
         ),
     ),
     "vault": ("Credential delivery", ("no_vault",)),
+    "runtime-guard": ("Native runtime safeguard", ("runtime_guard",)),
     "logging": (
         "Lifecycle logging",
         ("log_dir", "journald", "lifecycle_diagnostics", "verbose"),
@@ -116,7 +118,7 @@ _OPTION_GROUPS = {
 
 _LAUNCH_GROUPS = ("workspace", "session", "container", "native", "vault", "logging")
 _COMMAND_SCOPES = {
-    "start": _LAUNCH_GROUPS,
+    "start": (*_LAUNCH_GROUPS, "runtime-guard"),
     "reset": _LAUNCH_GROUPS,
     "stop": ("workspace", "logging"),
     "sync": ("workspace", "sync-resources", "logging"),

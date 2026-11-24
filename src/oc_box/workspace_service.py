@@ -491,6 +491,14 @@ def client_command(
     file_preview=False,
 ):
     """No host pass_env, auth refresh, profiles, or vault unlock on attach."""
+    safeguard = getattr(box, "runtime_safeguard", None)
+    guarded = safeguard.current() if safeguard else None
+    guarded_container = (
+        guarded.record.container if guarded else connection.get("_runtime_container")
+    )
+    guarded_digest = (
+        guarded.record.digest if guarded else connection.get("_runtime_digest")
+    )
     image_preview = connection.get("image_preview", False)
     if type(image_preview) is not bool:
         raise box.BoxError("Invalid private workspace image-preview setting.")
@@ -507,7 +515,7 @@ def client_command(
             box.container_project(data),
             "--env",
             "OPENCODE_PASSWORD",
-            data["container"],
+            guarded_container or data["container"],
         ]
     )
     names = {
@@ -563,6 +571,10 @@ def client_command(
             if verified is not None:
                 # Use the inspected immutable container ID, not a mutable name.
                 container, mounts = verified
+                if guarded_container and container != guarded_container:
+                    raise box.BoxError(
+                        "The live file-open client no longer matches the guarded container."
+                    )
                 reason = file_preview_host.readiness_reason()
                 if reason is None:
                     refusals = []
@@ -617,8 +629,12 @@ def client_command(
         else "xterm-256color"
     )
     bridge = "import os,sys,json; env=json.loads(sys.argv[1]); env['OPENCODE_PASSWORD']=os.environ['OPENCODE_PASSWORD']; os.execvpe(sys.argv[2],sys.argv[2:],env)"
+    if guarded_digest and safeguard:
+        arguments = safeguard.bound_command(arguments, guarded_digest)
     command.extend(["python3", "-I", "-S", "-c", bridge, json.dumps(names), *arguments])
     result = box.ContainerCommand(command, env)
+    if guarded:
+        result.guarded_spawn = True
     if preview_host_open is not None:
         result.preview_host_open = preview_host_open
     return result
@@ -1104,15 +1120,18 @@ class Owner:
         )
         self.errors = box.captured_output(private=True)
         self.error_file = self.errors.__enter__()
+        safeguard = getattr(box, "runtime_safeguard", None)
+        guarded = safeguard.current() if safeguard else None
         try:
-            self.child = subprocess.Popen(
-                command,
-                env=command.environment,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=self.error_file,
-                start_new_session=True,
-            )
+            with guarded.spawn(box) if guarded else contextlib.nullcontext():
+                self.child = subprocess.Popen(
+                    command,
+                    env=command.environment,
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=self.error_file,
+                    start_new_session=True,
+                )
             assert self.child.stdout is not None
             output = bytearray()
             deadline = time.monotonic() + 180
@@ -1128,8 +1147,15 @@ class Owner:
                         "Invalid private workspace service readiness response."
                     )
             self.connection = validate_endpoint(json.loads(output.split(b"\n", 1)[0]))
+            if guarded and self.connection.get("version") != guarded.record.version:
+                raise box.BoxError(
+                    "Private owner readiness did not match the guarded OpenCode release."
+                )
             self.connection["workspace"] = self.data["id"]
             self.connection["image_preview"] = self.image_preview
+            if guarded:
+                self.connection["_runtime_container"] = guarded.record.container
+                self.connection["_runtime_digest"] = guarded.record.digest
             if __package__:
                 from . import ui_state
             else:
@@ -1161,8 +1187,15 @@ class Owner:
     def publish(self, session):
         if session is not None and not self.box.valid_session_id(session):
             raise self.box.BoxError("Invalid live workspace session ID.")
-        with self.condition:
+        safeguard = getattr(self.box, "runtime_safeguard", None)
+        guarded = safeguard.current() if safeguard else None
+        with (
+            guarded.spawn(self.box) if guarded else contextlib.nullcontext(),
+            self.condition,
+        ):
             self.session, self.ready = session, True
+            if guarded:
+                guarded.launching = False
 
     def default_session(self):
         """Recheck persisted open membership without inventing an active tab."""
@@ -1359,6 +1392,9 @@ def attach(box, path, data):
             raise box.BoxError(
                 "Live service does not match this workspace/version/session."
             )
+        safeguard = getattr(box, "runtime_safeguard", None)
+        if safeguard:
+            safeguard.bind_client(box, path, data, connection)
     except (OSError, ValueError) as exc:
         stream.close()
         raise box.BoxError(
@@ -1633,6 +1669,8 @@ class Gateway:
 
 
 def web_session(box, data, connection, args):
+    if connection.get("_runtime_container"):
+        data = {**data, "container": connection["_runtime_container"]}
     if __package__:
         from . import ui_state
     else:

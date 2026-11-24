@@ -231,10 +231,10 @@ class RequestTests(unittest.TestCase):
         self.assertEqual(native.call_args.args[3:], ("GET", "/api/info"))
         gateway.assert_not_called()
 
-    def test_cli_unsupported_version_refuses_before_workspace_or_credentials(self):
+    def test_cli_unsupported_owner_version_refuses_before_backend_or_credentials(self):
         with (
             patch.object(box, "detect_opencode_release", return_value="2.2.7"),
-            patch.object(box, "find_workspace") as workspace,
+            patch.object(box, "find_workspace", return_value=(None, None)) as workspace,
             patch.object(service, "preflight_port") as port,
             patch.object(box, "check_backend") as backend,
             patch.object(box.vault, "hidden") as unlock,
@@ -243,7 +243,9 @@ class RequestTests(unittest.TestCase):
             # Unit tests run inside oc-box; this tests the host CLI path only.
             with patch.dict("os.environ", {"OC_BOX_CONTAINER": "0"}):
                 box.main(["web", "--attachments", "--project", "/synthetic/project"])
-        for operation in (workspace, port, backend, unlock):
+        workspace.assert_called_once()
+        port.assert_called_once()
+        for operation in (backend, unlock):
             operation.assert_not_called()
 
     def test_supported_versions_enable_only_the_selected_gateway(self):
