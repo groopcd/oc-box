@@ -62,6 +62,11 @@ The read seam uses the existing bounded project/catalog and transcript
 projections, checks the exact native PID and workspace, and repeats the
 live selection check after retiring its transport. It is not a general
 native JSON proxy.
+The disconnected guest-read smoke checks the original grant,
+workspace catalog, selected generation and retained message against the
+pinned OpenCode 2.4.1 executable. It uses real loopback sockets and
+worker pipes, with synthetic outer inspect and exec. It serves no HTTP
+routes and does not establish installed, browser or Podman acceptance.
 
 ## Named HTTPS: the stop fence must cover every supported writer
 

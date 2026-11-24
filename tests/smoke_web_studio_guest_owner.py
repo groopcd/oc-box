@@ -23,7 +23,7 @@ from oc_box import web_studio_guest_binding, workspace_control, workspace_servic
 _NATIVE_SHA = "ec93043f18f8a6b4d8e71ec9260e292ba6f91b66b142782135d40f0b58b0c152"
 
 
-def exercise(root, binary):
+def exercise(root, binary, *, verify_binding=None):
     env = build_environment(root / "native", "2.4.1")
     env["OC_BOX_STATE_HOME"] = str(root / "state")
     env["XDG_RUNTIME_DIR"] = str(root)
@@ -92,6 +92,8 @@ def exercise(root, binary):
                             == listener.origin(gateway, listening=False),
                             "The proof did not join the same worker and socket.",
                         )
+                        if verify_binding is not None:
+                            verify_binding(binding, project)
                         # A real V2 stop intent retires this proof even while
                         # the worker and the workspace lock are still held.
                         workspace_control.request_stop(path)
