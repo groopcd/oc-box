@@ -89,13 +89,40 @@ envelope fixtures demonstrate that structurally accepted bytes can still
 fail the real OCOP login. The operation is deliberately stateless, not a
 replay or account replacement check.
 
-The host integration must pin the executable and profile, bound startup,
-pipe I/O, concurrent children and cleanup, and require exact output plus
-a verified clean exit before using it. Use private pipes, an empty child
-environment, no other inherited descriptors, and disable core dumps.
-Waiting for input EOF does not itself enforce a deadline. Do not expose
-this executable as an arbitrary OPRF service. No storage operation or
-enrollment authorization is implemented here.
+### Inactive Python adapter
+
+`src/oc_box/web_registration_worker.py` provides:
+
+```python
+RegistrationWorker(executable_fd: int, *, expected_sha256: bytes, io_timeout: float = 2)
+generate_setup(*, deadline: float | None = None) -> bytes
+respond(*, setup: bytes, credential_identifier: bytes, registration_request: bytes,
+        deadline: float | None = None) -> bytes
+validate_upload(upload: bytes, *, deadline: float | None = None) -> bytes
+close() -> bool
+```
+
+The constructor borrows a fully sealed executable FD and pins its own
+duplicate to the caller's single reviewed digest (32 raw bytes). There is
+no artifact discovery or fallback. Each call reserves one live slot and
+sends one request, then closes stdin. Bytes are returned only after the
+exact echoed header, status and fixed payload, strict stdout EOF, and a
+confirmed zero exit from `waitpid`. The optional absolute monotonic deadline
+can only shorten the configured per-call limit. Linux process pipes and
+pidfds reuse the existing login worker's supervision primitives, without
+changing that worker; the child gets an empty environment, no extra
+descriptors, no captured stderr, and no core dumps. This does not sandbox a
+helper or bound all OS process-creation delays. The caller owns aggregate
+admission limits and must never expose an arbitrary OPRF service.
+
+`RegistrationError` is a fixed refusal. `RegistrationCleanupError` also
+permanently fences the worker; a false `close()` means reaping is still
+unconfirmed and the caller must keep its teardown fence. Another `close()`
+can check only the same child, with no reset, retry, or replacement. The
+adapter neither selects an account nor establishes possession or account
+scope. Host approval, a separate OCOP possession proof before persistence,
+scope verification, and the generation-checked store write remain separate
+responsibilities. No listener or runtime caller uses this adapter.
 
 ## Optional browser login slot
 
@@ -167,10 +194,11 @@ env -i PATH=/usr/bin:/bin /usr/bin/python3 -I -B "$research/check-registration" 
 ```
 
 Only the separate client fixture generates a synthetic password, and it
-never leaves that process. The check calls registration primitives through
-pipes and tests wrong-profile framing, malformed/oversize input, a successful
-matched login and failed login with mismatched registration data. It does
-not run a browser workflow, trusted host launcher, store or listener.
+never leaves that process. The check runs the real helper using the Python
+adapter on a sealed FD, then logs in through the existing OCOP worker. It
+also tests raw wrong-profile/oversize frames, malformed cryptographic
+inputs, and failed login with mismatched registration data. It does not run
+a browser workflow, live host enrollment, store or listener.
 
 Two fresh local `--with-registration` builds, one without any fixture
 target, yielded identical bytes. The separately built OCOP worker stayed
