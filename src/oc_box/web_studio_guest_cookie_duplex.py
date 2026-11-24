@@ -29,8 +29,8 @@ class DuplexGuestCookieVerifier:
 
     def __init__(self, binding, workers, worker_use):
         if (
-            type(binding) is not web_studio_guest_binding._UnservedBinding
-            or type(workers) is not web_guest_worker_drain.AcceptedWorkers
+            type(workers) is not web_guest_worker_drain.AcceptedWorkers
+            or not web_studio_guest_binding._accepts_worker_registry(binding, workers)
             or not workers.current(worker_use)
         ):
             native._refuse()
