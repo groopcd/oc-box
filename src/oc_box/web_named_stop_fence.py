@@ -1,7 +1,7 @@
 """Unwired host-private routing fences for foreground Studio lifetimes."""
 
 from contextlib import ExitStack, contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 import fcntl
 import hashlib
@@ -10,7 +10,7 @@ import os
 from pathlib import Path
 import secrets
 import struct
-from threading import get_ident
+from threading import Event, get_ident
 import time
 
 if __package__:
@@ -106,6 +106,14 @@ class _StudioScope:
             / self.workspace.id
             / studio_registry.RECORD_NAME
         )
+
+
+@dataclass(frozen=True, slots=True, eq=False, repr=False)
+class _AttachWitness:
+    scope: _StudioScope
+    gate: tuple[int, int, int, int]
+    generation: bytes
+    _retired: Event = field(default_factory=Event, init=False)
 
 
 def _studio_seal(directory, name, workspace):
@@ -394,6 +402,51 @@ def require_unarmed(path, *, timeout=control.DEFAULT_TIMEOUT):
     with _gate(path, owning=True) as gate, gate.locked(deadline), _errors():
         gate.unarmed()
         gate.sync()
+
+
+def observe_attach(scope, *, timeout=control.DEFAULT_TIMEOUT):
+    """Observe exactly one armed Studio lifetime with no stop intent.
+
+    This read is not owner or stream attestation and cannot acquire a client
+    lease, start an owner, or adopt legacy state. Retain the original witness
+    across the later counted exchange; do not resolve a second candidate.
+    """
+    if type(scope) is not _StudioScope:
+        raise FenceError("invalid-request")
+    deadline = _deadline(timeout)
+    with _gate(scope) as gate, gate.locked(deadline), _errors():
+        generation, status = gate.read()
+        if generation == _EMPTY[0] or status != 0:
+            raise FenceError("wrong-lifetime")
+        return _AttachWitness(scope, gate.identity, generation)
+
+
+def attach_current(witness, *, timeout=control.DEFAULT_TIMEOUT):
+    """Recheck only the captured arm; a refreshed observation is not a retry."""
+    if (
+        type(witness) is not _AttachWitness
+        or type(witness.scope) is not _StudioScope
+        or type(witness.generation) is not bytes
+        or len(witness.generation) != len(_EMPTY[0])
+        or witness.generation == _EMPTY[0]
+        or witness._retired.is_set()
+    ):
+        return False
+    matched = False
+    try:
+        deadline = _deadline(timeout)
+        with _gate(witness.scope) as gate, gate.locked(deadline), _errors():
+            same = gate.identity == witness.gate and gate.read() == (
+                witness.generation,
+                0,
+            )
+        matched = same and not witness._retired.is_set()
+        return matched
+    except FenceError:
+        return False
+    finally:
+        if not matched:
+            witness._retired.set()
 
 
 def route_stop(path, *, direct_stop, timeout=control.DEFAULT_TIMEOUT):
