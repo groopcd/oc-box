@@ -9,6 +9,9 @@ layouts; it uses the real [transcript](web-studio-transcript-view.md) and
 controls. The ordinary document, `web_sessions.js`, `web_sessions.css`, asset
 routes, and gateway are unchanged when the opt-in is absent.
 
+The flat installer, sdist and wheel carry the six explicitly listed Studio
+CSS/MJS files as static bytes. Packaging them does not serve or activate them.
+
 ## Trusted handoff
 
 1. A separately reviewed composition must explicitly call the internal
