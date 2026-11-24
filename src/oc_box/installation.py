@@ -115,6 +115,7 @@ RUNTIME_FILES = (
     "paths.py",
     "workspace_identity.py",
     "installation.py",
+    "install_ownership.py",
     "updater.py",
     "update_channels.py",
     "package_updates.py",
@@ -156,15 +157,32 @@ def atomic_file(path, content, mode=0o644, *, replace=True):
     try:
         with os.fdopen(fd, "wb") as stream:
             stream.write(content)
+            os.fchmod(stream.fileno(), mode)
             stream.flush()
             os.fsync(stream.fileno())
-        os.chmod(temporary, mode)
-        if replace:
-            os.replace(temporary, path)
-        else:
-            os.link(temporary, path, follow_symlinks=False)
+            if replace:
+                os.replace(temporary, path)
+            else:
+                os.link(temporary, path, follow_symlinks=False)
+                os.unlink(temporary)
+            temporary = None
+            info = os.fstat(stream.fileno())
+            return info.st_dev, info.st_ino, info.st_ctime_ns
     finally:
-        Path(temporary).unlink(missing_ok=True)
+        if temporary is not None:
+            Path(temporary).unlink(missing_ok=True)
+
+
+def _activate_link(temporary, destination, target, *, directory=False):
+    temporary.unlink(missing_ok=True)
+    temporary.symlink_to(target, target_is_directory=directory)
+    fd = os.open(temporary, os.O_PATH | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        os.replace(temporary, destination)
+        info = os.fstat(fd)
+        return info.st_dev, info.st_ino, info.st_ctime_ns
+    finally:
+        os.close(fd)
 
 
 def optional_crypto_runtime(release):
@@ -260,9 +278,10 @@ def install(
     """Activate a release; only the verified bootstrap can enroll a new install."""
     # The build backend imports file inventories, not host enrollment policy.
     if __package__:
-        from . import host_file_open_policy
+        from . import host_file_open_policy, install_ownership
     else:
         import host_file_open_policy
+        import install_ownership
     source = source_root(source)
     if (source / "distribution.json").is_file():
         raise ValueError(
@@ -336,6 +355,7 @@ def install(
                 prefix=(build.get("commit") or "local")[:12] + "-", dir=releases
             )
         )
+        staged = release.lstat()
         activated = False
         try:
             for name in PROGRAM_FILES:
@@ -377,18 +397,25 @@ def install(
             # Readers/install-info are optional: ship prebuilt manuals.
             man = home / ".local/share/man/man1/oc-box.1"
             info = home / ".local/share/info/oc-box.info"
-            atomic_file(man, (release / "docs/oc-box.1").read_bytes())
-            atomic_file(info, (release / "docs/oc-box.info").read_bytes())
             completion = home / ".local/share/bash-completion/completions/oc-box"
-            atomic_file(completion, (release / COMPLETION_FILE).read_bytes())
+            outputs = {
+                man: atomic_file(man, (release / "docs/oc-box.1").read_bytes()),
+                info: atomic_file(info, (release / "docs/oc-box.info").read_bytes()),
+                completion: atomic_file(
+                    completion, (release / COMPLETION_FILE).read_bytes()
+                ),
+            }
             binary = home / host_file_open_policy.LAUNCHER
             # A running launcher keeps this exact immutable release path. It
             # never lazy-loads modules from a half-updated or newer directory.
             wrapper = host_file_open_policy.launcher_bytes(release)
-            link = target / ".current-next"
-            link.unlink(missing_ok=True)
-            link.symlink_to(release.relative_to(target), target_is_directory=True)
-            os.replace(link, target / "current")
+            current = target / "current"
+            outputs[current] = _activate_link(
+                target / ".current-next",
+                current,
+                release.relative_to(target),
+                directory=True,
+            )
             activated = True
             # Preserve documented/legacy installed paths as pointers into the
             # current release, including build metadata and manual sources.
@@ -407,13 +434,12 @@ def install(
                             "Both legacy manual directories exist; inspect the installation."
                         )
                     destination.rename(legacy)
-                temporary = target / (".next-" + name)
-                temporary.unlink(missing_ok=True)
-                temporary.symlink_to(
+                outputs[destination] = _activate_link(
+                    target / (".next-" + name),
+                    destination,
                     "current/" + name,
-                    target_is_directory=name in ("docs", "completions"),
+                    directory=name in ("docs", "completions"),
                 )
-                os.replace(temporary, destination)
             if fresh is not None and not host_file_open_policy.still_fresh(
                 fresh, root_identity, lock_fd, auxiliary=False
             ):
@@ -422,17 +448,20 @@ def install(
                 # Do not qualify if a launcher appeared between the last check
                 # and activation (for example from another package manager).
                 try:
-                    atomic_file(binary, wrapper, 0o755, replace=False)
+                    outputs[binary] = atomic_file(binary, wrapper, 0o755, replace=False)
                 except OSError:
                     # Preserve normal activation when the filesystem cannot
                     # perform a no-replacement write. The default stays off.
                     fresh = None
             if fresh is None:
-                atomic_file(binary, wrapper, 0o755)
+                outputs[binary] = atomic_file(binary, wrapper, 0o755)
             else:
                 file_open_enabled = host_file_open_policy.record_fresh(
                     fresh, root_identity, lock_fd, release
                 )
+            install_ownership.record_inventory(
+                home, release, outputs, lock_fd=lock_fd, staged=staged
+            )
         finally:
             if not activated:
                 shutil.rmtree(release)
