@@ -19,6 +19,13 @@ evidence of trust in a browser profile.
 
 ## Named sign-in is not enabled
 
+For future host-authorized enrollment and reset, the account store can bind
+an authenticated review to the existing store generation and explicit
+workspace scope. A reviewed protocol upload refuses a changed store or an
+expanded reset scope; it neither grants enrollment authorization nor revokes
+existing browsers. The browser approval and native owner fences still have
+to be implemented.
+
 The source contains internal encrypted account records, bounded PAKE
 orchestration with a pinned-descriptor worker interface, and expiring browser
 admission with stream cancellation and drain hooks. The private coordinator

@@ -52,6 +52,7 @@ _INVALID = "Web account store has an invalid or unsupported format."
 _UNVERIFIED = "Web account store save could not be verified; reload before retrying."
 _BAD_PASSPHRASE = "Invalid web account store passphrase length or encoding."
 _BAD_SCOPE = "Web account scope requires distinct, explicit workspace IDs."
+_STALE_REVIEW = "Web account registration review is no longer current."
 
 
 class WebAccountsError(ValueError):
@@ -69,6 +70,19 @@ class Account:
 class AccountStore:
     setup: bytes = field(repr=False)
     accounts: tuple[Account, ...] = field(repr=False)
+
+
+@dataclass(frozen=True, slots=True, eq=False)
+class RegistrationReview:
+    """Trusted in-process store binding, not browser or host approval."""
+
+    _path: Path = field(repr=False)
+    _directory_identity: tuple[int, int] = field(repr=False)
+    _file_stamp: tuple = field(repr=False)
+    username: str = field(repr=False)
+    workspace_ids: tuple[str, ...] = field(repr=False)
+    setup: bytes = field(repr=False)
+    replacing: bool = field(repr=False)
 
 
 def _passphrase(value, *, new=False):
@@ -470,6 +484,80 @@ def load(path: Path, passphrase: str) -> AccountStore:
     with _locked(path) as directory:
         store, _ = _read(path, directory, secret)
         return store
+
+
+def _check_enrollment_target(store, username, scope, replacing):
+    existing = next(
+        (item for item in store.accounts if item.username == username), None
+    )
+    if replacing:
+        # A password reset must not quietly expand or narrow the account scope.
+        if existing is None or existing.workspace_ids != scope:
+            raise WebAccountsError(
+                "Web account reset requires the existing workspace scope."
+            )
+    elif existing is not None:
+        raise WebAccountsError("Web account already exists; no record was replaced.")
+    elif len(store.accounts) >= MAX_ACCOUNTS:
+        raise WebAccountsError("Web account store has reached its account limit.")
+
+
+def review_registration(path, passphrase, username, *, workspace_ids, replacing=False):
+    """Read an authenticated store binding before a reviewed enrollment/reset.
+
+    Only a trusted host caller may select the username and verified workspace
+    IDs. Keep this object and its setup bytes inside the host; it is not the
+    one-use browser authorization or an account/session lifecycle fence.
+    """
+    if type(replacing) is not bool:
+        raise WebAccountsError("Web account registration mode is invalid.")
+    name, scope = _username(username), _scope(workspace_ids)
+    secret = _passphrase(passphrase)
+    with _locked(path) as directory:
+        store, previous = _read(path, directory, secret)
+        _check_enrollment_target(store, name, scope, replacing)
+        return RegistrationReview(
+            path,
+            _identity(os.fstat(directory)),
+            _stamp(previous),
+            name,
+            scope,
+            store.setup,
+            replacing,
+        )
+
+
+def commit_registration(path, passphrase, review, *, registration):
+    """Publish a vetted protocol upload against its exact reviewed store.
+
+    This performs a storage compare-and-swap only. The caller must enforce
+    host approval, one-use redemption, native owner exclusion/revocation and
+    exact protocol record validation before calling it. Do not retry on a
+    stale or unverified outcome. It does not prevent offline store rollback.
+    """
+    if type(review) is not RegistrationReview or path != review._path:
+        raise WebAccountsError(_STALE_REVIEW)
+    secret = _passphrase(passphrase)
+    record = _protocol_bytes(registration, MAX_REGISTRATION_BYTES)
+    with _locked(path) as directory:
+        if (
+            _identity(os.fstat(directory)) != review._directory_identity
+            or _stamp(_entry(directory, path.name)) != review._file_stamp
+        ):
+            raise WebAccountsError(_STALE_REVIEW)
+        store, previous = _read(path, directory, secret)
+        if _stamp(previous) != review._file_stamp or store.setup != review.setup:
+            raise WebAccountsError(_STALE_REVIEW)
+        _check_enrollment_target(
+            store, review.username, review.workspace_ids, review.replacing
+        )
+        account = Account(review.username, review.workspace_ids, record)
+        others = (item for item in store.accounts if item.username != review.username)
+        updated = AccountStore(
+            store.setup,
+            tuple(sorted((*others, account), key=lambda item: item.username)),
+        )
+        _publish(path, directory, _seal(updated, secret), previous)
 
 
 def add_account(

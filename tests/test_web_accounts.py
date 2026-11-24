@@ -244,6 +244,75 @@ class StoreRefusalTests(StoreFixture):
 
 @unittest.skipUnless(HAS_CRYPTO, "optional cryptography not installed")
 class EncryptedStoreTests(StoreFixture):
+    def test_reviewed_registration_enrolls_and_resets_under_same_scope(self):
+        self.create()
+        before = self.path.read_bytes()
+        reviewed = accounts.review_registration(
+            self.path, PHRASE, USERNAME, workspace_ids=(WORKSPACE,)
+        )
+        self.assert_unchanged(before)
+        self.assertEqual(reviewed.setup, SETUP)
+        self.assertNotIn(USERNAME, repr(reviewed))
+        accounts.commit_registration(
+            self.path, PHRASE, reviewed, registration=REGISTRATION
+        )
+        enrolled = self.path.read_bytes()
+        with self.assertRaisesRegex(accounts.WebAccountsError, "no longer current"):
+            accounts.commit_registration(
+                self.path, PHRASE, reviewed, registration=b"another synthetic record"
+            )
+        with self.assertRaisesRegex(
+            accounts.WebAccountsError, "existing workspace scope"
+        ):
+            accounts.review_registration(
+                self.path,
+                PHRASE,
+                USERNAME,
+                workspace_ids=(WORKSPACE, OTHER_WORKSPACE),
+                replacing=True,
+            )
+        self.assert_unchanged(enrolled)
+        reset = accounts.review_registration(
+            self.path, PHRASE, USERNAME, workspace_ids=(WORKSPACE,), replacing=True
+        )
+        replacement = b"synthetic reset record"
+        accounts.commit_registration(self.path, PHRASE, reset, registration=replacement)
+        store = accounts.load(self.path, PHRASE)
+        self.assertEqual(store.setup, SETUP)
+        self.assertEqual(
+            store.accounts, (accounts.Account(USERNAME, (WORKSPACE,), replacement),)
+        )
+
+    def test_other_account_change_stales_a_review_without_writing(self):
+        self.create()
+        reviewed = accounts.review_registration(
+            self.path, PHRASE, USERNAME, workspace_ids=(WORKSPACE,)
+        )
+        self.add("a-different-account", workspace_ids=(OTHER_WORKSPACE,))
+        changed = self.path.read_bytes()
+        with self.assertRaisesRegex(accounts.WebAccountsError, "no longer current"):
+            accounts.commit_registration(
+                self.path, PHRASE, reviewed, registration=REGISTRATION
+            )
+        self.assert_unchanged(changed)
+
+    def test_review_cannot_follow_a_replaced_storage_directory(self):
+        self.create()
+        reviewed = accounts.review_registration(
+            self.path, PHRASE, USERNAME, workspace_ids=(WORKSPACE,)
+        )
+        displaced = self.root / "displaced"
+        self.directory.rename(displaced)
+        self.directory.mkdir(mode=0o700)
+        raw = (displaced / self.path.name).read_bytes()
+        self.write_fixture(raw)
+        with self.assertRaisesRegex(accounts.WebAccountsError, "no longer current"):
+            accounts.commit_registration(
+                self.path, PHRASE, reviewed, registration=REGISTRATION
+            )
+        self.assertEqual((displaced / self.path.name).read_bytes(), raw)
+        self.assert_unchanged(raw)
+
     def test_roundtrip_at_record_and_scope_limits_and_no_plaintext(self):
         maximum_setup = SETUP.ljust(accounts.MAX_SETUP_BYTES, b"x")
         maximum_record = REGISTRATION.ljust(accounts.MAX_REGISTRATION_BYTES, b"y")
