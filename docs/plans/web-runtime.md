@@ -71,6 +71,14 @@ listen, unlock the host vault, create a workspace, or publish a link. A second
 port failure releases both sockets. The socket pair does not establish
 browser trust, exclusive native owner admission, or a runnable HTTPS mode.
 
+The unserved bootstrap ingress now admits the exact top-level workspace
+entry and an account-site document POST containing only its single-use
+ticket. It uses separate Secure, HttpOnly, SameSite=Strict bootstrap
+cookies, checks current owner binding before and after the operation, and
+never includes a ticket in a URL or accepts a password field. The account
+step yields only a bootstrap cookie; the reviewed login assets, response
+writer and live routing still need to be connected.
+
 The unserved named HTTPS transport takes ownership of one accepted connection,
 selects a validated TLS context and role by the actual IPv4 loopback endpoint,
 then checks that role's exact HTTP/1.1 method, route and origin. Before reading
