@@ -12,6 +12,7 @@ import sys
 import termios
 from time import monotonic
 import unittest
+from unittest.mock import Mock
 
 from oc_box import web_guest_duplex_worker as worker
 
@@ -238,6 +239,28 @@ class DuplexWorkerTests(unittest.TestCase):
             self.assertEqual(self._frame(proc), (worker.Op.END, b""))
             proc.stdin.close()
             self._failed(proc)
+
+    def test_combined_native_fin_and_error_is_not_an_orderly_end(self):
+        # A Linux FIN followed by an abortive close may deliver all these
+        # readiness bits together even when recv would report an empty read.
+        transfer = worker._Worker(123)
+        transfer.ready = True
+        transfer.native = Mock()
+        transfer.native.recv.return_value = b""
+        with self.assertRaises(worker.DuplexError):
+            transfer._pump_native(select.POLLIN | select.POLLHUP | select.POLLERR)
+        transfer.native.recv.assert_not_called()
+        self.assertFalse(transfer.ended)
+        self.assertFalse(transfer.output)
+
+    def test_idle_stdout_loss_retires_native_socket_without_stdin_input(self):
+        with self._open() as (proc, peer):
+            self.assertFalse(proc.stdin.closed)
+            proc.stdout.close()
+            self.assertEqual(proc.wait(timeout=2), 1)
+            self.assertEqual(peer.recv(1), b"")
+            self.assertFalse(proc.stdin.closed)
+            self.assertEqual(proc.stderr.read(1), b"")
 
     def test_cancel_deadline_does_not_wait_forever_for_stdin_eof(self):
         with self._open() as (proc, peer):

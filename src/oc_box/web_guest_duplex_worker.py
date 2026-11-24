@@ -240,6 +240,10 @@ class _Worker:
         return read | (select.POLLOUT if self.to_native is not None else 0)
 
     def _pump_native(self, events):
+        # Linux can report FIN and a subsequent TCP reset together. A
+        # zero-byte recv in that case is not an orderly END.
+        if events & (select.POLLERR | select.POLLNVAL):
+            raise DuplexError()
         if self.connecting:
             if self.native.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR):
                 raise DuplexError()
@@ -264,8 +268,6 @@ class _Worker:
                 self.await_ack = self.output_serial
                 self.credit_deadline = monotonic() + _FRAME_SECONDS
                 self._send(Op.DATA, _SERIAL.pack(self.output_serial) + data)
-        if events & (select.POLLERR | select.POLLNVAL):
-            raise DuplexError()
         if self.to_native is not None and events & (select.POLLOUT | select.POLLHUP):
             try:
                 count = self.native.send(self.to_native)
@@ -302,8 +304,9 @@ class _Worker:
                 poller = select.poll()
                 if not self.input_eof:
                     poller.register(0, select.POLLIN)
-                if self.output:
-                    poller.register(1, select.POLLOUT)
+                # Observe loss of the sole stdout reader even while idle.
+                # Error/hangup flags are reported regardless of the mask.
+                poller.register(1, select.POLLOUT if self.output else 0)
                 native = self.native
                 native_fd = None
                 if native is not None and (mask := self._native_events()):
@@ -317,6 +320,10 @@ class _Worker:
                     poller.poll(None if timeout is None else math.ceil(timeout * 1000))
                 )
                 if end is not None and monotonic() >= end:
+                    raise DuplexError()
+                if events.get(1, 0) & (
+                    select.POLLERR | select.POLLHUP | select.POLLNVAL
+                ):
                     raise DuplexError()
                 if 0 in events:
                     self._read_input()
