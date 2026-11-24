@@ -35,6 +35,15 @@ Unit/native offline checks are not proof of that lifecycle. Upgrade through your
 normal GitHub/curl, uv, pipx or virtual-environment package channel to get a
 current release.
 
+Where a safe capability check is available, oc-box prefers it to an exact
+release list, so an upgrade that preserves the native contract does not need
+a launcher change. For example, stable 2.x releases can try the native TUI
+Ctrl-click integration, but still need a compatible renderer and verified
+workspace and desktop boundaries. A version match is not a compatibility
+guarantee. Private history/storage and authentication protocols with
+version-specific semantics keep their own validation; a new OpenCode major
+does not automatically inherit the V2 workspace and storage contract.
+
 ## Environment and service plan
 
 OpenCode 2.x still supports environment variables and `{env:NAME}` substitution.

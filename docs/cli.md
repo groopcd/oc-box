@@ -348,7 +348,8 @@ does not silently restore link following.
 This command also works without a TTY. It does not discover desktop helpers or
 read the clipboard, even when saving an enable choice. Host opening resolves
 the current launch flag first, then the saved workspace choice, then the
-installation policy. An image-preview preference applies only on the next
+installation policy. The preference reports the requested policy, not whether
+the current TUI supports it. An image-preview preference applies only on the next
 owning native V2 start/reset; additional clients inherit their running owner's
 setting, not a preference changed after that owner started.
 JSON output includes the effective `host_clipboard` and
@@ -2778,8 +2779,8 @@ off in native OpenCode's own `cli.json` or change the workspace preference.
 Request Ctrl-click host file opening for this native `start` (including the
 implicit command) or `reset` TUI client. Applies to an owning client or an
 additional `start` client; it does not change a running owner's settings. A
-positive request requires interactive native OpenCode 2.3.x under direct
-Konsole or Yakuake and is incompatible with custom Podman arguments.
+positive request requires interactive, stable native OpenCode 2.x under
+direct Konsole or Yakuake and is incompatible with custom Podman arguments.
 If actual mount or desktop admission later fails, host opening stays off.
 
 ### --no-host-file-open
@@ -2875,11 +2876,15 @@ adopted or cleaned by the new launcher.
 
 Neither switch changes host OpenCode or terminal settings.
 If the existing owner was started before upgrading oc-box, exit it normally and
-start it again so the container gets the updated plugin. This is a private
-native renderer integration that may stop working after a 2.3.x update or in
-terminals that do not pass Ctrl-click to OpenCode. Leave terminal hyperlink
-handlers at their normal settings; this feature does not use them. It is not available in web,
-V1, plain host OpenCode, or the maintenance/session terminals.
+start it again so the container gets the updated plugin. Stable 2.x releases
+are eligible without a minor-version allowlist, but the client must still
+provide a compatible native renderer. If a requested feature fails launcher
+admission, startup reports that host opening is off, with a reason; the native
+plugin warns during initialization if it cannot set up its renderer hook.
+Terminals that do not pass Ctrl-click to OpenCode still cannot use the feature.
+Leave terminal hyperlink handlers at their normal settings; this feature does
+not use them. It is not available in web, V1, plain host OpenCode, or the
+maintenance/session terminals.
 
 ### --host-drop
 

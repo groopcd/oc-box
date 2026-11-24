@@ -429,17 +429,18 @@ so re-enabling does not silently restore link following.  This command
 also works without a TTY. It does not discover desktop helpers or read
 the clipboard, even when saving an enable choice.  Host opening resolves
 the current launch flag first, then the saved workspace choice, then the
-installation policy.  An image-preview preference applies only on the
-next owning native V2 start/reset; additional clients inherit their
-running owner's setting, not a preference changed after that owner
-started.  JSON output includes the effective ‘host_clipboard’ and
-‘host_clipboard_symlinks’ booleans.  It includes ‘host_file_open’ and
-‘image_preview’ and ‘startup_logo’ only when explicitly saved; absence
-means use their default rules.  ‘source’ still describes the preference
-file, not each field.  Use ‘--table’ to see the choices and which are
-saved, default, or inherited.  These are requests for future clients,
-not a live availability check.  The presentation does not save a
-preference by itself.
+installation policy.  The preference reports the requested policy, not
+whether the current TUI supports it.  An image-preview preference
+applies only on the next owning native V2 start/reset; additional
+clients inherit their running owner's setting, not a preference changed
+after that owner started.  JSON output includes the effective
+‘host_clipboard’ and ‘host_clipboard_symlinks’ booleans.  It includes
+‘host_file_open’ and ‘image_preview’ and ‘startup_logo’ only when
+explicitly saved; absence means use their default rules.  ‘source’ still
+describes the preference file, not each field.  Use ‘--table’ to see the
+choices and which are saved, default, or inherited.  These are requests
+for future clients, not a live availability check.  The presentation
+does not save a preference by itself.
 
 Corrupt, unsafe or mismatched preferences refuse rather than silently
 granting access.  Changes apply to future clients only.  Preferences
@@ -3102,10 +3103,10 @@ change the workspace preference.
 Request Ctrl-click host file opening for this native ‘start’ (including
 the implicit command) or ‘reset’ TUI client.  Applies to an owning
 client or an additional ‘start’ client; it does not change a running
-owner's settings.  A positive request requires interactive native
-OpenCode 2.3.x under direct Konsole or Yakuake and is incompatible with
-custom Podman arguments.  If actual mount or desktop admission later
-fails, host opening stays off.
+owner's settings.  A positive request requires interactive, stable
+native OpenCode 2.x under direct Konsole or Yakuake and is incompatible
+with custom Podman arguments.  If actual mount or desktop admission
+later fails, host opening stays off.
 
 5.45 -no-host-file-open
 =======================
@@ -3206,12 +3207,16 @@ adopted or cleaned by the new launcher.
 
 Neither switch changes host OpenCode or terminal settings.  If the
 existing owner was started before upgrading oc-box, exit it normally and
-start it again so the container gets the updated plugin.  This is a
-private native renderer integration that may stop working after a 2.3.x
-update or in terminals that do not pass Ctrl-click to OpenCode.  Leave
-terminal hyperlink handlers at their normal settings; this feature does
-not use them.  It is not available in web, V1, plain host OpenCode, or
-the maintenance/session terminals.
+start it again so the container gets the updated plugin.  Stable 2.x
+releases are eligible without a minor-version allowlist, but the client
+must still provide a compatible native renderer.  If a requested feature
+fails launcher admission, startup reports that host opening is off, with
+a reason; the native plugin warns during initialization if it cannot set
+up its renderer hook.  Terminals that do not pass Ctrl-click to OpenCode
+still cannot use the feature.  Leave terminal hyperlink handlers at
+their normal settings; this feature does not use them.  It is not
+available in web, V1, plain host OpenCode, or the maintenance/session
+terminals.
 
 5.48 -host-drop
 ===============
@@ -5184,20 +5189,20 @@ Node: Name769
 Node: Synopsis930
 Node: Description5132
 Node: Commands10952
-Node: Options144309
-Node: Lifecycle and persistence207374
-Node: Distribution images209674
-Node: Sessions and recovery214751
-Node: Devices and host permissions221336
-Node: Resource reports223682
-Node: Configuration and environment225793
-Node: Files237174
-Node: Exit status248084
-Node: Examples249492
-Node: Troubleshooting251631
-Node: Installation and manuals264123
-Node: Authors and license274313
-Node: See also274920
+Node: Options144396
+Node: Lifecycle and persistence207726
+Node: Distribution images210026
+Node: Sessions and recovery215103
+Node: Devices and host permissions221688
+Node: Resource reports224034
+Node: Configuration and environment226145
+Node: Files237526
+Node: Exit status248436
+Node: Examples249844
+Node: Troubleshooting251983
+Node: Installation and manuals264475
+Node: Authors and license274665
+Node: See also275272
 
 End Tag Table
 

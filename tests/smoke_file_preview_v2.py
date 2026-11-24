@@ -1,6 +1,6 @@
 """Native Ctrl-click wiring with a stub or private synthetic mounts.
 
-Run with pyte installed and --opencode /path/to/an/unmodified/2.3.x/cli.
+Run with pyte installed and --opencode /path/to/an/unmodified/stable-v2/cli.
 No provider, normal config, host desktop, real workspace or Podman is used.
 The optional --private-mounts mode re-execs under unshare and also exercises
 the real reader against ordinary synthetic Linux bind mounts.

@@ -348,6 +348,13 @@ explicit opt-out must not inspect preview mounts or supply private relay
 metadata. Keep the existing fresh-click, immutable mount/descriptor, opener,
 and no-write-back tests.
 
+Stable native 2.x eligibility does not prove renderer compatibility. Run the
+native Ctrl-click smoke against the retained 2.3 regression builds and current
+stable 2.x. Check that launcher refusal reports a fixed reason before handoff,
+without mount inspection on version or terminal refusal; a disabled preference
+must remain quiet. The native fixture checks that a miss, an ungranted click and
+output alone cannot start a transfer, even on a new minor release.
+
 Exercise verified fresh GitHub setup versus upgrade, early failure,
 reinstallation, existing/symlinked state, and an unverified installation
 record. Ordinary wheel or editable/source launches are not fresh-install
@@ -355,7 +362,7 @@ evidence. The new-install default must not be reactivated by restore; attaching
 never changes another native client's choice.
 
 Before publishing this follow-up, review an exact-source disposable Linux host
-run with local rootless Podman and a native OpenCode 2.3.x TUI in direct
+run with local rootless Podman and a compatible native OpenCode 2.x TUI in direct
 Konsole/Yakuake. Check fresh flagless opening, an existing install remaining
 off on upgrade, explicit enable and a second-client opt-out. Observe fresh
 copies on two deliberate Ctrl-clicks and no open from unclicked output.
