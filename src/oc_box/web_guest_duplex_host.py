@@ -2,6 +2,7 @@
 
 from collections import deque
 from dataclasses import dataclass
+import fcntl
 import io
 import os
 import secrets
@@ -36,6 +37,17 @@ def _fd_pin(fd):
     return fd, info.st_dev, info.st_ino
 
 
+def _require_pipe(pin, direction):
+    fd = pin[0]
+    flags = fcntl.fcntl(fd, fcntl.F_GETFL)
+    if (
+        _fd_pin(fd) != pin
+        or not flags & os.O_NONBLOCK
+        or flags & os.O_ACCMODE != direction
+    ):
+        raise DuplexHostError()
+
+
 @dataclass(slots=True, repr=False)
 class _Frame:
     op: wire.Op
@@ -58,6 +70,9 @@ class DuplexHost:
             type(child) is not subprocess.Popen
             or child.returncode is not None
             or signal.getsignal(signal.SIGCHLD) != signal.SIG_DFL
+            or not hasattr(os, "P_PIDFD")
+            or not hasattr(os, "pidfd_open")
+            or not hasattr(signal, "pidfd_send_signal")
         ):
             raise DuplexHostError()
         self._owner = current_thread()
@@ -68,6 +83,7 @@ class DuplexHost:
         if tx[1:] == rx[1:]:
             raise DuplexHostError()
         self._tag = secrets.token_bytes(wire.TAG_SIZE)
+        self._challenge = None
         self._out = deque()
         self._input = bytearray()
         self._header = None
@@ -76,6 +92,7 @@ class DuplexHost:
         self._send_serial = self._receive_serial = 0
         self._closing = self._cancel_sent = self._input_closed = False
         self._receipt = self._eof = self._failed = self._verified = False
+        self._forced = self._local_reaped = False
         # Raw descriptors have no FileIO finalizer which could close a later
         # foreign descriptor after observed numeric-FD substitution.
         owned = []
@@ -97,6 +114,8 @@ class DuplexHost:
                 raise DuplexHostError()
             child.stdin.close()
             child.stdout.close()
+            _require_pipe(self._tx_pin, os.O_WRONLY)
+            _require_pipe(self._rx_pin, os.O_RDONLY)
         except BaseException:
             for fd in reversed(owned):
                 os.close(fd)
@@ -156,12 +175,11 @@ class DuplexHost:
         self._rx_data = None
 
     def _check_pipes(self):
-        if (
-            _fd_pin(self._rx_pin[0]) != self._rx_pin
-            or self._child.returncode is not None
-            or (not self._input_closed and _fd_pin(self._tx_pin[0]) != self._tx_pin)
-        ):
+        if self._child.pid != self._pid or self._child.returncode is not None:
             raise DuplexHostError()
+        _require_pipe(self._rx_pin, os.O_RDONLY)
+        if not self._input_closed:
+            _require_pipe(self._tx_pin, os.O_WRONLY)
 
     def _write(self):
         row = self._out[0]
@@ -210,6 +228,7 @@ class DuplexHost:
             return
         if self._header is None:
             self._header = wire.decode_header(self._input)
+            self._check_opcode(self._header[0])
             self._input.clear()
             if self._header[1] != 0:
                 return
@@ -219,6 +238,25 @@ class DuplexHost:
         self._header = None
         self._accept(op, payload)
 
+    def _check_opcode(self, op):
+        if op == wire.Op.CLOSED:
+            allowed = self._cancel_sent and self._input_closed
+        elif op == wire.Op.READY:
+            allowed = self._opened and not self.ready
+        elif op == wire.Op.ACK:
+            allowed = (
+                self.ready
+                and not self.ended
+                and self._queued_data is not None
+                and self._queued_data == self._send_serial
+            )
+        elif op in (wire.Op.DATA, wire.Op.END):
+            allowed = self.ready and not self.ended and self._rx_credit is None
+        else:
+            allowed = False
+        if not allowed:
+            raise DuplexHostError()
+
     def _accept(self, op, payload):
         if op == wire.Op.CLOSED and self._cancel_sent and self._input_closed:
             expected = (
@@ -226,7 +264,7 @@ class DuplexHost:
                 if self._opened
                 else wire.Closure.NEVER_OPENED
             )
-            if payload != self._tag + bytes([expected]):
+            if payload != self._tag + self._challenge + bytes([expected]):
                 raise DuplexHostError()
             self._receipt = True
         elif op == wire.Op.READY and self._opened and not self.ready:
@@ -255,7 +293,7 @@ class DuplexHost:
         else:
             raise DuplexHostError()
 
-    def _step(self, milliseconds):
+    def _step(self, milliseconds, *, deadline=None):
         self._check_pipes()
         poller = select.poll()
         if self._out:
@@ -264,15 +302,19 @@ class DuplexHost:
             poller.register(self._rx_pin[0], select.POLLIN)
         events = dict(poller.poll(milliseconds))
         self._check_pipes()
+        if deadline is not None and monotonic() >= deadline:
+            raise DuplexHostError()
         # Accept only bounded records. Output ownership is never handed to a
         # browser writer; the caller owns its own independent sink bounds.
         for event in events.values():
             if event & select.POLLNVAL:
                 raise DuplexHostError()
-        if self._tx_pin[0] in events and self._out:
-            self._write()
         if self._rx_pin[0] in events and not self._eof:
             self._read()
+        if self._tx_pin[0] in events and self._out:
+            if deadline is not None and monotonic() >= deadline:
+                raise DuplexHostError()
+            self._write()
 
     def advance(self, *, milliseconds=0):
         """One short poll slice for a future duplex pump, not a lifetime timer."""
@@ -301,12 +343,21 @@ class DuplexHost:
                 or self._pidfd_identity() != self._pid_pin
             ):
                 raise DuplexHostError()
-            pid, status = os.waitpid(self._pid, os.WNOHANG)
-            if pid == self._pid and (os.WIFEXITED(status) or os.WIFSIGNALED(status)):
-                child.returncode = os.waitstatus_to_exitcode(status)
+            status = os.waitid(os.P_PIDFD, self._pidfd, os.WEXITED | os.WNOHANG)
+            if status is not None:
+                if status.si_pid != self._pid or status.si_code not in (
+                    os.CLD_EXITED,
+                    os.CLD_KILLED,
+                    os.CLD_DUMPED,
+                ):
+                    raise DuplexHostError()
+                child.returncode = (
+                    status.si_status
+                    if status.si_code == os.CLD_EXITED
+                    else -status.si_status
+                )
+                self._local_reaped = True
                 return child.returncode
-            if pid:
-                raise DuplexHostError()
             poller.poll(_slice(deadline))
         raise DuplexHostError()
 
@@ -329,9 +380,12 @@ class DuplexHost:
             self._rx_data = None
             if partial is not None:
                 self._out.append(partial)
-            self._append(wire.Op.CANCEL, self._tag)
+            self._challenge = secrets.token_bytes(wire.TAG_SIZE)
+            if self._challenge == self._tag:
+                raise DuplexHostError()
+            self._append(wire.Op.CANCEL, self._tag + self._challenge)
             while not self._eof and monotonic() < deadline:
-                self._step(_slice(deadline))
+                self._step(_slice(deadline), deadline=deadline)
             if (
                 not (self._receipt and self._eof)
                 or self._wait_exact(deadline) != 0
@@ -344,6 +398,8 @@ class DuplexHost:
             self._output_closed = True
             os.close(self._pidfd)
             self._pidfd = None
+            if monotonic() >= deadline:
+                return False
             self._verified = True
             return True
         except (OSError, ValueError):
@@ -353,12 +409,17 @@ class DuplexHost:
                 self._failed = True
 
     def abandon(self, *, timeout=1.0):
-        """Best-effort local cleanup only, never confirmation or a second CANCEL."""
+        """Return whether local reap is settled, never a native drain verdict.
+
+        On False the caller still retains this particular handle and must not
+        release the workspace. A retry can only wait for the original child,
+        not send another CANCEL or forced signal.
+        """
         self._thread()
         if type(timeout) not in (int, float) or not 0 < timeout <= 1:
             raise DuplexHostError()
         if self._verified:
-            return
+            return True
         self._failed = True
         for flag, expected in (
             ("_input_closed", self._tx_pin),
@@ -374,35 +435,36 @@ class DuplexHost:
             except (OSError, ValueError):
                 pass
         if self._pidfd is None:
-            return
-        reaped = self._child.returncode is not None
+            return self._local_reaped
         try:
             if (
                 self._pidfd_identity() == self._pid_pin
                 and self._child.pid == self._pid
                 and self._child.returncode is None
             ):
-                try:
-                    signal.pidfd_send_signal(self._pidfd, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
+                if not self._forced:
+                    self._forced = True
+                    try:
+                        signal.pidfd_send_signal(self._pidfd, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
                 self._wait_exact(monotonic() + timeout)
-                reaped = True
         except ChildProcessError:
             # This process has no remaining child to reap by this PID.
             # That is not a terminal wait status or a clean receipt.
-            reaped = True
+            self._local_reaped = True
         except (OSError, ValueError):
             pass
         finally:
             try:
                 if self._pidfd_identity() != self._pid_pin:
                     self._pidfd = None
-                elif reaped:
+                elif self._local_reaped:
                     os.close(self._pidfd)
                     self._pidfd = None
             except OSError:
                 self._pidfd = None
+        return self._local_reaped and self._pidfd is None
 
 
 def _slice(deadline):
