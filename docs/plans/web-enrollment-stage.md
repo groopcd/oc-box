@@ -101,6 +101,13 @@ bytes already sent or prove receipt by the browser. Do not retain response
 callbacks after that request. A generic refusal has no approval authority
 but is still subject to the transport write gate.
 
+`write_enrollment_reply` is the synchronous, checked write boundary for
+a future enrollment-only TLS worker. It keeps the original response
+fence, emits no headers supplied by the request or worker, and calls the
+abort hook on unconfirmed delivery. Socket fixtures verify both a checked
+final write and a partial final write that makes the host result unavailable.
+No normal named sign-in route calls this writer.
+
 Only a verified KE3 followed by a confirmed drain of both workers can make
 the result available. For HTTP enrollment, the trusted host must only call
 `take_for_host()` **after** the final successful write and post-write check;

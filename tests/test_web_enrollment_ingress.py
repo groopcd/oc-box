@@ -2,11 +2,13 @@
 
 import base64
 import json
+import socket
 from time import monotonic
 from unittest.mock import Mock, patch
 
 from oc_box import web_accounts, web_enrollment, web_enrollment_ingress as ingress
 from oc_box import web_local_origins, web_named_headers, web_registration_worker
+from oc_box import web_named_transport
 from test_web_enrollment import (
     ACCOUNT,
     KE1,
@@ -108,6 +110,57 @@ class EnrollmentIngressTests(EnrollmentFixture):
 
     def proof_finish(self, challenge):
         return {"challenge": challenge, "ke3": b64(KE3)}
+
+    def test_final_wire_delivery_leaves_result_for_the_host_not_the_browser(self):
+        challenge = self.prepared()
+        final = self.send(FINISH, self.proof_finish(challenge))
+        writer, reader = socket.socketpair()
+        with (
+            writer,
+            reader,
+            patch.object(web_accounts, "commit_registration") as commit,
+        ):
+            self.assertEqual(
+                ingress.write_enrollment_reply(
+                    writer, final, monotonic() + 2, check=lambda: None
+                ),
+                200,
+            )
+            writer.shutdown(socket.SHUT_WR)
+            with reader.makefile("rb") as stream:
+                head, body = stream.read(4096).split(b"\r\n\r\n", 1)
+            self.assertTrue(head.startswith(b"HTTP/1.1 200"))
+            self.assertNotIn(b"Set-Cookie:", head)
+            self.assertEqual(body, b'{"verified":true}')
+            result = self.reviewed.take_for_host()
+            self.assertEqual(result.registration, RECORD)
+            commit.assert_not_called()
+
+    def test_partial_final_wire_delivery_cancels_tentative_host_result(self):
+        challenge = self.prepared()
+        final = self.send(FINISH, self.proof_finish(challenge))
+
+        def disconnect(writer, response, deadline, *, check):
+            check()
+            writer.sendall(b"HTTP/1.1 200")
+            raise BrokenPipeError()
+
+        writer, reader = socket.socketpair()
+        with (
+            writer,
+            reader,
+            patch.object(
+                web_named_transport, "_write_response", side_effect=disconnect
+            ) as write,
+        ):
+            with self.assertRaises(web_named_headers.NamedRequestError):
+                ingress.write_enrollment_reply(
+                    writer, final, monotonic() + 2, check=lambda: None
+                )
+            write.assert_called_once()
+            self.assertEqual(reader.recv(128), b"HTTP/1.1 200")
+        self.assertIsNone(self.reviewed.take_for_host())
+        self.refused(self.send(FINISH, self.proof_finish(challenge)))
 
     def test_exact_three_rounds_disclose_only_protocol_and_proof_boolean(self):
         with patch.object(web_accounts, "commit_registration") as commit:

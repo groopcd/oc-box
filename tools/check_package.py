@@ -54,6 +54,7 @@ _WEB_RUNTIME_FILES = (
     "web_studio_read.py",
     "web_studio_selection.py",
     "web_studio_send.py",
+    "web_studio_guest.py",
     "web_history.py",
     "web_tls.py",
     "web_local_origins.py",
@@ -88,6 +89,7 @@ _WEB_RUNTIME_FILES = (
     "web_pake_profile.py",
     "web_pake_worker.py",
     "web_enrollment.py",
+    "web_enrollment_ingress.py",
     "web_registration_worker.py",
 )
 
