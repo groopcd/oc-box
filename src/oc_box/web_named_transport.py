@@ -1,7 +1,7 @@
 """Unserved, one-request transport for the local named HTTPS profile.
 
-This only reads an already accepted socket. It does not bind or accept, write
-HTTP responses, call an ingress, or select a workspace or upstream.
+This only uses an already accepted socket. It does not bind or accept, choose
+a workspace or upstream, or provide a production dispatcher.
 """
 
 import re
@@ -19,6 +19,8 @@ else:
 _REQUEST_TIMEOUT = 5.0
 _HEAD_LIMIT = 16384  # Includes the request line and the terminating empty line.
 _BODY_LIMIT = 8192
+_CONFIRM_SIZE = 54
+_RESPONSE_LIMIT = 8192
 _HEAD_END = b"\r\n\r\n"
 _LENGTH = re.compile(r"0|[1-9][0-9]{0,3}")
 _UNSUPPORTED_FIELDS = frozenset(
@@ -46,6 +48,21 @@ _ROUTES = {
         )
     ),
 }
+_RESPONSE_STATUS = {
+    200: b"200 OK",
+    403: b"403 Forbidden",
+    503: b"503 Service Unavailable",
+}
+_RESPONSE_HEADERS = (
+    b"Connection: close\r\n"
+    b"Content-Type: application/json\r\n"
+    b"Cache-Control: no-store\r\n"
+    b"Referrer-Policy: no-referrer\r\n"
+    b"X-Content-Type-Options: nosniff\r\n"
+    b"Cross-Origin-Resource-Policy: same-origin\r\n"
+    b"Content-Security-Policy: default-src 'none'; frame-ancestors 'none'; "
+    b"base-uri 'none'; form-action 'none'\r\n"
+)
 
 
 @dataclass(frozen=True, slots=True, repr=False)
@@ -56,6 +73,14 @@ class NamedRequest:
     method: str
     target: str
     headers: tuple[tuple[str, str], ...]
+    body: bytes
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class NamedResponse:
+    """Fixed JSON envelope for a trusted research dispatcher, not a proxy."""
+
+    status: int
     body: bytes
 
 
@@ -122,6 +147,14 @@ def _head(lines, role, origin):
         size = 0
     else:
         _refuse()
+    if role == "account":
+        if not size or fields.get("content-type") != "application/json":
+            _refuse()
+    elif target == "/oc-box/confirm":
+        if size != _CONFIRM_SIZE:
+            _refuse()
+    elif size:
+        _refuse()  # Workspace metadata and logout are empty.
     return method, target, headers, size
 
 
@@ -140,10 +173,12 @@ def _read(stream, *, role, origin, deadline):
         _refuse()
     while len(body) < size:
         body.extend(_recv(stream, size - len(body), deadline))
+    if target == "/oc-box/confirm" and not body.isascii():
+        _refuse()
 
-    # Refuse already-readable surplus (including another queued TLS record)
-    # without waiting for the client to close. A later byte is not detectable
-    # here; this socket is never used to read a second request.
+    # Refuse surplus observed during framing or by this one immediate probe.
+    # WantRead is not proof that no further bytes are in flight or pending in a
+    # partial TLS record. This socket is never used to read a second request.
     _remaining(deadline)
     stream.setblocking(False)
     try:
@@ -156,8 +191,38 @@ def _read(stream, *, role, origin, deadline):
     return NamedRequest(role, method, target, headers, bytes(body))
 
 
+def _write_response(stream, response, deadline):
+    if (
+        type(response) is not NamedResponse
+        or type(response.status) is not int
+        or response.status not in _RESPONSE_STATUS
+        or type(response.body) is not bytes
+        or len(response.body) > _RESPONSE_LIMIT
+    ):
+        _refuse()
+    wire = (
+        b"HTTP/1.1 "
+        + _RESPONSE_STATUS[response.status]
+        + b"\r\n"
+        + _RESPONSE_HEADERS
+        + b"Content-Length: "
+        + str(len(response.body)).encode("ascii")
+        + _HEAD_END
+        + response.body
+    )
+    with memoryview(wire) as data:
+        offset = 0
+        while offset < len(data):
+            stream.settimeout(_remaining(deadline))
+            count = stream.send(data[offset:])
+            if not count:
+                _refuse()
+            offset += count
+    _remaining(deadline)
+
+
 class NamedHTTPSReader:
-    """Private host-side parser; never hand it a shared or borrowed socket."""
+    """Private host-side transport; never hand it a shared or borrowed socket."""
 
     def __init__(
         self, origins, *, account_cert, account_key, workspace_cert, workspace_key
@@ -188,9 +253,26 @@ class NamedHTTPSReader:
         a request or a fixed refusal. The one deadline covers all on-wire reads.
         The result is not yet a browser session or permission to start work.
         """
+        return self._exchange(peer, handlers=None)
+
+    def respond_one(self, peer, *, account, workspace):
+        """Parse, call the trusted handler for the selected role, respond and close.
+
+        ``handler(request, deadline=...)`` receives no stream and must return
+        a NamedResponse. It owns any authorization checks and must cooperate
+        with the same absolute monotonic deadline. This transport cannot
+        interrupt synchronous work, undo side effects, or assert completion
+        of external work. It refuses to start a write if the budget has expired.
+        No retry, graceful TLS drain, or second request is attempted.
+        """
+        self._exchange(peer, handlers={"account": account, "workspace": workspace})
+
+    def _exchange(self, peer, *, handlers):
         deadline = monotonic() + _REQUEST_TIMEOUT
         try:
             with peer:
+                if handlers is not None and not all(map(callable, handlers.values())):
+                    _refuse()
                 if peer.family != socket.AF_INET or peer.type != socket.SOCK_STREAM:
                     _refuse()
                 endpoint = self._endpoints.get(peer.getsockname())
@@ -214,7 +296,17 @@ class NamedHTTPSReader:
                         "http/1.1",
                     ):
                         _refuse()
-                    return _read(stream, role=role, origin=origin, deadline=deadline)
+                    request = _read(stream, role=role, origin=origin, deadline=deadline)
+                    if handlers is None:
+                        return request
+                    _remaining(deadline)
+                    try:
+                        response = handlers[role](request, deadline=deadline)
+                    except Exception:  # noqa: BLE001 - never echo handler diagnostics.
+                        pass
+                    else:
+                        _write_response(stream, response, deadline)
+                        return
         except OSError:
             pass
         _refuse()

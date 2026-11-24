@@ -45,17 +45,26 @@ uses one loopback-only named relay per verified owner and refuses concurrent
 guest access to that owner unless independent admission is proven. Guest mode
 remains the default elsewhere.
 
-The unserved named HTTPS reader takes ownership of one accepted connection,
+The unserved named HTTPS transport takes ownership of one accepted connection,
 selects a validated TLS context and role by the actual IPv4 loopback endpoint,
-then admits only that role's current exact HTTP/1.1 route and origin. TLS
-handshake, headers (16 KiB, 64 fields) and body (8 KiB) share one five-second
-deadline. It rejects ambiguous framing and already-readable surplus, and closes
-the socket on every outcome; it never uses EOF to delimit a request or treats a
-later byte as a second request. This is a read-only transport seam, not a
-listening service, response path, handoff receiver or authorization to perform
-upstream work. A future caller must verify its own listener binds and bound
-concurrent connections. Synthetic TLS coverage does not establish a browser or
-host deployment pass.
+then checks that role's exact HTTP/1.1 method, route and origin. Before reading
+the remaining body, it requires nonempty `application/json` for account POSTs,
+exactly 54 bytes for confirmation, and no bytes for logout or metadata. It
+closes after a read-only probe or, in the scoped exchange, after using one
+explicit role handler to produce one bounded, fixed-length JSON envelope.
+The response writer cannot set cookies, redirect, upgrade or relay a stream.
+The transport refuses surplus it sees while framing or during one immediate
+probe; it cannot detect every byte still in flight and never parses or forwards
+a second request. It does not use EOF to delimit the request.
+
+The TLS handshake, headers (16 KiB, 64 fields), body and response (8 KiB each)
+share a five-second I/O deadline. A trusted synchronous dispatch callback
+receives that deadline and must honor it. A late result cannot start a response,
+but this does not preempt the callback, roll back its effects or verify its
+cleanup. There is no production dispatcher, listener, handoff receiver or
+authority to perform upstream work. A future owner integration must separately
+verify its binds and bound concurrent work, cancellation and drain. Synthetic
+TLS coverage does not establish a browser or host deployment pass.
 
 A later LAN instance can use distinct existing sites and certificates under
 operator control. Isolated guest LAN tests can establish transport behavior
