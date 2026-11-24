@@ -13,7 +13,7 @@ from pathlib import Path
 from select import select
 
 CHECK = runpy.run_path(str(Path(__file__).with_name("check")))
-from oc_box import web_registration_worker  # noqa: E402
+from oc_box import web_bootstrap, web_enrollment, web_registration_worker  # noqa: E402
 
 require = CHECK["require"]
 read_exact = CHECK["read_exact"]
@@ -149,6 +149,86 @@ def registration_and_login(registrar, fixture, profile, origins, setup, *, case,
     print(f"PASS registration then login: {case}")
 
 
+def staged_enrollment(registrar, profile, fixture, origins, setup, *, case):
+    accounts, admission = CHECK["web_accounts"], CHECK["web_admission"]
+    name, workspace = CHECK["NAME"], CHECK["WORKSPACE"]
+    _, client, verifier = CHECK["binding_bytes"](name)
+    if case == "different verifier":
+        verifier = CHECK["digest"](b"verifier", b"https://accounts.ocbox.test:9445")
+    binding = admission.WebBinding(workspace, "synthetic-owner", origins.workspace.value)
+    bootstrap = web_bootstrap.BrowserBootstrap(origins=origins, binding=binding)
+    issued = bootstrap.issue(binding)
+    origin = origins.account.value
+    nonce = bootstrap.accept(binding, auth_origin=origin, ticket=issued.value)
+    claim = bootstrap.claim_enrollment(binding, auth_origin=origin, account_nonce=nonce)
+    require(claim is not None, "synthetic enrollment claim refused")
+    # This fixture deliberately has no account file or persistence authority.
+    review = accounts.RegistrationReview(
+        Path("/synthetic/accounts"), (1, 2), (3, 4), name, (workspace,), setup, False, bytes(32),
+    )
+    approval = web_enrollment.EnrollmentApproval(
+        review=review, origins=origins, claim=claim,
+        registration_worker=registrar, proof_profile=profile,
+    )
+    browser = dict(account_origin=origin, account_nonce=nonce)
+    try:
+        with process(fixture) as child:
+            child.stdin.write(client + verifier)
+            blinded = read_exact(child.stdout, 32)
+            registration = approval.start(**browser, request=blinded)
+            require(registration is not None, "staged registration refused")
+            child.stdin.write(registration.response)
+            upload_and_ke1 = read_exact(child.stdout, 192 + 96)
+            upload, ke1 = upload_and_ke1[:192], upload_and_ke1[192:]
+            stage = browser | dict(challenge=registration.challenge)
+            require(approval.take_for_host() is None, "unproved registration result")
+            proof = approval.start_proof(**stage, registration=upload, ke1=ke1)
+            require(proof is not None and not approval.drained(), "no live OCOP attempt")
+            context = CHECK["digest"](
+                b"enrollment-proof", f"{origin}\n{registration.challenge}".encode("ascii"),
+            )
+            require(proof.context == context and len(proof.ke2) == 320, "wrong proof context")
+            require(approval.take_for_host() is None, "KE2 is not possession")
+            if case == "retired":
+                require(bootstrap.retire(binding, auth_origin=origin, account_nonce=nonce),
+                        "bootstrap retirement failed")
+                approval.expire()
+                require(approval.drained(), "retirement did not drain OCOP")
+            if case == "different context":
+                context = bytes([context[0] ^ 1]) + context[1:]
+            child.stdin.write(context + proof.ke2)
+            child.stdin.close()
+            status = read_exact(child.stdout, 1)
+            has_proof = case not in ("different context", "different verifier")
+            require(status == bytes([not has_proof]), "wrong synthetic client proof status")
+            ke3 = read_exact(child.stdout, 64) if has_proof else bytes(64)
+            require(child.wait(timeout=5) == 0 and not child.stdout.read(1), "client did not drain")
+            if case == "changed proof":
+                ke3 = bytes([ke3[0] ^ 1]) + ke3[1:]
+            if case == "valid":
+                require(not approval.finish_proof(**(stage | {"account_nonce": CHECK["OTHER"]}), ke3=ke3),
+                        "wrong browser consumed proof")
+            valid = case == "valid"
+            require(approval.finish_proof(**stage, ke3=ke3) is valid, "staged proof outcome")
+            require(not approval.finish_proof(**stage, ke3=ke3), "enrollment proof replay accepted")
+            result = approval.take_for_host()
+            if valid:
+                require(
+                    result is not None and result.review is review and result.registration == upload
+                    and result.current(), "wrong host-only staged result",
+                )
+                require(bootstrap.retire(binding, auth_origin=origin, account_nonce=nonce)
+                        and not result.current(), "retired host result stayed current")
+            else:
+                require(result is None, "refused proof returned a host result")
+            require(approval.take_for_host() is None and approval.drained(),
+                    "staged result replay or unverified cleanup")
+    finally:
+        bootstrap.close()
+        require(approval.close() and not approval.cleanup_failed, "unconfirmed enrollment drain")
+    print(f"PASS staged EnrollmentApproval with real OCOR/OCOP: {case}")
+
+
 @contextmanager
 def sealed_elf(data):
     fd = os.memfd_create("oc-box-ocor-research", os.MFD_CLOEXEC | os.MFD_ALLOW_SEALING)
@@ -197,6 +277,19 @@ def main():
                      "different verifier", "changed envelope"):
             registration_and_login(registrar, fixture, profile, origins, setup,
                                    case=case, other_setup=other_setup)
+    for case in ("valid", "changed proof", "different verifier", "different context", "retired"):
+        with ExitStack() as cleanup:
+            with sealed_elf(worker) as fd:
+                profile = CHECK["web_pake_profile"].LocalPakeProfile(
+                    fd, expected_sha256=bytes.fromhex(args.worker_sha256), origins=origins,
+                )
+            cleanup.callback(close, profile, "unconfirmed enrollment OCOP worker drain")
+            with sealed_elf(registrar_bytes) as fd:
+                registrar = web_registration_worker.RegistrationWorker(
+                    fd, expected_sha256=bytes.fromhex(args.registration_sha256),
+                )
+            cleanup.callback(close, registrar, "unconfirmed enrollment OCOR worker drain")
+            staged_enrollment(registrar, profile, fixture, origins, setup, case=case)
 
 
 if __name__ == "__main__":

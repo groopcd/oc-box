@@ -28,14 +28,15 @@ to be implemented.
 
 The in-process approval gate reserves one live account bootstrap for one
 reviewed workspace registration and uses the same local PAKE identifiers.
-Canonical upload validation alone is refused as evidence of possession;
-a separate trusted OCOP proof must confirm the exact tentative setup and
-record without issuing a sign-in handoff. The one-time host result can
-carry its live guard into the account store's locked compare-and-swap.
-Expiry and retirement invalidate the guard; a possibly active verifier
-prevents verified drain. This gate opens no listener and writes no store.
-Actual host confirmation, owner exclusion/revocation, the proof transport,
-and HTTPS routes remain separate requirements.
+The [staged coordinator](web-enrollment-stage.md) validates the canonical
+upload with OCOR and verifies possession with a separate OCOP exchange
+against the exact tentative setup and record. It issues no sign-in handoff.
+Only the one-time host result carries its live guard into the account
+store's locked compare-and-swap. Expiry and retirement invalidate the
+guard; a possibly active verifier prevents verified drain. Offline
+composition with the real helpers opens no listener and writes no store.
+Actual host confirmation, owner exclusion/revocation, the browser
+enrollment workflow, and HTTPS routes remain separate requirements.
 
 The source contains internal encrypted account records, bounded PAKE
 orchestration with a pinned-descriptor worker interface, and expiring browser
