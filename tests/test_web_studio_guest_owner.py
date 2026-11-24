@@ -1,11 +1,12 @@
 """Original owner generation and guest-only private readiness tests."""
 
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 import contextlib
 import fcntl
 import json
 import os
 from pathlib import Path
+import socket
 import subprocess
 from tempfile import TemporaryDirectory
 from time import monotonic
@@ -15,6 +16,8 @@ from unittest.mock import Mock, patch
 
 from oc_box import oc_box as box
 from oc_box import opencode_v2_io as worker
+from oc_box import web_guest_duplex_exec as exec_bridge
+from oc_box import web_guest_worker_drain as worker_drain
 from oc_box import web_studio_guest_binding as binding
 from oc_box import web_studio_guest_owner as guest
 from oc_box import workspace_control, workspace_service as service
@@ -174,6 +177,119 @@ class GuestOwnerTests(unittest.TestCase):
         self.owner.connection = proof.seal(wire())
         self.owner.publish(None)
         return proof
+
+    def test_registered_guest_tunnel_binds_one_providerless_exec_and_retires_it(self):
+        for scenario in (
+            "clean",
+            "stop-intent",
+            "startup-uncertain",
+            "retirement-uncertain",
+        ):
+            with self.subTest(scenario=scenario), contextlib.ExitStack() as stack:
+                self.token = workspace_control.capture(self.path)
+                self.owner = service.Owner(
+                    box, self.path, self.data, guest_stop_token=self.token
+                )
+                stack.enter_context(
+                    patch.dict(os.environ, {"OPENCODE_PASSWORD": "no-forward-secret"})
+                )
+                proof = self.seal(stack)
+                gateway = service.Gateway(
+                    box, proof.pinned_data(), self.owner.connection
+                )
+                reservation = stack.enter_context(gateway._listener_preflight())
+                original = binding.bind_unserved(gateway, reservation, proof)
+                registry = worker_drain.AcceptedWorkers()
+                left, right = socket.socketpair()
+                stack.enter_context(right)
+                outcome = Future()
+                child = Mock()
+                tunnel = Mock()
+                tunnel.close.return_value = scenario != "retirement-uncertain"
+
+                def popen(command, **options):
+                    self.assertEqual(
+                        command[:14],
+                        [
+                            "podman",
+                            "exec",
+                            "-i",
+                            "--workdir",
+                            "/",
+                            _CONTAINER,
+                            "/usr/bin/env",
+                            "-i",
+                            "PATH=/usr/bin:/bin",
+                            "/usr/bin/python3",
+                            "-I",
+                            "-S",
+                            "-B",
+                            "-c",
+                        ],
+                    )
+                    self.assertEqual(command[-1], "22001")
+                    self.assertNotIn("no-forward-secret", command[-2])
+                    self.assertNotIn("OPENCODE_PASSWORD", options["env"])
+                    self.assertEqual(options["env"], proof._engine_env)
+                    self.assertIs(options["stdin"], subprocess.PIPE)
+                    self.assertIs(options["stdout"], subprocess.PIPE)
+                    self.assertEqual(options["bufsize"], 0)
+                    self.assertEqual(options["cwd"], "/")
+                    with self.assertRaises(workspace_control.ControlError):
+                        with workspace_control.admission(self.path, timeout=0):
+                            self.fail(
+                                "Relay attempted to spawn without stop admission."
+                            )
+                    if scenario == "startup-uncertain":
+                        raise OSError("private synthetic detail")
+                    return child
+
+                def run(use):
+                    try:
+                        relay = exec_bridge.GuestDuplexExec(original, registry, use)
+                        if scenario == "stop-intent":
+                            workspace_control.request_stop(self.path)
+                        if scenario in ("stop-intent", "startup-uncertain"):
+                            with self.assertRaisesRegex(
+                                exec_bridge.GuestExecError, "^The original Studio"
+                            ):
+                                relay.start(deadline=monotonic() + 5)
+                        else:
+                            self.assertIs(relay.start(deadline=monotonic() + 5), tunnel)
+                        with self.assertRaises(exec_bridge.GuestExecError):
+                            relay.start(deadline=monotonic() + 5)
+                        retired = relay.retire()
+                        self.assertIs(relay.retire(), retired)
+                        outcome.set_result(retired)
+                    except BaseException as error:
+                        outcome.set_exception(error)
+
+                with (
+                    patch.object(
+                        exec_bridge.subprocess, "Popen", side_effect=popen
+                    ) as spawn,
+                    patch.object(
+                        exec_bridge.web_guest_duplex_host,
+                        "DuplexHost",
+                        return_value=tunnel,
+                    ) as supervise,
+                ):
+                    if not registry.dispatch(left, run):
+                        left.close()
+                        self.fail("Could not register the synthetic browser socket.")
+                    retired = outcome.result(timeout=10)
+                    self.assertEqual(retired, scenario in ("clean", "stop-intent"))
+                    self.assertEqual(registry.close(timeout=3), retired)
+                    self.assertEqual(spawn.call_count, int(scenario != "stop-intent"))
+                    if scenario in ("clean", "retirement-uncertain"):
+                        supervise.assert_called_once_with(child)
+                        tunnel.close.assert_called_once()
+                    else:
+                        supervise.assert_not_called()
+                    self.assertEqual(
+                        tunnel.abandon.call_count,
+                        int(scenario == "retirement-uncertain"),
+                    )
 
     def test_exact_original_owner_pinned_and_a_stale_connection_cannot_replace_it(self):
         with box.workspace_lock(self.path):
