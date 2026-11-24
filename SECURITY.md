@@ -274,8 +274,9 @@ backup, or restore data; a saved workspace choice also cannot be restored as
 authority. `--no-host-file-open` opts out for the current client, and neither
 launch flag affects other clients.
 
-An eligible client still needs direct Konsole or Yakuake, native OpenCode
-2.3.x, verified project/home mounts, and a private staging directory. Seeing an
+An eligible client still needs direct Konsole or Yakuake, stable native
+OpenCode 2.x with a compatible renderer, verified project/home mounts, and a
+private staging directory. Seeing an
 assistant link or starting a client with host opening enabled does not authorize
 a transfer. The host relay requires a fresh matched Ctrl-click and bounds the
 one-use transfer. The result is a private copy, not a share or a write-back.

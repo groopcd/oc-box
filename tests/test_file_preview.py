@@ -16,7 +16,7 @@ class PreviewAdmissionTests(unittest.TestCase):
         self.container_id = "a" * 64
         self.data = {
             "id": "b" * 32,
-            "opencode_version": "2.3.2",
+            "opencode_version": "2.4.1",
             "container": "oc-box-probe",
             "home": "/home/probe",
             "home_volume": "oc-box-home-probe",
@@ -118,7 +118,7 @@ class PreviewAdmissionTests(unittest.TestCase):
         native.assert_not_called()
         backend.assert_not_called()
 
-    def test_explicit_enable_rejects_old_versions_and_incompatible_arguments(self):
+    def test_explicit_enable_rejects_non_v2_and_incompatible_arguments(self):
         args = box.parser().parse_args(["reset", "--host-file-open"])
         with (
             patch.object(box.sys.stdin, "isatty", return_value=True),
@@ -126,14 +126,14 @@ class PreviewAdmissionTests(unittest.TestCase):
             patch("oc_box.host_drop.preflight", return_value="konsole"),
         ):
             with self.assertRaisesRegex(box.BoxError, "native-version-unsupported"):
-                box.validate_host_file_open(args, "2.2.6")
+                box.validate_host_file_open(args, "1.19.5")
             with self.assertRaisesRegex(box.BoxError, "custom Podman arguments"):
                 box.validate_host_file_open(
-                    args, "2.3.2", {"podman_args": ["synthetic-option"]}
+                    args, "2.4.1", {"podman_args": ["synthetic-option"]}
                 )
             args.clear_podman_args = True
             box.validate_host_file_open(
-                args, "2.3.2", {"podman_args": ["synthetic-option"]}
+                args, "2.4.1", {"podman_args": ["synthetic-option"]}
             )
 
     def test_automatic_installation_default_does_not_authorize_restored_workspace(self):
@@ -153,11 +153,22 @@ class PreviewAdmissionTests(unittest.TestCase):
             )
             self.assertEqual(default.call_count, 1)
 
-    def test_only_canonical_stable_native_23_is_eligible(self):
-        for release in ("2.3.0", "2.3.1", "2.3.2", "2.3.79"):
-            self.assertTrue(file_preview.supports(release))
-        for release in ("2.2.7", "2.4.0", "2.3.02", "2.3.0-beta.1", "2.3.2\n", None):
-            self.assertFalse(file_preview.supports(release))
+    def test_canonical_stable_native_v2_is_eligible_without_a_minor_pin(self):
+        for release in ("2.2.6", "2.3.2", "2.4.1", "2.79.42"):
+            with self.subTest(release=release):
+                self.assertTrue(file_preview.supports(release))
+        for release in (
+            "1.19.5",
+            "3.0.0",
+            "2.04.1",
+            "2.4.01",
+            "2.4.1-beta.1",
+            "2.4.1+local",
+            "2.4.1\n",
+            None,
+        ):
+            with self.subTest(release=release):
+                self.assertFalse(file_preview.supports(release))
 
     def test_retired_switch_and_private_marker_cannot_activate_off_clients(self):
         with (
@@ -251,7 +262,7 @@ class PreviewAdmissionTests(unittest.TestCase):
     ):
         variants = (
             ({**self.data, "podman_args": ["--volume=/synthetic:ro"]}, self.connection),
-            ({**self.data, "opencode_version": "2.2.6"}, self.connection),
+            ({**self.data, "opencode_version": "2.4.1-beta.1"}, self.connection),
             (self.data, {**self.connection, "workspace": "c" * 32}),
             (self.data, {**self.connection, "version": "2.3.0"}),
         )
@@ -310,20 +321,51 @@ class PreviewAdmissionTests(unittest.TestCase):
             flush=True,
         )
 
-    def test_kitty_does_not_get_host_open_even_with_a_desktop(self):
-        with (
-            patch.object(file_preview, "client_binding") as binding,
-            patch.object(file_preview, "host_export_mounts") as inventory,
-            patch.object(file_preview_host, "readiness_reason", return_value=None),
-            patch("oc_box.host_drop.preflight", return_value="kitty"),
-            patch.object(box.sys.stdin, "isatty", return_value=True),
-            patch.object(box.sys.stdout, "isatty", return_value=True),
+    def test_requested_host_open_reports_early_refusals_without_mount_inspection(self):
+        for release, tty, profile, reason in (
+            ("1.19.5", True, "konsole", "native-version-unsupported"),
+            (None, True, "konsole", "native-version-unverified"),
+            ("2.4.1", False, "konsole", "not-interactive"),
+            ("2.4.1", True, "kitty", "terminal-profile-unsupported"),
         ):
-            command = self.command()
-        self.assertNotIn(file_preview.ROOTS, " ".join(command))
-        self.assertFalse(hasattr(command, "preview_host_open"))
-        binding.assert_not_called()
-        inventory.assert_not_called()
+            self.data["opencode_version"] = release
+            with (
+                self.subTest(reason=reason),
+                patch.object(file_preview, "client_binding") as binding,
+                patch.object(file_preview, "host_export_mounts") as inventory,
+                patch.object(file_preview_host, "readiness_reason") as desktop,
+                patch("oc_box.host_drop.preflight", return_value=profile),
+                patch.object(box.sys.stdin, "isatty", return_value=tty),
+                patch.object(box.sys.stdout, "isatty", return_value=tty),
+                patch("builtins.print") as notice,
+            ):
+                command = self.command()
+                self.assertNotIn(file_preview.ROOTS, " ".join(command))
+                self.assertFalse(hasattr(command, "preview_host_open"))
+                binding.assert_not_called()
+                inventory.assert_not_called()
+                desktop.assert_not_called()
+                notice.assert_called_once_with(
+                    f"oc-box: Experimental host opening is off ({reason}).", flush=True
+                )
+
+    def test_saved_opt_in_warns_on_v1_but_does_not_prevent_native_launch(self):
+        args = box.parser().parse_args(["start"])
+        args._saved_host_file_open = True
+        self.data["distro"] = "synthetic"
+        self.data["opencode_version"] = "1.19.5"
+        with (
+            patch.object(box, "refresh_sessions", return_value={}),
+            patch.object(box, "exec_command"),
+            patch.object(box, "run_native_tui", return_value=0) as tui,
+            patch.object(box, "sync_sessions"),
+            patch.object(file_preview, "report_unavailable") as notice,
+        ):
+            self.assertEqual(
+                box.launch_client(None, self.data, args, "1.19.5", None), 0
+            )
+            tui.assert_called_once()
+            notice.assert_called_once_with("native-version-unsupported")
 
     def test_reports_desktop_and_engine_refusals_without_swallowing_native_tui(self):
         verified = (self.container_id, {"roots": [self.project, self.data["home"]]})

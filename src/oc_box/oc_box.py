@@ -605,7 +605,7 @@ def validate_host_file_open(args, version=None, data=None):
     reason = file_preview.client_incompatibility(version)
     if reason is not None:
         raise BoxError(
-            "--host-file-open requires an interactive native OpenCode 2.3.x "
+            "--host-file-open requires an interactive stable native OpenCode 2.x "
             f"TUI in direct Konsole or Yakuake ({reason})."
         )
     if getattr(args, "podman_arg", None) or (
@@ -4142,6 +4142,17 @@ def launch_client(path, data, args, version, exported, owner=None):
                     "oc-box: Opening OpenCode; plugins and MCP servers may need time to initialize.",
                     flush=True,
                 )
+            file_open = effective_host_file_open(args, data)
+            if file_open and owner is None:
+                if __package__:
+                    from . import file_preview
+                else:
+                    import file_preview
+                file_preview.report_unavailable(
+                    "private-native-client-unavailable"
+                    if file_preview.supports(version)
+                    else "native-version-unsupported"
+                )
             code = run_native_tui(
                 data,
                 workspace_service.client_command(
@@ -4151,7 +4162,7 @@ def launch_client(path, data, args, version, exported, owner=None):
                     command,
                     interactive=True,
                     ui_owner=True,
-                    file_preview=effective_host_file_open(args, data),
+                    file_preview=file_open,
                 )
                 if owner
                 else exec_command(data, command, interactive=True),

@@ -16,15 +16,16 @@ else:
     import startup_output
     from file_preview_host import InactiveMountSource
 
-RELEASE = re.compile(r"2\.3\.(?:0|[1-9][0-9]*)")
+RELEASE = re.compile(r"2\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)")
 ROOTS = "OC_BOX_FILE_PREVIEW_ROOTS"
 NOTICE = (
     "oc-box: Experimental Ctrl-click host opening requires an ordinary "
-    "native OpenCode 2.3.x workspace with verified mounts; host opening is off."
+    "native OpenCode 2 workspace with verified mounts; host opening is off."
 )
 
 
 def supports(release):
+    """Eligibility only; the native TUI hook must verify its own contract."""
     return isinstance(release, str) and RELEASE.fullmatch(release) is not None
 
 
@@ -44,6 +45,12 @@ def client_incompatibility(release=None):
         return "terminal-profile-unverified"
     # Kitty's optional remote control can inject terminal input.
     return None if profile == "konsole" else "terminal-profile-unsupported"
+
+
+def report_unavailable(reason):
+    startup_output.line(
+        f"oc-box: Experimental host opening is off ({reason}).", flush=True
+    )
 
 
 def _root(path):

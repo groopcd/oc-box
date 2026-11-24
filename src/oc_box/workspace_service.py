@@ -570,10 +570,16 @@ def client_command(
                 import file_preview as preview
                 import file_preview_host
             release = data.get("opencode_version")
+            reason = (
+                "native-version-unverified"
+                if release is None
+                else preview.client_incompatibility(release)
+            )
+            if reason is not None:
+                preview.report_unavailable(reason)
             verified = (
                 preview.client_binding(box, data, connection)
-                if preview.supports(release)
-                and preview.client_incompatibility(release) is None
+                if reason is None
                 else None
             )
             if verified is not None:
@@ -610,10 +616,7 @@ def client_command(
                         )
 
                 if preview_host_open is None:
-                    startup_output.line(
-                        f"oc-box: Experimental host opening is off ({reason}).",
-                        flush=True,
-                    )
+                    preview.report_unavailable(reason)
 
     if (
         image_preview

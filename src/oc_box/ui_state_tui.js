@@ -16,7 +16,7 @@ export default Plugin.define({
       if (!stopped) stopPreview = install(context)
     }).catch(() => {
       if (!stopped) context.ui.toast.show({
-        message: "Experimental host file opening is unavailable on this client.",
+        message: "Host file opening is off: this client does not provide a compatible native TUI hook.",
         variant: "warning",
       })
     })
