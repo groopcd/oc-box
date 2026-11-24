@@ -195,6 +195,18 @@ jobs:
           python3 -B tests/smoke_history_subagent_recovery_v2.py --opencode "$binary" --foreground
           python3 -B tests/smoke_history_subagent_recovery_v2.py --opencode "$binary" \
             --foreground --producer-close abrupt
+      # These adapters have independent, behavior-tested release profiles.
+      # A floating OpenCode install can correctly refuse an unverified profile.
+      - name: Native host attachment broker and direct queue on verified OpenCode 2.4.1
+        if: matrix.opencode == '2.4.1'
+        run: >-
+          python3 -B tests/smoke_attachments_v2.py
+          --opencode "$RUNNER_TEMP/opencode-v24/node_modules/@opencode/cli-linux-x64/bin/opencode"
+      - name: Authenticated browser attachment transport on verified OpenCode 2.4.1
+        if: matrix.opencode == '2.4.1'
+        run: >-
+          python3 -B tests/smoke_web_attachments_v2.py
+          --opencode "$RUNNER_TEMP/opencode-v24/node_modules/@opencode/cli-linux-x64/bin/opencode"
 
   opencode-v2-native-2-3-lifecycle:
     runs-on: ubuntu-latest
@@ -270,14 +282,6 @@ jobs:
       - name: Native image preview preference isolation on current stable OpenCode 2.x
         run: >-
           python3 -B tests/smoke_image_preview_preferences_v2.py
-          --opencode "$RUNNER_TEMP/opencode-v2-web/node_modules/.bin/opencode"
-      - name: Native host attachment broker and direct queue on current stable OpenCode 2.x
-        run: >-
-          python3 -B tests/smoke_attachments_v2.py
-          --opencode "$RUNNER_TEMP/opencode-v2-web/node_modules/.bin/opencode"
-      - name: Authenticated browser attachment transport on current stable OpenCode 2.x
-        run: >-
-          python3 -B tests/smoke_web_attachments_v2.py
           --opencode "$RUNNER_TEMP/opencode-v2-web/node_modules/.bin/opencode"
       - name: Native host credential round trip on current stable OpenCode 2.x
         run: >-
