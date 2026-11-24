@@ -22,11 +22,23 @@ def _stamp(stream):
     return fd, info.st_dev, info.st_ino
 
 
-def _same(stream, stamp):
+def _same(stream, stamp, *, disown=False):
+    """Optionally disown a confirmed mismatch for an already-owned wrapper."""
+    fd = stream.fileno()
     try:
-        return _stamp(stream) == stamp
-    except (OSError, ValueError):
-        return False
+        info = os.fstat(fd)
+    except OSError as error:
+        if not disown or fd < 0 or error.errno != errno.EBADF:
+            return False
+        # An OS-closed descriptor can be reused before the wrapper is freed.
+    else:
+        if stat.S_ISSOCK(info.st_mode) and (fd, info.st_dev, info.st_ino) == stamp:
+            return stream.fileno() == fd
+    if disown and stream.fileno() == fd:
+        # Once registered, this wrapper must not keep finalizer ownership of
+        # a known foreign or OS-closed fd. Detach without closing that number.
+        stream.detach()
+    return False
 
 
 @dataclass(frozen=True, slots=True, eq=False, repr=False)
@@ -165,7 +177,7 @@ class AcceptedWorkers:
                 with self._lock:
                     row = self._workers[use]
                     try:
-                        if _same(use.stream, row.stamp):
+                        if _same(use.stream, row.stamp, disown=True):
                             use.stream.close()
                             row.closed = use.stream.fileno() < 0
                     except (OSError, ValueError):
@@ -192,7 +204,7 @@ class AcceptedWorkers:
             with self._lock:
                 row = self._live(use)
                 if row is not None:
-                    if _same(use.stream, row.stamp):
+                    if _same(use.stream, row.stamp, disown=True):
                         return True
                     self._failed = True
                     self._fence(pending)
@@ -215,7 +227,7 @@ class AcceptedWorkers:
                 row = self._live(use)
                 if row is None:
                     return None
-                if not _same(use.stream, row.stamp):
+                if not _same(use.stream, row.stamp, disown=True):
                     self._failed = True
                     self._fence(pending)
                     return None
@@ -249,9 +261,10 @@ class AcceptedWorkers:
                 ):
                     return False
                 entry = row.activities[activity]
-                if entry.uncertain:
+                same = _same(use.stream, row.stamp, disown=True)
+                if same and entry.uncertain:
                     return False
-                if confirmed is True and _same(use.stream, row.stamp):
+                if same and confirmed is True:
                     del row.activities[activity]
                     return True
                 entry.uncertain = True
@@ -266,18 +279,19 @@ class AcceptedWorkers:
         # be woken; its owning worker remains responsible for closing it.
         self._closed = True
         for use, row in self._workers.items():
+            same = row.closed or _same(use.stream, row.stamp, disown=True)
+            if not same:
+                self._failed = True
             if use.cancelled:
                 continue
             use._cancelled.set()
-            if not row.closed:
+            if same and not row.closed:
                 try:
-                    if _same(use.stream, row.stamp):
-                        use.stream.shutdown(socket.SHUT_RDWR)
-                    else:
-                        self._failed = True
+                    use.stream.shutdown(socket.SHUT_RDWR)
                 except OSError as error:
                     if error.errno != errno.ENOTCONN:
                         self._failed = True
+                    _same(use.stream, row.stamp, disown=True)
             for entry in row.activities.values():
                 notice = entry.notice
                 self._notifications.add(notice)

@@ -26,8 +26,12 @@ synthetic helpers.
    listener and stop baseline independently. No check makes an external
    syscall atomic with later closure, and the descriptor comparison does not
    protect against arbitrary same-process races or an untracked descriptor
-   alias. Any observed substitution fences the lifetime. Only the registered
-   target closes the original accepted stream and records that closure.
+   alias. A confirmed foreign descriptor is disowned with `detach()` so
+   neither explicit cleanup nor the original socket's finalizer closes it;
+   a confirmed OS-closed descriptor is disowned before it can be reused.
+   Neither is evidence of retirement, and drain stays unconfirmed. Only
+   the registered target closes the original accepted stream and records
+   that closure.
 3. In the worker, reserve each relay **and** helper with
    `activity = admit(use, wake=...)` before any setup that can start native
    work. A refusal permits no launch. The exact activity handle is private and

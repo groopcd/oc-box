@@ -1,12 +1,15 @@
 """Deterministic lifecycle fixtures; no Gateway, native service or child exec."""
 
 from concurrent.futures import ThreadPoolExecutor
+import errno
+import gc
 import os
 from queue import Queue
 import socket
 from threading import Event, Thread
 import unittest
 from unittest.mock import Mock, patch
+import weakref
 
 from oc_box import web_guest_worker_drain as drain
 
@@ -291,18 +294,15 @@ class AcceptedWorkerTests(unittest.TestCase):
         self.assertTrue(workers.dispatch(stream, run))
         try:
             self.assertTrue(ready.wait(3))
-            os.dup2(foreign.fileno(), stream.fileno(), inheritable=False)
+            fd = os.dup2(foreign.fileno(), stream.fileno(), inheritable=False)
             workers.fence()
-            foreign_peer.sendall(b"alive")
-            self.assertEqual(stream.recv(5), b"alive")
+            self.assertEqual(stream.fileno(), -1)
+            self.assert_foreign_socket(fd, foreign, foreign_peer)
         finally:
             release.set()
         self.assertTrue(returned.wait(3))
         self.assertIs(verdicts.get(timeout=3), False)
         self.assertFalse(workers.close(timeout=3))
-        self.assertGreaterEqual(stream.fileno(), 0)
-        stream.sendall(b"still alive")
-        self.assertEqual(foreign_peer.recv(11), b"still alive")
 
     def test_unconnected_inheritable_or_nonstream_is_not_admitted(self):
         workers = drain.AcceptedWorkers()
@@ -315,26 +315,141 @@ class AcceptedWorkerTests(unittest.TestCase):
         dispatch.assert_not_called()
         self.assertTrue(workers.close(timeout=0))
 
-    def test_invalidated_worker_never_regains_authority_after_fd_is_restored(self):
+    def test_disowned_fd_cannot_be_reintroduced_as_a_new_worker_handle(self):
         workers = drain.AcceptedWorkers()
         stream, _ = self.pair()
         foreign, _ = self.pair()
         verdicts = Queue()
 
         def run(use):
-            original = stream.dup()
-            try:
-                fd = stream.fileno()
-                os.dup2(foreign.fileno(), fd, inheritable=False)
-                first = workers.current(use)
-                os.dup2(original.fileno(), fd, inheritable=False)
-                verdicts.put((first, workers.current(use)))
-            finally:
-                original.close()
+            fd = os.dup2(foreign.fileno(), use.stream.fileno(), inheritable=False)
+            first = workers.current(use)
+            with socket.socket(fileno=fd) as replacement:
+                replacement_use = drain.AcceptedWorker(replacement)
+                verdicts.put(
+                    (first, workers.current(use), workers.current(replacement_use))
+                )
 
         self.assertTrue(workers.dispatch(stream, run))
-        self.assertEqual(verdicts.get(timeout=3), (False, False))
+        self.assertEqual(verdicts.get(timeout=3), (False, False, False))
         self.assertFalse(workers.close(timeout=3))
+
+    def assert_foreign_socket(self, fd, foreign, peer):
+        # Wrap the exact numeric fd, not foreign's surviving source fd.
+        with socket.socket(fileno=fd) as replacement:
+            self.assertTrue(os.path.samestat(os.fstat(fd), os.fstat(foreign.fileno())))
+            replacement.settimeout(3)
+            peer.sendall(b"x")
+            self.assertEqual(replacement.recv(1), b"x")
+            replacement.sendall(b"y")
+            self.assertEqual(peer.recv(1), b"y")
+
+    def test_exact_foreign_fd_survives_worker_and_registry_finalization(self):
+        for phase in (
+            "worker-exit",
+            "activation",
+            "ambiguous-start",
+            "after-fence",
+            "wake-failure",
+        ):
+            with self.subTest(phase=phase):
+                self.check_finalization(phase)
+
+    def check_finalization(self, phase):
+        foreign, peer = self.pair()
+        # This wrapper must not have an addCleanup reference: verify that
+        # both it and the sticky-failed registry really are collected.
+        workers = drain.AcceptedWorkers()
+        stream, original_peer = socket.socketpair()
+        stream_ref, workers_ref = weakref.ref(stream), weakref.ref(workers)
+        entered, release = Event(), Event()
+        real_start = Thread.start
+        dispatched = []
+        replaced = Event()
+        fd = stream.fileno()
+
+        def replace():
+            os.dup2(foreign.fileno(), fd, inheritable=False)
+            replaced.set()
+
+        def wake():
+            replace()
+            raise OSError("synthetic wake failure")
+
+        def run(use):
+            dispatched.append(True)
+            if phase == "worker-exit":
+                replace()
+            elif phase == "wake-failure":
+                workers.admit(use, wake=wake)
+                entered.set()
+                release.wait(3)
+
+        def start(thread):
+            if phase in ("activation", "ambiguous-start"):
+                replace()
+            if phase in ("ambiguous-start", "after-fence"):
+                raise RuntimeError("synthetic ambiguous thread start")
+            real_start(thread)
+
+        try:
+            with original_peer, patch.object(drain.Thread, "start", start):
+                if phase in ("ambiguous-start", "after-fence"):
+                    with self.assertRaises(drain.WorkerDrainError):
+                        workers.dispatch(stream, run)
+                else:
+                    self.assertTrue(workers.dispatch(stream, run))
+                if phase == "after-fence":
+                    replace()
+                elif phase == "worker-exit":
+                    self.assertTrue(replaced.wait(3))
+                elif phase == "wake-failure":
+                    try:
+                        self.assertTrue(entered.wait(3))
+                        workers.fence()
+                    finally:
+                        release.set()
+                self.assertFalse(workers.close(timeout=3))
+                self.assertFalse(workers.close(timeout=0))
+                self.assertEqual(
+                    dispatched,
+                    [True] if phase in ("worker-exit", "wake-failure") else [],
+                )
+            del stream, workers
+            gc.collect()
+            self.assertIsNone(stream_ref())
+            self.assertIsNone(workers_ref())
+            self.assertTrue(replaced.is_set())
+            self.assert_foreign_socket(fd, foreign, peer)
+        finally:
+            if replaced.is_set():
+                try:
+                    if os.path.samestat(os.fstat(fd), os.fstat(foreign.fileno())):
+                        os.close(fd)
+                except OSError:
+                    pass
+
+    def test_uncertain_identity_error_does_not_disown_the_original_socket(self):
+        stream, peer = self.pair()
+        fd, *_ = stamp = drain._stamp(stream)
+        with patch.object(
+            drain.os, "fstat", side_effect=OSError(errno.EIO, "synthetic")
+        ):
+            self.assertFalse(drain._same(stream, stamp, disown=True))
+        self.assertEqual(stream.fileno(), fd)
+        peer.sendall(b"x")
+        self.assertEqual(stream.recv(1), b"x")
+
+    def test_os_closed_fd_is_disowned_before_it_can_be_reused(self):
+        stream, _ = self.pair()
+        foreign, peer = self.pair()
+        fd, *_ = stamp = drain._stamp(stream)
+        os.close(fd)
+        self.assertFalse(drain._same(stream, stamp, disown=True))
+        self.assertEqual(stream.fileno(), -1)
+        os.dup2(foreign.fileno(), fd, inheritable=False)
+        stream.close()
+        self.assert_foreign_socket(fd, foreign, peer)
 
 
 if __name__ == "__main__":
