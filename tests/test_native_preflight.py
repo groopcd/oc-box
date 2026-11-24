@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import tarfile
 import tempfile
 import unittest
 from unittest.mock import Mock, patch
@@ -425,6 +426,73 @@ class PreflightTests(unittest.TestCase):
 
 
 class EmbeddedCodeTests(unittest.TestCase):
+    def test_native_version_banner_requires_exact_patch_without_extra_output(self):
+        scope = {"__name__": "fixture"}
+        exec(preflight._PROBE, scope)
+        with tempfile.TemporaryDirectory() as working:
+            program = Path(working) / "native"
+            for output, expected in (
+                ("2.4.1", True),
+                ("opencode v2.4.1", True),
+                ("v2.4.1", True),
+                ("opencode v2.4.0", False),
+                ("opencode v2.4.1-rc.1", False),
+                ("extra\n2.4.1", False),
+            ):
+                with self.subTest(output=output):
+                    program.write_text(f"#!/bin/sh\nprintf '%s\\n' '{output}'\n")
+                    program.chmod(0o700)
+                    self.assertIs(scope["agrees"](str(program), VERSION), expected)
+
+    def test_stage_fetches_only_one_platform_artifact_and_only_copies_wrapper_manifest(
+        self,
+    ):
+        scope = {"__name__": "fixture"}
+        exec(preflight._STAGE, scope)
+        with tempfile.TemporaryDirectory() as working:
+            root = Path(working)
+            runtime, wrapper = root / "runtime", root / "wrapper"
+            calls = []
+
+            def npm(*arguments):
+                calls.append(arguments)
+                if arguments[0] == "pack":
+                    with tarfile.open(
+                        wrapper / f"opencode-cli-{VERSION}.tgz", "w:gz"
+                    ) as archive:
+                        for name, value in (
+                            ("package/package.json", b"{}"),
+                            ("package/postinstall.mjs", b"never execute"),
+                        ):
+                            member = tarfile.TarInfo(name)
+                            member.size = len(value)
+                            archive.addfile(member, io.BytesIO(value))
+
+            platform = "@opencode/cli-linux-x64"
+            scope["stage_cli"](npm, runtime, wrapper, platform, VERSION)
+            self.assertEqual(
+                calls,
+                [
+                    (
+                        "pack",
+                        "--pack-destination",
+                        str(wrapper),
+                        f"@opencode/cli@{VERSION}",
+                    ),
+                    (
+                        "install",
+                        "--global",
+                        f"--prefix={runtime}",
+                        f"{platform}@{VERSION}",
+                    ),
+                ],
+            )
+            target = runtime / "lib/node_modules/@opencode/cli"
+            self.assertEqual(
+                [entry.name for entry in target.iterdir()], ["package.json"]
+            )
+            self.assertEqual((target / "package.json").read_bytes(), b"{}")
+
     def test_registry_tunnel_never_dials_arbitrary_endpoint(self):
         scope = {"__name__": "fixture"}
         exec(preflight._STAGE, scope)

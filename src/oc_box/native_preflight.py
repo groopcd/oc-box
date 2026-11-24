@@ -390,6 +390,7 @@ import socketserver
 import stat
 import subprocess
 import sys
+import tarfile
 import threading
 import time
 from urllib.parse import urlsplit
@@ -480,8 +481,10 @@ def canonical_lock(path, version):
 
 
 def publish_sdk(config, destination):
-    remaining = 128 * 1024 * 1024
-    entries = 16384
+    # The audited 2.3.2 and 2.4.0 SDKs each contain ~20k entries / 132 MiB.
+    # Leave bounded headroom; refuse large or ambiguous future layouts.
+    remaining = 192 * 1024 * 1024
+    entries = 32768
     for parent, directories, files in os.walk(config, followlinks=False):
         for item in directories + files:
             path = Path(parent) / item
@@ -497,6 +500,39 @@ def publish_sdk(config, destination):
             if entries < 0 or remaining < 0:
                 raise ValueError()
     shutil.copytree(config, destination, symlinks=True)
+
+
+def stage_cli(npm, runtime, wrapper_dir, package, version):
+    wrapper_dir.mkdir()
+    # A global install of the wrapper resolves every Linux x64 variant,
+    # even with --omit=optional on supported npm. Pack only the tiny wrapper
+    # and install exactly one platform artifact. Copy just the wrapper's
+    # bounded manifest; never extract or run its scripts or launcher stub.
+    npm("pack", "--pack-destination", str(wrapper_dir), f"@opencode/cli@{version}")
+    wrapper = wrapper_dir / f"opencode-cli-{version}.tgz"
+    info = wrapper.lstat()
+    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or not 1 <= info.st_size <= 1024 * 1024:
+        raise ValueError()
+    manifest = None
+    with tarfile.open(wrapper, "r:gz") as archive:
+        for count, item in enumerate(archive):
+            if count >= 64 or not 0 <= item.size <= 1024 * 1024:
+                raise ValueError()
+            if item.name != "package/package.json":
+                continue
+            if manifest is not None or not item.isreg() or not 1 <= item.size <= 65536:
+                raise ValueError()
+            with archive.extractfile(item) as source:
+                manifest = source.read(65537)
+            if len(manifest) != item.size:
+                raise ValueError()
+    if manifest is None:
+        raise ValueError()
+    npm("install", "--global", f"--prefix={runtime}", f"{package}@{version}")
+    target = runtime / "lib/node_modules/@opencode/cli"
+    target.mkdir(parents=True)
+    with (target / "package.json").open("xb") as stream:
+        stream.write(manifest)
 
 
 def fetch(version):
@@ -527,8 +563,7 @@ def fetch(version):
             )
 
         package = artifact["platform_package"]()
-        npm("install", "--global", "--prefix=/tmp/runtime", "--omit=optional",
-            f"@opencode/cli@{version}", f"{package}@{version}")
+        stage_cli(npm, Path("/tmp/runtime"), Path("/tmp/wrapper"), package, version)
         try:
             proof = artifact["materialize"]("/tmp/runtime", version)
             # npm extracts into bounded tmpfs. Copy only the verified CLI
@@ -577,6 +612,7 @@ _PROBE = r"""
 import json
 import os
 from pathlib import Path
+import re
 import resource
 import select
 import shutil
@@ -586,6 +622,7 @@ import time
 
 
 def agrees(binary, version):
+    exact = rb"(?:opencode[ \t]+)?v?" + re.escape(version.encode("ascii")) + rb"\r?\n"
     with subprocess.Popen(
         [binary, "--version"], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL, start_new_session=True,
@@ -598,7 +635,7 @@ def agrees(binary, version):
                     break
                 chunk = os.read(child.stdout.fileno(), 128 - len(output))
                 if not chunk:
-                    return child.wait(timeout=1) == 0 and output == (version + "\n").encode()
+                    return child.wait(timeout=1) == 0 and re.fullmatch(exact, output) is not None
                 output.extend(chunk)
             return False
         finally:
