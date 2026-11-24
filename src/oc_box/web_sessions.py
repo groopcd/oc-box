@@ -327,6 +327,181 @@ def _workspace_name(data):
     return label if label and label not in (".", "..") else "Private workspace"
 
 
+_MANAGER_VIEWS = (
+    ("status", "Status"),
+    ("settings", "Settings"),
+    ("sessions", "Sessions"),
+    ("terminals", "Terminals"),
+    ("logs", "Logs"),
+    ("storage", "Storage"),
+    ("backups", "Backup/restore"),
+)
+
+
+def _manager_panel(ident, heading, description, body, tag=""):
+    hidden = "" if ident == "status" else " hidden"
+    badge = f'<span class="workspace-tag">{tag}</span>' if tag else ""
+    return f"""<section role="tabpanel" id="workspace-manager-{ident}" aria-labelledby="workspace-tab-{ident}" tabindex="0"{hidden}>
+  <div class="workspace-manager-view-head">
+    <div><h2>{heading}</h2><p>{description}</p></div>{badge}
+  </div>
+  {body}
+</section>"""
+
+
+def _workspace_manager(name):
+    """The approved no-chat layout with only this browser's existing scope."""
+    tabs = "\n".join(
+        f'<button type="button" role="tab" id="workspace-tab-{ident}" data-section="{ident}" '
+        f'aria-controls="workspace-manager-{ident}" aria-selected="{str(index == 1).lower()}" '
+        f'tabindex="{0 if index == 1 else -1}"><b aria-hidden="true">{index}</b> {label}</button>'
+        for index, (ident, label) in enumerate(_MANAGER_VIEWS, 1)
+    )
+    overview = _manager_panel(
+        "status",
+        "Overview",
+        "Verified session metadata for this private workspace. No host resource or activity readings.",
+        f"""<div class="workspace-manager-grid">
+  <section class="workspace-manager-card"><h3 class="workspace-eyebrow">Workspace</h3>
+    <p class="workspace-manager-value"><bdi>{name}</bdi></p><small>Current private service</small></section>
+  <section class="workspace-manager-card"><h3 class="workspace-eyebrow">Open TUI tabs</h3>
+    <p class="workspace-manager-value" id="workspace-manager-tab-count">Unknown</p><small>Separate from history</small></section>
+  <section class="workspace-manager-card"><h3 class="workspace-eyebrow">Browser selection</h3>
+    <p class="workspace-manager-value" id="workspace-manager-selection" dir="auto">None</p><small>Not evidence of TUI focus</small></section>
+</div>
+<div class="workspace-manager-split">
+  <section class="workspace-manager-card"><h3>Session sources</h3>
+    <div class="workspace-manager-table-scroll"><table class="workspace-manager-table">
+      <thead><tr><th scope="col">Source</th><th scope="col">Catalog status</th></tr></thead>
+      <tbody><tr><td>Open TUI tabs</td><td><span id="workspace-manager-membership-status" role="status">Unavailable</span></td></tr>
+        <tr><td>Workspace history</td><td id="workspace-manager-history-status">Not requested</td></tr></tbody>
+    </table></div>
+  </section>
+  <section class="workspace-manager-card"><h3>Selected workspace</h3>
+    <p><bdi>{name}</bdi></p>
+    <details id="workspace-manager-details"><summary>Workspace details</summary>
+      <p>History is limited to the registered workspace project. Native browser tabs are independent of TUI membership.</p>
+      <p id="workspace-manager-selection-details" dir="auto"></p>
+    </details>
+  </section>
+</div>""",
+        "Workspace only",
+    )
+    settings = _manager_panel(
+        "settings",
+        "Settings",
+        "Display preferences stay on this page and reset on reload. Host and native configuration do not change.",
+        """<div class="workspace-manager-grid">
+  <section class="workspace-manager-card"><h3>Display</h3><div class="workspace-manager-fields">
+    <div class="workspace-manager-field"><label for="workspace-manager-density">Density</label>
+      <select id="workspace-manager-density">
+      <option value="comfortable">Comfortable</option><option value="compact">Compact</option>
+    </select></div>
+    <label class="workspace-manager-check"><input type="checkbox" id="workspace-manager-expand-details"> Expand workspace details</label>
+  </div></section>
+  <section class="workspace-manager-card"><h3>Host settings</h3>
+    <p>Host settings, resource controls and automatic monitoring are not available in this browser.</p>
+  </section>
+</div>
+<div class="workspace-manager-toolbar">
+  <button type="button" class="workspace-action" id="workspace-settings-apply">Apply</button>
+  <button type="button" class="workspace-action" id="workspace-settings-defaults">Reset to defaults</button>
+  <button type="button" class="workspace-action" id="workspace-settings-revert">Revert</button>
+  <span class="workspace-tag">This page only</span>
+  <p id="workspace-settings-notice" role="status"></p>
+</div>""",
+    )
+    sessions = _manager_panel(
+        "sessions",
+        "Sessions",
+        "Browse this workspace’s session metadata. Opening a row returns to native chat without adding a TUI tab.",
+        f"""<div class="workspace-manager-card">
+  <div class="workspace-manager-toolbar">
+    <div class="workspace-manager-field workspace-manager-source"><label for="workspace-manager-source">Source</label>
+      <select id="workspace-manager-source">
+        <option value="tabs">Open TUI tabs</option><option value="history">Workspace history</option>
+        <option value="archived">Archived in workspace</option>
+      </select>
+    </div>
+    <button type="button" class="workspace-action" id="workspace-manager-session-refresh"
+      aria-label="Refresh TUI tabs" title="Refresh TUI tabs">Refresh</button>
+  </div>
+  <div class="workspace-manager-session-search">
+    <label class="workspace-search" for="workspace-manager-search">{_icon("search")}
+      <input type="search" id="workspace-manager-search" aria-label="Search sessions"
+        placeholder="Search title or session ID…" maxlength="128" autocomplete="off">
+    </label>
+    <button type="button" class="workspace-action" id="workspace-manager-clear-search" disabled>Clear search</button>
+    <label class="workspace-manager-check" id="workspace-manager-archive-filter" hidden>
+      <input type="checkbox" id="workspace-manager-include-archives" checked> Include archived
+    </label>
+    <span class="workspace-tag" id="workspace-manager-session-count" role="status"></span>
+  </div>
+  <div class="workspace-manager-table-scroll workspace-manager-session-table" id="workspace-manager-session-table" hidden>
+    <table class="workspace-manager-table" aria-label="Workspace session results">
+      <thead><tr><th scope="col">Session</th><th scope="col">Source</th><th scope="col">TUI membership</th></tr></thead>
+      <tbody id="workspace-manager-session-rows"></tbody>
+    </table>
+  </div>
+</div>""",
+        "Workspace metadata",
+    )
+    unavailable = "".join(
+        _manager_panel(
+            ident,
+            heading,
+            description,
+            f'<section class="workspace-manager-card"><h3>{card}</h3><p>{guidance}</p></section>',
+            "Host only",
+        )
+        for ident, heading, description, card, guidance in (
+            (
+                "terminals",
+                "Terminals",
+                "This browser manager cannot attach to or control a terminal.",
+                "Native session terminal",
+                "Use <code>oc-box terminal</code> from the host to attach to an eligible native workspace session.",
+            ),
+            (
+                "logs",
+                "Logs",
+                "This browser manager does not read host logs, container output or the system journal.",
+                "Launcher activity",
+                "Use <code>oc-box logs</code> on the host for the private launcher activity journal.",
+            ),
+            (
+                "storage",
+                "Storage",
+                "This browser manager cannot scan storage or change workspace resources.",
+                "Storage inventory",
+                "Open Storage in the local <code>oc-box tui</code> manager to review storage and workspace operations.",
+            ),
+            (
+                "backups",
+                "Backup and restore",
+                "No archive, key or credential material is available to this browser manager.",
+                "Create or restore an archive",
+                "Use <code>oc-box backup</code> or <code>oc-box restore</code> on the host and review the operation there.",
+            ),
+        )
+    )
+    return f"""<section id="workspace-manager" aria-labelledby="workspace-manager-title" hidden>
+  <header class="workspace-manager-head">
+    <div><p class="workspace-eyebrow">oc-box / Manager</p><h1 id="workspace-manager-title">Workspace manager</h1>
+      <p>This browser view is limited to this workspace. Host operations stay local.</p></div>
+    <div class="workspace-manager-toolbar">
+      <div class="workspace-manager-field"><span>Workspace context</span><strong><bdi>{name}</bdi></strong></div>
+      <button type="button" class="workspace-action" id="workspace-manager-status-refresh" aria-label="Refresh TUI membership">Refresh</button>
+      <span class="workspace-tag">Workspace only</span>
+    </div>
+  </header>
+  <div id="workspace-manager-nav" class="workspace-manager-tabs" role="tablist" aria-label="Workspace manager sections">
+    {tabs}
+  </div>
+  {overview}{settings}{sessions}{unavailable}
+</section>"""
+
+
 def _workspace_layout_body(state, conversation, fallback, attachments, workspace_name):
     """Port the final Studio chrome; data and native UI stay behind their existing boundaries."""
     name = escape(workspace_name)
@@ -354,10 +529,6 @@ def _workspace_layout_body(state, conversation, fallback, attachments, workspace
     </nav>
   </div>
 </header>
-<nav id="workspace-manager-nav" class="workspace-picker" aria-label="Workspace manager sections" hidden>
-  <button type="button" data-section="status" aria-pressed="true">Status</button>
-  <button type="button" data-section="sessions" aria-pressed="false">Sessions</button>
-</nav>
 <div id="workspace-content">
   <aside id="workspace-library" aria-labelledby="workspace-library-title">
     <div class="workspace-rail-head">
@@ -434,7 +605,9 @@ def _workspace_layout_body(state, conversation, fallback, attachments, workspace
         <p><a href="{INDEX}">Reload shell</a> (may interrupt a draft).</p></section>
     </div>
   </aside>
-</div></main></body></html>"""
+</div>
+{_workspace_manager(name)}
+</main></body></html>"""
 
 
 def document(

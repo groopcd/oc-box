@@ -18,9 +18,28 @@ dividers; narrow windows use on-demand panes.
 The native guest pairing boundary is unchanged. Studio, Dashboard, Chat focus
 and the metadata-only workspace manager share the same native iframe and
 membership/selection routes. The concept's custom transcript, composer,
-synthetic metrics and activity, account menus and Full TUI are not part of this
-port. The browser manager offers only Status and Sessions; it does not expose
-host data or privileged actions.
+synthetic metrics and activity, and simulated host actions are not part of
+this port. The manager adapts the seven-view no-chat layout from the same
+approved mockup (`21e966ce80d2dde4db853c5a784ef10b28d90af4`); it is not the local
+Full TUI or a browser gateway to host management.
+
+- **Status** shows the workspace label, verified TUI membership and the
+  retained browser selection. Refresh is explicit; there are no host resource
+  readings, workspace registry, or activity entries.
+- **Settings** stages display density and whether workspace details open.
+  Apply affects only this page; Reset to defaults stages defaults, and Revert
+  or Esc discards unapplied changes. Reload resets the preferences. There is
+  no automatic refresh, browser storage, or host/native settings write.
+- **Sessions** lists selected-source metadata in a searchable table. Archive
+  filters apply only to workspace history. An explicit row open returns to
+  the last chat layout and uses the existing native selection checks.
+- **Terminals**, **Logs**, **Storage**, and **Backup/restore** provide local host
+  guidance only. The browser manager cannot attach to terminals, read logs or
+  storage, or read or write backups.
+
+The manager tabs wrap on narrow screens. Use Left/Right, Home/End, or 1–7 on a
+focused manager tab; Tab moves into the active view. Switching views does not
+load history or change the mounted native conversation.
 
 Choosing **History** or **Archived** makes an explicit request to the same
 bounded private catalog for the registered in-container project directory.
