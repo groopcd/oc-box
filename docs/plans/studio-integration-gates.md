@@ -47,6 +47,12 @@ write that the native server already admitted. Require measured native
 behavior for any stronger logout claim. Never turn a browser cookie into
 a host capability or add a replacement plaintext sign-in.
 
+The guest selection registry now binds page generations to the original
+guest grant and a registered use with fresh native authentication. A new
+selection invalidates that page's old view before verification, and a
+late response cannot revive it. The caller must still verify membership
+on the held native workspace and retire every admitted helper.
+
 ## Named HTTPS: the stop fence must cover every supported writer
 
 A stop requested from another terminal must be an intent for this exact
