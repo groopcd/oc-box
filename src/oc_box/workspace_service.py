@@ -11,6 +11,7 @@ import base64
 import contextlib
 import contextvars
 from dataclasses import dataclass
+import errno
 import hashlib
 import json
 import math
@@ -1733,6 +1734,126 @@ class NativeResponseHeaders:
         return bytes(output)
 
 
+class _GatewayListenerError(ValueError):
+    def __init__(self):
+        super().__init__(
+            "The original loopback gateway listener could not be verified."
+        )
+
+
+def _gateway_listener_snapshot(listener, *, accepting):
+    """Read kernel facts about this exact TCP socket, not a reported URL."""
+    if type(listener) is not socket.socket:
+        raise _GatewayListenerError()
+    identity = _gateway_socket_identity(listener)
+    if (
+        listener.get_inheritable()
+        or listener.getsockopt(socket.SOL_SOCKET, socket.SO_DOMAIN) != socket.AF_INET
+        or listener.getsockopt(socket.SOL_SOCKET, socket.SO_TYPE) != socket.SOCK_STREAM
+        or listener.getsockopt(socket.SOL_SOCKET, socket.SO_PROTOCOL)
+        != socket.IPPROTO_TCP
+        or listener.getsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR)
+        or listener.getsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT)
+        or listener.getsockopt(socket.SOL_SOCKET, socket.SO_ACCEPTCONN)
+        != int(accepting)
+    ):
+        raise _GatewayListenerError()
+    host, port = listener.getsockname()
+    if host != "127.0.0.1" or not 1 <= port <= 65535:
+        raise _GatewayListenerError()
+    try:
+        listener.getpeername()
+    except OSError as error:
+        if error.errno != errno.ENOTCONN:
+            raise
+    else:
+        raise _GatewayListenerError()
+    if _gateway_socket_identity(listener) != identity:
+        raise _GatewayListenerError()
+    return identity, (host, port)
+
+
+def _gateway_socket_identity(listener):
+    fd = listener.fileno()
+    info = os.fstat(fd)
+    if not stat.S_ISSOCK(info.st_mode):
+        raise _GatewayListenerError()
+    return fd, info.st_dev, info.st_ino
+
+
+class _GatewayListenerProof:
+    """Listener evidence only; never an owner lease or worker drain verdict."""
+
+    def __init__(self, gateway, *, probe_only):
+        if gateway.closed.is_set() or gateway._listener_proof is not None:
+            raise _GatewayListenerError()
+        self._gateway = gateway
+        self._listener = gateway.listener
+        self._identity, self._address = _gateway_listener_snapshot(
+            self._listener, accepting=False
+        )
+        self._lock = threading.Lock()
+        self._probe_only = probe_only
+        self._listening = False
+        self._retired = False
+
+    def _matches(self, gateway, *, accepting):
+        if gateway.closed.is_set() or gateway.listener is not self._listener:
+            return False
+        try:
+            return (
+                _gateway_listener_snapshot(self._listener, accepting=accepting)
+                == (self._identity, self._address)
+                and not gateway.closed.is_set()
+                and gateway.listener is self._listener
+            )
+        except (AttributeError, OSError, ValueError):
+            return False
+
+    def _mark_listening(self, gateway):
+        # Called by the foreground startup path, after its own listen() and
+        # before starting the accept thread. An early external listen fails the
+        # separate unserved check before the transition is attempted.
+        with self._lock:
+            if (
+                gateway is not self._gateway
+                or self._probe_only
+                or self._retired
+                or self._listening
+                or not self._matches(gateway, accepting=True)
+            ):
+                raise _GatewayListenerError()
+            self._listening = True
+
+    def origin(self, gateway, *, listening):
+        """Return the pinned origin for this phase, or None; never rebind."""
+        if (
+            gateway is not self._gateway
+            or gateway._listener_proof is not self
+            or type(listening) is not bool
+        ):
+            return None
+        with self._lock:
+            if self._retired:
+                return None
+            if not self._matches(gateway, accepting=self._listening):
+                self._retired = True
+                return None
+            if listening != self._listening:
+                return None
+            host, port = self._address
+            return f"http://{host}:{port}"
+
+    def _close_original(self):
+        # Startup/unserved cleanup must not close a different socket that
+        # replaced the descriptor. No shutdown/drain claim follows from this.
+        try:
+            if _gateway_socket_identity(self._listener) == self._identity:
+                self._listener.close()
+        except (OSError, ValueError):
+            pass
+
+
 class Gateway:
     # Trusted first-party extension hook; never populated by browser input.
     shell_addon_scripts = ()
@@ -1757,19 +1878,64 @@ class Gateway:
         self.children = set()
         self.lock = threading.Lock()
         self.capacity = threading.BoundedSemaphore(32)
+        self.listener = None
+        self._listener_proof = None
+
+    def _reserve_listener(self, *, probe_only=False):
+        """Bind the actual gateway socket, not the disposable port preflight."""
+        if self.listener is not None or self.closed.is_set():
+            raise _GatewayListenerError()
+        listener = socket.socket()
+        try:
+            self.listener = listener
+            listener.bind(("127.0.0.1", self.port))
+            try:
+                self._listener_proof = _GatewayListenerProof(
+                    self, probe_only=probe_only
+                )
+            except (AttributeError, OSError, ValueError):
+                raise _GatewayListenerError() from None
+        except BaseException:
+            listener.close()
+            raise
+        return self._listener_proof
+
+    @contextlib.contextmanager
+    def _listener_preflight(self):
+        """Borrow the real reservation for a private, unserved-only check."""
+        proof = self._reserve_listener(probe_only=True)
+        try:
+            yield proof
+        finally:
+            self.closed.set()
+            proof._close_original()
+
+    def _start_listener(self, proof):
+        """Activate that same reservation; retain the legacy accept behavior."""
+        if (
+            type(proof) is not _GatewayListenerProof
+            or proof is not self._listener_proof
+            or proof._probe_only
+            or proof.origin(self, listening=False) is None
+        ):
+            raise _GatewayListenerError()
+        listener = proof._listener
+        try:
+            listener.listen(32)
+            listener.settimeout(0.2)
+            proof._mark_listening(self)
+            self.url = proof.origin(self, listening=True)
+            if self.url is None:
+                raise _GatewayListenerError()
+            self.thread = threading.Thread(target=self.serve, daemon=True)
+            self.thread.start()
+        except BaseException:
+            self.closed.set()
+            proof._close_original()
+            raise
 
     def __enter__(self):
-        self.listener = socket.socket()
-        try:
-            self.listener.bind(("127.0.0.1", self.port))
-            self.listener.listen(32)
-            self.listener.settimeout(0.2)
-        except BaseException:
-            self.listener.close()
-            raise
-        self.url = "http://127.0.0.1:" + str(self.listener.getsockname()[1])
-        self.thread = threading.Thread(target=self.serve, daemon=True)
-        self.thread.start()
+        self._start_listener(self._reserve_listener())
         return self
 
     def serve(self):
