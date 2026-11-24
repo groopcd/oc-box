@@ -20,12 +20,17 @@ from oc_box import web_guest_duplex_worker as worker
 _SCRIPT = Path(worker.__file__).resolve()
 _TAG = b"\x9a" * 16
 _OTHER_TAG = b"\xbd" * 16
+_CHALLENGE = b"\xc1" * 16
 _HEADER = struct.Struct("!4sBH")
 _SERIAL = struct.Struct("!Q")
 
 
 def _wire(op, payload=b""):
-    return _HEADER.pack(b"OGD\x01", op, len(payload)) + payload
+    return _HEADER.pack(b"OGD\x02", op, len(payload)) + payload
+
+
+def _cancel_frame(tag=_TAG):
+    return _wire(worker.Op.CANCEL, tag + _CHALLENGE)
 
 
 def _data(serial, payload):
@@ -101,7 +106,7 @@ class DuplexWorkerTests(unittest.TestCase):
         head = self._read(proc, _HEADER.size)
         self.assertEqual(len(head), _HEADER.size)
         magic, code, size = _HEADER.unpack(head)
-        self.assertEqual(magic, b"OGD\x01")
+        self.assertEqual(magic, b"OGD\x02")
         self.assertLessEqual(size, worker.MAX_DATA + _SERIAL.size)
         payload = self._read(proc, size)
         self.assertEqual(len(payload), size)
@@ -125,12 +130,14 @@ class DuplexWorkerTests(unittest.TestCase):
                 yield proc, peer
 
     def _cancel(self, proc):
-        self._write(proc, _wire(worker.Op.CANCEL, _TAG))
+        self._write(proc, _cancel_frame())
         proc.stdin.close()
 
     def _retired(self, proc, status=worker.Closure.SOCKET_CLOSED, *, first=None):
         result = self._frame(proc) if first is None else first
-        self.assertEqual(result, (worker.Op.CLOSED, _TAG + bytes([status])))
+        self.assertEqual(
+            result, (worker.Op.CLOSED, _TAG + _CHALLENGE + bytes([status]))
+        )
         self.assertEqual(self._read(proc, 1), b"")
         self.assertEqual(proc.wait(timeout=3), 0)
         self.assertEqual(proc.stderr.read(1), b"")
@@ -155,8 +162,8 @@ class DuplexWorkerTests(unittest.TestCase):
             (worker.Op.DATA, _SERIAL.pack(1) + b"\x00" * worker.MAX_DATA),
             (worker.Op.ACK, _SERIAL.pack(1)),
             (worker.Op.END, b""),
-            (worker.Op.CANCEL, _TAG),
-            (worker.Op.CLOSED, _TAG + b"\x01"),
+            (worker.Op.CANCEL, _TAG + _CHALLENGE),
+            (worker.Op.CLOSED, _TAG + _CHALLENGE + b"\x01"),
         ):
             with self.subTest(op=op):
                 self.assertEqual(worker.encode(op, payload), _wire(op, payload))
@@ -166,21 +173,22 @@ class DuplexWorkerTests(unittest.TestCase):
                 )
         for raw in (
             b"OGD",
-            _HEADER.pack(b"OGD\x02", worker.Op.OPEN, len(_TAG)),
-            _HEADER.pack(b"OGD\x01", 255, 0),
+            _HEADER.pack(b"OGD\x01", worker.Op.OPEN, len(_TAG)),
+            _HEADER.pack(b"OGD\x02", 255, 0),
             _HEADER.pack(
-                b"OGD\x01", worker.Op.DATA, _SERIAL.size + worker.MAX_DATA + 1
+                b"OGD\x02", worker.Op.DATA, _SERIAL.size + worker.MAX_DATA + 1
             ),
-            _HEADER.pack(b"OGD\x01", worker.Op.DATA, _SERIAL.size),
-            _HEADER.pack(b"OGD\x01", worker.Op.ACK, 0),
-            _HEADER.pack(b"OGD\x01", worker.Op.CLOSED, len(_TAG)),
+            _HEADER.pack(b"OGD\x02", worker.Op.DATA, _SERIAL.size),
+            _HEADER.pack(b"OGD\x02", worker.Op.ACK, 0),
+            _HEADER.pack(b"OGD\x02", worker.Op.CANCEL, len(_TAG)),
+            _HEADER.pack(b"OGD\x02", worker.Op.CLOSED, len(_TAG)),
         ):
             with self.assertRaises(worker.DuplexError):
                 worker.decode_header(raw)
 
     def test_precancel_requires_control_eof_and_never_dials(self):
         with self._listener() as (listener, proc):
-            self._write(proc, _wire(worker.Op.CANCEL, _TAG))
+            self._write(proc, _cancel_frame())
             self.assertFalse(select.select([listener, proc.stdout], [], [], 0.1)[0])
             proc.stdin.close()
             self._retired(proc, worker.Closure.NEVER_OPENED)
@@ -188,9 +196,7 @@ class DuplexWorkerTests(unittest.TestCase):
 
     def test_open_then_immediate_cancel_never_forwards_bytes(self):
         with self._listener() as (listener, proc):
-            self._write(
-                proc, _wire(worker.Op.OPEN, _TAG) + _wire(worker.Op.CANCEL, _TAG)
-            )
+            self._write(proc, _wire(worker.Op.OPEN, _TAG) + _cancel_frame())
             proc.stdin.close()
             result = self._frame(proc)
             if result[0] == worker.Op.READY:
@@ -231,7 +237,7 @@ class DuplexWorkerTests(unittest.TestCase):
             peer.shutdown(socket.SHUT_WR)
             self.assertEqual(self._frame(proc), (worker.Op.END, b""))
             self.assertEqual(peer.recv(1), b"")
-            self._write(proc, _data(1, b"discard") + _wire(worker.Op.CANCEL, _TAG))
+            self._write(proc, _data(1, b"discard") + _cancel_frame())
             proc.stdin.close()
             self._retired(proc)
         with self._open() as (proc, peer):
@@ -264,7 +270,7 @@ class DuplexWorkerTests(unittest.TestCase):
 
     def test_cancel_deadline_does_not_wait_forever_for_stdin_eof(self):
         with self._open() as (proc, peer):
-            self._write(proc, _wire(worker.Op.CANCEL, _TAG))
+            self._write(proc, _cancel_frame())
             self.assertEqual(peer.recv(1), b"")
             self.assertEqual(proc.wait(timeout=worker._CLOSE_SECONDS + 2), 1)
             self._failed(proc)
@@ -324,11 +330,11 @@ class DuplexWorkerTests(unittest.TestCase):
         for data in (
             b"",
             _wire(worker.Op.OPEN, _TAG)[:-1],
-            _wire(worker.Op.CANCEL, _TAG)[:-1],
-            _wire(worker.Op.CANCEL, _TAG) + b"\x00",
-            _wire(worker.Op.CANCEL, _TAG) * 2,
+            _cancel_frame()[:-1],
+            _cancel_frame() + b"\x00",
+            _cancel_frame() * 2,
             _data(1, b"before open"),
-            _HEADER.pack(b"OGD\x01", worker.Op.DATA, 0xFFFF),
+            _HEADER.pack(b"OGD\x02", worker.Op.DATA, 0xFFFF),
         ):
             with self.subTest(size=len(data)), self._listener() as (listener, proc):
                 self._write(proc, data)
@@ -337,7 +343,7 @@ class DuplexWorkerTests(unittest.TestCase):
                 self.assertFalse(select.select([listener], [], [], 0)[0])
         for data in (
             b"",
-            _wire(worker.Op.CANCEL, _OTHER_TAG),
+            _cancel_frame(_OTHER_TAG),
             _wire(worker.Op.OPEN, _TAG),
         ):
             with self.subTest(size=len(data)), self._open() as (proc, peer):
@@ -357,7 +363,7 @@ class DuplexWorkerTests(unittest.TestCase):
             self.assertEqual(
                 self._frame(proc), (worker.Op.DATA, _SERIAL.pack(1) + b"first")
             )
-            self._write(proc, _ack(1) + _ack(1) + _wire(worker.Op.CANCEL, _TAG))
+            self._write(proc, _ack(1) + _ack(1) + _cancel_frame())
             proc.stdin.close()
             self._failed(proc)
 

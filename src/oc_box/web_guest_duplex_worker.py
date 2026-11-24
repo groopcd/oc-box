@@ -16,7 +16,7 @@ from time import monotonic
 
 MAX_DATA = 16 * 1024
 TAG_SIZE = 16
-_VERSION = b"OGD\x01"
+_VERSION = b"OGD\x02"
 _HEADER = struct.Struct("!4sBH")
 _SERIAL = struct.Struct("!Q")
 _START_SECONDS = 6
@@ -51,8 +51,8 @@ def _check_size(op, size):
         valid = size == _SERIAL.size
     elif op == Op.END:
         valid = size == 0
-    elif op == Op.CLOSED:
-        valid = size == TAG_SIZE + 1
+    elif op in (Op.CANCEL, Op.CLOSED):
+        valid = size == 2 * TAG_SIZE + int(op == Op.CLOSED)
     else:
         valid = size == TAG_SIZE
     if not valid:
@@ -93,7 +93,7 @@ class _Worker:
         self.port = port
         self.native = None
         self.opened = self.connecting = self.ready = self.ended = False
-        self.tag = None
+        self.tag = self.challenge = None
         self.cancelled = self.input_eof = self.done = False
         self.phase_deadline = monotonic() + _START_SECONDS
         self.partial_deadline = self.write_deadline = self.credit_deadline = None
@@ -137,10 +137,12 @@ class _Worker:
         else:
             raise DuplexError()
 
-    def _cancel(self, tag):
+    def _cancel(self, payload):
+        tag, challenge = payload[:TAG_SIZE], payload[TAG_SIZE:]
         if self.tag is not None and tag != self.tag:
             raise DuplexError()
         self.tag = tag
+        self.challenge = challenge
         self.cancelled = True
         self.phase_deadline = monotonic() + _CLOSE_SECONDS
         self._close_native()
@@ -184,7 +186,7 @@ class _Worker:
                     raise DuplexError()
                 self.input_eof = True
                 status = Closure.SOCKET_CLOSED if self.opened else Closure.NEVER_OPENED
-                self._send(Op.CLOSED, self.tag + bytes([status]))
+                self._send(Op.CLOSED, self.tag + self.challenge + bytes([status]))
                 return
             limit = self.header[1] if self.header is not None else _HEADER.size
             chunk = os.read(0, limit - len(self.input))

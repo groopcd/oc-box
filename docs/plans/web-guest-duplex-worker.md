@@ -11,10 +11,12 @@ listener, parse HTTP, or interpret WebSocket bytes.
 
 ## Private wire
 
-Each record is `OGD\x01`, one opcode byte, a big-endian unsigned 16-bit
+Each record is `OGD\x02`, one opcode byte, a big-endian unsigned 16-bit
 payload length, and exactly that payload. Tags are opaque 16-byte per-attempt
-labels, not credentials. Serial numbers are unsigned 64-bit big-endian integers
-starting at one independently in each direction, with no wrap.
+labels, not credentials. A separate fresh 16-byte challenge first appears in
+`CANCEL` and is echoed only in the terminal receipt. Version 1 is refused.
+Serial numbers are unsigned 64-bit big-endian integers starting at one
+independently in each direction, with no wrap.
 
 | Opcode | Direction | Payload and meaning |
 | --- | --- | --- |
@@ -23,8 +25,8 @@ starting at one independently in each direction, with no wrap.
 | 3 `DATA` | both | Serial followed by 1–16,384 opaque bytes. |
 | 4 `ACK` | both | Matching serial; returns one `DATA` credit. |
 | 5 `END` | from worker | Empty; native read EOF and local socket close, not a retirement receipt. |
-| 6 `CANCEL` | to worker | Same tag, or a new tag if this is the first record and no `OPEN` occurred. |
-| 7 `CLOSED` | from worker | Tag then one byte: `0` never opened, `1` worker's exact socket closed. |
+| 6 `CANCEL` | to worker | Original tag (the first tag if no `OPEN` occurred), then the fresh challenge. |
+| 7 `CLOSED` | from worker | Tag, challenge, then one byte: `0` never opened, `1` worker's exact socket closed. |
 
 After `READY`, each direction has one `DATA` credit. The worker returns
 incoming credit only after the whole payload was accepted by the local TCP
@@ -67,10 +69,14 @@ and the original unreaped process, with a pidfd and bounded poll slices. It
 keeps one send and one receive data credit, permits cancellation before
 `OPEN`, and finishes only a record that was partly written before
 cancellation. After sending `CANCEL` and closing the original input, it
-drains and discards any remaining old data. It then requires the exact tag
-and expected closure disposition, genuine stdout EOF with no surplus, and
-a terminal `waitpid` status of zero before its deadline. Unknown or forced
-local cleanup never supplies confirmation or resends cancellation. The
+drains and discards any remaining old data. It then requires the exact tag,
+challenge and expected closure disposition, genuine stdout EOF with no
+surplus, and a terminal `waitid(P_PIDFD, …)` status of zero before its
+deadline. A premature receipt header cannot become authorized by a later
+write, and a reply queued before cancellation cannot know the fresh
+challenge. Unknown or forced local cleanup never supplies confirmation or
+resends cancellation. If local cleanup returns `False`, retain the original
+handle and never release the workspace on that basis. The
 binding and pre-spawn registration are exclusively the caller's responsibility;
 the host consumer does not run a command, accept a browser, or choose an
 owner. Callers must not duplicate or retain the original pipe handles, poll

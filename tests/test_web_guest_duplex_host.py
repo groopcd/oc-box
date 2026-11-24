@@ -19,13 +19,29 @@ from oc_box import web_guest_duplex_worker as worker
 _SCRIPT = Path(worker.__file__).resolve()
 _FAKE = """
 import os, sys, time
-with sys.stdin.buffer as inp:
-    framed = inp.read()
-tag = framed[-16:]
+inp = sys.stdin.buffer
 mode = sys.argv[1]
-receipt = b"OGD\\x01\\x07\\x00\\x11" + tag + b"\\0"
+def frame(op, payload):
+    return b"OGD\\x02" + bytes([op]) + len(payload).to_bytes(2, "big") + payload
+if mode in ("early-receipt", "early-credit"):
+    opened = inp.read(23)
+    tag = opened[7:]
+    os.write(1, frame(2, tag))
+    early = frame(7, tag + b"X" * 16 + b"\\1") if mode == "early-receipt" else frame(4, bytes(7) + b"\\1")
+    os.write(1, early)
+    inp.read()
+    sys.exit(0)
+framed = inp.read()
+tag, challenge = framed[-32:-16], framed[-16:]
+receipt = frame(7, tag + challenge + b"\\0")
 if mode == "wrong-tag":
-    receipt = receipt[:7] + bytes([tag[0] ^ 1]) + tag[1:] + b"\\0"
+    receipt = frame(7, bytes([tag[0] ^ 1]) + tag[1:] + challenge + b"\\0")
+elif mode in ("wrong-challenge", "stale-challenge"):
+    if mode == "stale-challenge":
+        challenge = tag
+        receipt = frame(7, tag + challenge + b"\\0")
+    else:
+        receipt = frame(7, tag + bytes([challenge[0] ^ 1]) + challenge[1:] + b"\\0")
 elif mode == "wrong-disposition":
     receipt = receipt[:-1] + b"\\1"
 elif mode == "short":
@@ -148,6 +164,8 @@ class DuplexHostTests(unittest.TestCase):
     def test_wrong_missing_late_or_unreaped_retirement_stays_false(self):
         for mode in (
             "wrong-tag",
+            "wrong-challenge",
+            "stale-challenge",
             "wrong-disposition",
             "short",
             "missing",
@@ -165,17 +183,74 @@ class DuplexHostTests(unittest.TestCase):
                 self.assertFalse(tunnel.close())
 
     def test_receipt_plus_eof_does_not_accept_lost_kernel_wait_evidence(self):
-        waitpid = os.waitpid
+        waitid = os.waitid
         with self.child(["-c", _FAKE, "clean"]) as (_, tunnel):
 
-            def stolen(pid, options):
-                found = waitpid(pid, options)
-                if found[0]:
+            def stolen(kind, pidfd, options):
+                found = waitid(kind, pidfd, options)
+                if found is not None:
                     raise ChildProcessError()
                 return found
 
-            with patch.object(host.os, "waitpid", side_effect=stolen):
+            with patch.object(host.os, "waitid", side_effect=stolen):
                 self.assertFalse(tunnel.close())
+            self.assertFalse(tunnel.close())
+
+    def test_buffered_receipt_cannot_become_valid_when_close_sends_cancel(self):
+        with self.child(["-c", _FAKE, "early-receipt"]) as (_, tunnel):
+            tunnel.open()
+            self.advance_until(tunnel, lambda: tunnel.ready)
+            self.assertFalse(tunnel.close())
+            self.assertFalse(tunnel._receipt)
+            self.assertFalse(tunnel.close())
+
+    def test_unsolicited_credit_is_refused_at_its_header(self):
+        with self.child(["-c", _FAKE, "early-credit"]) as (_, tunnel):
+            tunnel.open()
+            self.advance_until(tunnel, lambda: tunnel.ready)
+            with self.assertRaises(host.DuplexHostError):
+                self.advance_until(tunnel, lambda: False)
+            self.assertFalse(tunnel.close())
+
+    def test_blocking_mode_drift_refuses_before_sending_cancel(self):
+        with self.child(["-c", _FAKE, "clean"]) as (_, tunnel):
+            os.set_blocking(tunnel._tx_pin[0], True)
+            self.assertFalse(tunnel.close())
+            self.assertFalse(tunnel._cancel_sent)
+
+    def test_expired_during_poll_does_not_send_cancel(self):
+        with self.child(["-c", _FAKE, "clean"]) as (_, tunnel):
+            clock = [100.0]
+            poller = host.select.poll()
+
+            class LatePoll:
+                register = poller.register
+
+                def poll(self, timeout):
+                    result = poller.poll(timeout)
+                    clock[0] += 1
+                    return result
+
+            with (
+                patch.object(host.select, "poll", return_value=LatePoll()),
+                patch.object(host, "monotonic", side_effect=lambda: clock[0]),
+            ):
+                self.assertFalse(tunnel.close(timeout=0.5))
+            self.assertFalse(tunnel._cancel_sent)
+
+    def test_unresolved_abandon_retains_original_pidfd_without_second_signal(self):
+        with self.child(["-c", _FAKE, "keep-open"]) as (proc, tunnel):
+            send = host.signal.pidfd_send_signal
+            with patch.object(host.signal, "pidfd_send_signal", wraps=send) as forced:
+                with patch.object(
+                    tunnel, "_wait_exact", side_effect=host.DuplexHostError
+                ):
+                    self.assertFalse(tunnel.abandon())
+                self.assertIsNotNone(tunnel._pidfd)
+                self.assertTrue(tunnel.abandon())
+                forced.assert_called_once()
+            self.assertIsNone(tunnel._pidfd)
+            self.assertIsNotNone(proc.returncode)
             self.assertFalse(tunnel.close())
 
     def test_an_unexpected_duplicate_stdin_writer_is_not_eof(self):
