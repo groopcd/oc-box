@@ -30,7 +30,9 @@ _WORKSPACES = frozenset(
     }
 )
 _MAX_ITEMS = 512
-_MAX_TEXT = 16384
+# The flat installer records a compatibility link for each runtime module.
+# Keep the exact list reviewable for ordinary home paths, with a fixed cap.
+_MAX_TEXT = 32 * 1024
 
 
 class UninstallReviewError(ValueError):
@@ -69,7 +71,7 @@ def parse(argv):
     parser.add_argument(
         "--full",
         action="store_true",
-        help="also review verified oc-box workspace containers, home volumes, and removable oc-box state",
+        help="request full cleanup; currently refuses without removing anything",
     )
     parser.add_argument(
         "--dry-run",

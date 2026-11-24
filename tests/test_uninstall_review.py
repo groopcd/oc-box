@@ -61,6 +61,15 @@ class UninstallReviewTests(unittest.TestCase):
         self.assertIn("Dry run; nothing was removed.", review)
         self.assertNotIn("Required confirmation", review)
 
+    def test_exact_launcher_review_keeps_an_aggregate_size_bound(self):
+        request = uninstall_review.parse(["--uninstall"])
+        items = tuple(
+            uninstall_review.ReviewItem("launcher", f"/example/{'a' * 255}/{index}")
+            for index in range(200)
+        )
+        with self.assertRaises(uninstall_review.UninstallReviewError):
+            uninstall_review.render(request, items)
+
     def test_blocked_review_cannot_offer_confirmation_or_interpret_control_bytes(self):
         request = uninstall_review.parse(["--uninstall", "--full"])
         items = (uninstall_review.ReviewItem("home-volume", "literal\x1b\nname"),)
