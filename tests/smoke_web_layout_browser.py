@@ -161,6 +161,13 @@ def workspace_views(page, gateway, first, history):
         "Synthetic Alpha"
     )
     rendered_session(page, gateway, first, "Synthetic Alpha")
+    page.emulate_media(color_scheme="light")
+    require(
+        frame.evaluate(
+            "node => node.contentWindow.matchMedia('(prefers-color-scheme: light)').matches"
+        ),
+        "Dark Studio chrome changed the native conversation's system theme.",
+    )
     # Checking src alone would miss a replacement element or same-URL reload.
     mark = page.evaluate_handle(
         """() => {

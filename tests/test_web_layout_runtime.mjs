@@ -144,7 +144,7 @@ class Element extends Events {
 const origin = "http://127.0.0.1:4242";
 const bootstrap = JSON.parse(markup["web-shell"]["data-bootstrap"]);
 const [alpha, bravo] = bootstrap.sessions;
-function boot() {
+function boot({ failInitialRoute = false } = {}) {
   const nodes = Object.fromEntries(Object.entries(markup).map(([key, attrs]) => [key, new Element(attrs)]));
   const get = id => nodes[id];
   const root = get("web-shell");
@@ -170,7 +170,10 @@ function boot() {
   };
   const window = new Events();
   window.location = new URL("/auth/oc-box-sessions", origin);
-  window.history = { replaceState(_state, _title, url) { window.location = new URL(url, origin); } };
+  window.history = { replaceState(_state, _title, url) {
+    if (failInitialRoute) throw new Error("Synthetic history API refusal");
+    window.location = new URL(url, origin);
+  } };
   let observe;
   window.setInterval = fn => { observe = fn; return 1; };
   for (const name of ["localStorage", "indexedDB", "sessionStorage"])
@@ -211,6 +214,15 @@ function boot() {
     shell: window.ocBoxWebShell, tick: () => observe() };
 }
 const settle = async () => { for (let i = 0; i < 12; i++) await Promise.resolve(); };
+
+{
+  const f = boot({ failInitialRoute: true });
+  assert.equal(f.shell, undefined);
+  assert.equal(f.get("fallback-links").hidden, false);
+  assert.match(f.get("catalog-status").textContent, /explicit fallback links or native Home/);
+  assert.equal(f.frame.srcWrites, 0);
+  assert.deepEqual(f.network.calls, []);
+}
 
 {
   const f = boot();

@@ -778,6 +778,9 @@ class WebSessionsTests(unittest.TestCase):
             self.assertIn(gateway.native_session_route(item["id"]).encode(), body)
         self.assertEqual(body.count(b"<iframe "), 1)
         self.assertEqual(body.count(web_attachments.SCRIPT.encode()), 1)
+        # A refused drop inside the native iframe must be explainable even if
+        # the user has not opened the attachment chooser.
+        self.assertIn(b'</details><p id="addon-status" role="status"></p>', body)
         self.assertNotIn(b"ses_closed", body)
         self.assertIn(b'href="/"', body)
         for empty_status in ("valid", "missing"):

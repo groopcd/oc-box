@@ -437,8 +437,6 @@
       }
     });
     search.addEventListener("input", render);
-    // Initial links are only for no-JS fallback, not an alternate stale catalog.
-    document.getElementById("fallback-links").hidden = true;
     apply();
     return {
       manager,
@@ -519,14 +517,10 @@
     workspace = workspaceLayout();
     notice.textContent = data.selectionNotice;
     render();
+    if (selected) select(selected, selected.origin); // Existing src is not reassigned.
     refresh.addEventListener("click", () => workspace.refresh());
     frame.addEventListener("load", () => { sawFrameLoad = true; frameReady(); });
     window.addEventListener("load", () => { if (!sawFrameLoad) frameReady(); }, { once: true });
-    window.ocBoxWebShell = Object.freeze({
-      version: 1, frame, controls: document.getElementById("session-controls"),
-      status: document.getElementById("addon-status"), selection, refresh: refreshTabs
-    });
-    if (selected) select(selected, selected.origin); // Existing src is not reassigned.
     const startObserver = () => {
       if (timer === null) timer = window.setInterval(() => { void observeNativeRoute(); }, 1000);
     };
@@ -537,7 +531,15 @@
       workspace.cancel();
     });
     window.addEventListener("pageshow", () => { startObserver(); void observeNativeRoute(); });
+    // Keep the server-rendered links available unless the shell finishes starting.
+    document.getElementById("fallback-links").hidden = true;
+    window.ocBoxWebShell = Object.freeze({
+      version: 1, frame, controls: document.getElementById("session-controls"),
+      status: document.getElementById("addon-status"), selection, refresh: refreshTabs
+    });
   } catch {
+    if (timer !== null) window.clearInterval(timer);
+    document.getElementById("fallback-links").hidden = false;
     status.textContent = "The shell could not initialize. Use explicit fallback links or native Home.";
   }
 })();
