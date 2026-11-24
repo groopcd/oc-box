@@ -147,6 +147,7 @@ class PackagingTests(unittest.TestCase):
                     "tests/web_attachments_browser.mjs",
                     "tests/web_attachments_shell_dom.mjs",
                     "tests/smoke_web_attachments_v2.py",
+                    "tests/smoke_web_attachments_browser.py",
                     "tests/test_native_tabs.py",
                     "tests/test_native_tab_routing.py",
                     "tests/test_web_sessions.py",

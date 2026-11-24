@@ -2,7 +2,9 @@
 // GPL-3.0-or-later.
 (() => {
   "use strict";
-  const SUPPORTED = new Set(["2.2.6", "2.3.0"]);
+  // Keep the exact native composer-test matrix in sync with web_attachments.py.
+  const SUPPORTED = new Set(["2.2.6", "2.2.7", "2.3.0", "2.3.2", "2.4.1"]);
+  const RELEASE_FALLBACK = "Use oc-box web without --attachments, or Ctrl+Y in the oc-box TUI with --host-clipboard where supported";
   const MAX_FILE = 20 * 1024 * 1024;
   const MAX_TOTAL = 40 * 1024 * 1024;
   const MAX_FILES = 8;
@@ -236,8 +238,10 @@
         refusal = "native browser authentication failed; open a fresh oc-box web link";
       }
       if (!reply.ok) throw new Error("unavailable");
-      if (!SUPPORTED.has((await reply.json()).version)) {
-        refusal = "the native browser composer contract is not verified for this release";
+      const info = await reply.json();
+      if (typeof info?.version !== "string") throw new Error("unavailable");
+      if (!SUPPORTED.has(info.version)) {
+        refusal = `the native browser composer contract is not verified for this release. ${RELEASE_FALLBACK}`;
         throw new Error("unsupported");
       }
       active = true;

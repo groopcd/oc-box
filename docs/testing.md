@@ -405,7 +405,7 @@ Run the separate provider-free native API contract on each supported release:
 python3 -B tests/smoke_web_attachments_v2.py --opencode /path/to/opencode-v2
 ```
 
-Its source-bound versions are 2.2.6
+The original native source review used 2.2.6
 (`dc2ffcf8bf26f9e669b6aa22b95f50e12be15e06`) and 2.3.0
 (`a6b15d33daf6ab7d35569f6d711fdb630b9f04e7`). The fixture verifies real
 native pairing/cookie authentication, bundled app assets, unchanged history/inbox
@@ -415,6 +415,22 @@ API. These checks do not prove browser/Spectacle/Wayland/X11/portal behavior,
 native composer thumbnail admission, provider interpretation, live rootless
 Podman isolation or new host acceptance. No native source/binary modifications
 or private widget selector hooks are used by the adapter.
+
+Before admitting another native release, also exercise unmodified native
+browser assets in Chromium with the real pairing link and attachment addon:
+
+```sh
+uv run --no-project --with playwright python3 -B tests/smoke_web_attachments_browser.py \
+  --opencode /path/to/clean/native --chromium /path/to/chromium
+```
+
+Verify a browser chooser and a trusted Chromium drop, exact native draft scope
+across two workspace sessions, preserved text and media, and no prompt/inbox
+mutation or execution before Send. Do not equate an OpenAPI or browser feature
+check with draft semantics. Test an unlisted release by adding it in a
+disposable source copy for the synthetic fixture before changing launcher
+support. This is not a physical Spectacle drag, installed browser profile,
+or live Podman acceptance test.
 
 The common shell alone owns selection, tabstrip, metadata endpoints and its
 single native iframe; attachments use only its frozen v1 API, events and optional

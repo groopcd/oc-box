@@ -784,9 +784,11 @@ attachment forwarding refuses instead of guessing another target.
 Native Home and the shell's direct native fallback links remain available;
 those separate direct views do not load this addon.
 The addon uses only the existing loopback relay and native pairing/authentication.
-Native OpenCode **2.2.6 and 2.3.0 only** are
-source-checked; other versions refuse the adapter rather than assuming
-compatibility. Omit the option for the common shell with no attachment addon.
+The adapter is available only on native releases with verified browser draft
+and no-automatic-Send behavior. An unverified composer, failed browser
+authentication, or unavailable native service is reported explicitly. Omit
+the option for the common shell with no attachment addon, or use the native
+TUI's host import on a supported terminal.
 Its fixed authenticated script is `/auth/oc-box-attachments.js`; the earlier
 independent `/auth/oc-box-attachments?session=...` wrapper is retired.
 
@@ -2847,6 +2849,8 @@ clickable. Absolute paths and local `file://` URIs resolve inside the container.
 Relative paths resolve against the active session's directory, not the host
 shell's directory. Hold Ctrl until after releasing the mouse button. Each
 successful click reads a fresh file; there is no panel or confirmation step.
+If the native TUI reports a drag on a verified link instead of a complete
+click, oc-box refuses the open and asks you to clear the selection and retry.
 
 - PNG: opens a normalized static image, retaining the resolution and alpha but
   not embedded metadata. Input is limited to 4 MiB and 4,194,304 pixels
@@ -3225,7 +3229,7 @@ oc-box credentials --project ~/devel/demo --credential-mode vault --clear-creden
 
 ### --attachments
 
-Web only: explicitly select the visible, source-version-bounded browser File-drop
+Web only: explicitly select the visible, compatibility-verified browser File-drop
 adapter described under `web`. Keeps the native app and its draft/Send controls
 unchanged. No automatic prompt admission or host-path/URL reading.
 

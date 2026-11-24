@@ -250,6 +250,7 @@ def check_archives(directory):
             "tests/web_attachments_browser.mjs",
             "tests/web_attachments_shell_dom.mjs",
             "tests/smoke_web_attachments_v2.py",
+            "tests/smoke_web_attachments_browser.py",
             "tests/test_sharing.py",
             "tests/test_attachments.py",
             "tests/test_attachment_io.py",

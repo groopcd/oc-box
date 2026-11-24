@@ -26,6 +26,8 @@ from oc_box import (
 
 
 ROOT = Path(__file__).resolve().parents[1]
+COMPOSER_TESTED = ("2.2.6", "2.2.7", "2.3.0", "2.3.2", "2.4.1")
+UNKNOWN_RELEASES = ("2.3.1", "2.4.0", "2.4.2", "2.4.1-beta", "2.4.1+local", "2.4.01")
 
 
 class RequestTests(unittest.TestCase):
@@ -41,8 +43,9 @@ class RequestTests(unittest.TestCase):
     def test_owning_web_passes_verified_version_without_skipping_native_cross_check(
         self,
     ):
-        for version in ("2.2.6", "2.3.0"):
-            for native_version in (version, "2.99.0"):
+        for version in COMPOSER_TESTED:
+            different_tested_version = "2.3.0" if version != "2.3.0" else "2.4.1"
+            for native_version in (version, different_tested_version):
                 with self.subTest(version=version, native_version=native_version):
                     data = {
                         "id": "a" * 32,
@@ -210,13 +213,14 @@ class RequestTests(unittest.TestCase):
         self.assertFalse(service.web_parser().parse_args([]).attachments)
         self.assertTrue(service.web_parser().parse_args(["--attachments"]).attachments)
         args = SimpleNamespace(attachments=True, port=0, no_open=True)
-        for version in ("2.2.7", "2.3.1", "2.3.0-beta", None):
+        self.assertEqual(adapter.SUPPORTED, frozenset(COMPOSER_TESTED))
+        for version in (*UNKNOWN_RELEASES, None, {"version": "2.4.1"}):
             with (
                 self.subTest(version=version),
                 patch.object(service, "require_session", return_value="ses_synthetic"),
                 patch.object(service, "api") as native,
                 patch.object(service, "Gateway") as gateway,
-                self.assertRaisesRegex(box.BoxError, "requires native"),
+                self.assertRaisesRegex(box.BoxError, "not verified for this native"),
             ):
                 service.web_session(box, {}, {"version": version}, args)
             native.assert_not_called()
@@ -233,12 +237,12 @@ class RequestTests(unittest.TestCase):
 
     def test_cli_unsupported_version_refuses_before_workspace_or_credentials(self):
         with (
-            patch.object(box, "detect_opencode_release", return_value="2.2.7"),
+            patch.object(box, "detect_opencode_release", return_value="2.4.2"),
             patch.object(box, "find_workspace") as workspace,
             patch.object(service, "preflight_port") as port,
             patch.object(box, "check_backend") as backend,
             patch.object(box.vault, "hidden") as unlock,
-            self.assertRaisesRegex(box.BoxError, "requires native"),
+            self.assertRaisesRegex(box.BoxError, r"without --attachments, or Ctrl\+Y"),
         ):
             # Unit tests run inside oc-box; this tests the host CLI path only.
             with patch.dict("os.environ", {"OC_BOX_CONTAINER": "0"}):
@@ -247,7 +251,7 @@ class RequestTests(unittest.TestCase):
             operation.assert_not_called()
 
     def test_supported_versions_enable_only_the_selected_gateway(self):
-        for version in ("2.2.6", "2.3.0"):
+        for version in COMPOSER_TESTED:
             with (
                 self.subTest(version=version),
                 patch.object(service, "require_session", return_value="ses_synthetic"),

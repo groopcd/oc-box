@@ -223,11 +223,24 @@ for (const mode of ["same-id-event", "metadata", "spa-away-back", "document-load
   g.input.dispatchEvent(new Event("change", { isTrusted: true })); await settle();
   assert.equal(g.received.length, 2);
 }
-const refused = await fixture("2.2.7");
-assert.match(refused.elements["addon-status"].textContent, /composer contract is not verified/);
-refused.fileDrop(image()); await settle();
-assert.equal(refused.received.length, 0);
-assert.equal(refused.input.disabled, true);
+for (const version of ["2.2.6", "2.2.7", "2.3.0", "2.3.2", "2.4.1"]) {
+  const supported = await fixture(version);
+  assert.equal(supported.input.disabled, false);
+  supported.fileDrop(image()); await settle();
+  assert.equal(supported.received.length, 1, version);
+}
+for (const version of ["2.3.1", "2.4.0", "2.4.2", "2.4.1-beta", "2.4.1+local", "2.4.01"]) {
+  const refused = await fixture(version);
+  assert.match(refused.elements["addon-status"].textContent, /composer contract is not verified.*without --attachments, or Ctrl\+Y/);
+  refused.fileDrop(image()); await settle();
+  assert.equal(refused.received.length, 0);
+  assert.equal(refused.input.disabled, true);
+}
+{
+  const malformed = await fixture(null);
+  assert.equal(malformed.input.disabled, true);
+  assert.match(malformed.elements["addon-status"].textContent, /private native service could not be verified/);
+}
 for (const [status, message] of [
   [401, /authentication failed/],
   [503, /private native service could not be verified/],

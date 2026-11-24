@@ -4916,13 +4916,11 @@ def main(argv=None):
             )
         if web.attachments:
             if __package__:
-                from .web_attachments import SUPPORTED
+                from . import web_attachments
             else:
-                from web_attachments import SUPPORTED
-            if args._opencode_release not in SUPPORTED:
-                raise BoxError(
-                    "The browser attachment adapter requires native OpenCode 2.2.6 or 2.3.0."
-                )
+                import web_attachments
+            if not web_attachments.supports_release(args._opencode_release):
+                raise BoxError(web_attachments.UNVERIFIED_RELEASE)
         workspace_service.preflight_port(web.port)
     else:
         args = parser().parse_args(argv)

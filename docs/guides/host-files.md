@@ -44,13 +44,14 @@ copies or a model provider.
 | `share PATH` | Typed disclosure consent for the path | Live file/folder reads | Read-only tools, not a container mount or per-session attachment grant |
 
 These are different adapters, not interchangeable routes to arbitrary host
-files. Browser attachments are source-checked on native **2.2.6/2.3.0**.
-Native host drops/clipboard accept valid **2.x** releases subject to their
-private-client, terminal and transfer contracts; explicit image attachment keeps
-its separate **2.2.6/2.2.7/2.3.0** profiles. Browser batches allow eight files /
-40 MiB; native TUI imports allow four paths / 16 MiB per batch, with their own
-per-client limits. See the [browser reference](../cli.md#web--browser-interface)
-and the workflow sections below before choosing one.
+files. Browser attachments require verified native draft behavior. Native host
+drops and clipboard accept valid **2.x** releases subject to their private-client,
+terminal and transfer contracts. The image broker verifies ClientMCP on the
+running owner; direct `attach PATH` requires verified native queue behavior.
+Browser batches allow eight files / 40 MiB; native TUI imports allow four paths /
+16 MiB per batch, with their own per-client limits. See the
+[browser reference](../cli.md#web--browser-interface) and the workflow sections
+below before choosing one.
 
 ## Share a file or folder for live reads
 

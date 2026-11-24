@@ -67,11 +67,12 @@ shell never infers focus from saved order or activity. Choose a displayed tab,
 use `--session`, or follow **Open native OpenCode Home** if membership cannot be
 verified. Native browser tabs remain separate from mirrored TUI membership.
 
-On native **2.2.6 and 2.3.0 only**, `--attachments` adds browser-selected
-PNG/JPEG/GIF/WebP/PDF drops and a file chooser to that same view. Omit the flag
-on `2.3.2` and other versions outside that attachment allowlist. Verify native
-thumbnails/cards before pressing native Send; the adapter never submits a
-prompt automatically. Browser/native history and provider retention still apply.
+On native releases with a verified browser composer, `--attachments` adds
+browser-selected PNG/JPEG/GIF/WebP/PDF drops and a file chooser to that same
+view. If the launcher reports an unverified release, omit the flag or use the
+native TUI's host import on a supported terminal. Verify native thumbnails/cards
+before pressing native Send; the adapter never submits a prompt automatically.
+Browser/native history and provider retention still apply.
 See the [web reference](../cli.md#web--browser-interface) for limits and privacy.
 
 ## Open Studio
