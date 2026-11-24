@@ -52,6 +52,7 @@ RUNTIME_FILES = (
     "web_named_handoff.py",
     "web_named_handoff_client.mjs",
     "web_named_http.py",
+    "web_named_launch.py",
     "web_named_listeners.py",
     "web_named_login.html",
     "web_named_login.css",
