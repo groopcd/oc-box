@@ -1,6 +1,6 @@
 :root { color-scheme: dark; font: 14px system-ui, sans-serif; }
 body { margin: 0; }
-#native { flex: 1; min-height: 0; width: 100%; border: 0; }
+#native { flex: 1; min-height: 0; width: 100%; border: 0; color-scheme: light dark; }
 #no-selection { padding: 1rem; }
 [hidden] { display: none !important; }
 

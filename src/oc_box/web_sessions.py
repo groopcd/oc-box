@@ -349,8 +349,10 @@ def _workspace_layout_body(state, conversation, fallback, attachments):
         + escape(state["selectionNotice"])
         + '</p><div id="retained-selection"></div><details'
         + ("" if attachments else " hidden")
-        + '><summary>Browser attachments</summary><div id="session-controls"></div>'
-        '<p id="addon-status" role="status"></p></details></div>'
+        + '><summary>Browser attachments</summary><div id="session-controls"></div></details>'
+        '<p id="addon-status" role="status"'
+        + ("" if attachments else " hidden")
+        + "></p></div>"
         + conversation
         + '</section><div id="workspace-divider-right" class="workspace-divider" tabindex="0" '
         'role="separator" aria-orientation="vertical" aria-label="Status pane width" '
