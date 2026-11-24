@@ -25,6 +25,11 @@ import time
 import unicodedata
 import uuid
 
+# Older auto-updaters can exec this flat script directly, without the
+# installed wrapper's -B. Keep a pinned install immutable in both cases.
+if not __package__ and __name__ == "__main__":
+    sys.dont_write_bytecode = True
+
 if __package__:
     from . import (
         cli_help,
@@ -4812,6 +4817,12 @@ def _has_launcher_logging_flag(arguments):
 
 def main(argv=None):
     arguments = list(sys.argv[1:] if argv is None else argv)
+    if arguments and arguments[0] == "--uninstall":
+        if __package__:
+            from .uninstall_cli import cli
+        else:
+            from uninstall_cli import cli
+        return cli(PACKAGE, arguments)
     if arguments and arguments[0] == "logs":
         if __package__:
             from .logs_cli import cli
@@ -5305,24 +5316,12 @@ def _main_command(args, argv):
             from updater import UpdateError, automatic_upgrade
 
         try:
-            release = automatic_upgrade(APP)
+            automatic_upgrade(APP, launch_args=sys.argv[1:] if argv is None else argv)
         except (UpdateError, OSError, ValueError) as exc:
             startup_output.line(
                 f"oc-box: automatic update unavailable: {exc}; continuing with the installed version.",
                 file=sys.stderr,
             )
-        else:
-            if release is not None:
-                environment = {**os.environ, "OC_BOX_UPDATE_CHECKED": "1"}
-                os.execve(
-                    sys.executable,
-                    [
-                        sys.executable,
-                        str(release / "oc_box.py"),
-                        *(sys.argv[1:] if argv is None else argv),
-                    ],
-                    environment,
-                )
     with loading_stage("Checking rootless Podman", stage="backend"):
         check_backend(
             **({"env": maintenance_host_env()} if args.command == "terminal" else {}),
@@ -5644,6 +5643,9 @@ def _help_requested(arguments):
 
 def entrypoint():
     arguments = sys.argv[1:]
+    if arguments and arguments[0] == "--uninstall":
+        # Uninstall never resolves a workspace or touches the activity journal.
+        return main(arguments)
     informational = _help_requested(arguments) or any(
         arg in arguments for arg in ("--version", "--about", "--status", "--demo")
     )
@@ -5760,5 +5762,22 @@ def entrypoint():
         return result
 
 
+def _installed_entrypoint():
+    if (
+        __package__
+        or PACKAGE.parent.name != "releases"
+        or _help_requested(sys.argv[1:])
+    ):
+        return entrypoint()
+    from install_ownership import installed_runtime_use, OwnershipError
+
+    try:
+        with installed_runtime_use(PACKAGE):
+            return entrypoint()
+    except OwnershipError as exc:
+        print(f"oc-box: {exc}", file=sys.stderr)
+        return 1
+
+
 if __name__ == "__main__":
-    sys.exit(entrypoint())
+    sys.exit(_installed_entrypoint())

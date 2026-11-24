@@ -80,6 +80,7 @@ def main(argv=None):
         )
         parser.add_argument("--release-version", help=argparse.SUPPRESS)
         parser.add_argument("--verified-release-commit", help=argparse.SUPPRESS)
+        parser.add_argument("--expect-active-installation", help=argparse.SUPPRESS)
         args = parser.parse_args(argv)
         # Legacy no-argument downloaded installers remain valid. Bootstrap
         # selectors additionally bind the requested published identity.
@@ -163,6 +164,11 @@ def main(argv=None):
             with_vault=args.with_vault,
             with_tui=args.with_tui,
             **({"verified_release": True} if verified_release else {}),
+            **(
+                {"expected_active": args.expect_active_installation}
+                if args.expect_active_installation is not None
+                else {}
+            ),
         )
         if args.channel is not None:
             try:

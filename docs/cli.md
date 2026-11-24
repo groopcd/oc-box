@@ -30,6 +30,7 @@ oc-box logs [--log-dir PATH] --path
 oc-box tui [--project PATH | --workspace ID] [--read-only] [--demo]
 oc-box upgrade [--check] [--stable | --devel] [--vault] [--tui]
 oc-box upgrade --auto-update on|off
+oc-box --uninstall [--dry-run]
 oc-box secrets init|passwd [--min-passphrase-length N]
 oc-box secrets list
 oc-box secrets set|remove NAME
@@ -1772,9 +1773,13 @@ are preserved as `legacy-docs`. No workspaces or credentials are migrated/delete
 GitHub automatic updates are off by default and follow the saved release channel.
 `--auto-update on` saves `auto_update: true` in the existing host oc-box
 configuration, retaining settings such as `pass_env`.
-Normal installed `start` launches check before Podman/workspace setup and, when
-updated, continue with the same arguments. No background daemon, active-session
-update, or automatic check for list/status/terminal/reset/purge is introduced.
+The verified active launcher checks before Podman/workspace setup. The installer
+rechecks the active source, and only a compatible, verified target continues
+with the same arguments, holding its use lock across the restart. Use explicit
+upgrade for a target without the automatic handoff protocol. A retained copy
+using this protocol does not update or recreate a missing installation.
+No background daemon, active-session update, or automatic check for
+list/status/terminal/reset/purge is introduced.
 Direct source-checkout launches skip automatic updates. A concurrent check does
 not block another normal launcher. Network/download failures are reported and
 the normal launch continues with the installed version; explicit upgrade failures
@@ -1790,6 +1795,27 @@ download. HTTPS is required; shell commands or a custom upstream URL are not
 accepted. Use manual source installation for a reviewed alternate deployment.
 Updates inside a container are refused because its private HOME is not the host
 installation. Git is required for public updates; build tools are not.
+
+### uninstall
+
+Run `oc-box --uninstall` as the regular host user from the verified active
+GitHub-installed launcher. Review the selected release and installed files on
+the controlling terminal, then type `UNINSTALL OC-BOX`. `--dry-run` prints
+the launcher-only review without prompting or deleting anything. Use
+`oc-box --uninstall --help` for the dedicated help.
+
+This removes only the reviewed launcher, selected installed release, and its
+verified links, manuals and completion. It keeps older releases and all
+workspace containers, home volumes, project files and markers, registry,
+vault, settings, logs, backups and host OpenCode history. It does not contact
+Podman or OpenCode. A missing or changed [installation receipt](installation.md#installation-ownership-receipt),
+an in-use launcher or an unverified installation refuses. Use the owning
+package manager for a Python-package installation; oc-box will not invoke
+that manager or delete its environment.
+
+Full cleanup is not enabled in this candidate. `--full` refuses rather than
+falling back to launcher-only removal. Neither mode may remove host OpenCode
+history.
 
 ### secrets
 

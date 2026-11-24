@@ -72,6 +72,7 @@ File: oc-box.info,  Node: Synopsis,  Next: Description,  Prev: Name,  Up: Top
      oc-box tui [--project PATH | --workspace ID] [--read-only] [--demo]
      oc-box upgrade [--check] [--stable | --devel] [--vault] [--tui]
      oc-box upgrade --auto-update on|off
+     oc-box --uninstall [--dry-run]
      oc-box secrets init|passwd [--min-passphrase-length N]
      oc-box secrets list
      oc-box secrets set|remove NAME
@@ -1985,10 +1986,14 @@ credentials are migrated/deleted.
 
 GitHub automatic updates are off by default and follow the saved release
 channel.  ‘--auto-update on’ saves ‘auto_update: true’ in the existing
-host oc-box configuration, retaining settings such as ‘pass_env’.
-Normal installed ‘start’ launches check before Podman/workspace setup
-and, when updated, continue with the same arguments.  No background
-daemon, active-session update, or automatic check for
+host oc-box configuration, retaining settings such as ‘pass_env’.  The
+verified active launcher checks before Podman/workspace setup.  The
+installer rechecks the active source, and only a compatible, verified
+target continues with the same arguments, holding its use lock across
+the restart.  Use explicit upgrade for a target without the automatic
+handoff protocol.  A retained copy using this protocol does not update
+or recreate a missing installation.  No background daemon,
+active-session update, or automatic check for
 list/status/terminal/reset/purge is introduced.  Direct source-checkout
 launches skip automatic updates.  A concurrent check does not block
 another normal launcher.  Network/download failures are reported and the
@@ -2008,7 +2013,31 @@ for a reviewed alternate deployment.  Updates inside a container are
 refused because its private HOME is not the host installation.  Git is
 required for public updates; build tools are not.
 
-4.20 secrets
+4.20 uninstall
+==============
+
+Run ‘oc-box --uninstall’ as the regular host user from the verified
+active GitHub-installed launcher.  Review the selected release and
+installed files on the controlling terminal, then type ‘UNINSTALL
+OC-BOX’.  ‘--dry-run’ prints the launcher-only review without prompting
+or deleting anything.  Use ‘oc-box --uninstall --help’ for the dedicated
+help.
+
+This removes only the reviewed launcher, selected installed release, and
+its verified links, manuals and completion.  It keeps older releases and
+all workspace containers, home volumes, project files and markers,
+registry, vault, settings, logs, backups and host OpenCode history.  It
+does not contact Podman or OpenCode.  A missing or changed [installation
+receipt](installation.md#installation-ownership-receipt), an in-use
+launcher or an unverified installation refuses.  Use the owning package
+manager for a Python-package installation; oc-box will not invoke that
+manager or delete its environment.
+
+Full cleanup is not enabled in this candidate.  ‘--full’ refuses rather
+than falling back to launcher-only removal.  Neither mode may remove
+host OpenCode history.
+
+4.21 secrets
 ============
 
 Manage an optional encrypted credential vault on the host.  This command
@@ -2173,7 +2202,7 @@ This is not a general redaction filter for OpenCode, provider logs, tool
 output, or session archives: an agent can still print, save, or transmit
 a credential it has received.
 
-4.21 credentials
+4.22 credentials
 ================
 
 View or change **names-only** forwarding policy for an existing
@@ -2266,7 +2295,7 @@ container data.  Selection is reduced forwarding, not an isolation
 boundary from secrets already inside the container.  Delivered keys
 remain readable by the agent/tools with normal container permissions.
 
-4.22 backup
+4.23 backup
 ===========
 
 Create one encrypted ‘.ocbox’ file for an existing workspace (available
@@ -2346,7 +2375,7 @@ file may remain: inspect it with ‘backup-info’ before retrying.  The
 source remains stopped, not reset/deleted.  The temporary capture image
 is removed by its unique tag; shared base images remain.
 
-4.23 Include host settings for migration
+4.24 Include host settings for migration
 ========================================
 
 On supporting stable and development releases, ‘backup --host --output
@@ -2385,7 +2414,7 @@ Treat this archive and its age identity/passphrase as sensitive.  The
 vault remains separately encrypted with its original passphrase.  This
 is neither a whole-machine backup nor a credential revocation mechanism.
 
-4.24 backup-info
+4.25 backup-info
 ================
 
 Decrypt/verify a backup's manifest and ciphertext checksums without
@@ -2415,7 +2444,7 @@ authentication chunk.  Wrong keys, corruption, missing/extra components,
 unsupported versions, or unsafe outer envelope paths are rejected before
 restore activation.
 
-4.25 restore
+4.26 restore
 ============
 
 Streaming failures identify the producer/consumer exit code and a fixed
@@ -2516,7 +2545,7 @@ incomplete restores), and retry to a new destination.  Orphan staging
 directories may need manual host removal after inspection; the launcher
 never deletes a caller-supplied tree on marker alone.
 
-4.26 Restore host settings on a new machine
+4.27 Restore host settings on a new machine
 ===========================================
 
 Install oc-box, age and the required OpenCode version on the destination
@@ -5190,22 +5219,22 @@ Tag Table:
 Node: Top210
 Node: Name769
 Node: Synopsis930
-Node: Description5132
-Node: Commands10952
-Node: Options144864
-Node: Lifecycle and persistence207929
-Node: Distribution images210229
-Node: Sessions and recovery215306
-Node: Devices and host permissions221891
-Node: Resource reports224237
-Node: Configuration and environment226348
-Node: Files237729
-Node: Exit status248639
-Node: Examples250047
-Node: Troubleshooting252186
-Node: Installation and manuals264678
-Node: Authors and license274868
-Node: See also275475
+Node: Description5168
+Node: Commands10988
+Node: Options146337
+Node: Lifecycle and persistence209402
+Node: Distribution images211702
+Node: Sessions and recovery216779
+Node: Devices and host permissions223364
+Node: Resource reports225710
+Node: Configuration and environment227821
+Node: Files239202
+Node: Exit status250112
+Node: Examples251520
+Node: Troubleshooting253659
+Node: Installation and manuals266151
+Node: Authors and license276341
+Node: See also276948
 
 End Tag Table
 
