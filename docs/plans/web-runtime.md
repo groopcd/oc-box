@@ -123,6 +123,51 @@ would not close the gate: the browser still needs an independently reviewed,
 matching client served by the trusted account origin. Neither half is fetched
 or distributed by oc-box.
 
+### Source-only browser transport
+
+`src/oc_box/web_pake_client.mjs` is an offline-tested adapter, not an installed
+or served browser asset. It has no page, password field, enrollment, WASM
+loader, handoff POST or runtime caller. It binds to the configured local
+account and workspace origins, verifies the public transcript context and
+supplies the separate client and verifier IDs. It sends only the username
+and KE1 on `/start`, then the challenge ID and KE3 on `/finish`, both as
+bounded, same-origin HTTPS JSON POSTs without redirects or fallback.
+The module allows one controller per account document and only one live
+exchange or pending ticket at a time. Cancellation aborts the transport and
+blocks progress at checkpoints; it cannot interrupt synchronous WASM or undo
+a POST the ingress has already processed.
+
+A successful response yields only an opaque in-memory ticket carrier. It
+expires locally after at most five seconds, never later than the attempt
+deadline, and is invalidated on `pagehide`, cancellation, explicit `discard()`,
+or a single `take()`. A future caller may take it only for the separately
+reviewed POST handoff, never a URL. Taking it does not prove app admission;
+the server remains authoritative for expiry, browser binding and replay.
+
+The offline binding now supplies `openAttempt` in the trusted controller
+configuration. Before any password access, `openAttempt()` must return a fresh,
+empty handle with synchronous `start(readPassword)`, `finish(bindings)` and
+`discard()`. `exchange({username, readPassword, signal})` makes a one-shot byte
+reader available only to `start`, after taking ownership of the handle.
+The trusted binding must clean up those local bytes, verify the server proof
+before emitting KE3, and confirm teardown by returning `true` from `discard()`.
+Uncertain teardown permanently fences that controller; a new one cannot
+replace it in the same document. The earlier one-step `createSession`
+contract is not accepted. The wire, `finish` binding parameters and artifact
+review requirements are unchanged.
+
+The adapter does not validate artifact provenance or establish memory erasure.
+The Node fixture checks both origins and the exact Python wire format with a
+synthetic session that checks its arguments; it does not verify a password,
+make browser requests, or establish browser trust. Run it from a source checkout:
+`PYTHONPATH=src python3 -B -m unittest discover -s tests -p test_web_pake_client.py -v`.
+The separate checkout-only [Chromium/WASM and verifier check](../../tools/web-pake-research/README.md#browser-conformance-scope)
+exercises the same contract with pinned artifacts through a private CDP pipe.
+It is not a trusted-HTTPS or host admission test.
+Activation still requires independent review of the exact native/WASM
+artifacts and interface, matching host-authorized enrollment (including
+password input encoding), a trusted account page, and the live gates above.
+
 ## Isolated feasibility results
 
 - **Local HTTPS:** Two fresh, sandboxed Chromium 159 lab runs each passed

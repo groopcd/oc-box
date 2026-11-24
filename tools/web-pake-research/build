@@ -1,0 +1,203 @@
+#!/usr/bin/python3 -I
+# SPDX-License-Identifier: GPL-3.0-or-later
+"""Build the research worker and optional browser slot from existing pinned archives."""
+
+import argparse
+import hashlib
+import io
+import json
+import os
+import platform
+import shutil
+import subprocess
+import sys
+import tarfile
+import tomllib
+from pathlib import Path
+
+SOURCE = Path(__file__).resolve().parent
+HOST = "x86_64-unknown-linux-gnu"
+BROWSER = "wasm32-unknown-unknown"
+OPAQUE = "opaque-ke-5.0.0-pre.0"
+LOCK = "de7589771ffb3ba4e61c4fb1208b51abdbca6052119c4329befbbe9f7d4c659a"
+ARCHIVES = {
+    f"{OPAQUE}.crate": "fcb98b5f65f45e88fd18fadda77a042aa9c322e92a66ee42e08aa9c2cda2cca5",
+    f"rust-files/cargo-1.99.0-{HOST}.tar.xz": "d7674918d28093097614cd9728b6ca60db9ea3038f640f0bd1e9a4188c7568ce",
+    f"rust-files/rustc-1.99.0-{HOST}.tar.xz": "77171ba2a0345fdf2abc4fedda55d6de078dae7a68527c28be8c77dcc9604bd5",
+    f"rust-files/rust-std-1.99.0-{HOST}.tar.xz": "3e58dff2d0b72196b5ea4e90536e174d400de88564a52694686b81e091169933",
+    f"rust-files/rust-std-1.99.0-{BROWSER}.tar.xz": "b760b0c9b08a6843c05de0098bd6802e23178ff473c4715ae57c1d679125bf22",
+    "zig-toolchain.tar.xz": "02aa270f183da276e5b5920b1dac44a63f1a49e55050ebde3aecc9eb82f93239",
+}
+
+
+def digest(path):
+    with path.open("rb") as stream:
+        return hashlib.file_digest(stream, "sha256").hexdigest()
+
+
+def unpack(path, expected, parent, top, *, regular=False):
+    raw = path.read_bytes()
+    if hashlib.sha256(raw).hexdigest() != expected:
+        raise ValueError(f"Incorrect input digest: {path.name}")
+    with tarfile.open(fileobj=io.BytesIO(raw)) as archive:
+        members = archive.getmembers()
+        names = {member.name for member in members}
+        if len(names) != len(members) or any(
+            not (member.name == top or member.name.startswith(top + "/"))
+            or ".." in Path(member.name).parts
+            or (regular and not (member.isfile() or member.isdir()))
+            for member in members
+        ):
+            raise ValueError(f"Unexpected archive layout: {path.name}")
+        archive.extractall(parent, members, filter="data")
+    return parent / top
+
+
+def stage(cache, root, with_browser):
+    tool_dir = root / "tools"
+    rust = tool_dir / "rust"
+    for component in ("cargo", "rustc", "rust-std"):
+        top = f"{component}-1.99.0-{HOST}"
+        filename = f"rust-files/{top}.tar.xz"
+        extracted = unpack(cache / filename, ARCHIVES[filename], tool_dir, top)
+        name = f"rust-std-{HOST}" if component == "rust-std" else component
+        shutil.copytree(extracted / name, rust, dirs_exist_ok=True, symlinks=True)
+    if with_browser:
+        top = f"rust-std-1.99.0-{BROWSER}"
+        filename = f"rust-files/{top}.tar.xz"
+        extracted = unpack(cache / filename, ARCHIVES[filename], tool_dir, top)
+        shutil.copytree(
+            extracted / f"rust-std-{BROWSER}", rust, dirs_exist_ok=True, symlinks=True
+        )
+    for name in ("cc", "ocop-link"):
+        path = tool_dir / name
+        shutil.copyfile(SOURCE / "link", path)
+        path.chmod(0o500)
+    unpack(cache / "zig-toolchain.tar.xz", ARCHIVES["zig-toolchain.tar.xz"], tool_dir,
+           "zig-x86_64-linux-0.15.2")
+
+    crate = f"{OPAQUE}.crate"
+    source = unpack(cache / crate, ARCHIVES[crate], root, OPAQUE, regular=True)
+    lock = source / "Cargo.lock"
+    if digest(lock) != LOCK:
+        raise ValueError("Unexpected upstream lockfile.")
+    vendor = root / "vendor"
+    archives = cache / "cargo-patched/registry/cache/index.crates.io-1949cf8c6b5b557f"
+    packages = tomllib.loads(lock.read_text(encoding="utf-8"))["package"]
+    for package in packages:
+        if (
+            "source" not in package
+            and (package["name"], package["version"]) == ("opaque-ke", "5.0.0-pre.0")
+        ):
+            continue
+        if package["source"] != "registry+https://github.com/rust-lang/crates.io-index":
+            raise ValueError("Unexpected dependency source.")
+        top = f"{package['name']}-{package['version']}"
+        checksum = package["checksum"]
+        path = unpack(archives / f"{top}.crate", checksum, vendor, top, regular=True)
+        index = path / ".cargo-checksum.json"
+        files = {
+            entry.relative_to(path).as_posix(): digest(entry)
+            for entry in path.rglob("*")
+            if entry.is_file()
+        }
+        with index.open("x", encoding="utf-8") as stream:
+            json.dump({"files": files, "package": checksum}, stream, sort_keys=True)
+    return source, rust
+
+
+def build(cache, root, with_fixture, with_browser):
+    source, rust = stage(cache, root, with_browser)
+    bins = source / "src/bin"
+    profile = bins / "ocbox_profile"
+    profile.mkdir(parents=True)
+    shutil.copyfile(SOURCE / "suite.rs", profile / "mod.rs")
+    targets = {"ocop-worker": "worker.rs"}
+    if with_fixture:
+        targets["ocop-fixture"] = "client_fixture.rs"
+    browser = "ocop-browser"
+    manifest = source / "Cargo.toml"
+    with manifest.open("a", encoding="utf-8") as stream:
+        sources = {**targets, browser: "browser_login.rs"} if with_browser else targets
+        for target, filename in sources.items():
+            path = bins / filename
+            shutil.copyfile(SOURCE / filename, path)
+            stream.write(f'\n[[bin]]\nname = "{target}"\npath = "src/bin/{filename}"\n')
+
+    cargo_home, home, temporary = (root / name for name in ("cargo-home", "home", "tmp"))
+    for path in (cargo_home, home, temporary):
+        path.mkdir()
+    # Cargo also reads config files in the invocation directory's ancestors.
+    # The fresh stage must not inherit ambient config or wrappers.
+    for ancestor in reversed((source, *source.parents)):
+        if any(os.path.lexists(ancestor / ".cargo" / name) for name in ("config", "config.toml")):
+            raise ValueError("Cargo configuration in a build directory ancestor.")
+    env = {
+        "PATH": f"{rust / 'bin'}:{root / 'tools'}:/usr/bin:/bin",
+        "HOME": str(home),
+        "TMPDIR": str(temporary),
+        "LC_ALL": "C",
+        "TZ": "UTC",
+        "CARGO_HOME": str(cargo_home),
+        "CARGO_TARGET_DIR": str(root / "target"),
+        "CARGO_NET_OFFLINE": "true",
+        "CARGO_ENCODED_RUSTFLAGS": f"--remap-path-prefix={root}=/oc-box-build",
+        "ZIG_GLOBAL_CACHE_DIR": str(root / "zig-global"),
+        "ZIG_LOCAL_CACHE_DIR": str(root / "zig-local"),
+    }
+
+    def run(*args, **kwargs):
+        subprocess.run(args, cwd=source, env=env, check=True, **kwargs)
+
+    cargo = rust / "bin/cargo"
+    config = (
+        "--frozen",
+        "--config", 'source.crates-io.replace-with="offline-vendor"',
+        "--config", f"source.offline-vendor.directory={json.dumps(str(root / 'vendor'))}",
+        "--no-default-features",
+    )
+    native = (*config, "--features", "ristretto255,argon2,rand/sys_rng")
+    run(rust / "bin/rustc", "-vV")
+    run(cargo, "-V")
+    for target in targets:
+        run(cargo, "rustc", *native, "--release", "--bin", target, "--",
+            "-C", f"linker={root / 'tools/ocop-link'}", "-C", "rpath=no")
+    with (root / "native-tree.txt").open("xb") as graph:
+        run(cargo, "tree", *native, "--target", HOST, "-e", "normal,build,features", stdout=graph)
+    artifacts = [root / "target/release" / name for name in targets]
+    if with_browser:
+        # The WASM target imports only the trusted entropy function; it must
+        # not inherit the native OS RNG feature.
+        wasm = (*config, "--features", "ristretto255,argon2", "--target", BROWSER)
+        exports = ("io_addr", "io_size", "login_start", "login_finish", "discard")
+        flags = [arg for name in exports for arg in ("-C", f"link-arg=--export={name}")]
+        run(cargo, "rustc", *wasm, "--release", "--bin", browser, "--",
+            "-C", "link-arg=--max-memory=67108864", *flags)
+        with (root / "wasm-tree.txt").open("xb") as graph:
+            run(cargo, "tree", *wasm, "-e", "normal,build,features", stdout=graph)
+        artifacts.append(root / "target" / BROWSER / "release" / f"{browser}.wasm")
+    if digest(source / "Cargo.lock") != LOCK:
+        raise ValueError("Build changed the pinned lockfile.")
+    for artifact in artifacts:
+        print(f"{digest(artifact)}  {artifact}")
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("cache", type=Path, help="directory with the pinned archives")
+    parser.add_argument("output", type=Path, help="new directory outside the checkout")
+    parser.add_argument("--with-fixture", action="store_true", help="also build a test-only client")
+    parser.add_argument("--with-browser", action="store_true", help="also build the research WASM slot")
+    args = parser.parse_args()
+    if sys.platform != "linux" or platform.machine() != "x86_64":
+        parser.error("this research build targets x86_64 Linux only")
+    cache, output = args.cache.resolve(strict=True), args.output.resolve()
+    if output.is_relative_to(cache) or output.is_relative_to(SOURCE.parent.parent):
+        parser.error("output must be outside the cache and checkout")
+    os.umask(0o077)
+    output.mkdir()
+    build(cache, output, args.with_fixture, args.with_browser)
+
+
+if __name__ == "__main__":
+    main()
