@@ -1,0 +1,118 @@
+/* Composer from docs/mockups/web-manager.html at 21e966ce. Scope it to the
+   first-party slot; never style the native frame or existing shell controls. */
+#workspace-studio-composer[hidden] { display: none; }
+#workspace-studio-composer {
+  box-sizing: border-box;
+  width: min(100%, 760px);
+  margin-inline: auto;
+  padding: 0 24px 16px;
+  color: var(--workspace-text, #e5edf5);
+  font: 14px/1.5 system-ui, sans-serif;
+}
+.chat-body > #workspace-studio-composer { width: 100%; padding: 0; }
+#workspace-studio-composer * { box-sizing: border-box; }
+#workspace-studio-composer .compose {
+  border: 1px solid #36576a;
+  background: var(--workspace-panel, #0e1824);
+  border-radius: 9px;
+  padding: 8px 10px;
+}
+#workspace-studio-composer .compose:focus-within { border-color: var(--workspace-accent, #78e0e6); }
+#workspace-studio-composer textarea {
+  width: 100%;
+  min-height: 54px;
+  padding: 6px;
+  border: 0;
+  outline: none;
+  background: none;
+  resize: vertical;
+  color: inherit;
+  font: inherit;
+}
+#workspace-studio-composer textarea::placeholder { color: var(--workspace-muted, #a1b3c7); }
+#workspace-studio-composer .compose-foot {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+#workspace-studio-composer .send {
+  margin-left: auto;
+  color: #09212a;
+  background: var(--workspace-accent, #78e0e6);
+  border: 1px solid var(--workspace-accent, #78e0e6);
+  border-radius: 6px;
+  padding: 5px 10px;
+  font: inherit;
+  font-weight: 750;
+  cursor: pointer;
+}
+#workspace-studio-composer .send:not(:disabled):hover { background: #b3f4f0; }
+#workspace-studio-composer .send:disabled { cursor: default; opacity: .65; }
+#workspace-studio-composer :is(textarea, .send):focus-visible {
+  outline: 2px solid var(--workspace-accent, #78e0e6);
+  outline-offset: 3px;
+}
+#workspace-studio-composer .icon {
+  width: 17px;
+  height: 17px;
+  vertical-align: middle;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.65;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  flex: none;
+}
+#workspace-studio-composer .composition-note {
+  margin: 7px 0 0;
+  color: var(--workspace-muted, #a1b3c7);
+  font-size: 11px;
+}
+#workspace-studio-composer .composition-status:empty { margin-top: 0; }
+
+/* Optional shared center: put the transcript and composer mounts immediately
+   inside #workspace-studio-center. The shell's composer slot then stays put
+   across transcript replacements, while the two share the demo's chat-body
+   height. The transcript alone keeps its own layout when Send is unavailable. */
+@supports (grid-template-rows: subgrid) {
+  #workspace-studio-center {
+    --studio-chat-height: max(455px, calc(100dvh - 190px));
+  }
+  [data-layout="dashboard"] #workspace-studio-center {
+    --studio-chat-height: max(420px, calc(100dvh - 374px));
+  }
+  [data-layout="focus"] #workspace-studio-center {
+    --studio-chat-height: calc(100dvh - 200px);
+  }
+  #workspace-studio-center:has(> #workspace-studio-composer:not([hidden])) {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto minmax(auto, 1fr) max-content;
+  }
+  #workspace-studio-center:has(> #workspace-studio-composer:not([hidden]))::before {
+    content: "";
+    grid-area: 2 / 1 / 4 / 2;
+    min-height: var(--studio-chat-height);
+    pointer-events: none;
+  }
+  #workspace-studio-center:has(> #workspace-studio-composer:not([hidden]))
+    > #workspace-studio-transcript,
+  #workspace-studio-center:has(> #workspace-studio-composer:not([hidden]))
+    > #workspace-studio-transcript > section {
+    display: grid;
+    grid-area: 1 / 1 / 3 / 2;
+    grid-template-rows: subgrid;
+  }
+  #workspace-studio-center:has(> #workspace-studio-composer:not([hidden]))
+    > #workspace-studio-transcript .chat-body {
+    min-height: 0;
+    margin-block: 0;
+    padding-block-end: 0;
+  }
+  #workspace-studio-center > #workspace-studio-composer { grid-area: 3 / 1; }
+}
+@media (max-width: 680px) {
+  #workspace-studio-center { --studio-chat-height: 410px; }
+  #workspace-studio-composer { padding-inline: 13px; padding-block-end: 14px; }
+}

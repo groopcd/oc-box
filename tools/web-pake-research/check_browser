@@ -1,0 +1,415 @@
+#!/usr/bin/python3 -I
+# SPDX-License-Identifier: GPL-3.0-or-later
+"""Verify the offline browser slot via Chromium's private CDP pipe. No listeners."""
+
+import argparse
+import base64
+import fcntl
+import hashlib
+import json
+import os
+import signal
+import socket
+import struct
+import subprocess
+import sys
+from contextlib import contextmanager
+from pathlib import Path
+from select import select
+from tempfile import TemporaryDirectory
+from time import monotonic
+
+HERE = Path(__file__).resolve().parent
+ROOT = HERE.parents[1]
+sys.path.insert(0, str(ROOT / "src"))
+from oc_box import (  # noqa: E402
+    private_memory,
+    web_account_ingress,
+    web_accounts,
+    web_admission,
+    web_local_origins,
+    web_named_local,
+    web_pake_flow,
+    web_pake_profile,
+)
+
+PRODUCT = "HeadlessChrome/159.0.8154.6"
+CHROME_SHA = "24eb0a14de64ab0c9c2e283a5512ca817db64af8fd853cdb4d818f19a8e23b9b"
+ADAPTER_SHA = "be51703c623afa49427e5810a38a56ae4242c40117b404b3d62361b18b4e4b13"
+WASM_SHA = "802c138b34fe9b3734240d13397f227f9698724ca9795a993b40d295d81d15ae"
+WORKER_SHA = "b58ef89a7e4e447cc1976246b8bb548154fd719a68800ed82313fbc1c9a45730"
+SEED_SHA = "cbf418d162425f82df7be43a5792b6d88a6befe125ae4419ba15dd87050323a5"
+WORKSPACE = "e" * 32
+COOKIE = "A" * 43
+NONCE = "B" * 42 + "E"
+PAGE = b'<!doctype html><meta charset="utf-8"><script type="module" src="/fixture.mjs"></script>'
+CSP = ("default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; "
+       "connect-src 'self'; form-action 'none'; frame-ancestors 'none'")
+ENTRY = """
+import os, sys
+for source, dest in zip(map(int, sys.argv[1:3]), (3, 4)):
+    os.dup2(source, dest)
+    os.close(source)
+os.execve(sys.argv[3], sys.argv[3:], dict(os.environ))
+"""
+
+
+def require(ok, category):
+    if not ok:
+        raise RuntimeError(category)
+
+
+def b64(data):
+    return base64.b64encode(data).decode("ascii")
+
+
+def pinned(path, size, expected):
+    with path.open("rb") as stream:
+        data = stream.read(size + 1)
+    require(len(data) == size and hashlib.sha256(data).hexdigest() == expected,
+            "pinned source or artifact mismatch")
+    return data
+
+
+def network_off():
+    require(os.geteuid() != 0 and [name for _, name in socket.if_nameindex()] == ["lo"],
+            "run as non-root with only loopback in a private network namespace")
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+        flags = fcntl.ioctl(sock, 0x8913, struct.pack("16s24x", b"lo"))  # SIOCGIFFLAGS
+    require(not struct.unpack_from("H", flags, 16)[0] & 1, "private loopback must be down")
+
+
+@contextmanager
+def sealed(data):
+    fd = os.memfd_create("ocop-browser-research", os.MFD_CLOEXEC | os.MFD_ALLOW_SEALING)
+    try:
+        os.fchmod(fd, 0o500)
+        with os.fdopen(os.dup(fd), "wb") as stream:
+            stream.write(data)
+        private_memory.seal(fd)
+        yield fd
+    finally:
+        os.close(fd)
+
+
+class Cdp:
+    def __init__(self, tx, rx):
+        self.tx, self.rx = tx, rx
+        self.buffer = b""
+        self.last = 0
+        self.route = None
+
+    def send(self, method, params=None, session=None):
+        self.last += 1
+        msg = {"id": self.last, "method": method, "params": params or {}}
+        if session is not None:
+            msg["sessionId"] = session
+        data = memoryview((json.dumps(msg) + "\0").encode("ascii"))
+        cutoff = monotonic() + 5
+        while data:
+            require(select([], [self.tx], [], max(0, cutoff - monotonic()))[1], "CDP write timeout")
+            try:
+                data = data[os.write(self.tx, data):]
+            except BlockingIOError:
+                continue
+        return self.last
+
+    def receive(self, cutoff):
+        while b"\0" not in self.buffer:
+            require(select([self.rx], [], [], max(0, cutoff - monotonic()))[0], "CDP read timeout")
+            data = os.read(self.rx, 65_536)
+            require(data, "unexpected CDP EOF")
+            self.buffer += data
+            require(len(self.buffer) < 2_000_000, "CDP frame overflow")
+        raw, self.buffer = self.buffer.split(b"\0", 1)
+        return json.loads(raw)
+
+    def call(self, method, params=None, session=None):
+        ident = self.send(method, params, session)
+        cutoff = monotonic() + 12
+        while monotonic() < cutoff:
+            msg = self.receive(cutoff)
+            if msg.get("id") == ident:
+                require("error" not in msg, f"CDP call refused: {method}")
+                return msg["result"]
+            if msg.get("method") == "Fetch.requestPaused":
+                require(self.route is not None, "unexpected browser fetch")
+                self.route(self, msg["sessionId"], msg["params"])
+        raise RuntimeError(f"CDP call timed out: {method}")
+
+
+@contextmanager
+def chromium(chrome, profile):
+    r, tx = os.pipe()
+    rx, w = os.pipe()
+    child_r = fcntl.fcntl(r, fcntl.F_DUPFD_CLOEXEC, 20)
+    child_w = fcntl.fcntl(w, fcntl.F_DUPFD_CLOEXEC, 20)
+    os.close(r)
+    os.close(w)
+    proc = None
+    try:
+        try:
+            proc = subprocess.Popen(
+                [sys.executable, "-I", "-B", "-c", ENTRY, str(child_r), str(child_w), str(chrome),
+                 "--headless", "--remote-debugging-pipe", "--disable-dev-shm-usage",
+                 "--disable-background-networking", "--disable-component-update",
+                 "--disable-domain-reliability", "--disable-sync", "--disable-quic",
+                 "--disable-breakpad", "--disable-setuid-sandbox", "--no-first-run",
+                 "--no-default-browser-check", "--no-proxy-server",
+                 "--host-resolver-rules=MAP * ~NOTFOUND", f"--user-data-dir={profile}"],
+                pass_fds=(child_r, child_w), start_new_session=True,
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                env={"HOME": profile, "TMPDIR": profile, "PATH": "/usr/bin:/bin", "LC_ALL": "C"},
+            )
+        finally:
+            os.close(child_r)
+            os.close(child_w)
+        os.set_blocking(tx, False)
+        api = Cdp(tx, rx)
+        yield api
+        api.send("Browser.close")
+        require(proc.wait(timeout=6) == 0, "Chromium cleanup not graceful")
+    finally:
+        os.close(tx)
+        os.close(rx)
+        if proc is not None:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            proc.wait(timeout=6)
+
+
+def seed_account(fd, origins, username, size):
+    # Only a vector selector and public identity hashes enter the seed fixture.
+    # Neither a password nor a seed record is ever transferred to the browser.
+    name = username.encode("ascii")
+    public = b"".join(web_pake_profile._identifier(label, value) for label, value in (
+        (b"credential", name), (b"client", name),
+        (b"verifier", origins.account.value.encode("ascii")),
+    ))
+    seed = subprocess.run(
+        [f"/proc/self/fd/{fd}"], input=bytes([2 if size == 37 else 3]) + public,
+        capture_output=True, timeout=5, cwd="/", env={}, pass_fds=(fd,),
+    )
+    require(seed.returncode == 0 and not seed.stderr and len(seed.stdout) == 416,
+            "synthetic seed fixture failed")
+    return seed.stdout[:128], seed.stdout[128:320]
+
+
+class AccountRoute:
+    def __init__(self, origins, ingress, assets, mode, username):
+        self.origin = origins.account.value
+        self.host = self.origin.removeprefix("https://")
+        self.ingress, self.assets, self.mode, self.username = ingress, assets, mode, username
+        self.calls = []
+
+    def wire(self, path, request):
+        try:
+            raw = request["postData"].encode("ascii")
+            require(0 < len(raw) <= web_account_ingress.MAX_BODY_BYTES, "browser body bound")
+            payload = json.loads(raw)
+            names, proof_len = (
+                (("username", "ke1"), 96) if path == "/start"
+                else (("challenge_id", "ke3"), 64)
+            )
+            proof = base64.b64decode(payload[names[1]], validate=True)
+            require(tuple(payload) == names and len(proof) == proof_len and
+                    b64(proof) == payload[names[1]] and
+                    raw == json.dumps(payload, separators=(",", ":")).encode("ascii"),
+                    "noncanonical PAKE fields")
+            require(path != "/start" or payload["username"] == self.username, "unexpected user")
+            # Oversized/invalid-reader cases must not produce a POST. Verify
+            # the other canonical payloads do not embed the known vector bytes.
+            vector = b"ABCDEFGHIJKLMNOPQRSTUVWXYZABCDEFGHIJK"
+            for candidate in (vector, bytes([vector[0] ^ 1]) + vector[1:]):
+                require(all(secret not in data for secret in (candidate, base64.b64encode(candidate))
+                            for data in (raw, proof)), "synthetic vector appeared on wire")
+            headers = {key.lower(): value for key, value in request["headers"].items()}
+            require(headers.get("origin") == self.origin and
+                    headers.get("content-type") == "application/json", "browser POST origin/type")
+        except Exception:
+            raise RuntimeError("browser wire contract refused") from None
+        return raw, headers
+
+    def __call__(self, api, session, event):
+        request = event["request"]
+        method, url = request["method"], request["url"]
+        require(url.startswith(self.origin + "/"), "browser requested a foreign URL")
+        path = url[len(self.origin):]
+        if method == "GET":
+            require(path in self.assets and "postData" not in request, "unexpected browser asset")
+            content_type, body = self.assets[path]
+            headers = [("Cache-Control", "no-store"), ("Content-Type", content_type)]
+            if path == "/fixture":
+                headers.append(("Content-Security-Policy", CSP))
+            code = 200
+        else:
+            require(method == "POST" and path in ("/start", "/finish"), "unexpected browser request")
+            raw, actual = self.wire(path, request)
+            # CDP models a previously bootstrapped HTTPS connection. Only the
+            # Origin and content type are actual browser headers here.
+            response = self.ingress(
+                method=method, target=path, body=raw, actual_tls=True,
+                headers=[
+                    ("Host", self.host), ("Origin", actual["origin"]),
+                    ("Cookie", "__Host-ocbox-account=" + COOKIE),
+                    ("Content-Type", actual["content-type"]), ("Content-Length", str(len(raw))),
+                ],
+            )
+            code, body = response.status, response.body
+            self.calls.append((path, code))
+            if (self.mode, path) in (("abort-start", "/start"), ("abort-finish", "/finish")):
+                # The real verifier already processed this request. Leave the
+                # response paused and abort the genuine browser fetch in flight.
+                api.send("Runtime.evaluate", {"expression": "cancelFixture()"}, session)
+                return
+            if self.mode == "changed-reply-context" and path == "/start":
+                reply = json.loads(body)
+                context = bytearray(base64.b64decode(reply["context"], validate=True))
+                context[0] ^= 1
+                reply["context"] = b64(context)
+                body = json.dumps(reply, separators=(",", ":")).encode("ascii")
+            headers = [(key, value) for key, value in response.headers if key != "Content-Length"]
+        headers.append(("Content-Length", str(len(body))))
+        api.send("Fetch.fulfillRequest", {
+            "requestId": event["requestId"], "responseCode": code, "body": b64(body),
+            "responseHeaders": [{"name": key, "value": value} for key, value in headers],
+        }, session)
+
+
+@contextmanager
+def browser_document(api, route, origin):
+    target = api.call("Target.createTarget", {"url": "about:blank"})["targetId"]
+    api.route = route
+    try:
+        session = api.call("Target.attachToTarget", {"targetId": target, "flatten": True})["sessionId"]
+        api.call("Page.enable", session=session)
+        api.call("Fetch.enable", {"patterns": [{"urlPattern": "*"}]}, session=session)
+        api.call("Page.navigate", {"url": origin + "/fixture"}, session=session)
+        yield session
+    finally:
+        try:
+            require(api.call("Target.closeTarget", {"targetId": target})["success"], "target close refused")
+        finally:
+            api.route = None
+
+
+# (case, expected POST statuses, open/read/finish counts, confirmed discards,
+# ticket obtained/usable). Modes not requiring a boundary-sized vector use 37 bytes.
+START, FINISH = ("/start", 200), ("/finish", 200)
+CASES = (
+    ("valid", (START, FINISH), (1, 1, 1), [True], (True, True)),
+    ("wrong", (START,), (1, 1, 1), [True], (False, None)),
+    ("changed-client", (START,), (1, 1, 1), [True], (False, None)),
+    ("changed-verifier", (START,), (1, 1, 1), [True], (False, None)),
+    ("changed-context", (START,), (1, 1, 1), [True], (False, None)),
+    ("changed-reply-context", (START,), (1, 1, 0), [True], (False, None)),
+    ("changed-ke2", (START,), (1, 1, 1), [True], (False, None)),
+    ("binding-accessor", (START,), (1, 1, 1), [True], (False, None)),
+    ("changed-proof", (START, ("/finish", 403)), (1, 1, 1), [True], (False, None)),
+    ("out-of-scope", (START,), (1, 1, 1), [True], (False, None)),
+    ("pre-aborted", (), (0, 0, 0), [], (False, None)),
+    ("abort-start", (START,), (1, 1, 0), [True], (False, None)),
+    ("abort-finish", (START, FINISH), (1, 1, 1), [True], (False, None)),
+    ("abort-ticket", (START, FINISH), (1, 1, 1), [True], (True, False)),
+    ("hide-ticket", (START, FINISH), (1, 1, 1), [True], (True, False)),
+    ("expire-ticket", (START, FINISH), (1, 1, 1), [True], (True, False)),
+    ("entropy-trap", (), (1, 1, 0), [False], (False, None)),
+    ("over-scrub-limit", (), (1, 1, 0), [False], (False, None)),
+    ("bad-module", (START, FINISH), (2, 1, 1), [True, True], (True, True)),
+    ("reader-throws", (START, FINISH), (2, 2, 1), [True, True], (True, True)),
+    ("oversized", (START, FINISH), (2, 2, 1), [True, True], (True, True)),
+)
+
+
+def run_case(api, worker_fd, seed_fd, assets, spec, size=37):
+    mode, traffic, counts, cleanup, ticket = spec
+    origins = web_local_origins.LocalOrigins(9443, 9444) if size == 37 else (
+        web_local_origins.LocalOrigins(9741, 9742))
+    name = "synthetic-first" if size == 37 else "synthetic-second"
+    setup, record = seed_account(seed_fd, origins, name, size)
+    scope = ("a" * 32,) if mode == "out-of-scope" else (WORKSPACE,)
+    store = web_accounts.AccountStore(setup, (web_accounts.Account(name, scope, record),))
+    binding = web_admission.WebBinding(WORKSPACE, "synthetic-owner", origins.workspace.value)
+    backend = web_pake_profile.LocalPakeProfile(
+        worker_fd, expected_sha256=bytes.fromhex(WORKER_SHA), origins=origins)
+    flow = web_pake_flow.PakeFlow(
+        binding, store=store, backend=backend, sizes=backend.sizes, auth_origin=origins.account.value)
+    native_calls = []
+    sign_in = web_named_local.LocalNamedSignIn(
+        origins=origins, binding=binding, flow=flow, owner_current=lambda candidate: candidate == binding,
+        pair_native=lambda *args: native_calls.append(True),
+    )
+    ingress = web_account_ingress.AccountIngress(
+        origins=origins, sign_in=sign_in, translate_nonce=lambda cookie: NONCE if cookie == COOKIE else None)
+    route = AccountRoute(origins, ingress, assets, mode, name)
+    try:
+        with browser_document(api, route, origins.account.value) as session:
+            config = json.dumps(dict(username=name, mode=mode, size=size,
+                                     accountOrigin=origins.account.value, workspaceOrigin=origins.workspace.value))
+            tested = api.call("Runtime.evaluate", {
+                "expression": "(async () => { for (let i=0; i<100 && !globalThis.exercise; i++) "
+                              "await new Promise(r=>setTimeout(r,25)); "
+                              f"return exercise({config}); }})()",
+                "awaitPromise": True, "returnByValue": True,
+            }, session)
+            require("exceptionDetails" not in tested, "browser fixture execution failed")
+            result = tested["result"]["value"]
+            require((result["ticket"], result.get("taken")) == ticket and
+                    (not ticket[0] or result["singleUse"] is True), "unexpected ticket outcome")
+            require(tuple(result[key] for key in ("opened", "reads", "finishes")) == counts and
+                    result["cleanup"] == cleanup, "attempt ownership or cleanup mismatch")
+            require(result["cleared"] and result["immutable"] and result["reuseRefused"] and
+                    not result["accessorCalled"], "slot input or one-use contract mismatch")
+            if mode == "entropy-trap":
+                require(result["entropy"] == 1, "entropy trap not observed")
+            elif mode in ("pre-aborted", "over-scrub-limit"):
+                require(result["entropy"] == 0, "refused input reached WASM entropy")
+            require(tuple(route.calls) == traffic and not native_calls, "unexpected account traffic or pairing")
+            outstanding = int(traffic == (START,))
+            require(len(backend._worker._active) == outstanding, "unexpected live verifier state")
+    finally:
+        try:
+            sign_in.close()
+        finally:
+            closed = backend.close()
+        require(closed and not flow.cleanup_failed and flow.active_verifiers == 0,
+                "worker cleanup not confirmed")
+    print(f"PASS {mode} {size} bytes, {len(traffic)} protocol POST(s)", flush=True)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("build_dir", type=Path)
+    parser.add_argument("chromium", type=Path, help="already installed pinned headless-shell binary")
+    args = parser.parse_args()
+    network_off()
+    build = args.build_dir.resolve(strict=True) / "target"
+    chrome = args.chromium.resolve(strict=True)
+    with chrome.open("rb") as stream:
+        require(hashlib.file_digest(stream, "sha256").hexdigest() == CHROME_SHA, "Chromium hash mismatch")
+    worker = pinned(build / "release/ocop-worker", 524_480, WORKER_SHA)
+    seed = pinned(build / "release/ocop-fixture", 559_216, SEED_SHA)
+    wasm = pinned(build / "wasm32-unknown-unknown/release/ocop-browser.wasm", 204_179, WASM_SHA)
+    adapter = pinned(ROOT / "src/oc_box/web_pake_client.mjs", 12_182, ADAPTER_SHA)
+    assets = {
+        "/fixture": ("text/html", PAGE),
+        "/fixture.mjs": ("text/javascript", (HERE / "browser_fixture.mjs").read_bytes()),
+        "/adapter.mjs": ("text/javascript", adapter),
+        "/slot.mjs": ("text/javascript", (ROOT / "src/oc_box/web_named_login_slot.mjs").read_bytes()),
+        "/client.wasm": ("application/wasm", wasm),
+        "/favicon.ico": ("text/plain", b""),
+    }
+    with sealed(worker) as worker_fd, sealed(seed) as seed_fd:
+        with TemporaryDirectory(prefix="ocop-cdp-") as profile, chromium(chrome, profile) as api:
+            require(api.call("Browser.getVersion")["product"] == PRODUCT, "Chromium product mismatch")
+            print(PRODUCT, flush=True)
+            for spec in CASES:
+                run_case(api, worker_fd, seed_fd, assets, spec, 1024 if spec[0] == "oversized" else 37)
+            run_case(api, worker_fd, seed_fd, assets, CASES[0], 1024)
+    print("ALL PASS: targets and verifiers drained; Chromium exited; temporary profile removed")
+
+
+if __name__ == "__main__":
+    main()

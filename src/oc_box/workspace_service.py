@@ -10,6 +10,7 @@ import argparse
 import base64
 import contextlib
 import contextvars
+from dataclasses import dataclass
 import hashlib
 import json
 import math
@@ -37,6 +38,8 @@ else:
     import startup_output
 
 CONNECTION = contextvars.ContextVar("oc_box_v2_connection")
+LIFECYCLE_LOCK = contextvars.ContextVar("oc_box_owner_lifecycle_lock", default=None)
+_NAMED_ONLY = "named-only"
 MAX_CONTROL = 16384
 PROXY = """import os,select,socket,sys
 s=socket.create_connection(('127.0.0.1',int(sys.argv[1])),timeout=10); s.settimeout(None)
@@ -455,7 +458,7 @@ def read_control(stream):
     return value
 
 
-def validate_workspace(box, path, data):
+def _validate_workspace_identity(box, path, data):
     project = box.validate_project(data["project"])
     selected, _ = box.find_workspace(project)
     if (
@@ -464,6 +467,10 @@ def validate_workspace(box, path, data):
         or data.get("restore_incomplete")
     ):
         raise box.BoxError("Workspace identity changed; refusing live session access.")
+
+
+def validate_workspace(box, path, data):
+    _validate_workspace_identity(box, path, data)
     info = box.inspect_owned(data, env=box.maintenance_host_env())
     if not info or not info["State"].get("Running") or info["State"].get("Paused"):
         raise box.BoxError(
@@ -1062,7 +1069,16 @@ def wait_history(box, data, connection, *, timeout=30, interval=0.2):
 
 
 class Owner:
-    def __init__(self, box, path, data, *, image_preview=False, ui_bridge=False):
+    def __init__(
+        self,
+        box,
+        path,
+        data,
+        *,
+        image_preview=False,
+        ui_bridge=False,
+        named_stop_token=None,
+    ):
         if type(image_preview) is not bool:
             raise box.BoxError("Invalid private workspace image-preview setting.")
         self.box, self.path, self.data = box, path, data
@@ -1077,11 +1093,23 @@ class Owner:
         self.child = None
         self.listener = None
         self.bound = False
+        self._named_stop_token = named_stop_token
+        self._named_control = None
 
     def __enter__(self):
         box = self.box
         # The caller owns the lifecycle lock. A refused connection is stale;
         # a live controller must never be replaced by a new server.
+        named = self._named_stop_token is not None
+        live = live_connection()
+        if (named and (self.address.exists() or self.address.is_symlink())) or (
+            live is not None
+            and live.get("workspace") == self.data["id"]
+            and (named or live.get("web_mode") == _NAMED_ONLY)
+        ):
+            raise box.BoxError(
+                "Named workspace mode cannot replace an existing controller."
+            )
         if self.address.exists():
             info = self.address.lstat()
             if not stat.S_ISSOCK(info.st_mode) or info.st_uid != os.getuid():
@@ -1099,9 +1127,36 @@ class Owner:
                         "A private workspace service already owns this workspace."
                     )
         script = (box.PACKAGE / "opencode_v2_io.py").read_text()
-        command = box.exec_command(
-            self.data, ["python3", "-c", script, "lease", box.CONTAINER_OPENCODE]
-        )
+        execution_data = self.data
+        worker = ["python3", "-c", script, "lease", box.CONTAINER_OPENCODE]
+        if named:
+            if __package__:
+                from . import web_named_protocol
+            else:
+                import web_named_protocol
+            try:
+                if self.bound or self._named_control is not None:
+                    raise web_named_protocol.OwnerLeaseError()
+                self._named_control = web_named_protocol.NamedControl(
+                    self, self._named_stop_token
+                )
+                execution_data = self._named_control.pinned_data()
+                worker = self._named_control.worker_arguments(
+                    script, box.CONTAINER_OPENCODE
+                )
+            except (
+                box.BoxError,
+                OSError,
+                ValueError,
+                KeyError,
+                TypeError,
+                AttributeError,
+                RecursionError,
+            ):
+                raise box.BoxError(
+                    "Named workspace owner could not be verified."
+                ) from None
+        command = box.exec_command(execution_data, worker)
         self.errors = box.captured_output(private=True)
         self.error_file = self.errors.__enter__()
         try:
@@ -1127,7 +1182,30 @@ class Owner:
                     raise box.BoxError(
                         "Invalid private workspace service readiness response."
                     )
-            self.connection = validate_endpoint(json.loads(output.split(b"\n", 1)[0]))
+            if named:
+                try:
+                    if not output.endswith(b"\n") or output.count(b"\n") != 1:
+                        raise web_named_protocol.OwnerLeaseError()
+                    self.connection = validate_endpoint(
+                        json.loads(output, object_pairs_hook=web_named_protocol._unique)
+                    )
+                    self._named_control.seal(self.connection)
+                except (
+                    OSError,
+                    ValueError,
+                    KeyError,
+                    TypeError,
+                    AttributeError,
+                    RecursionError,
+                ):
+                    raise box.BoxError(
+                        "Named workspace owner could not be verified."
+                    ) from None
+                self.connection["web_mode"] = _NAMED_ONLY
+            else:
+                self.connection = validate_endpoint(
+                    json.loads(output.split(b"\n", 1)[0])
+                )
             self.connection["workspace"] = self.data["id"]
             self.connection["image_preview"] = self.image_preview
             if __package__:
@@ -1222,6 +1300,11 @@ class Owner:
                     "3i", stream.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12)
                 )
                 if uid != os.getuid():
+                    return
+                if self._named_control is not None:
+                    # Indistinguishable legacy attach/info clients cannot
+                    # receive the private credential from a named-only owner.
+                    self._named_control.serve(stream)
                     return
                 stream.settimeout(5)
                 request = read_control(stream)
@@ -1328,39 +1411,43 @@ class Owner:
         self.shutdown()
 
 
+@dataclass(frozen=True, slots=True, repr=False)
+class AttachedControl:
+    """Trusted borrower view of one same-user attach, not owner attestation."""
+
+    connection: dict
+    stream: socket.socket
+    peer_pid: int
+
+
 @contextlib.contextmanager
-def attach(box, path, data):
-    validate_workspace(box, path, data)
+def _attach_control(box, path, data, *, named=None):
+    """Hold the original connected stream, never acquire a second lease.
+
+    Borrowers must not close it, read additional replies, or treat a same-user
+    PID and connected descriptor as proof of the native owner's generation.
+    """
+    if named is None:
+        validate_workspace(box, path, data)
     stream = socket.socket(socket.AF_UNIX)
     try:
         stream.settimeout(5)
-        stream.connect(str(socket_path(box, data)))
-        _, uid, _ = struct.unpack(
+        stream.connect(
+            str(socket_path(box, data) if named is None else named.owner.address)
+        )
+        peer_pid, uid, _ = struct.unpack(
             "3i", stream.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12)
         )
         if uid != os.getuid():
             raise box.BoxError("Private workspace controller belongs to another user.")
-        stream.sendall(
-            (json.dumps({"action": "attach", "workspace": data["id"]}) + "\n").encode()
-        )
-        connection = read_control(stream)
-        if connection.get("error"):
-            raise box.BoxError(connection["error"])
-        validate_endpoint(connection)
-        if (
-            connection.get("workspace") != data["id"]
-            or connection.get("version") != data.get("opencode_version")
-            or "session" not in connection
-            or (
-                connection["session"] is not None
-                and not box.valid_session_id(connection["session"])
-            )
-        ):
-            raise box.BoxError(
-                "Live service does not match this workspace/version/session."
-            )
+        if named is not None:
+            connection = named.exchange(stream, peer_pid)
+        else:
+            connection = _legacy_attachment(box, data, stream)
     except (OSError, ValueError) as exc:
         stream.close()
+        if named is not None:
+            raise
         raise box.BoxError(
             "No ready live OpenCode 2.x workspace service. Start oc-box or 'oc-box web' first; no credentials were refreshed."
         ) from exc
@@ -1368,9 +1455,38 @@ def attach(box, path, data):
         stream.close()
         raise
     try:
-        yield connection
+        yield AttachedControl(connection, stream, peer_pid)
     finally:
         stream.close()
+
+
+def _legacy_attachment(box, data, stream):
+    stream.sendall(
+        (json.dumps({"action": "attach", "workspace": data["id"]}) + "\n").encode()
+    )
+    connection = read_control(stream)
+    if connection.get("error"):
+        raise box.BoxError(connection["error"])
+    validate_endpoint(connection)
+    if (
+        connection.get("workspace") != data["id"]
+        or connection.get("version") != data.get("opencode_version")
+        or "session" not in connection
+        or (
+            connection["session"] is not None
+            and not box.valid_session_id(connection["session"])
+        )
+    ):
+        raise box.BoxError(
+            "Live service does not match this workspace/version/session."
+        )
+    return connection
+
+
+@contextlib.contextmanager
+def attach(box, path, data):
+    with _attach_control(box, path, data) as attached:
+        yield attached.connection
 
 
 def relay_command(box, data, port):
@@ -1633,6 +1749,15 @@ class Gateway:
 
 
 def web_session(box, data, connection, args):
+    live = live_connection()
+    if connection.get("web_mode") == _NAMED_ONLY or (
+        live is not None
+        and live.get("workspace") == data["id"]
+        and live.get("web_mode") == _NAMED_ONLY
+    ):
+        raise box.BoxError(
+            "The one-use link is unavailable on a named-only workspace owner."
+        )
     if __package__:
         from . import ui_state
     else:

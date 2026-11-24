@@ -72,6 +72,7 @@ File: oc-box.info,  Node: Synopsis,  Next: Description,  Prev: Name,  Up: Top
      oc-box tui [--project PATH | --workspace ID] [--read-only] [--demo]
      oc-box upgrade [--check] [--stable | --devel] [--vault] [--tui]
      oc-box upgrade --auto-update on|off
+     oc-box --uninstall [--dry-run]
      oc-box secrets init|passwd [--min-passphrase-length N]
      oc-box secrets list
      oc-box secrets set|remove NAME
@@ -760,12 +761,20 @@ APIs and private saved-tab layout can change within 2.x, and not every
 release has been tested.
 
 Studio replaces the compact session index.  Studio, Dashboard and Chat
-focus change the layout, not the selected native conversation.  The
-separate no-chat manager distinguishes verified open tabs from
-on-demand, read-only history for the registered workspace project.  It
-makes other views unavailable rather than granting host catalogs, logs,
-workspace/backup operations, or a host terminal.  It is not the offline
-demo's Full TUI or the local ‘oc-box tui’ manager.
+focus change the layout, not the selected native conversation.  Studio
+shows the workspace name, a neutral guest label, a sessions rail and a
+closable workspace inspector; wide Studio panes resize by dragging or
+with the divider arrow keys.  The rail and the separate no-chat
+workspace manager distinguish verified open TUI tabs from on-demand,
+metadata-only history for the registered workspace project.
+**Archived** filters that history; it does not read host archives.  The
+browser manager offers seven no-chat views.  Status and Sessions show
+workspace metadata; Settings changes display preferences for the current
+page only.  Terminals, Logs, Storage and Backup/restore provide
+host-side guidance, not browser access to those operations.  Use
+Left/Right, Home/End, or 1–7 on the manager tabs.  Opening a view never
+fetches history or starts monitoring.  The browser manager is not the
+offline demo's Full TUI or the local ‘oc-box tui’ manager.
 
 The one-use link is the only browser sign-in method and the HTTP relay
 binds to ‘127.0.0.1’ only.  Vault unlock supplies workspace credentials,
@@ -1977,10 +1986,14 @@ credentials are migrated/deleted.
 
 GitHub automatic updates are off by default and follow the saved release
 channel.  ‘--auto-update on’ saves ‘auto_update: true’ in the existing
-host oc-box configuration, retaining settings such as ‘pass_env’.
-Normal installed ‘start’ launches check before Podman/workspace setup
-and, when updated, continue with the same arguments.  No background
-daemon, active-session update, or automatic check for
+host oc-box configuration, retaining settings such as ‘pass_env’.  The
+verified active launcher checks before Podman/workspace setup.  The
+installer rechecks the active source, and only a compatible, verified
+target continues with the same arguments, holding its use lock across
+the restart.  Use explicit upgrade for a target without the automatic
+handoff protocol.  A retained copy using this protocol does not update
+or recreate a missing installation.  No background daemon,
+active-session update, or automatic check for
 list/status/terminal/reset/purge is introduced.  Direct source-checkout
 launches skip automatic updates.  A concurrent check does not block
 another normal launcher.  Network/download failures are reported and the
@@ -2000,7 +2013,31 @@ for a reviewed alternate deployment.  Updates inside a container are
 refused because its private HOME is not the host installation.  Git is
 required for public updates; build tools are not.
 
-4.20 secrets
+4.20 uninstall
+==============
+
+Run ‘oc-box --uninstall’ as the regular host user from the verified
+active GitHub-installed launcher.  Review the selected release and
+installed files on the controlling terminal, then type ‘UNINSTALL
+OC-BOX’.  ‘--dry-run’ prints the launcher-only review without prompting
+or deleting anything.  Use ‘oc-box --uninstall --help’ for the dedicated
+help.
+
+This removes only the reviewed launcher, selected installed release, and
+its verified links, manuals and completion.  It keeps older releases and
+all workspace containers, home volumes, project files and markers,
+registry, vault, settings, logs, backups and host OpenCode history.  It
+does not contact Podman or OpenCode.  A missing or changed [installation
+receipt](installation.md#installation-ownership-receipt), an in-use
+launcher or an unverified installation refuses.  Use the owning package
+manager for a Python-package installation; oc-box will not invoke that
+manager or delete its environment.
+
+Full cleanup is not enabled in this candidate.  ‘--full’ refuses rather
+than falling back to launcher-only removal.  Neither mode may remove
+host OpenCode history.
+
+4.21 secrets
 ============
 
 Manage an optional encrypted credential vault on the host.  This command
@@ -2165,7 +2202,7 @@ This is not a general redaction filter for OpenCode, provider logs, tool
 output, or session archives: an agent can still print, save, or transmit
 a credential it has received.
 
-4.21 credentials
+4.22 credentials
 ================
 
 View or change **names-only** forwarding policy for an existing
@@ -2258,7 +2295,7 @@ container data.  Selection is reduced forwarding, not an isolation
 boundary from secrets already inside the container.  Delivered keys
 remain readable by the agent/tools with normal container permissions.
 
-4.22 backup
+4.23 backup
 ===========
 
 Create one encrypted ‘.ocbox’ file for an existing workspace (available
@@ -2338,7 +2375,7 @@ file may remain: inspect it with ‘backup-info’ before retrying.  The
 source remains stopped, not reset/deleted.  The temporary capture image
 is removed by its unique tag; shared base images remain.
 
-4.23 Include host settings for migration
+4.24 Include host settings for migration
 ========================================
 
 On supporting stable and development releases, ‘backup --host --output
@@ -2377,7 +2414,7 @@ Treat this archive and its age identity/passphrase as sensitive.  The
 vault remains separately encrypted with its original passphrase.  This
 is neither a whole-machine backup nor a credential revocation mechanism.
 
-4.24 backup-info
+4.25 backup-info
 ================
 
 Decrypt/verify a backup's manifest and ciphertext checksums without
@@ -2407,7 +2444,7 @@ authentication chunk.  Wrong keys, corruption, missing/extra components,
 unsupported versions, or unsafe outer envelope paths are rejected before
 restore activation.
 
-4.25 restore
+4.26 restore
 ============
 
 Streaming failures identify the producer/consumer exit code and a fixed
@@ -2508,7 +2545,7 @@ incomplete restores), and retry to a new destination.  Orphan staging
 directories may need manual host removal after inspection; the launcher
 never deletes a caller-supplied tree on marker alone.
 
-4.26 Restore host settings on a new machine
+4.27 Restore host settings on a new machine
 ===========================================
 
 Install oc-box, age and the required OpenCode version on the destination
@@ -5182,22 +5219,22 @@ Tag Table:
 Node: Top210
 Node: Name769
 Node: Synopsis930
-Node: Description5132
-Node: Commands10952
-Node: Options144309
-Node: Lifecycle and persistence207374
-Node: Distribution images209674
-Node: Sessions and recovery214751
-Node: Devices and host permissions221336
-Node: Resource reports223682
-Node: Configuration and environment225793
-Node: Files237174
-Node: Exit status248084
-Node: Examples249492
-Node: Troubleshooting251631
-Node: Installation and manuals264123
-Node: Authors and license274313
-Node: See also274920
+Node: Description5168
+Node: Commands10988
+Node: Options146337
+Node: Lifecycle and persistence209402
+Node: Distribution images211702
+Node: Sessions and recovery216779
+Node: Devices and host permissions223364
+Node: Resource reports225710
+Node: Configuration and environment227821
+Node: Files239202
+Node: Exit status250112
+Node: Examples251520
+Node: Troubleshooting253659
+Node: Installation and manuals266151
+Node: Authors and license276341
+Node: See also276948
 
 End Tag Table
 

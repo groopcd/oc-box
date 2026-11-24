@@ -4,15 +4,22 @@
   "use strict";
   const root = document.getElementById("web-shell");
   if (!root) return;
+  const byId = id => document.getElementById("workspace-" + id);
   const tabs = document.getElementById("session-tabs");
+  const groups = {
+    tabs: { list: tabs, panel: byId("open-group") },
+    history: { list: byId("history-list"), panel: byId("history-group") },
+    archived: { list: byId("archived-list"), panel: byId("archived-group") },
+  };
   const frame = document.getElementById("native");
   const retained = document.getElementById("retained-selection");
   const notice = document.getElementById("selection-status");
   const status = document.getElementById("catalog-status");
   const empty = document.getElementById("no-selection");
   const refresh = document.getElementById("refresh-tabs");
-  const conversationTitle = document.getElementById("workspace-conversation-title");
-  const currentSession = document.getElementById("workspace-current-session");
+  const conversationTitle = byId("conversation-title");
+  const conversationSource = byId("conversation-source");
+  const currentSession = byId("current-session");
   const endpoint = "/auth/oc-box-sessions/catalog";
   const verifyEndpoint = "/auth/oc-box-sessions/selection";
   const historyEndpoint = "/auth/oc-box-sessions/history";
@@ -27,6 +34,7 @@
   let navigation = 0;
   let sawFrameLoad = false;
   let membershipKnown = false;
+  let membershipRefreshFailed = false;
   let workspace = null;
   let ready = false;
 
@@ -58,36 +66,118 @@
       detail: selection()
     }));
   }
-  function render() {
-    const current = awaitingLoad ? selected : selection();
-    const activeId = membershipKnown && current && members.some(item => item.id === current.activeRoot) ?
-      current.activeRoot : awaitingLoad ? selected?.id : current?.sessionID;
-    tabs.replaceChildren();
-    for (const item of workspace.visibleRows()) {
-      const button = document.createElement("button");
-      button.type = "button";
-      if (workspace.manager()) {
-        button.setAttribute("aria-label", "Open in native chat: " + (item.title || item.id));
-      } else {
+  function rowIcon(name) {
+    const namespace = "http://www.w3.org/2000/svg";
+    const svg = document.createElementNS(namespace, "svg");
+    const use = document.createElementNS(namespace, "use");
+    svg.setAttribute("class", "workspace-icon");
+    svg.setAttribute("aria-hidden", "true");
+    use.setAttribute("href", "#i-" + name);
+    svg.append(use);
+    return svg;
+  }
+  function sessionButton(item, source) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.title = item.id;
+    button.dataset.sessionId = item.id;
+    button.dataset.sessionSource = source;
+    button.addEventListener("click", () => workspace.open(item));
+    return button;
+  }
+  function renderRail(rows, activeId, currentId, openIds) {
+    const focused = document.activeElement?.dataset;
+    const source = workspace.source();
+    const isTabs = source === "tabs";
+    let refocus;
+    for (const [kind, { list, panel }] of Object.entries(groups)) {
+      list.replaceChildren();
+      panel.hidden = kind !== source;
+    }
+    for (const item of rows) {
+      const kind = isTabs ? "tabs" : item.archived ? "archived" : "history";
+      const button = sessionButton(item, source);
+      button.className = "workspace-session" + (item.child ? " workspace-child" : "");
+      const title = item.title || item.id;
+      if (isTabs) {
         button.setAttribute("role", "tab");
         button.setAttribute("aria-controls", "native");
+        button.setAttribute("aria-label", title);
         button.setAttribute("aria-selected", String(activeId === item.id));
       }
-      button.textContent = (item.title || item.id) + (workspace.source() === "history" ?
-        (item.child ? " · Child" : "") + (item.archived ? " · Archived" : "") : "");
-      button.title = item.id;
-      button.dataset.sessionSource = workspace.source();
-      button.addEventListener("click", () => workspace.open(item));
-      tabs.append(button);
+      if (!isTabs) button.setAttribute("aria-current", String(currentId === item.id));
+      const copy = document.createElement("span");
+      const titleNode = document.createElement("span");
+      titleNode.className = "workspace-session-title";
+      titleNode.setAttribute("dir", "auto");
+      titleNode.textContent = title;
+      const description = document.createElement("small");
+      description.textContent = isTabs ? "Open TUI tab" :
+        [item.child ? "Child session" : null, item.archived ? "Archived" : null,
+          openIds.has(item.id) ? "In open TUI tabs" : null]
+          .filter(Boolean).join(" · ") || "Workspace history";
+      copy.append(titleNode, description);
+      button.append(rowIcon(item.child ? "child" : item.archived ? "archive" : "chat"), copy);
+      groups[kind].panel.hidden = false;
+      groups[kind].list.append(button);
+      if (focused?.sessionId === item.id && focused.sessionSource === source) refocus = button;
     }
+    refocus?.focus({ preventScroll: true });
+  }
+  function renderManagerRows(rows, openIds) {
+    const tbody = byId("manager-session-rows");
+    const source = workspace.source();
+    const focused = document.activeElement?.dataset;
+    let refocus;
+    const rendered = rows.map(item => {
+      const tr = document.createElement("tr");
+      const title = item.title || item.id;
+      const button = sessionButton(item, source);
+      button.className = "workspace-manager-text-action";
+      button.setAttribute("aria-label", "Open in native chat: " + title);
+      button.setAttribute("dir", "auto");
+      button.textContent = title;
+      if (selected?.id === item.id) {
+        tr.className = "is-selected";
+        button.setAttribute("aria-current", "true");
+      }
+      if (focused?.sessionId === item.id && focused.sessionSource === source) refocus = button;
+      const session = document.createElement("td");
+      const id = document.createElement("small");
+      id.textContent = item.id;
+      session.append(button, id);
+      const provenance = document.createElement("td");
+      provenance.textContent = source === "tabs" ? "Open TUI tab" :
+        (item.archived ? "Archived in workspace" : "Workspace history") + (item.child ? " · Child session" : "");
+      const membership = document.createElement("td");
+      membership.textContent = !membershipKnown ? "Unknown" :
+        openIds.has(item.id) ? "Open in TUI" : "Not in current TUI catalog";
+      tr.append(session, provenance, membership);
+      return tr;
+    });
+    tbody.replaceChildren(...rendered);
+    byId("manager-session-table").hidden = rendered.length === 0;
+    refocus?.focus({ preventScroll: true });
+  }
+  function render() {
+    const current = awaitingLoad ? selected : selection();
+    const currentId = awaitingLoad ? selected?.id : current?.sessionID;
+    const openIds = new Set(membershipKnown ? members.map(item => item.id) : []);
+    const activeId = openIds.has(current?.activeRoot) ? current.activeRoot : currentId;
+    if (!workspace.manager()) renderRail(workspace.visibleRows(), activeId, currentId, openIds);
+    else if (workspace.managerSessions()) renderManagerRows(workspace.visibleRows(), openIds);
     retained.replaceChildren();
     conversationTitle.textContent = selected?.title || "Native conversation";
+    conversationSource.textContent = "OpenCode / Native conversation";
     currentSession.textContent = selected ? (selected.title || selected.id) + " · " + selected.id :
       "No conversation selected.";
     if (selected) {
-      selected.member = membershipKnown && members.some(item => item.id === selected.id);
-      const childOfOpenTab = membershipKnown && !selected.member &&
-        members.some(item => item.id === selected.activeRoot);
+      selected.member = openIds.has(selected.id);
+      const childOfOpenTab = !selected.member && openIds.has(selected.activeRoot);
+      const sourceLabel = selected.historyKind === "archived" ? "Archived in workspace" :
+        selected.historyKind === "history" ? "Workspace history" :
+        selected.member ? "Open TUI tab" : childOfOpenTab ? "Child of open TUI tab" : "Browser selection";
+      conversationSource.textContent = "OpenCode / " + sourceLabel;
       notice.textContent = selected.origin + (selected.member ? "" : childOfOpenTab ?
         " — viewing a child of open TUI tab " + selected.activeRoot :
         membershipKnown ? " — selection is not in the latest TUI membership; conversation retained" :
@@ -99,14 +189,24 @@
         retained.append(label);
       }
     } else notice.textContent = "No native conversation is currently verified. Choose a tab or use native Home.";
-    status.textContent = (membershipKnown ? members.length + " verified open TUI tab(s). " :
+    status.textContent = membershipRefreshFailed ?
+      "TUI membership could not be refreshed. Conversation retained; retry or open native Home." :
+      (membershipKnown ? members.length + " verified open TUI tab(s). " :
       "TUI membership unavailable; open count unknown. ") +
       "Refresh does not reload the selected conversation or verify native focus.";
+    byId("manager-tab-count").textContent = membershipKnown ? String(openIds.size) : "Unknown";
+    byId("manager-selection").textContent = selected?.title || selected?.id || "None";
+    byId("manager-selection-details").textContent = selected ?
+      (selected.title || selected.id) + " · " + selected.id + ". " + notice.textContent : "No browser conversation selected.";
+    byId("manager-membership-status").textContent = membershipRefreshFailed ? "Refresh failed; open count unknown." :
+      membershipKnown ? `${openIds.size} verified open TUI tabs` : "Unavailable; open count unknown.";
+    byId("manager-history-status").textContent = workspace.historySummary();
+    workspace.updateRefresh();
   }
-  function select(item, origin) {
+  function select(item, origin, historyKind = null) {
     const next = row(item);
     navigation += 1;
-    selected = { ...next, origin, member: members.some(value => value.id === next.id),
+    selected = { ...next, origin, historyKind, member: members.some(value => value.id === next.id),
       activeRoot: next.activeRoot ?? (members.some(value => value.id === next.id) ? next.id : null) };
     let differs = frame.getAttribute("src") !== next.route;
     try {
@@ -154,6 +254,7 @@
     // URL observation is not native TUI focus evidence. Verify existing identity
     // against this pinned service before updating the outer selected-tab claim.
     busy = true;
+    workspace.updateRefresh();
     const revision = navigation;
     try {
       const response = await fetch(verifyEndpoint + "?session=" + encodeURIComponent(id),
@@ -179,7 +280,7 @@
     }
     finally {
       busy = false;
-      refresh.disabled = workspace.isHistoryLoading();
+      workspace.updateRefresh();
     }
   }
   function frameReady() {
@@ -201,7 +302,7 @@
   async function refreshTabs() {
     if (busy) return;
     busy = true;
-    refresh.disabled = true;
+    workspace.updateRefresh();
     try {
       const response = await fetch(endpoint, { credentials: "same-origin", headers: { Accept: "application/json" } });
       if (!response.ok) throw new Error("catalog");
@@ -211,36 +312,37 @@
       if (new Set(next.map(item => item.id)).size !== next.length) throw new Error("catalog");
       members = next;
       membershipKnown = data.status === "valid";
+      membershipRefreshFailed = false;
       render(); // Deliberately never select/reload a frame on metadata refresh.
       changed();
     } catch {
       membershipKnown = false;
+      membershipRefreshFailed = true;
       members = []; // A failed refresh cannot leave a stale count or action.
       render();
       changed();
-      status.textContent = "TUI membership could not be refreshed. Conversation retained; retry or open native Home.";
     } finally {
       busy = false;
-      refresh.disabled = workspace.isHistoryLoading();
+      workspace.updateRefresh();
     }
   }
-  function studioDividers(content) {
+  function studioDividers(content, wide) {
     const minPane = 208; // Must agree with the wide Studio CSS tracks.
     const minChat = 420;
-    const gutter = 12;
-    const defaults = { left: 248, right: 264 };
+    const gutter = 10;
+    const defaults = { left: 248, right: 278 };
     const requested = { ...defaults };
     const widths = {};
     const handles = {
       left: document.getElementById("workspace-divider-left"),
       right: document.getElementById("workspace-divider-right"),
     };
-    const wide = window.matchMedia("(min-width: 66rem)");
     const other = side => side === "left" ? "right" : "left";
     const budget = () => Math.max(2 * minPane, content.clientWidth - minChat - 2 * gutter);
     const clamp = (value, max) => Math.min(Math.max(value, minPane), max);
     let priority = "left";
     let drag = null;
+    const paired = () => root.dataset.layout === "studio" && root.dataset.workspaceInspector === "true";
 
     function cancel() {
       if (!drag) return;
@@ -250,8 +352,11 @@
       if (handle.hasPointerCapture(id)) handle.releasePointerCapture(id);
     }
     function fit() {
-      if (!["studio", "dashboard"].includes(root.dataset.layout) || !wide.matches) { cancel(); return; }
-      if (root.dataset.layout === "dashboard") {
+      const enabled = ["studio", "dashboard"].includes(root.dataset.layout) && wide.matches;
+      handles.left.hidden = !enabled;
+      handles.right.hidden = !enabled || !paired();
+      if (!enabled) { cancel(); return; }
+      if (!paired()) {
         const maximum = Math.max(minPane, content.clientWidth - minChat - gutter);
         widths.left = clamp(requested.left, maximum);
         root.style.setProperty("--workspace-left", widths.left + "px");
@@ -274,8 +379,7 @@
       }
     }
     function resize(side, value) {
-      const limit = root.dataset.layout === "dashboard" ?
-        Math.max(minPane, content.clientWidth - minChat - gutter) : budget() - minPane;
+      const limit = paired() ? budget() - minPane : Math.max(minPane, content.clientWidth - minChat - gutter);
       requested[side] = clamp(value, limit);
       priority = side;
       fit();
@@ -284,7 +388,7 @@
       const handle = handles[side];
       const direction = side === "left" ? 1 : -1;
       handle.addEventListener("pointerdown", event => {
-        if (!ready || drag || event.button !== 0 || !event.isPrimary || !wide.matches) return;
+        if (!ready || handle.hidden || drag || event.button !== 0 || !event.isPrimary) return;
         handle.setPointerCapture(event.pointerId);
         drag = { handle, id: event.pointerId, startX: event.clientX, startWidth: widths[side] };
         root.dataset.resizing = side;
@@ -300,9 +404,9 @@
           if (drag?.handle === handle && drag.id === event.pointerId) cancel();
         });
       }
-      handle.addEventListener("dblclick", () => { if (ready) resize(side, defaults[side]); });
+      handle.addEventListener("dblclick", () => { if (ready && !handle.hidden) resize(side, defaults[side]); });
       handle.addEventListener("keydown", event => {
-        if (!ready) return;
+        if (!ready || handle.hidden) return;
         const step = event.shiftKey ? 64 : 16;
         let next;
         if (event.key === "ArrowLeft") next = widths[side] - direction * step;
@@ -316,30 +420,57 @@
       });
     }
     const refit = () => { if (ready) fit(); };
-    wide.addEventListener("change", refit);
     window.addEventListener("resize", refit);
     return { fit, cancel };
   }
   function workspaceLayout() {
-    const byId = id => document.getElementById("workspace-" + id);
     const buttons = id => Array.from(byId(id).querySelectorAll("button"));
     const views = buttons("layouts");
-    const sections = buttons("manager-nav");
+    const managerRegion = byId("manager");
+    const sections = buttons("manager-nav").map(tab => ({
+      tab, name: tab.dataset.section, panel: document.getElementById(tab.getAttribute("aria-controls")),
+    }));
+    const statusRefresh = byId("manager-status-refresh"), sessionRefresh = byId("manager-session-refresh");
+    const managerSource = byId("manager-source"), managerSearch = byId("manager-search");
+    const includeArchives = byId("manager-include-archives"), clearSearch = byId("manager-clear-search");
+    const density = byId("manager-density"), expandDetails = byId("manager-expand-details");
+    const displayDefaults = { density: "comfortable", expanded: false };
+    let display = displayDefaults;
     const search = byId("search");
     const library = byId("library");
     const toggles = { sessions: byId("sessions-toggle"), inspector: byId("inspector-toggle") };
     const overview = byId("overview"), overviewTitle = byId("overview-title"), chat = byId("chat");
-    const roomy = window.matchMedia("(min-width: 46rem)");
-    const openTabs = byId("open-tabs"), historyTabs = byId("history-tabs");
-    const dividers = studioDividers(byId("content"));
+    const sessionsClose = byId("sessions-close");
+    const inspectorClose = byId("inspector-close"), inspectorLink = byId("inspector-link");
+    const roomy = window.matchMedia("(min-width: 681px)");
+    const wide = window.matchMedia("(min-width: 1001px)");
+    const sources = { tabs: byId("open-tabs"), history: byId("history-tabs"), archived: byId("archived-tabs") };
+    const dividers = studioDividers(byId("content"), wide);
+    const layouts = {
+      studio: ["Studio.", "Sessions, chat and workspace context."],
+      dashboard: ["Dashboard.", "Workspace status first, with the selected conversation underneath."],
+      focus: ["Chat focus.", "More room for the conversation; open sessions or the inspector on demand."],
+      manager: ["Workspace manager.", "Seven views without chat. This browser can access only workspace metadata."],
+    };
     let view = "studio";
     let lastChat = view;
     let section = "status";
     let panel = null;
+    let dockedInspector = true;
+    let inspectorReturn = null;
     let source = "tabs", historyState = "idle", historyRows = [];
     let historyController, verifyingHistory = false;
     const manager = () => view === "manager";
-    const drawers = () => view === "focus" || (view === "studio" && !roomy.matches);
+    const managerSessions = () => manager() && section === "sessions";
+    const sessionsDrawer = () => !manager() && (view === "focus" || !roomy.matches);
+    const inspectorDrawer = () => view === "focus" || (view === "studio" && !wide.matches);
+    const historySource = () => source !== "tabs";
+    const listStatus = () => byId(managerSessions() ? "manager-session-count" : "search-status");
+    const refreshSource = () => historySource() ? loadHistory() : refreshTabs();
+    function updateRefresh() {
+      statusRefresh.disabled = busy;
+      refresh.disabled = sessionRefresh.disabled = historySource() ? historyState === "loading" : busy;
+    }
 
     async function loadHistory() {
       historyController?.abort();
@@ -347,8 +478,7 @@
       historyController = controller;
       historyState = "loading";
       historyRows = [];
-      if (source === "history") refresh.disabled = true;
-      if (source === "history") render();
+      render();
       try {
         const response = await fetch(historyEndpoint, {
           credentials: "same-origin", headers: { Accept: "application/json" },
@@ -374,43 +504,60 @@
       } finally {
         if (historyController === controller) {
           historyController = null;
-          if (source === "history") {
-            refresh.disabled = false;
-            render();
-          }
+          render();
         }
       }
     }
     function setSource(value) {
+      if (!Object.hasOwn(sources, value)) return;
       if (source !== value) navigation += 1; // An away/back source change invalidates pending opens.
       source = value;
-      openTabs.setAttribute("aria-pressed", String(value === "tabs"));
-      historyTabs.setAttribute("aria-pressed", String(value === "history"));
-      tabs.setAttribute("aria-label", value === "history" ? "Workspace history" : "Open native TUI tabs");
-      refresh.textContent = value === "history" ? "Refresh workspace history" : "Refresh TUI tabs";
-      refresh.disabled = value === "history" ? historyState === "loading" : busy;
+      for (const [kind, button] of Object.entries(sources)) {
+        button.setAttribute("aria-pressed", String(value === kind));
+      }
+      managerSource.value = source;
+      byId("manager-archive-filter").hidden = source !== "history";
+      const label = historySource() ? "Refresh workspace history" : "Refresh TUI tabs";
+      for (const button of [refresh, sessionRefresh]) {
+        button.setAttribute("aria-label", label);
+        button.title = label;
+      }
       render();
-      if (value === "history" && historyState === "idle") void loadHistory();
+      if (historySource() && historyState === "idle") void loadHistory();
     }
     function apply() {
       root.dataset.layout = view;
+      const [name, description] = layouts[view];
+      byId("layout-name").textContent = name;
+      byId("layout-description").textContent = description +
+        (view === "studio" && wide.matches ? " Drag the dividers, or focus one and use the arrow keys." : "");
       for (const button of views) button.setAttribute("aria-pressed", String(button.dataset.view === view));
-      for (const button of sections) button.setAttribute("aria-pressed", String(button.dataset.section === section));
-      byId("manager-nav").hidden = !manager();
-      chat.hidden = manager(); // Never move the frame or write its src here.
-      chat.inert = drawers() && panel !== null;
-      overview.hidden = manager() ? section !== "status" : drawers() && panel !== "inspector";
-      const unavailable = manager() && section !== "status" && section !== "sessions";
-      byId("unavailable").hidden = !unavailable;
-      if (unavailable) byId("unavailable-title").textContent =
-        sections.find(button => button.dataset.section === section).textContent;
-      library.hidden = manager() ? section !== "sessions" : drawers() && panel !== "sessions";
-      tabs.setAttribute("role", manager() ? "group" : "tablist");
-      root.dataset.workspaceDrawers = drawers() ? "true" : "false";
-      for (const [name, button] of Object.entries(toggles)) {
-        button.hidden = !drawers();
-        button.setAttribute("aria-expanded", String(drawers() && panel === name));
+      for (const { tab, name: panelName, panel: sectionPanel } of sections) {
+        const active = panelName === section;
+        tab.setAttribute("aria-selected", String(active));
+        tab.tabIndex = active ? 0 : -1;
+        sectionPanel.hidden = !active;
       }
+      managerRegion.hidden = !manager();
+      statusRefresh.hidden = section !== "status";
+      byId("content").hidden = manager();
+      chat.hidden = manager(); // Never move the frame or write its src here.
+      chat.inert = panel !== null;
+      overview.hidden = manager() || (inspectorDrawer() ? panel !== "inspector" : view === "studio" && !dockedInspector);
+      library.hidden = manager() || (sessionsDrawer() && panel !== "sessions");
+      library.inert = panel === "inspector";
+      root.dataset.workspaceSessionsDrawer = String(sessionsDrawer());
+      root.dataset.workspaceInspectorDrawer = String(inspectorDrawer());
+      root.dataset.workspaceInspector = String(!overview.hidden);
+      toggles.sessions.hidden = !sessionsDrawer();
+      sessionsClose.hidden = !sessionsDrawer();
+      toggles.sessions.setAttribute("aria-expanded", String(panel === "sessions"));
+      toggles.inspector.hidden = manager() || view === "dashboard";
+      toggles.inspector.setAttribute("aria-expanded", String(!overview.hidden));
+      inspectorClose.hidden = toggles.inspector.hidden;
+      inspectorLink.setAttribute("aria-expanded", String(!overview.hidden));
+      byId("inspector-context").textContent = view === "dashboard" ?
+        "Workspace overview" : "Workspace inspector";
       dividers.fit();
     }
     function show(next) {
@@ -419,79 +566,173 @@
       dividers.cancel();
       view = next;
       panel = null;
+      dockedInspector = true;
+      inspectorReturn = null;
       apply();
       navigation += 1; // Invalidate outstanding native route checks as well.
       render();
       changed(); // Invalidate File reads even for a round trip to the same selection.
-      if (!manager()) void observeNativeRoute();
+      if (manager()) sections.find(entry => entry.name === section).tab.focus();
+      else void observeNativeRoute();
     }
-    function togglePanel(name) {
-      if (!drawers()) return;
+    function showSection(next, focus = false) {
+      if (!manager()) return;
+      if (section !== next.name) {
+        navigation += 1;
+        section = next.name;
+        apply();
+        render();
+      }
+      if (focus) next.tab.focus();
+    }
+    function stageDisplay(value, message) {
+      density.value = value.density;
+      expandDetails.checked = value.expanded;
+      byId("settings-notice").textContent = message;
+    }
+    function applyDisplay() {
+      if (density.value !== "comfortable" && density.value !== "compact") return;
+      display = { density: density.value, expanded: expandDetails.checked };
+      if (display.density === "compact") managerRegion.dataset.compact = "";
+      else delete managerRegion.dataset.compact;
+      byId("manager-details").open = display.expanded;
+      byId("settings-notice").textContent = "Applied for this page only. No host changes.";
+    }
+    function toggleSessions() {
+      if (!sessionsDrawer()) return;
       navigation += 1;
-      panel = panel === name ? null : name;
+      panel = panel === "sessions" ? null : "sessions";
       apply();
-      (panel ? (panel === "sessions" ? search : overviewTitle) : toggles[name]).focus();
+      (panel ? search : toggles.sessions).focus();
+    }
+    function showInspector(open, trigger = toggles.inspector) {
+      if (manager()) return;
+      if (view === "dashboard") {
+        // The dashboard already shows status above chat. Close a narrow
+        // session drawer before taking focus there.
+        if (panel === "sessions") toggleSessions();
+        overviewTitle.focus();
+        return;
+      }
+      navigation += 1;
+      dividers.cancel();
+      if (open) inspectorReturn = trigger === inspectorLink && sessionsDrawer() ? toggles.sessions : trigger;
+      if (inspectorDrawer()) panel = open ? "inspector" : null;
+      else dockedInspector = open;
+      apply();
+      let returnTo = inspectorReturn || toggles.inspector;
+      if (returnTo === inspectorLink && library.hidden) returnTo = toggles.sessions;
+      (open ? overviewTitle : returnTo.hidden ? toggles.inspector : returnTo).focus();
     }
     const on = (target, type, listener) =>
       target.addEventListener(type, event => { if (ready) listener(event); });
     for (const button of views) on(button, "click", () => show(button.dataset.view));
-    for (const button of sections) on(button, "click", () => {
-      if (section !== button.dataset.section) navigation += 1;
-      section = button.dataset.section;
-      apply();
-    });
-    for (const [name, button] of Object.entries(toggles)) on(button, "click", () => togglePanel(name));
-    on(root, "keydown", event => {
-      if (drawers() && panel && event.key === "Escape" && !event.defaultPrevented) {
+    sections.forEach((entry, index) => {
+      on(entry.tab, "click", () => showSection(entry, true));
+      on(entry.tab, "keydown", event => {
+        if (event.defaultPrevented || event.isComposing || event.altKey || event.ctrlKey || event.metaKey) return;
+        const last = sections.length - 1;
+        const target = { ArrowLeft: index ? index - 1 : last,
+          ArrowRight: index === last ? 0 : index + 1, Home: 0, End: last };
+        const next = Object.hasOwn(target, event.key) ? target[event.key] :
+          /^[1-7]$/.test(event.key) ? Number(event.key) - 1 : null;
+        if (next === null) return;
         event.preventDefault();
-        togglePanel(panel);
+        showSection(sections[next], true);
+      });
+    });
+    on(statusRefresh, "click", () => { if (manager() && section === "status") void refreshTabs(); });
+    on(sessionRefresh, "click", () => { if (managerSessions()) void refreshSource(); });
+    on(managerSource, "change", () => { if (managerSessions()) setSource(managerSource.value); });
+    on(managerSearch, "input", render);
+    on(includeArchives, "change", () => {
+      navigation += 1;
+      render();
+    });
+    on(clearSearch, "click", () => {
+      managerSearch.value = "";
+      render();
+      managerSearch.focus();
+    });
+    on(byId("settings-apply"), "click", applyDisplay);
+    on(byId("settings-defaults"), "click", () => stageDisplay(displayDefaults, "Defaults staged. Apply to use them."));
+    on(byId("settings-revert"), "click", () => stageDisplay(display, "Draft reverted."));
+    on(managerRegion, "keydown", event => {
+      if (section !== "settings" || event.key !== "Escape" || event.defaultPrevented || event.isComposing) return;
+      event.preventDefault();
+      stageDisplay(display, "Draft reverted.");
+    });
+    on(toggles.sessions, "click", toggleSessions);
+    on(sessionsClose, "click", toggleSessions);
+    on(toggles.inspector, "click", () => showInspector(overview.hidden));
+    on(inspectorClose, "click", () => showInspector(false));
+    on(inspectorLink, "click", () => showInspector(true, inspectorLink));
+    on(root, "keydown", event => {
+      if (panel && event.key === "Escape" && !event.defaultPrevented) {
+        event.preventDefault();
+        if (panel === "sessions") toggleSessions();
+        else showInspector(false);
       }
     });
-    on(roomy, "change", () => {
-      if (view !== "studio") return;
+    function fitPanes() {
       const focused = document.activeElement;
-      panel = drawers() && focused && library.contains(focused) ? "sessions" :
-        drawers() && focused && overview.contains(focused) ? "inspector" : null;
+      if (panel === "sessions" && !sessionsDrawer()) panel = null;
+      if (panel === "inspector" && !inspectorDrawer()) panel = null;
+      if (!panel && focused) {
+        if (sessionsDrawer() && library.contains(focused)) panel = "sessions";
+        else if (inspectorDrawer() && overview.contains(focused)) panel = "inspector";
+      }
+      if (view === "studio" && wide.matches && focused && overview.contains(focused)) dockedInspector = true;
       apply();
-    });
-    on(openTabs, "click", () => setSource("tabs"));
-    on(historyTabs, "click", () => setSource("history"));
+    }
+    on(roomy, "change", fitPanes);
+    on(wide, "change", fitPanes);
+    for (const [kind, button] of Object.entries(sources)) on(button, "click", () => setSource(kind));
     on(search, "input", render);
     apply();
     return {
       manager,
+      managerSessions,
       source: () => source,
-      isHistoryLoading: () => source === "history" && historyState === "loading",
-      refresh: () => source === "history" ? loadHistory() : refreshTabs(),
+      updateRefresh,
+      historySummary: () => historyState === "valid" ? `${historyRows.length} verified project records` :
+        { idle: "Not requested", loading: "Loading…", unavailable: "Unavailable" }[historyState],
+      refresh: refreshSource,
       cancel() {
         if (historyController) {
           historyController.abort();
           historyController = null;
           historyState = "idle";
-          refresh.disabled = false;
-          if (source === "history") render();
+          render();
         }
       },
       visibleRows() {
-        const query = search.value.slice(0, 128).trim().toLowerCase();
-        const history = source === "history";
-        const list = history ? historyRows : membershipKnown ? members : [];
+        const field = managerSessions() ? managerSearch : search;
+        const query = field.value.slice(0, 128).trim().toLowerCase();
+        const history = historySource();
+        const excludeArchives = managerSessions() && source === "history" && !includeArchives.checked;
+        const list = source === "archived" ? historyRows.filter(item => item.archived) :
+          excludeArchives ? historyRows.filter(item => !item.archived) :
+          history ? historyRows : membershipKnown ? members : [];
+        clearSearch.disabled = !managerSearch.value;
         const visible = list.filter(item =>
           !query || item.title.toLowerCase().includes(query) || item.id.toLowerCase().includes(query));
-        byId("search-status").textContent = history ?
+        listStatus().textContent = history ?
           historyState === "loading" ? "Loading workspace history…" :
           historyState !== "valid" ? "Workspace history unavailable. Refresh to retry." :
-          list.length === 0 ? "No sessions in this workspace project." :
-          `${visible.length} of ${list.length} workspace history rows. Not TUI membership.` :
+          list.length === 0 ? (source === "archived" ? "No archived sessions in this workspace project." :
+            excludeArchives ? "No non-archived sessions in this workspace project." : "No sessions in this workspace project.") :
+          visible.length === 0 ? "No workspace history matches this search." :
+          `${visible.length} of ${list.length} ${source === "archived" ? "archived" : "workspace history"} rows. Not TUI membership.` :
           !membershipKnown ? "Verified open TUI sessions unavailable." :
           members.length === 0 ? "No verified open TUI sessions." :
           visible.length === 0 ? "No open TUI sessions match this search." :
-          `${visible.length} of ${members.length} open TUI tabs.` + (manager() ? " Choose a tab to open native chat." : "");
+          `${visible.length} of ${members.length} open TUI tabs.`;
         return visible;
       },
       async open(item) {
-        if (!ready) return;
-        if (source === "history") {
+        if (!ready || (manager() && !managerSessions())) return;
+        if (historySource()) {
           if (verifyingHistory || historyState !== "valid" || !historyRows.includes(item)) return;
           verifyingHistory = true;
           const before = navigation;
@@ -504,11 +745,12 @@
             const result = await response.json();
             if (!result || result.id !== item.id) throw new Error("selection");
             const checked = row({ ...result, route:nativePrefix + result.id });
-            if (before !== navigation || source !== "history" || snapshot !== historyRows) return;
-            select(checked, "Explicit workspace history selection");
+            if (before !== navigation || !historySource() || snapshot !== historyRows) return;
+            select(checked, "Explicit workspace history selection",
+              result.time?.archived !== undefined ? "archived" : "history");
           } catch {
-            if (before === navigation && source === "history" && snapshot === historyRows) {
-              byId("search-status").textContent = "Workspace history selection could not be verified. Refresh to retry.";
+            if (before === navigation && historySource() && snapshot === historyRows) {
+              listStatus().textContent = "Workspace history selection could not be verified. Refresh to retry.";
             }
             return;
           } finally { verifyingHistory = false; }
@@ -519,7 +761,7 @@
         if (manager()) {
           show(lastChat);
           views.find(button => button.dataset.view === view).focus();
-        } else if (drawers() && panel === "sessions") togglePanel("sessions");
+        } else if (panel === "sessions") toggleSessions();
       },
     };
   }
@@ -563,9 +805,13 @@
     if (timer !== null) { window.clearInterval(timer); timer = null; }
     // On a narrow viewport the script may already have hidden the library.
     // Fall back to the stacked layout so the verified links are reachable.
-    delete root.dataset.workspaceDrawers;
+    delete root.dataset.workspaceSessionsDrawer;
+    delete root.dataset.workspaceInspectorDrawer;
+    delete root.dataset.workspaceInspector;
     document.getElementById("workspace-library").hidden = false;
+    document.getElementById("workspace-library").inert = false;
     document.getElementById("workspace-overview").hidden = false;
+    document.getElementById("workspace-chat").inert = false;
     document.getElementById("fallback-links").hidden = false;
     status.textContent = "The shell could not initialize. Use explicit fallback links or native Home.";
   }

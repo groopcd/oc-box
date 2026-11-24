@@ -29,10 +29,17 @@ RUNTIME_FILES = (
     "web_sessions.py",
     "web_sessions.js",
     "web_sessions.css",
+    "web_studio_shell.css",
+    "web_studio_shell.mjs",
+    "web_studio_transcript.css",
+    "web_studio_transcript.mjs",
+    "web_studio_composer.css",
+    "web_studio_composer.mjs",
     "web_tls.py",
     "web_local_origins.py",
     "web_handoff.py",
     "web_native_pair.py",
+    "web_named_native_profile.py",
     "web_named_local.py",
     "web_named_headers.py",
     "web_bootstrap.py",
@@ -115,6 +122,13 @@ RUNTIME_FILES = (
     "paths.py",
     "workspace_identity.py",
     "installation.py",
+    "install_ownership.py",
+    "install_removal.py",
+    "uninstall_cli.py",
+    "uninstall_plan.py",
+    "uninstall_review.py",
+    "uninstall_tty.py",
+    "workspace_uninstall.py",
     "updater.py",
     "update_channels.py",
     "package_updates.py",
@@ -156,15 +170,32 @@ def atomic_file(path, content, mode=0o644, *, replace=True):
     try:
         with os.fdopen(fd, "wb") as stream:
             stream.write(content)
+            os.fchmod(stream.fileno(), mode)
             stream.flush()
             os.fsync(stream.fileno())
-        os.chmod(temporary, mode)
-        if replace:
-            os.replace(temporary, path)
-        else:
-            os.link(temporary, path, follow_symlinks=False)
+            if replace:
+                os.replace(temporary, path)
+            else:
+                os.link(temporary, path, follow_symlinks=False)
+                os.unlink(temporary)
+            temporary = None
+            info = os.fstat(stream.fileno())
+            return info.st_dev, info.st_ino, info.st_ctime_ns
     finally:
-        Path(temporary).unlink(missing_ok=True)
+        if temporary is not None:
+            Path(temporary).unlink(missing_ok=True)
+
+
+def _activate_link(temporary, destination, target, *, directory=False):
+    temporary.unlink(missing_ok=True)
+    temporary.symlink_to(target, target_is_directory=directory)
+    fd = os.open(temporary, os.O_PATH | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        os.replace(temporary, destination)
+        info = os.fstat(fd)
+        return info.st_dev, info.st_ino, info.st_ctime_ns
+    finally:
+        os.close(fd)
 
 
 def optional_crypto_runtime(release):
@@ -255,14 +286,21 @@ def _lock_file(path, flags):
 
 
 def install(
-    source, home=None, *, with_vault=False, with_tui=False, verified_release=False
+    source,
+    home=None,
+    *,
+    with_vault=False,
+    with_tui=False,
+    verified_release=False,
+    expected_active=None,
 ):
     """Activate a release; only the verified bootstrap can enroll a new install."""
     # The build backend imports file inventories, not host enrollment policy.
     if __package__:
-        from . import host_file_open_policy
+        from . import host_file_open_policy, install_ownership
     else:
         import host_file_open_policy
+        import install_ownership
     source = source_root(source)
     if (source / "distribution.json").is_file():
         raise ValueError(
@@ -282,16 +320,19 @@ def install(
     build = get_version_info(source)
     fresh = (
         host_file_open_policy.fresh_locations(home)
-        if verified_release and shutil.which("oc-box") is None
+        if expected_active is None
+        and verified_release
+        and shutil.which("oc-box") is None
         else None
     )
-    target.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        # mkdir is the election point: a concurrent installer/updater or an
-        # already existing empty root disqualifies this installer from marking.
-        target.mkdir()
-    except FileExistsError:
-        fresh = None
+    if expected_active is None:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            # mkdir is the election point: a concurrent installer/updater or an
+            # already existing empty root disqualifies this installer from marking.
+            target.mkdir()
+        except FileExistsError:
+            fresh = None
     if target.is_symlink():
         raise ValueError("The oc-box installation root must not be a symlink.")
     root_identity = (
@@ -299,12 +340,16 @@ def install(
     )
     file_open_enabled = False
     with open(
-        target / host_file_open_policy.INSTALL_LOCK, "a+", opener=_lock_file
+        target / host_file_open_policy.INSTALL_LOCK,
+        "a+" if expected_active is None else "r+",
+        opener=_lock_file,
     ) as lock:
         lock_fd = lock.fileno()
         if not stat.S_ISREG(os.fstat(lock_fd).st_mode):
             raise ValueError("The oc-box installation lock must be a regular file.")
         fcntl.flock(lock, fcntl.LOCK_EX)
+        if expected_active is not None:
+            install_ownership.require_activation(home, expected_active, lock_fd=lock_fd)
         if fresh is not None and not host_file_open_policy.still_fresh(
             fresh, root_identity, lock_fd, initial=True
         ):
@@ -336,8 +381,10 @@ def install(
                 prefix=(build.get("commit") or "local")[:12] + "-", dir=releases
             )
         )
+        staged = release.lstat()
         activated = False
         try:
+            atomic_file(release / install_ownership.USE_LOCK, b"", 0o600, replace=False)
             for name in PROGRAM_FILES:
                 shutil.copyfile(source_file(source, name), release / name)
                 (release / name).chmod(0o644)
@@ -370,6 +417,9 @@ def install(
                         "Optional TUI installation timed out; existing installation retained."
                     ) from exc
                 atomic_file(release / "tui-support.json", b'{"optional_tui": true}\n')
+            staging = install_ownership.capture_staged_inventory(
+                home, release, staged=staged
+            )
             if fresh is not None and not host_file_open_policy.still_fresh(
                 fresh, root_identity, lock_fd
             ):
@@ -377,18 +427,25 @@ def install(
             # Readers/install-info are optional: ship prebuilt manuals.
             man = home / ".local/share/man/man1/oc-box.1"
             info = home / ".local/share/info/oc-box.info"
-            atomic_file(man, (release / "docs/oc-box.1").read_bytes())
-            atomic_file(info, (release / "docs/oc-box.info").read_bytes())
             completion = home / ".local/share/bash-completion/completions/oc-box"
-            atomic_file(completion, (release / COMPLETION_FILE).read_bytes())
+            outputs = {
+                man: atomic_file(man, (release / "docs/oc-box.1").read_bytes()),
+                info: atomic_file(info, (release / "docs/oc-box.info").read_bytes()),
+                completion: atomic_file(
+                    completion, (release / COMPLETION_FILE).read_bytes()
+                ),
+            }
             binary = home / host_file_open_policy.LAUNCHER
             # A running launcher keeps this exact immutable release path. It
             # never lazy-loads modules from a half-updated or newer directory.
             wrapper = host_file_open_policy.launcher_bytes(release)
-            link = target / ".current-next"
-            link.unlink(missing_ok=True)
-            link.symlink_to(release.relative_to(target), target_is_directory=True)
-            os.replace(link, target / "current")
+            current = target / "current"
+            outputs[current] = _activate_link(
+                target / ".current-next",
+                current,
+                release.relative_to(target),
+                directory=True,
+            )
             activated = True
             # Preserve documented/legacy installed paths as pointers into the
             # current release, including build metadata and manual sources.
@@ -407,13 +464,12 @@ def install(
                             "Both legacy manual directories exist; inspect the installation."
                         )
                     destination.rename(legacy)
-                temporary = target / (".next-" + name)
-                temporary.unlink(missing_ok=True)
-                temporary.symlink_to(
+                outputs[destination] = _activate_link(
+                    target / (".next-" + name),
+                    destination,
                     "current/" + name,
-                    target_is_directory=name in ("docs", "completions"),
+                    directory=name in ("docs", "completions"),
                 )
-                os.replace(temporary, destination)
             if fresh is not None and not host_file_open_policy.still_fresh(
                 fresh, root_identity, lock_fd, auxiliary=False
             ):
@@ -422,13 +478,13 @@ def install(
                 # Do not qualify if a launcher appeared between the last check
                 # and activation (for example from another package manager).
                 try:
-                    atomic_file(binary, wrapper, 0o755, replace=False)
+                    outputs[binary] = atomic_file(binary, wrapper, 0o755, replace=False)
                 except OSError:
                     # Preserve normal activation when the filesystem cannot
                     # perform a no-replacement write. The default stays off.
                     fresh = None
             if fresh is None:
-                atomic_file(binary, wrapper, 0o755)
+                outputs[binary] = atomic_file(binary, wrapper, 0o755)
             else:
                 file_open_enabled = host_file_open_policy.record_fresh(
                     fresh, root_identity, lock_fd, release
@@ -436,29 +492,32 @@ def install(
         finally:
             if not activated:
                 shutil.rmtree(release)
-    utility = shutil.which("install-info") or shutil.which(
-        "install-info", path="/usr/sbin:/sbin"
-    )
-    if utility:
-        try:
-            result = subprocess.run(
-                [utility, "--info-dir=" + str(info.parent), str(info)],
-                capture_output=True,
-                text=True,
-                timeout=15,
-            )
-            if result.returncode:
+        utility = shutil.which("install-info") or shutil.which(
+            "install-info", path="/usr/sbin:/sbin"
+        )
+        if utility:
+            try:
+                result = subprocess.run(
+                    [utility, "--info-dir=" + str(info.parent), str(info)],
+                    capture_output=True,
+                    text=True,
+                    timeout=15,
+                )
+                if result.returncode:
+                    print(
+                        "Note: Info index update failed; use 'info --file "
+                        + str(info)
+                        + "'."
+                    )
+            except (OSError, subprocess.TimeoutExpired):
                 print(
-                    "Note: Info index update failed; use 'info --file "
+                    "Note: Info index update unavailable; use 'info --file "
                     + str(info)
                     + "'."
                 )
-        except (OSError, subprocess.TimeoutExpired):
-            print(
-                "Note: Info index update unavailable; use 'info --file "
-                + str(info)
-                + "'."
-            )
+        install_ownership.record_inventory(
+            home, release, outputs, lock_fd=lock_fd, staging=staging
+        )
     print(f"Installed {binary} ({build['version']})")
     if file_open_enabled:
         print(

@@ -152,7 +152,12 @@ class NamedIngressHTTPTests(unittest.TestCase):
         self.owner = Mock(side_effect=lambda candidate: candidate == binding)
         authority = self._host("workspace")
         native = web_native_pair.NativeCookie(
-            binding, _ENDPOINT, authority, _NATIVE_VALUE, owner_current=self.owner
+            binding,
+            _ENDPOINT,
+            authority,
+            _NATIVE_VALUE,
+            version="2.3.2",
+            owner_current=self.owner,
         )
         self.pair = Mock(return_value=native)
         self.native_cookie_name = f"opencode_session_{self.origins.workspace_port}"
@@ -191,6 +196,7 @@ class NamedIngressHTTPTests(unittest.TestCase):
             ingress = app.NamedAppIngress(
                 sign_in,
                 endpoint=_ENDPOINT,
+                version="2.3.2",
                 claim_bootstrap=lambda nonce: bootstrap.claim_app(binding, nonce),
             )
         self.confirm = Mock(wraps=ingress.confirm)

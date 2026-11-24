@@ -61,6 +61,7 @@ _COMMAND_GROUPS = (
         "Installation",
         (
             ("upgrade", "Check for or install a launcher update"),
+            ("--uninstall", "Review or remove the verified launcher installation"),
             ("completion", "Print the Bash completion script"),
         ),
     ),

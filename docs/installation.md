@@ -206,6 +206,25 @@ code until exit; earlier copies are retained, not removed while in use. For the
 first migration from an old flat installation, exit active oc-box launchers
 before reinstalling. The pinned-release guarantee applies afterward.
 
+#### Installation ownership receipt
+
+The v2 receipt (`.install-inventory-v2.json` inside a release) records the
+staged files **before** the installer activates the launcher. Publication
+rechecks them and the exact installed wrapper, links and auxiliary files. It
+does not adopt files added during activation, retained releases, or oc-box
+data. The receipt is local filesystem evidence, not a signature. A missing or
+stale receipt cannot authorize verified removal. A failed removal may restore
+the original launcher names while changing their filesystem metadata; if the
+receipt no longer verifies, reinstall with the verified installer before
+retrying. Do not edit the receipt or remove retained staging blindly.
+
+Verified removal and automatic handoff require local Linux filesystem
+semantics, including cooperating `flock` locks on the same inodes and atomic
+no-replacement moves for removal. A matched path, a successful advisory lock,
+or a same-device check does not establish those semantics on NFS, SMB, or
+another non-local mount. These paths are not supported for verified removal or
+handoff.
+
 ## Update an existing installation
 
 ### Python-package installations
@@ -241,8 +260,14 @@ oc-box upgrade --auto-update on
 oc-box upgrade --auto-update off
 ```
 
-Automatic updates are **opt-in**. Normal installed starts can check the saved
-GitHub channel, install a changed release and continue with the same arguments.
+Automatic updates are **opt-in**. The active launcher can check the saved
+GitHub channel and continue in a verified target with the same arguments.
+The installer rechecks the source under its lock, and the launcher holds
+the target's use lock across the restart. Use an explicit upgrade when an
+older target does not support this protocol. A retained release using the
+new protocol cannot update or recreate an inactive installation; scripts
+from releases predating it retain their old behavior and should not be run
+directly.
 Network/update failures print a message and continue with the installed version.
 There is no background daemon or update during an active session. Informational
 commands, maintenance terminals, reset/purge and direct source-checkout launches

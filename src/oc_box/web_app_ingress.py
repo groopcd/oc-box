@@ -68,16 +68,19 @@ class NamedAppIngress:
     after the matching handoff is consumed and returns a liveness guard.
     """
 
-    def __init__(self, sign_in, *, endpoint, claim_bootstrap):
+    def __init__(self, sign_in, *, endpoint, version, claim_bootstrap):
         if os.environ.get("OC_BOX_CONTAINER") == "1":
             raise ValueError("Named workspace app admission is host-only.")
-        if type(sign_in) is not web_named_local.LocalNamedSignIn or not callable(
-            claim_bootstrap
+        if (
+            type(sign_in) is not web_named_local.LocalNamedSignIn
+            or not callable(claim_bootstrap)
+            or not web_native_pair.named_native_supports(version)
         ):
             raise ValueError("Expected a local named workspace sign-in.")
         # Endpoint is supplied by the trusted lease holder, never a request.
         web_native_pair._port(endpoint)
         self._endpoint = endpoint
+        self._native_version = version
         self._claim_bootstrap = claim_bootstrap
         self._sign_in = sign_in
         self._admission = sign_in.admission
@@ -210,7 +213,10 @@ class NamedAppIngress:
                 raise StaleAppSessionError()
             try:
                 native_cookie = session.native_cookie.upstream_cookie(
-                    binding=self._binding, endpoint=self._endpoint, origin=self._origin
+                    binding=self._binding,
+                    endpoint=self._endpoint,
+                    origin=self._origin,
+                    version=self._native_version,
                 )
             except web_native_pair.NativePairError:
                 native_cookie = None

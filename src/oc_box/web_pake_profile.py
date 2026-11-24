@@ -37,11 +37,17 @@ class LocalPakeProfile:
     def __init__(self, executable_fd, *, expected_sha256, origins):
         if type(origins) is not web_local_origins.LocalOrigins:
             raise TypeError("Use the dedicated local HTTPS profile.")
+        self._origins = origins
         self._verifier = _identifier(b"verifier", origins.account.value.encode("ascii"))
         self._worker = web_pake_worker.PakeWorker(
             executable_fd,
             expected_sha256=expected_sha256,
             sizes=web_pake_worker.LAB_SIZES,
+        )
+
+    def matches(self, origins):
+        return (
+            type(origins) is web_local_origins.LocalOrigins and origins == self._origins
         )
 
     def start(
