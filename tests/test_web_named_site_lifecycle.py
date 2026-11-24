@@ -32,10 +32,14 @@ from oc_box import (
     web_named_owner,
     web_named_services,
     web_named_site_lifecycle as lifecycle,
+    web_named_studio_chat,
+    web_named_studio_selection,
     web_named_transport as wire,
     web_native_pair,
     web_pake_flow,
     web_pake_profile,
+    web_studio_read,
+    web_studio_send,
 )
 
 
@@ -174,6 +178,7 @@ class NamedSiteLifecycleTests(unittest.TestCase):
         cookie=None,
         from_role=None,
         document=False,
+        extra_headers=(),
     ):
         origin = getattr(self.site, role).value
         fields = [
@@ -191,6 +196,7 @@ class NamedSiteLifecycleTests(unittest.TestCase):
             fields.append(f"Content-Type: {content_type}")
         if cookie:
             fields.append(f"Cookie: {cookie}")
+        fields.extend(f"{key}: {value}" for key, value in extra_headers)
         return ("\r\n".join(fields) + "\r\n\r\n").encode("ascii") + body
 
     def exchange(self, role, path, **kwargs):
@@ -219,13 +225,17 @@ class NamedSiteLifecycleTests(unittest.TestCase):
 
         self.connector.side_effect = connect
 
-    def begin_proof(self):
+    def begin_proof(self, *, studio=False):
         backend = proof.SyntheticBackend()
         backend.sizes = proof.SIZES
         backend.close = Mock(return_value=True)
         self.worker_factory.return_value = backend
         identity = self.lease.identity
+        if studio:
+            identity = replace(identity, version="2.4.1")
+        lease = replace(self.lease, identity=identity, observe=lambda: identity)
         sites = self.prepare(
+            lease=lease,
             store=web_accounts.AccountStore(
                 b"s" * 128,
                 (
@@ -233,7 +243,7 @@ class NamedSiteLifecycleTests(unittest.TestCase):
                         "fixture", (identity.workspace_id,), b"r" * 192
                     ),
                 ),
-            )
+            ),
         )
         self.addCleanup(sites.close)
         document = b"<h1>Fixture sign-in</h1>"
@@ -253,8 +263,12 @@ class NamedSiteLifecycleTests(unittest.TestCase):
                 ),
             )
         )
-        http.start_named_http(
-            sites, self.profile, login_document=document, expires_at=monotonic() + 10
+        self.application = http.start_named_http(
+            sites,
+            self.profile,
+            login_document=document,
+            expires_at=monotonic() + 10,
+            studio=studio,
         )
 
         head, page = self.exchange("workspace", entry.WORKSPACE_ENTRY, document=True)
@@ -319,6 +333,12 @@ class NamedSiteLifecycleTests(unittest.TestCase):
         self.assertEqual(head, b"")
         self.assertIsNone(sites.stop_reason)
         self.connector.assert_not_called()
+        self.assertEqual(
+            self.exchange(
+                "workspace", "/oc-box/studio/conversation?session=ses_fixture"
+            ),
+            (b"", b""),
+        )
 
         head, body = self.exchange("workspace", handoff.CONFIRM_PATH, **confirm)
         self.assertTrue(head.startswith(b"HTTP/1.1 204"))
@@ -375,6 +395,111 @@ class NamedSiteLifecycleTests(unittest.TestCase):
         self.connector.assert_called_once()
         self.assertIsNone(sites.stop_reason)
         self.assertTrue(sites.close())
+        self.assertGreaterEqual(self.lease.control.fileno(), 0)
+
+    def test_exact_studio_routes_share_the_tls_app_grant_and_retire_its_page(self):
+        sites, confirm, _ = self.begin_proof(studio=True)
+        head, _ = self.exchange("workspace", handoff.CONFIRM_PATH, **confirm)
+        cookie = self.cookie(head, "__Host-ocbox-app")
+        ingress = sites.services.application.ingress
+        browser = ingress._session(cookie.partition("=")[2])
+        registry = self.application._selection.registry
+        page = registry.bootstrap(browser, deadline=monotonic() + 2)
+        session = "ses_fixture"
+
+        with patch.object(
+            web_named_studio_selection, "_native_selection", return_value=session
+        ):
+            selection_head, selection_body = self.exchange(
+                "workspace",
+                web_named_studio_selection.PATH,
+                method="POST",
+                cookie=cookie,
+                content_type="application/json",
+                body=json.dumps(
+                    {"page": page.nonce, "sequence": 1, "sessionID": session}
+                ).encode("ascii"),
+            )
+        self.assertTrue(selection_head.startswith(b"HTTP/1.1 200"))
+        selected = json.loads(selection_body)
+        self.assertEqual(
+            selected, {"page": page.nonce, "generation": 1, "sessionID": session}
+        )
+        chat_headers = (
+            (web_named_studio_chat.PAGE_HEADER, page.nonce),
+            (web_named_studio_chat.GENERATION_HEADER, "1"),
+        )
+        transcript = {
+            "sessionID": session,
+            "title": "Synthetic",
+            "hasEarlier": False,
+            "messages": [
+                {
+                    "id": f"msg_synthetic_{i}",
+                    "role": "assistant",
+                    "text": "x" * 4000,
+                    "truncated": False,
+                }
+                for i in range(3)
+            ],
+        }
+        data = json.dumps(transcript).encode("ascii")
+        self.assertGreater(len(data), wire._RESPONSE_LIMIT)
+
+        def read(_, request, scope, *, observe, deadline, write, retire, **options):
+            self.assertIs(scope.browser, browser)
+            self.assertEqual(scope.session_id, session)
+            self.assertEqual(
+                request.target, web_named_studio_chat.READ_PATH + "?session=" + session
+            )
+            self.assertIs(observe(deadline), scope)
+            write(
+                web_studio_read.ReadResponse(data),
+                deadline,
+                check=lambda: observe(deadline),
+            )
+            self.assertTrue(retire())
+
+        target = web_named_studio_chat.READ_PATH + "?session=" + session
+        with patch.object(web_studio_read, "respond", side_effect=read) as reader:
+            response, body = self.exchange(
+                "workspace", target, cookie=cookie, extra_headers=chat_headers
+            )
+            self.assertTrue(response.startswith(b"HTTP/1.1 200"))
+            self.assertEqual(json.loads(body), transcript)
+            self.assertEqual(
+                self.exchange(
+                    "workspace",
+                    target + "&extra=1",
+                    cookie=cookie,
+                    extra_headers=chat_headers,
+                ),
+                (b"", b""),
+            )
+            reader.assert_called_once()
+
+        with patch.object(
+            web_studio_send.StudioSend,
+            "execute",
+            return_value=web_studio_send.SendResult.QUEUED,
+        ) as send:
+            response, body = self.exchange(
+                "workspace",
+                web_named_studio_chat.SEND_PATH,
+                method="POST",
+                cookie=cookie,
+                content_type="application/json",
+                extra_headers=chat_headers,
+                body=json.dumps(
+                    {"sessionID": session, "text": "Synthetic send"}
+                ).encode("ascii"),
+            )
+            self.assertTrue(response.startswith(b"HTTP/1.1 200"))
+            self.assertEqual(json.loads(body), {"status": "queued"})
+            send.assert_called_once()
+            self.assertEqual(send.call_args.kwargs["text"], "Synthetic send")
+        self.assertTrue(sites.close())
+        self.assertTrue(registry._closed)
         self.assertGreaterEqual(self.lease.control.fileno(), 0)
 
     def test_shutdown_interrupts_upstream_and_retains_owner_until_drain(self):

@@ -169,6 +169,7 @@ class _NamedSites:
         self._borrowed = False
         self._clean = True
         self._monitor = None
+        self._retire = None
         self._deadline = None
         self._workers = set()
 
@@ -186,7 +187,7 @@ class _NamedSites:
         """Wait for the accept fence; never use this as a lease-release signal."""
         return self._stopped.wait(timeout)
 
-    def start(self, *, account, workspace, expires_at):
+    def start(self, *, account, workspace, expires_at, retire=None):
         """Listen once and dispatch by listener, never by client-selected data.
 
         Each trusted callback borrows an already handshaken TLS socket for
@@ -197,6 +198,8 @@ class _NamedSites:
         the stream, or manage the lifecycle from a callback. Request refusals
         can raise ``NamedRequestError``. ``expires_at`` is a trusted absolute
         monotonic lifetime deadline, not a browser-session expiry.
+        ``retire`` closes only the optional in-memory page registry, without
+        performing I/O or owning the browser streams or workspace lease.
         """
         with self._lifecycle:
             if self._monitor is not None or self._stopped.is_set():
@@ -205,11 +208,13 @@ class _NamedSites:
                 if (
                     not callable(account)
                     or not callable(workspace)
+                    or (retire is not None and not callable(retire))
                     or type(expires_at) not in (int, float)
                     or not math.isfinite(expires_at)
                 ):
                     raise ListenerError()
                 self._deadline = expires_at
+                self._retire = retire
                 self._sweep()
                 with self._lock:
                     self._check_locked()
@@ -473,6 +478,14 @@ class _NamedSites:
             # reservation, or owner lease out from under any worker.
             admission = self._services.application.sign_in.admission
             admission.close()
+            if self._retire is not None:
+                try:
+                    self._retire()
+                except Exception:
+                    with self._lock:
+                        self._clean = False
+                else:
+                    self._retire = None
             with self._lock:
                 threads = [self._monitor, *(worker.thread for worker in self._workers)]
             for thread in threads:

@@ -42,3 +42,19 @@ oc-box backup --host --output /backup/host.ocbox
 Use an output outside the removal scope. This is not a workspace-volume backup
 and does not back up native host OpenCode history. Uninstall itself must not
 open that history, contact its service, or run a backup.
+
+## Focused launcher-only guest evidence
+
+Exact source `1466076c17f2205633788f0424ef9cb886d9c405` passed 20 checks
+in a private, no-NIC Fedora 44/KVM guest. Dedicated help and dry run wrote
+nothing; full requests, pipe confirmation and an incorrect controlling-PTY
+phrase refused. The exact phrase removed the verified active launcher and
+its selected release. An older installation of the same source, the project
+marker, vault, registry and native OpenCode history fixtures were preserved.
+Neither Podman nor OpenCode ran. Guest, unmount and QEMU exits were all zero;
+the guest was reaped and the writable disk, socket and ISO were removed.
+
+Sanitized receipt SHA-256:
+`909e26e5f4d2869cc3cdd5cc7ff741f1f761cd37d6df9d3011665af5fb9405f0`.
+This is launcher-only synthetic host evidence for that source, not a general
+filesystem guarantee, real-user uninstall, full cleanup or final release gate.

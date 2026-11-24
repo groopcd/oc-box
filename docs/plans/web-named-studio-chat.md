@@ -1,11 +1,13 @@
-# Named Studio chat dispatcher (unserved)
+# Named Studio chat dispatcher
 
 `web_named_studio_chat` composes the existing pinned OpenCode **2.4.1**
 [conversation reader](web-studio-read-route.md) and
 [explicit text Send adapter](web-studio-send.md) with the actual named app and
-its [page selection registry](web-studio-selection.md). No HTTP parser,
-listener, route table, bootstrap, UI, launcher or site lifecycle is activated
-or changed. There is no guest, 2.3.2, or native-proxy fallback.
+its [page selection registry](web-studio-selection.md). The internal reserved
+listener can compose these exact routes with an explicit trusted `studio=True`
+option. The launcher does not request it, and there is no authenticated Studio
+landing page or browser controller yet. There is no guest, 2.3.2, or
+native-proxy fallback.
 
 ## Exact browser envelopes
 
@@ -36,7 +38,8 @@ Send action; these HTTP checks cannot attest a physical gesture.
 
 ## Trusted TLS-worker composition
 
-Construct `NamedStudioChat(services._owner, selections)` only after the actual
+The internal named dispatcher constructs `NamedStudioChat(services._owner,
+selections)` only after the actual
 named app is composed. It borrows that binding's existing `VerifiedOwnerLease`
 (including its original attach control socket) and app admission. The registry
 must have been constructed for the exact `lease.identity` object and that same

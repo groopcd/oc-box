@@ -70,6 +70,11 @@ _ACCOUNT_ASSET_ROUTES = frozenset(
     (b"GET", path.encode("ascii"))
     for path in web_named_account_assets.ACCOUNT_ASSET_PATHS
 )
+_STUDIO_SELECTION = b"/oc-box/studio/selection"
+_STUDIO_SEND = b"/oc-box/studio/send"
+_STUDIO_READ = re.compile(
+    rb"/oc-box/studio/conversation\?session=ses[A-Za-z0-9_-]{1,125}"
+)
 _RESPONSE_STATUS = {
     200: b"200 OK",
     403: b"403 Forbidden",
@@ -126,7 +131,14 @@ def _recv(stream, size, deadline):
 
 
 def _head(
-    lines, role, origin, *, entry_origins=None, include_core=False, account_assets=False
+    lines,
+    role,
+    origin,
+    *,
+    entry_origins=None,
+    include_core=False,
+    account_assets=False,
+    include_studio=False,
 ):
     if len(lines) > web_named_headers._MAX_FIELDS + 1:
         _refuse()
@@ -147,10 +159,21 @@ def _head(
         and role == "workspace"
         and route == (b"POST", web_named_handoff.HANDOFF_PATH.encode("ascii"))
     )
+    studio = (
+        include_studio
+        and entry_origins is not None
+        and include_core
+        and role == "workspace"
+        and len(route) == 2
+        and (
+            (route[0] == b"POST" and route[1] in (_STUDIO_SELECTION, _STUDIO_SEND))
+            or (route[0] == b"GET" and _STUDIO_READ.fullmatch(route[1]) is not None)
+        )
+    )
     if (
         len(start) != 3
         or start[2] != b"HTTP/1.1"
-        or not (entry or core or handoff or asset)
+        or not (entry or core or handoff or asset or studio)
     ):
         _refuse()
     method, target = start[0].decode("ascii"), start[1].decode("ascii")
@@ -222,6 +245,10 @@ def _head(
     elif target == "/oc-box/confirm":
         if size != _CONFIRM_SIZE:
             _refuse()
+    elif studio and method == "POST":
+        limit = 512 if route[1] == _STUDIO_SELECTION else _BODY_LIMIT
+        if not 0 < size <= limit or fields.get("content-type") != "application/json":
+            _refuse()
     elif size:
         _refuse()  # Workspace metadata and logout are empty.
     return method, target, headers, size
@@ -236,6 +263,7 @@ def _read(
     entry_origins=None,
     include_core=False,
     account_assets=False,
+    include_studio=False,
 ):
     wire = bytearray()
     scan = 0
@@ -252,6 +280,7 @@ def _read(
         entry_origins=entry_origins,
         include_core=include_core,
         account_assets=account_assets,
+        include_studio=include_studio,
     )
     body = wire[end + len(_HEAD_END) :]
     if len(body) > size:
@@ -570,6 +599,7 @@ class NamedHTTPSReader:
         prelogin=None,
         named=None,
         account_assets=False,
+        include_studio=False,
     ):
         deadline = monotonic() + _REQUEST_TIMEOUT
         try:
@@ -614,6 +644,7 @@ class NamedHTTPSReader:
                         else None,
                         include_core=named is not None,
                         account_assets=account_assets,
+                        include_studio=include_studio,
                     )
                     if all(mode is None for mode in modes):
                         return request

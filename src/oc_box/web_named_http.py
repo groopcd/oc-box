@@ -2,8 +2,9 @@
 
 The exact prelogin, account protocol, confirm, logout and read-only native
 metadata and optional exact account assets share the same owner/account
-lifetime. No generic native forwarding, Studio assets or public command
-are enabled here.
+lifetime. An explicit trusted Studio composition adds selection, bounded
+conversation and text Send, not a landing page or generic native forwarding.
+No public command enables this listener.
 """
 
 import socket
@@ -21,6 +22,8 @@ if __package__:
         web_named_listeners,
         web_named_services,
         web_named_site_lifecycle,
+        web_named_studio_chat,
+        web_named_studio_selection,
         web_named_transport,
     )
 else:
@@ -34,6 +37,8 @@ else:
     import web_named_listeners
     import web_named_services
     import web_named_site_lifecycle
+    import web_named_studio_chat
+    import web_named_studio_selection
     import web_named_transport
 
 
@@ -47,7 +52,13 @@ _OK = web_named_transport.NamedResponse(200, b'{"ok":true}')
 
 
 def start_named_http(
-    sites, profile, *, expires_at, account_assets=None, login_document=None
+    sites,
+    profile,
+    *,
+    expires_at,
+    account_assets=None,
+    login_document=None,
+    studio=False,
 ):
     """Activate the exact prepared sites, without taking their lifetime away.
 
@@ -81,12 +92,15 @@ def start_named_http(
         services=sites.services,
         login_document=login_document,
         account_assets=account_assets,
+        studio=studio,
     )
     sites.start(
         account=application.account_site,
         workspace=application.workspace_site,
         expires_at=expires_at,
+        retire=application._retire_studio if studio else None,
     )
+    return application
 
 
 def _arguments(request):
@@ -109,11 +123,20 @@ def _interrupt(stream):
 
 
 class NamedHTTPApplication:
-    def __init__(self, *, reader, services, account_assets=None, login_document=None):
+    def __init__(
+        self,
+        *,
+        reader,
+        services,
+        account_assets=None,
+        login_document=None,
+        studio=False,
+    ):
         assets = web_named_account_assets
         if (
             type(reader) is not web_named_transport.NamedHTTPSReader
             or type(services) is not web_named_services.NamedServices
+            or type(studio) is not bool
             or services.entry._origins != reader._origins
             or (
                 account_assets is None
@@ -150,6 +173,16 @@ class NamedHTTPApplication:
             origins=reader._origins,
             app=services.application.ingress,
         )
+        self._selection = self._chat = None
+        if studio:
+            self._selection = web_named_studio_selection.NamedStudioSelection(services)
+            self._chat = web_named_studio_chat.NamedStudioChat(
+                services._owner, self._selection.registry
+            )
+
+    def _retire_studio(self):
+        if self._selection is not None:
+            self._selection.registry.close()
 
     def respond_one(self, peer):
         """Take one already accepted socket; the reader determines its role."""
@@ -158,6 +191,7 @@ class NamedHTTPApplication:
             handlers=None,
             named=self._dispatch,
             account_assets=self._account_assets is not None,
+            include_studio=self._chat is not None,
         )
 
     def account_site(self, stream, *, check, deadline):
@@ -190,6 +224,7 @@ class NamedHTTPApplication:
             entry_origins=self._reader._origins,
             include_core=True,
             account_assets=self._account_assets is not None,
+            include_studio=self._chat is not None,
         )
         try:
             self._dispatch(stream, request, deadline, check=check)
@@ -235,6 +270,22 @@ class NamedHTTPApplication:
                 deadline,
                 check=owner_current if reply.status == 200 else check,
             )
+        elif (
+            request.role == "workspace"
+            and self._selection is not None
+            and request.target == web_named_studio_selection.PATH
+        ):
+            self._selection.respond(stream, request, deadline, check=owner_current)
+        elif (
+            request.role == "workspace"
+            and self._chat is not None
+            and (
+                request.target == web_named_studio_chat.SEND_PATH
+                or web_named_studio_chat._READ_TARGET.fullmatch(request.target)
+                is not None
+            )
+        ):
+            self._respond_studio(stream, request, deadline, check=owner_current)
         elif (
             request.role == "workspace"
             and request.target in web_app_ingress._METADATA_PATHS
@@ -288,6 +339,58 @@ class NamedHTTPApplication:
                     write(stream, _DRAIN_ERROR, deadline, check=check)
         else:
             raise web_named_headers.NamedRequestError()
+
+    def _respond_studio(self, stream, request, deadline, *, check):
+        wrote = retired = False
+
+        def write(reply, end, *, check):
+            nonlocal wrote
+            if (
+                wrote
+                or retired
+                or type(reply) is not web_named_studio_chat.ChatReply
+                or type(reply.status) is not int
+                or reply.status not in web_named_transport._RESPONSE_STATUS
+                or type(reply.body) is not bytes
+                or not 0 < len(reply.body) <= web_named_studio_chat.MAX_RESPONSE_BYTES
+            ):
+                raise web_named_headers.NamedRequestError()
+            status = web_named_transport._RESPONSE_STATUS[reply.status]
+            head = (
+                b"HTTP/1.1 "
+                + status
+                + b"\r\nConnection: close\r\n"
+                + "".join(f"{key}: {value}\r\n" for key, value in reply.headers).encode(
+                    "ascii"
+                )
+                + f"Content-Length: {len(reply.body)}\r\n\r\n".encode("ascii")
+            )
+            wrote = True
+            web_named_transport._write_wire(stream, head, end, check=check)
+            for offset in range(0, len(reply.body), 16384):
+                web_named_transport._write_wire(
+                    stream, reply.body[offset : offset + 16384], end, check=check
+                )
+
+        def retire():
+            nonlocal retired
+            if retired:
+                return False
+            # Writes above are synchronous; after this fence no downstream
+            # operation can remain or use this borrowed stream again. The
+            # site owns its exact descriptor and closes it on worker exit.
+            retired = True
+            return True
+
+        self._chat.respond(
+            request,
+            actual_tls=True,
+            deadline=deadline,
+            check=check,
+            write=write,
+            interrupt=lambda: _interrupt(stream),
+            retire=retire,
+        )
 
     def _serve_account_asset(self, stream, request, deadline, *, check):
         translate = self._services.account._translate_nonce
