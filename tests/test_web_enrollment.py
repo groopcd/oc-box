@@ -1,5 +1,6 @@
 import base64
 import math
+import os
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from importlib.util import find_spec
@@ -231,7 +232,10 @@ class EnrollmentApprovalTests(unittest.TestCase):
     )
     def test_verified_result_preserves_the_original_store_cas(self):
         phrase = "synthetic enrollment store passphrase"
-        with TemporaryDirectory() as directory:
+        with (
+            patch.dict(os.environ, {"OC_BOX_CONTAINER": "0"}),
+            TemporaryDirectory() as directory,
+        ):
             path = Path(directory) / "accounts"
             web_accounts.initialize(path, phrase, setup=REVIEW.setup)
             review = web_accounts.review_registration(
