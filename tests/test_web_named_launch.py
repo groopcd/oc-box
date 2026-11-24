@@ -1,7 +1,10 @@
 """Verify host-side sequencing without a native service or real secrets."""
 
 from contextlib import ExitStack, contextmanager
+import json
+import os
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
@@ -11,6 +14,100 @@ from oc_box import web_accounts, web_named_account_assets, web_named_launch as l
 
 _PATH = Path("/synthetic/named")
 _WORKSPACE = "a" * 32
+
+
+class NamedInputProfileTests(unittest.TestCase):
+    def setUp(self):
+        context = ExitStack()
+        self.addCleanup(context.close)
+        root = Path(context.enter_context(TemporaryDirectory()))
+        self.path = root / "profile.json"
+        context.enter_context(
+            patch.object(launch.web_named_listeners, "_host_allowed", return_value=True)
+        )
+        pin = {"path": "/synthetic/browser.wasm", "size": 20, "sha256": "a" * 64}
+        self.data = {
+            "version": 1,
+            "tls": {key: f"/synthetic/{key}.pem" for key in launch._CERT_KEYS},
+            "wasm": pin,
+            "verifier": {**pin, "path": "/synthetic/verifier", "sha256": "b" * 64},
+            "account_store": "/synthetic/accounts",
+        }
+
+    def write(self, data=None, *, raw=None, mode=0o600):
+        self.path.write_bytes(
+            raw
+            if raw is not None
+            else json.dumps(self.data if data is None else data).encode()
+        )
+        self.path.chmod(mode)
+
+    def refusal(self):
+        with self.assertRaisesRegex(
+            launch.NamedLaunchError, "explicit named HTTPS profile"
+        ):
+            launch.load_named_inputs(self.path)
+
+    def test_exact_owner_profile_selects_pins_without_opening_referenced_artifacts(
+        self,
+    ):
+        self.write(mode=0o400)
+        inputs = launch.load_named_inputs(self.path)
+        self.assertEqual(inputs.account_store, Path("/synthetic/accounts"))
+        self.assertEqual(inputs.wasm_file, Path("/synthetic/browser.wasm"))
+        self.assertEqual(inputs.verifier_pin.sha256.hex(), "b" * 64)
+        self.assertEqual(inputs.wasm_pin.size, 20)
+        self.assertNotIn("/synthetic", repr(inputs))
+
+    def test_duplicate_fields_passwords_and_nonnative_paths_refuse(self):
+        for data in (
+            self.data | {"password": "do-not-read"},
+            self.data | {"version": True},
+            self.data | {"account_store": "relative/accounts"},
+            self.data | {"account_store": "/synthetic/../outside"},
+            self.data | {"account_store": "//synthetic/accounts"},
+            self.data | {"wasm": self.data["wasm"] | {"size": True}},
+            self.data | {"verifier": self.data["verifier"] | {"sha256": "A" * 64}},
+        ):
+            self.write(data)
+            self.refusal()
+        self.write(raw=b'{"version":1,' + json.dumps(self.data).encode()[1:])
+        self.refusal()
+        self.write(raw=b" " * (launch._PROFILE_LIMIT + 1))
+        self.refusal()
+
+    def test_shared_missing_and_substituted_profiles_fail_closed(self):
+        self.refusal()
+        self.write(mode=0o644)
+        self.refusal()
+        self.path.chmod(0o600)
+        other = self.path.with_name("other")
+        os.link(self.path, other)
+        self.refusal()
+        self.path.unlink()
+        self.path.symlink_to(other)
+        self.refusal()
+        directory = self.path.with_name("redirect")
+        directory.symlink_to(self.path.parent, target_is_directory=True)
+        with self.assertRaises(launch.NamedLaunchError):
+            launch.load_named_inputs(directory / "other")
+
+    def test_changed_profile_while_reading_is_not_adopted(self):
+        self.write()
+        pread = os.pread
+
+        def replaced(fd, length, offset):
+            content = pread(fd, length, offset)
+            if offset == 0:
+                # Atomic replacement is not a newer value to use without
+                # another explicit launch/verification.
+                moved = self.path.with_name("moved")
+                self.path.rename(moved)
+                self.write()
+            return content
+
+        with patch.object(launch.os, "pread", side_effect=replaced):
+            self.refusal()
 
 
 class PrepareNamedLaunchTests(unittest.TestCase):
