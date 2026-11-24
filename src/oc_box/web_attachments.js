@@ -2,10 +2,13 @@
 // GPL-3.0-or-later.
 (() => {
   "use strict";
-  const SUPPORTED = new Set(["2.2.6", "2.3.0"]);
+  // Keep the exact native composer-test matrix in sync with web_attachments.py.
+  const SUPPORTED = new Set(["2.2.6", "2.2.7", "2.3.0", "2.3.2", "2.4.1"]);
+  const RELEASE_FALLBACK = "Use oc-box web without --attachments, or Ctrl+Y in the oc-box TUI with --host-clipboard where supported";
   const MAX_FILE = 20 * 1024 * 1024;
   const MAX_TOTAL = 40 * 1024 * 1024;
   const MAX_FILES = 8;
+  const NATIVE_CHECK_MS = 5000;
 
   function mime(bytes) {
     const text = String.fromCharCode(...bytes);
@@ -224,11 +227,21 @@
       void current.add(selected);
     });
     notice("Checking native attachment version…");
+    const check = new AbortController();
+    const timeout = setTimeout(() => check.abort(), NATIVE_CHECK_MS);
+    let refusal = "the private native service could not be verified";
     try {
       const reply = await request("/api/info", {
-        credentials: "same-origin", cache: "no-store", redirect: "error",
+        credentials: "same-origin", cache: "no-store", redirect: "error", signal: check.signal,
       });
-      if (!reply.ok || !SUPPORTED.has((await reply.json()).version)) {
+      if (reply.status === 401 || reply.status === 403) {
+        refusal = "native browser authentication failed; open a fresh oc-box web link";
+      }
+      if (!reply.ok) throw new Error("unavailable");
+      const info = await reply.json();
+      if (typeof info?.version !== "string") throw new Error("unavailable");
+      if (!SUPPORTED.has(info.version)) {
+        refusal = `the native browser composer contract is not verified for this release. ${RELEASE_FALLBACK}`;
         throw new Error("unsupported");
       }
       active = true;
@@ -236,7 +249,9 @@
       stateChanged();
     } catch (_error) {
       current.setEnabled(false);
-      notice("Adapter refused: authenticated native OpenCode 2.2.6 or 2.3.0 is required. Native shell navigation remains available.");
+      notice(`Attachment adapter refused: ${refusal}. Native shell navigation remains available.`);
+    } finally {
+      clearTimeout(timeout);
     }
   }
 

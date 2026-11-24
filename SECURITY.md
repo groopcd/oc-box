@@ -138,8 +138,11 @@ and [historical limitations](docs/releases/1.7.md#known-acceptance-limitations).
 
 Experimental `oc-box attach` is separate from continuing `share` access. It
 requires an existing ready private V2 workspace and an explicit native
-`--session` at that workspace's exact native project directory, on supported
-2.2.6/2.2.7/2.3.0 only. Observed archived or staged-revert targets refuse.
+`--session` at that workspace's exact native project directory.
+The broker verifies an authenticated ClientMCP handshake on an eligible
+stable OpenCode V2 owner. Direct queue admission is limited to tested
+releases (2.2.6, 2.2.7, 2.3.0, 2.3.2, 2.4.0, and 2.4.1). Observed
+archived or staged-revert targets refuse.
 Native prompt admission has no atomic compare-and-swap precondition: a revert
 staged after the final check can still be committed by OpenCode. Do not edit a
 staged revert concurrently with direct attachment.
@@ -278,7 +281,8 @@ An eligible client still needs direct Konsole or Yakuake, stable native
 OpenCode 2.x with a compatible renderer, verified project/home mounts, and a
 private staging directory. Seeing an
 assistant link or starting a client with host opening enabled does not authorize
-a transfer. The host relay requires a fresh matched Ctrl-click and bounds the
+a transfer. The hook's startup acknowledgement also carries no authority.
+The host relay requires a fresh matched Ctrl-click and bounds the
 one-use transfer. The result is a private copy, not a share or a write-back.
 Use this feature only with a workspace you trust to honor the click. See the
 [format, mount and lifetime limits](docs/cli.md#experimental-ctrl-click-host-file-opening).

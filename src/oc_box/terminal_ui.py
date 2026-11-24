@@ -334,6 +334,13 @@ def run_tui(
                 "will be accepted; an already submitted open can still finish.",
                 file=sys.stderr,
             )
+        elif preview_relay is not None and preview_relay.startup_unverified():
+            print(
+                "oc-box: Ctrl-click host opening stayed off (native-hook-unverified). "
+                "The native TUI hook did not confirm startup. If the owner predates "
+                "this launcher, exit it normally and start it again.",
+                file=sys.stderr,
+            )
         if worker is not None:
             # A running worker can be inside an engine query or desktop
             # dispatch. Restore the TTY and reap its foreground client first.

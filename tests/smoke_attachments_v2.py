@@ -166,7 +166,13 @@ def relay(native, project, env, name, protocol):
 
     def serve():
         try:
-            sharing.serve(process, None, protocol=protocol, ready=ready.set)
+
+            def activate():
+                require(process.poll() is None, "broker-relay-exited")
+                protocol.activate()
+                ready.set()
+
+            sharing.serve(process, None, protocol=protocol, ready=activate)
         except Exception:
             failures.append("broker-serve")
         finally:
@@ -211,6 +217,9 @@ class ObservedProtocol:
     def catalogued(self):
         return self.protocol.catalogued
 
+    def activate(self):
+        self.protocol.activate()
+
     def reply(self, request):
         params = request.get("params", {})
         tool = request.get("method") == "tools/call"
@@ -235,11 +244,11 @@ class ObservedProtocol:
         return response
 
 
-def check_target(native, session, project, release):
+def check_target(native, session, project, release, *, broker=False):
     return attachment_io.deliver(
         attachment_io.connection(native.endpoint["url"], native.endpoint["password"]),
         {
-            "operation": "check",
+            "operation": "broker-check" if broker else "check",
             "session": session,
             "directory": str(project),
             "version": release,
@@ -287,8 +296,11 @@ def broker_cases(native, env, state, project, root, release):
             attachments.MCP(
                 broker,
                 caller,
+                version=release,
                 consent=consent,
-                check=lambda: check_target(native, caller, project, release),
+                check=lambda: check_target(
+                    native, caller, project, release, broker=True
+                ),
             ),
             reads,
             denied,
@@ -576,10 +588,71 @@ def direct_cases(native, env, state, project, release):
         == preserved,
         "native-staged-revert-preservation",
     )
+    archived = create_session(native, project, "Synthetic archived attachment target")
+    archived_path = "/api/session/" + archived
+    native("PATCH", archived_path, {"archived": True})
+    for operation in ("check", "broker-check", "send"):
+        refused = False
+        attempted = {**value, "session": archived, "operation": operation}
+        if operation != "send":
+            del attempted["prompt"]
+        try:
+            attachment_io.deliver(
+                attachment_io.connection(
+                    native.endpoint["url"], native.endpoint["password"]
+                ),
+                attempted,
+            )
+        except attachment_io.Refused as error:
+            refused = str(error) == "session-archived"
+        require(refused, "native-archived-refusal")
+    require(
+        native("GET", archived_path)["data"]["time"].get("archived") is not None
+        and native("GET", archived_path + "/inbox")["data"] == [],
+        "native-archived-preservation",
+    )
+    explicit = create_session(native, project, "Synthetic explicit attachment send")
+    explicit_path = "/api/session/" + explicit
+    wake_id = "msg_attachment_" + secrets.token_hex(8)
+    state["code"], state["results"] = 'return "EXPLICIT_ATTACHMENT_RESUME"', []
+    requests = state["requests"]
+    wake_prompt = {**prompt(wake_id), "resume": True}
+    require(
+        stdin_delivery(
+            native, env, project, {**value, "session": explicit, "prompt": wake_prompt}
+        )
+        == {"ok": True, "message": wake_id},
+        "native-resume-acknowledgement",
+    )
+
+    def completed():
+        require(not state["failures"], "native-resume-provider")
+        context = native("GET", explicit_path + "/context")["data"]
+        matches = [item for item in context if item["id"] == wake_id]
+        if (
+            state["results"]
+            and explicit not in native("GET", "/api/session/active")["data"]
+        ):
+            return matches
+        return None
+
+    projected = wait(completed, "native-resume-timeout")
+    require(
+        len(projected) == 1
+        and projected[0]["text"] == wake_prompt["text"]
+        and len(projected[0]["files"]) == 1
+        and projected[0]["files"][0]["mime"] == "image/png"
+        and native("GET", explicit_path + "/inbox")["data"] == []
+        and len(state["results"]) == 1
+        and state["results"][0]["text"] == "EXPLICIT_ATTACHMENT_RESUME"
+        and state["requests"] > requests,
+        "native-explicit-resume",
+    )
     print(
         "PASS: production stdin helper/native HTTP image queue admission without "
         "execution; explicit wake preserves native image in context/export; "
-        "staged-revert refusal preserves history and boundary.",
+        "explicit resume starts one synthetic turn; archived and staged-revert "
+        "refusals preserve history and boundary.",
         flush=True,
     )
 
@@ -591,7 +664,7 @@ def exercise(binary, root):
     host.mkdir()
     env = private_environment(root / "native")
     release = compat.version(bounded([binary, "--version"], env, project))
-    require(release in {"2.2.6", "2.3.0"}, "native-version")
+    require(release in attachment_io.DIRECT_RELEASES, "native-direct-profile")
     print("Native OpenCode " + release + "; private offline attachments.", flush=True)
     with canned_provider() as (port, state):
         config = Path(env["XDG_CONFIG_HOME"]) / "opencode/opencode.json"
@@ -637,14 +710,6 @@ def exercise(binary, root):
                     native("GET", "/api/credential")["data"] == []
                     and bridge.session_inventory(native, str(project)) == [],
                     "private-native-state",
-                )
-                paths = native("GET", "/openapi.json")["paths"]
-                require(
-                    paths.get("/api/experimental/client-mcp", {})
-                    .get("get", {})
-                    .get("x-websocket")
-                    is True,
-                    "native-client-mcp-unavailable",
                 )
                 broker_cases(native, env, state, project, host, release)
                 direct_cases(native, env, state, project, release)

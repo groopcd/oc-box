@@ -520,7 +520,7 @@ see the focused validation requirements in `docs/testing.md`.
 
 ### attach
 
-**Experimental, host-only, V2 2.2.6/2.2.7/2.3.0 only:** disclose one host image
+**Experimental, host-only, OpenCode V2:** disclose one host image
 to an explicitly selected native session in an already running workspace.
 `--session` is required in both modes. The session must belong to the workspace's
 exact native project directory; observed archived targets or staged native
@@ -552,6 +552,10 @@ and examine the screenshot.” The host terminal shows each proposed file and it
 disclosure warning. Independently type `attach` there to authorize **each file**;
 an agent's request, native permission approval, earlier approval or pasted path
 is never host consent.
+Stable V2 broker clients are eligible without a patch list. The launcher
+verifies the existing private owner's identity and a native ClientMCP
+initialization and tool catalog before it enables the broker. Failed
+verification or an unexpected disconnect returns a fixed error.
 
 `request_image` captures an approved image and returns only an opaque expiring
 ID. `read_attachment(id)` returns that captured image at most once, to the same
@@ -580,6 +584,11 @@ draft attachment chip**. Without `--send`, oc-box requests native `resume: false
 with `--send`, it requests queueing plus `resume: true`. An already active native
 execution may consume queued input even without `--send`: neither mode promises
 that inference stays stopped. Direct mode requires PATH.
+Direct mode is restricted to releases with verified queue behavior:
+2.2.6, 2.2.7, 2.3.0, 2.3.2, 2.4.0, and 2.4.1. On another release it refuses
+before selecting a file and recommends broker mode. If native admission
+cannot be confirmed, inspect the target session before retrying; oc-box
+does not retry the operation.
 
 Both modes capture a single regular, single-link PNG/JPEG/GIF/WebP image of at
 most 8 MiB using the sharing path/content guards. Folders, symlinks, special
@@ -845,9 +854,11 @@ attachment forwarding refuses instead of guessing another target.
 Native Home and the shell's direct native fallback links remain available;
 those separate direct views do not load this addon.
 The addon uses only the existing loopback relay and native pairing/authentication.
-Native OpenCode **2.2.6 and 2.3.0 only** are
-source-checked; other versions refuse the adapter rather than assuming
-compatibility. Omit the option for the common shell with no attachment addon.
+The adapter is available only on native releases with verified browser draft
+and no-automatic-Send behavior: 2.2.6, 2.2.7, 2.3.0, 2.3.2, and 2.4.1.
+An unverified composer, failed browser authentication, or unavailable native
+service is reported explicitly. Omit the option for the common shell with no
+attachment addon, or use the native TUI's host import on a supported terminal.
 Its fixed authenticated script is `/auth/oc-box-attachments.js`; the earlier
 independent `/auth/oc-box-attachments?session=...` wrapper is retired.
 
@@ -2874,8 +2885,9 @@ Set both `prompt.image_preview` and `session.image_preview` to `true` through
 that owner. This overlay contains only those two image booleans: it does not set
 permissions, notifications or other preferences. These are terminal preferences,
 not `opencode.json` server settings. The current native V2 settings reference is
-at <https://opencode.ai/docs/cli/config>. A supporting native V2 release and host
-terminal are required; actual rendering on older releases is not established.
+at <https://opencode.ai/docs/cli/config>. Image pixels still require native
+renderer and terminal graphics support; enabling the overlay is not proof
+that a particular terminal can draw them.
 This option does not install another OpenCode version or change permissions.
 
 The persistent container `cli.json` remains the base. Existing container-local
@@ -2899,8 +2911,10 @@ for future owning native V2 start/reset launches. It is off when not saved.
 owning launch without changing it. Saving unrelated native UI settings during
 an enabled generation does not persist the forced image values. Additional
 full TUI clients inherit the actual running owner's override and cannot supply
-either flag while it is running. API/history clients and session-shell terminals
-receive no overlay. Saved enables are not applied to V1. Web,
+either flag while it is running. If the saved enable is not active on the
+running owner, an additional native TUI explains the deferral. API/history
+clients and session-shell terminals receive no overlay. An owning V1 launch
+reports that a saved enable cannot apply and leaves the preference unchanged. Web,
 terminal/maintenance, informational commands and history sync ignore the
 saved choice and reject the flags. Only the boolean request is saved in host
 workspace preferences; no CLI snapshot is kept there.
@@ -2978,6 +2992,8 @@ clickable. Absolute paths and local `file://` URIs resolve inside the container.
 Relative paths resolve against the active session's directory, not the host
 shell's directory. Hold Ctrl until after releasing the mouse button. Each
 successful click reads a fresh file; there is no panel or confirmation step.
+If the native TUI reports a drag on a verified link instead of a complete
+click, oc-box refuses the open and asks you to clear the selection and retry.
 
 - PNG: opens a normalized static image, retaining the resolution and alpha but
   not embedded metadata. Input is limited to 4 MiB and 4,194,304 pixels
@@ -3024,6 +3040,9 @@ are eligible without a minor-version allowlist, but the client must still
 provide a compatible native renderer. If a requested feature fails launcher
 admission, startup reports that host opening is off, with a reason; the native
 plugin warns during initialization if it cannot set up its renderer hook.
+Opening stays off unless the hook confirms startup. If no confirmation or TUI
+warning arrives, oc-box reports the missing hook after restoring the terminal,
+without interrupting the native client.
 Terminals that do not pass Ctrl-click to OpenCode still cannot use the feature.
 Leave terminal hyperlink handlers at their normal settings; this feature does
 not use them. It is not available in web, V1, plain host OpenCode, or the
@@ -3057,6 +3076,8 @@ operator-trusted compatibility selection, not cryptographic emulator identity.
 The pathname bridge accepts a complete qualifying paste. Konsole uses that bridge
 only, with no OSC 72 probes/registration and unchanged child output. The Kitty
 profile enables structured OSC 72 drops only after an affirmative capability reply.
+If the reply is missing, oc-box reports after restoring the terminal that
+structured drops were not confirmed; pathname pastes remain available.
 Kitty graphics support, including Konsole's graphics support, is not proof of
 drag-and-drop capability. This is not a guarantee about every emulator/version.
 
@@ -3162,9 +3183,9 @@ available there.** Clients without effective clipboard importing retain their
 native Ctrl+Y.
 It inherits the direct-TTY, native-version and terminal-profile
 requirements of `--host-drop`; SSH, tmux, screen, unknown/ambiguous profiles and
-unsupported clients refuse explicit enable. A saved enable gracefully skips
-clipboard importing on unsupported terminals, native V1 or when the selected
-desktop helper is missing, without clearing the preference. Explicit enable
+unsupported clients refuse explicit enable. If a saved enable cannot apply
+because of a terminal, native version or desktop helper, startup explains why
+clipboard importing is off without clearing the preference. Explicit enable
 still requires strict preflight; it does not read the clipboard.
 CSI-u repeat/release reports do not request another import; legacy
 control-byte/ModifyOtherKeys repeats cannot be distinguished from new presses.
@@ -3351,7 +3372,7 @@ oc-box credentials --project ~/devel/demo --credential-mode vault --clear-creden
 
 ### --attachments
 
-Web only: explicitly select the visible, source-version-bounded browser File-drop
+Web only: explicitly select the visible, compatibility-verified browser File-drop
 adapter described under `web`. Keeps the native app and its draft/Send controls
 unchanged. No automatic prompt admission or host-path/URL reading.
 

@@ -189,6 +189,40 @@ class HostDropPreferenceLaunchTests(unittest.TestCase):
                     box.main([command, flag])
                 backend.assert_not_called()
 
+    def test_failed_helper_reports_unverified_cleanup_before_fallback_or_error(self):
+        @contextlib.contextmanager
+        def refused():
+            raise host_drop.TransferStartError(cleanup_verified=False)
+            yield
+
+        for strict in (False, True):
+            with (
+                self.subTest(strict=strict),
+                patch.object(box, "validate_host_drop", return_value="konsole"),
+                patch.object(host_drop, "Relay", return_value=refused()),
+                patch.object(box, "run_tui", return_value=0) as tui,
+                contextlib.redirect_stderr(io.StringIO()) as errors,
+            ):
+                if strict:
+                    with self.assertRaisesRegex(box.BoxError, "could not start"):
+                        box.run_native_tui(
+                            self.data, ["native"], {}, host_drop_enabled=True
+                        )
+                    tui.assert_not_called()
+                else:
+                    result = box.run_native_tui(
+                        self.data,
+                        ["native"],
+                        {},
+                        host_drop_enabled=True,
+                        host_drop_required=False,
+                    )
+                    self.assertEqual(result, 0)
+                    tui.assert_called_once_with(["native"])
+            self.assertIn(
+                "Temporary import cleanup could not be verified", errors.getvalue()
+            )
+
     def test_relay_compatibility_fallback_is_automatic_only(self):
         for required in (True, False):
             with (

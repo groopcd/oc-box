@@ -369,6 +369,16 @@ stable 2.x. Check that launcher refusal reports a fixed reason before handoff,
 without mount inspection on version or terminal refusal; a disabled preference
 must remain quiet. The native fixture checks that a miss, an ungranted click and
 output alone cannot start a transfer, even on a new minor release.
+The launcher's PTY tests also check missing or overdue native hook startup,
+invalid and duplicate announcements, ordinary output and exit preservation,
+and the requirement for a new matched click after readiness.
+The native smoke's `--hook-state missing` and `--hook-state incompatible`
+cases verify that neither client receives a grant and that the incompatible
+hook reports its refusal using the native TUI.
+`--hook-state dragging` injects the observed native drag flag at the release
+of a real assistant-link hit. A fresh host click can report that refusal but
+cannot open the file, and neither an ungranted click nor an unlinked path
+can trigger the warning.
 
 Exercise verified fresh GitHub setup versus upgrade, early failure,
 reinstallation, existing/symlinked state, and an unverified installation
@@ -410,7 +420,7 @@ Run the separate provider-free native API contract on each supported release:
 python3 -B tests/smoke_web_attachments_v2.py --opencode /path/to/opencode-v2
 ```
 
-Its source-bound versions are 2.2.6
+The original native source review used 2.2.6
 (`dc2ffcf8bf26f9e669b6aa22b95f50e12be15e06`) and 2.3.0
 (`a6b15d33daf6ab7d35569f6d711fdb630b9f04e7`). The fixture verifies real
 native pairing/cookie authentication, bundled app assets, unchanged history/inbox
@@ -420,6 +430,31 @@ API. These checks do not prove browser/Spectacle/Wayland/X11/portal behavior,
 native composer thumbnail admission, provider interpretation, live rootless
 Podman isolation or new host acceptance. No native source/binary modifications
 or private widget selector hooks are used by the adapter.
+
+Before admitting another native release, also exercise unmodified native
+browser assets in Chromium with the real pairing link and attachment addon:
+
+```sh
+uv run --no-project --with playwright python3 -B tests/smoke_web_attachments_browser.py \
+  --opencode /path/to/clean/native --chromium /path/to/chromium
+```
+
+Verify a browser chooser and a trusted Chromium drop, exact native draft scope
+across two workspace sessions, preserved text and media, and no prompt/inbox
+mutation or execution before Send. Do not equate an OpenAPI or browser feature
+check with draft semantics. Test an unlisted release by adding it in a
+disposable source copy for the synthetic fixture before changing launcher
+support. This is not a physical Spectacle drag, installed browser profile,
+or live Podman acceptance test.
+
+The compatibility donor `ff0e47e8376e6031fe4b907c165de00771a29663` documents
+verified browser draft and no-automatic-Send behavior on native 2.2.6, 2.2.7,
+2.3.0, 2.3.2, and 2.4.1. Native 2.4.0 passed the HTTP fixture with candidate
+eligibility enabled, but the Chromium fixture did not verify completed PDF
+staging. Its production refusal remains intentional; the HTTP result is not a
+composer pass.
+These results are for the donor's compatibility fixtures, not a pass of the
+merged Studio browser flow or a new external-host Podman acceptance.
 
 The common shell alone owns selection, tabstrip, metadata endpoints and its
 single native iframe; attachments use only its frozen v1 API, events and optional
@@ -753,7 +788,13 @@ with the retained baseline and current development native binaries:
 ```sh
 python3 -B tests/smoke_attachments_v2.py --opencode /path/to/opencode-2.2.6
 python3 -B tests/smoke_attachments_v2.py --opencode /path/to/opencode-2.3.0
+python3 -B tests/smoke_attachments_v2.py --opencode /path/to/current-stable-opencode-2
 ```
+
+Keep the native startup/broker and direct-queue checks separate. The broker
+must complete initialize and tool-catalog negotiation with the existing
+authenticated owner before exposing any grants. Do not treat API schemas as
+proof that a new release will honor the direct queue/resume semantics.
 
 Its approval callback is synthetic. The separate real-PTY approval unit cases
 do not turn that callback into an interactive desktop/Podman acceptance pass.
@@ -854,6 +895,29 @@ submission. Native UI composition/preview and the decision to send remain native
 `--image-preview` is an optional existing owning-launch visual overlay, not
 host-file authorization or proof of rendering. No offline/native result alone
 is a desktop gesture, focused-composer or rootless-Podman pass.
+
+**Private X11 desktop regression.** With Xvfb, software OpenGL, Kitty or Konsole,
+`xclip`, `xdotool`, and Pillow with XCB support, run:
+
+```sh
+uv run --no-project --with pillow python3 -B tests/smoke_image_preview_x11_v2.py --opencode /path/to/clean/native
+uv run --no-project --with pillow python3 -B tests/smoke_host_clipboard_x11_v2.py --opencode /path/to/clean/native --terminal kitty --verify-prompt-pixels
+```
+
+The preview smoke checks a synthetic transcript PNG's color pixels in memory
+with the override on and off. The clipboard smoke checks real X11 typed
+selection, a Ctrl+Y key event, PNG and followed URI-list symlink imports, strict
+symlink refusal visible in the composer, unchanged selections, and a separate
+explicit Send. The optional pixel assertion independently checks that the
+composer renders the PNG before Send. Only
+the Podman exec boundary for the private helper is replaced with local
+execution. Use `--clipboard-backend wayland` with Weston 16 and `wl-clipboard`
+to check the actual Wayland clipboard backend in a private headless compositor;
+the terminal and scripted key input still use X11. These are isolated-desktop
+checks, not physical hardware/input, a Wayland terminal session, or Podman
+acceptance. Neither reads the user's clipboard nor saves screenshots.
+Native current-stable CI separately checks that the image preview
+overlay is effective without persisting it in native preferences.
 
 **Focused external-host observations remain outstanding.** On clean pinned
 source with disposable synthetic data, check Konsole's default direct drops

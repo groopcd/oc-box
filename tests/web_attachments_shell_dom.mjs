@@ -78,7 +78,7 @@ async function settle() {
   await new Promise(resolve => setImmediate(resolve));
   for (let i = 0; i < 12; i++) await Promise.resolve();
 }
-async function fixture(version = "2.2.6") {
+async function fixture(version = "2.2.6", infoStatus = 200) {
   const ids = ["web-shell", "session-tabs", "native", "retained-selection", "selection-status",
     "catalog-status", "no-selection", "refresh-tabs", "session-controls", "addon-status"];
   const elements = Object.fromEntries(ids.map(id => [id, new Element(id)]));
@@ -117,7 +117,10 @@ async function fixture(version = "2.2.6") {
     calls.push(url);
     assert.equal(options.body, undefined);
     assert.equal(options.method, undefined); // GET only; no prompt API.
-    if (url === "/api/info") return { ok: true, json: async () => ({ version }) };
+    if (url === "/api/info") {
+      assert.equal(options.signal.aborted, false);
+      return { status: infoStatus, ok: infoStatus === 200, json: async () => ({ version }) };
+    }
     if (url.includes("/selection?")) {
       const id = new URL(url, origin).searchParams.get("session");
       const item = [...rows, child].find(row => row.id === id);
@@ -221,10 +224,32 @@ for (const mode of ["same-id-event", "metadata", "spa-away-back", "document-load
   g.input.dispatchEvent(new Event("change", { isTrusted: true })); await settle();
   assert.equal(g.received.length, 2);
 }
-const refused = await fixture("2.2.7");
-refused.fileDrop(image()); await settle();
-assert.equal(refused.received.length, 0);
-assert.equal(refused.input.disabled, true);
+for (const version of ["2.2.6", "2.2.7", "2.3.0", "2.3.2", "2.4.1"]) {
+  const supported = await fixture(version);
+  assert.equal(supported.input.disabled, false);
+  supported.fileDrop(image()); await settle();
+  assert.equal(supported.received.length, 1, version);
+}
+for (const version of ["2.3.1", "2.4.0", "2.4.2", "2.4.1-beta", "2.4.1+local", "2.4.01"]) {
+  const refused = await fixture(version);
+  assert.match(refused.elements["addon-status"].textContent, /composer contract is not verified.*without --attachments, or Ctrl\+Y/);
+  refused.fileDrop(image()); await settle();
+  assert.equal(refused.received.length, 0);
+  assert.equal(refused.input.disabled, true);
+}
+{
+  const malformed = await fixture(null);
+  assert.equal(malformed.input.disabled, true);
+  assert.match(malformed.elements["addon-status"].textContent, /private native service could not be verified/);
+}
+for (const [status, message] of [
+  [401, /authentication failed/],
+  [503, /private native service could not be verified/],
+]) {
+  const unavailable = await fixture("2.2.6", status);
+  assert.equal(unavailable.input.disabled, true);
+  assert.match(unavailable.elements["addon-status"].textContent, message);
+}
 {
   const g = await fixture();
   g.realm.location = new URL(child.route, origin); await g.tick();

@@ -259,9 +259,25 @@ jobs:
           "$RUNNER_TEMP/host-file-open-current-tests/bin/python" -m pip install 'pyte>=0.8.2,<0.9'
           "$RUNNER_TEMP/host-file-open-current-tests/bin/python" -B tests/smoke_file_preview_v2.py \
             --opencode "$RUNNER_TEMP/opencode-v2-web/node_modules/.bin/opencode"
+          for hook in missing incompatible dragging; do
+            "$RUNNER_TEMP/host-file-open-current-tests/bin/python" -B tests/smoke_file_preview_v2.py \
+              --opencode "$RUNNER_TEMP/opencode-v2-web/node_modules/.bin/opencode" --hook-state "$hook"
+          done
       - name: Native host-drop composer handoff on current stable OpenCode 2.x
         run: >-
           python3 -B tests/smoke_host_drop_v2.py
+          --opencode "$RUNNER_TEMP/opencode-v2-web/node_modules/.bin/opencode"
+      - name: Native image preview preference isolation on current stable OpenCode 2.x
+        run: >-
+          python3 -B tests/smoke_image_preview_preferences_v2.py
+          --opencode "$RUNNER_TEMP/opencode-v2-web/node_modules/.bin/opencode"
+      - name: Native host attachment broker and direct queue on current stable OpenCode 2.x
+        run: >-
+          python3 -B tests/smoke_attachments_v2.py
+          --opencode "$RUNNER_TEMP/opencode-v2-web/node_modules/.bin/opencode"
+      - name: Authenticated browser attachment transport on current stable OpenCode 2.x
+        run: >-
+          python3 -B tests/smoke_web_attachments_v2.py
           --opencode "$RUNNER_TEMP/opencode-v2-web/node_modules/.bin/opencode"
       - name: Native host credential round trip on current stable OpenCode 2.x
         run: >-

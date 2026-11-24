@@ -313,6 +313,31 @@ class ImagePreviewTests(unittest.TestCase):
         self.assertEqual(self.path.read_bytes(), before)
         self.assertEqual(self.cli.read_text(), '{"prompt":false}')
 
+    def test_saved_preview_warns_on_v1_without_replacing_saved_choice(self):
+        project = ["--workspace", self.data["id"]]
+        self.assertEqual(
+            box.main(["preferences", *project, "--image-preview", "on"]), 0
+        )
+        self.release.return_value = "1.19.5"
+        for flags, warned in (([], True), (["--no-image-preview"], False)):
+            with (
+                self.subTest(warned=warned),
+                contextlib.redirect_stdout(io.StringIO()) as output,
+                patch.object(box, "launch_environment", return_value=0) as launch,
+                patch.object(box, "image_preview_cli_config") as config,
+            ):
+                self.assertEqual(box.main(["start", *project, *flags]), 0)
+                self.assertIs(
+                    box.effective_image_preview(launch.call_args.args[2]), False
+                )
+                self.assertEqual(
+                    "Image preview override is off" in output.getvalue(), warned
+                )
+                config.assert_not_called()
+        self.assertTrue(
+            box.workspace_ui_preferences(self.path, self.data)["image_preview"]
+        )
+
     def test_credential_wait_mutations_use_exact_preflight_snapshot(self):
         cases = (
             "malformed_json",
@@ -722,6 +747,40 @@ class ImagePreviewTests(unittest.TestCase):
         self.release.assert_not_called()
         for operation in (config, credentials, prepare):
             operation.assert_not_called()
+
+    def test_attach_warns_saved_preview_is_not_active_on_existing_owner(self):
+        project = ["--workspace", self.data["id"]]
+        self.assertEqual(
+            box.main(["preferences", *project, "--image-preview", "on"]), 0
+        )
+        self.controller.return_value = True
+        connection = {
+            "url": "http://127.0.0.1:12345",
+            "password": "a" * 43,
+            "image_preview": False,
+            "session": None,
+        }
+        with (
+            patch.object(
+                workspace_service,
+                "attach",
+                return_value=contextlib.nullcontext(connection),
+            ),
+            patch.object(box, "image_preview_cli_config") as config,
+            patch.object(box, "launch_credentials") as credentials,
+            patch.object(box, "run_tui", return_value=0) as tui,
+            contextlib.redirect_stdout(io.StringIO()) as output,
+        ):
+            self.assertEqual(box.main(["start", *project]), 0)
+        self.assertIn(
+            "Image preview override is off for the running owner", output.getvalue()
+        )
+        self.assertNotIn("OPENCODE_CLI_CONFIG_CONTENT", " ".join(tui.call_args.args[0]))
+        self.assertTrue(
+            box.workspace_ui_preferences(self.path, self.data)["image_preview"]
+        )
+        config.assert_not_called()
+        credentials.assert_not_called()
 
 
 if __name__ == "__main__":
