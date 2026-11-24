@@ -855,9 +855,12 @@ symlink refusal visible in the composer, unchanged selections, and a separate
 explicit Send. The optional pixel assertion independently checks that the
 composer renders the PNG before Send. Only
 the Podman exec boundary for the private helper is replaced with local
-execution. These are isolated-desktop checks, not physical hardware/input,
-Wayland, or Podman acceptance. Neither reads the user's clipboard nor saves
-screenshots. Native current-stable CI separately checks that the image preview
+execution. Use `--clipboard-backend wayland` with Weston 16 and `wl-clipboard`
+to check the actual Wayland clipboard backend in a private headless compositor;
+the terminal and scripted key input still use X11. These are isolated-desktop
+checks, not physical hardware/input, a Wayland terminal session, or Podman
+acceptance. Neither reads the user's clipboard nor saves screenshots.
+Native current-stable CI separately checks that the image preview
 overlay is effective without persisting it in native preferences.
 
 **Focused external-host observations remain outstanding.** On clean pinned

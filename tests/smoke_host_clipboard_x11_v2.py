@@ -1,13 +1,15 @@
-"""Real X11 selection + Ctrl+Y + native V2 composer; only Podman exec is local.
+"""Real desktop selection + Ctrl+Y + a native V2 composer on private Xvfb.
 
 Requires Xvfb, xclip, xdotool, Kitty or Konsole, and Pillow with XCB support.
 The display, input gesture, selection, oc-box helper, and native client are
 real. A synthetic loopback provider sees media only after a separate Enter.
+The optional Wayland selection backend uses private headless Weston 16 and
+wl-clipboard. The terminal and its input still run on the private X11 display.
 No live workspace, desktop clipboard, Podman, or screenshots are retained.
 """
 
 import argparse
-from contextlib import chdir, contextmanager
+from contextlib import chdir, contextmanager, nullcontext
 import hashlib
 import json
 import os
@@ -138,9 +140,17 @@ def relay(arguments):
 
 @contextmanager
 def publish(env, mime, content):
-    command = ["/usr/bin/xclip", "-selection", "clipboard"]
+    if "WAYLAND_DISPLAY" in env:
+        command = ["/usr/bin/wl-copy", "--foreground", "--type", mime]
+        types = ["/usr/bin/wl-paste", "--list-types"]
+        read = ["/usr/bin/wl-paste", "--no-newline", "--type", mime]
+    else:
+        base = ["/usr/bin/xclip", "-selection", "clipboard"]
+        command = [*base, "-target", mime, "-in", "-quiet"]
+        types = [*base, "-target", "TARGETS", "-out"]
+        read = [*base, "-target", mime, "-out"]
     process = subprocess.Popen(
-        [*command, "-target", mime, "-in", "-quiet"],
+        command,
         env=env,
         stdin=subprocess.PIPE,
         stdout=subprocess.DEVNULL,
@@ -149,9 +159,38 @@ def publish(env, mime, content):
     try:
         process.stdin.write(content)
         process.stdin.close()
-        yield command
+        yield types, read
     finally:
         reap(process)
+
+
+@contextmanager
+def private_wayland(runtime):
+    env = {"XDG_RUNTIME_DIR": str(runtime), "WAYLAND_DISPLAY": "fixture-wayland"}
+    compositor = subprocess.Popen(
+        [
+            "/usr/bin/weston",
+            "--no-config",
+            "--backend=headless",
+            "--fake-seat",
+            "--renderer=pixman",
+            "--shell=kiosk",
+            "--idle-time=0",
+            "--socket=fixture-wayland",
+        ],
+        env={**env, "PATH": os.defpath, "HOME": str(runtime)},
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        wait(
+            (runtime / "fixture-wayland").is_socket,
+            "Private Weston did not become ready.",
+        )
+        yield env
+    finally:
+        reap(compositor)
 
 
 def wait(check, message, *, timeout=10):
@@ -236,7 +275,7 @@ def run_case(
 
     def offered(command):
         value = subprocess.run(
-            [*command, "-target", "TARGETS", "-out"],
+            command,
             env=env,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
@@ -248,9 +287,10 @@ def run_case(
     try:
         window = wait(visible, "The private terminal never became visible.")
         xdo("windowfocus", "--sync", window)
-        with publish(env, mime, content) as command:
+        with publish(env, mime, content) as (types, read):
             wait(
-                lambda: offered(command), "The private X11 selection was not published."
+                lambda: offered(types),
+                "The private desktop selection was not published.",
             )
             # The shell maps before the inner TUI handles bracketed paste.
             # Observe the synthetic transcript marker without recording output.
@@ -292,14 +332,16 @@ def run_case(
                 "Ctrl+Y submitted native input without a user Send.",
             )
             same = subprocess.run(
-                [*command, "-target", mime, "-out"],
+                read,
                 env=env,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
                 timeout=2,
                 check=True,
             )
-            require(same.stdout == content, "The import modified the X11 selection.")
+            require(
+                same.stdout == content, "The import modified the desktop selection."
+            )
             if mode != "strict":
                 xdo("type", "--delay", "10", MARKER)
                 xdo("key", "Return")
@@ -329,12 +371,14 @@ def run_case(
         )
     finally:
         reap(process)
+    backend = "Wayland" if "WAYLAND_DISPLAY" in env else "X11"
     print(
-        f"PASS {terminal} native {version}: {mode}; Ctrl+Y, no automatic Send, selection preserved."
+        f"PASS {terminal} native {version}, {backend} selection: {mode}; "
+        "Ctrl+Y, no automatic Send, selection preserved."
     )
 
 
-def exercise(binary, terminal, root, *, verify_prompt_pixels=False):
+def exercise(binary, terminal, root, *, clipboard_backend, verify_prompt_pixels=False):
     project = root / "project"
     project.mkdir()
     env = private_environment(root / "native")
@@ -361,7 +405,14 @@ def exercise(binary, terminal, root, *, verify_prompt_pixels=False):
     image_hash = hashlib.sha256(content).hexdigest()
     runtime = Path(env["HOME"]) / "run"
     runtime.mkdir(mode=0o700)
-    with private_display(root) as display, canned_provider() as (port, provider):
+    clipboard = (
+        private_wayland(runtime) if clipboard_backend == "wayland" else nullcontext({})
+    )
+    with (
+        private_display(root) as display,
+        clipboard as selection,
+        canned_provider() as (port, provider),
+    ):
         config = json.loads(env["OPENCODE_CONFIG_CONTENT"])
         config.update(
             {
@@ -393,6 +444,7 @@ def exercise(binary, terminal, root, *, verify_prompt_pixels=False):
         gui = {
             **env,
             **display,
+            **selection,
             "LIBGL_ALWAYS_SOFTWARE": "1",
             "QT_QPA_PLATFORM": "xcb",
             "XDG_RUNTIME_DIR": str(runtime),
@@ -439,6 +491,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--opencode", type=Path, required=True)
     parser.add_argument("--terminal", choices=TERMINALS, default="kitty")
+    parser.add_argument(
+        "--clipboard-backend", choices=("x11", "wayland"), default="x11"
+    )
     parser.add_argument("--verify-prompt-pixels", action="store_true")
     args = parser.parse_args()
     with tempfile.TemporaryDirectory(prefix="oc-box-clipboard-x11-") as directory:
@@ -446,5 +501,6 @@ if __name__ == "__main__":
             str(args.opencode.resolve()),
             args.terminal,
             Path(directory),
+            clipboard_backend=args.clipboard_backend,
             verify_prompt_pixels=args.verify_prompt_pixels,
         )
