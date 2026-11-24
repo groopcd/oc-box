@@ -748,6 +748,18 @@ def api(box, data, connection, method, target, value=None, *, timeout=60):
     return json.loads(result.stdout) if result.stdout.strip() else None
 
 
+def confirm_guarded_owner(box, data, connection, expected, deadline):
+    """A fresh lease frame carries credentials, not the native release."""
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise box.BoxError("Guarded OpenCode owner readiness expired.")
+    info = api(box, data, connection, "GET", "/api/info", timeout=min(remaining, 10))
+    if not isinstance(info, dict) or info.get("version") != expected:
+        raise box.BoxError(
+            "Private owner readiness did not match the guarded OpenCode release."
+        )
+
+
 def wait_history(box, data, connection, *, timeout=30, interval=0.2):
     """Boundedly wait for this private server's drains and job notices to settle.
 
@@ -1151,9 +1163,9 @@ class Owner:
                         "Invalid private workspace service readiness response."
                     )
             self.connection = validate_endpoint(json.loads(output.split(b"\n", 1)[0]))
-            if guarded and self.connection.get("version") != guarded.record.version:
-                raise box.BoxError(
-                    "Private owner readiness did not match the guarded OpenCode release."
+            if guarded:
+                confirm_guarded_owner(
+                    box, self.data, self.connection, guarded.record.version, deadline
                 )
             self.connection["workspace"] = self.data["id"]
             self.connection["image_preview"] = self.image_preview

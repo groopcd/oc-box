@@ -420,9 +420,16 @@ class PreflightTests(unittest.TestCase):
 
     def test_uncertain_create_recovers_only_a_matching_identity(self):
         self.engine.ambiguous_create = True
-        self.refused("stage")
+        self.refused("scratch-create")
         self.assertFalse(self.engine.objects)
         self.assertIn(("rm", "c" * 64), [cmd for _, _, cmd, _ in self.engine.calls])
+        budgets = [
+            limits["timeout"]
+            for _, _, args, limits in self.engine.calls
+            if args[0] == "create"
+        ]
+        self.assertEqual(budgets, [90])
+        self.assertLess(preflight._CONTROL_SECONDS, budgets[0])
 
 
 class EmbeddedCodeTests(unittest.TestCase):

@@ -29,6 +29,7 @@ REFUSAL_CATEGORIES = frozenset(
         "unsupported-version",
         "backend",
         "stage-image",
+        "scratch-create",
         "stage",
         "sdk",
         "artifact",
@@ -50,6 +51,9 @@ _PHASE = _LABEL + ".phase"
 _STAGE_SECONDS = 210
 _PROBE_SECONDS = 100
 _CONTROL_SECONDS = 12
+# Preparing the pinned image for keep-id on a fresh rootless store can be
+# materially slower than inspecting an existing engine object.
+_CREATE_SECONDS = 90
 _EXE_PATH = "/scratch/runtime/bin/opencode"
 _HOME = "/tmp/preflight-home"
 _PROJECT = "/tmp/preflight-project"
@@ -61,6 +65,7 @@ LOG_REASONS = {
     "unsupported-version": "unsupported-version",
     "backend": "scope-unavailable",
     "stage-image": "stage-image",
+    "scratch-create": "scratch-creation",
     "stage": "transport",
     "sdk": "verification",
     "artifact": "verification",
@@ -961,11 +966,12 @@ class _Scratch:
                 "-c",
                 script,
                 *args,
-                category=phase,
+                category="scratch-create",
+                timeout=_CREATE_SECONDS,
             )
             if code:
-                raise Refusal(phase)
-            ident = _one_line(output, SHA256, phase)
+                raise Refusal("scratch-create", exit_code=code)
+            ident = _one_line(output, SHA256, "scratch-create")
             _, state, mounts, ports, network_mode = self.inspect(
                 ident, name, phase, ident
             )

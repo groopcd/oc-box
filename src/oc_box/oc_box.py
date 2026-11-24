@@ -2544,12 +2544,22 @@ def prepare_runtime(
     copy_command = exec_command(data, ["python3", "-c", unpack, version])
     # binary input requires the binary subprocess mode here.
     try:
-        proc = subprocess.run(
-            copy_command,
-            env=copy_command.environment,
-            input=archive,
-            capture_output=True,
-            timeout=60,
+        guarded = runtime_safeguard.current()
+        copy_options = {
+            "env": copy_command.environment,
+            "input": archive,
+            "stdout": subprocess.PIPE,
+            "stderr": subprocess.PIPE,
+            "timeout": 60,
+        }
+        proc = (
+            history_recovery.run_admitted(
+                copy_command,
+                lambda: guarded.spawn(sys.modules[__name__]),
+                **copy_options,
+            )
+            if guarded
+            else subprocess.run(copy_command, **copy_options)
         )
     except subprocess.TimeoutExpired as exc:
         raise BoxError("Copying configuration into the container timed out.") from exc
@@ -3768,7 +3778,7 @@ def launch_environment(path, data, args, *, image_preview_snapshot=None):
             with loading_stage("Syncing session history", stage="history-sync"):
                 with (
                     workspace_service.history_source(sys.modules[__name__], data)
-                    if opencode_compat.major(version) == 2
+                    if not guarded and opencode_compat.major(version) == 2
                     else contextlib.nullcontext()
                 ):
                     sync_sessions(path, data, announce=False)
@@ -4998,6 +5008,18 @@ def _validate_web_release(args, version):
             )
 
 
+def _stop_selected(path, data):
+    record = runtime_safeguard.load(sys.modules[__name__], path)
+    if record:
+        info = inspect_owned(data)
+        if not info or info.get("Id") != record.container:
+            raise BoxError(
+                "The guarded container identity changed; no substitute was stopped."
+            )
+        data = {**data, "container": record.container}
+    stop_container(data)
+
+
 def _main_command(args, argv):
     if getattr(args, "runtime_guard", False) and (
         args.command != "start"
@@ -5485,26 +5507,20 @@ def _main_command(args, argv):
     # Explicit stop is usable from a second terminal. Tool calls
     # never auto-restart a stopped container; the running TUI can then be exited.
     if args.command == "stop":
-        record = runtime_safeguard.load(sys.modules[__name__], path)
-        if record:
-            info = inspect_owned(data)
-            if not info or info.get("Id") != record.container:
-                raise BoxError(
-                    "The guarded container identity changed; no substitute was stopped."
-                )
-            data = {**data, "container": record.container}
         if opencode_compat.major(data.get("opencode_version", "1.0.0")) == 1:
-            stop_container(data)
+            _stop_selected(path, data)
         else:
             try:
+                # Publish before inspecting the independent runtime sidecar.
+                # Its pending/ready replacement must never cancel stop intent.
                 workspace_control.request_stop(path)
                 with workspace_control.admission(path, timeout=45):
-                    stop_container(data)
+                    _stop_selected(path, data)
                     workspace_control.require_certain(path)
             except workspace_control.ControlError as exc:
                 # Still honor stop as far as possible, but never claim an ordered
                 # successful stop if startup/control state could not be fenced.
-                stop_container(data)
+                _stop_selected(path, data)
                 raise BoxError(str(exc)) from None
         print("Container stopped; files, packages, and conversations retained.")
         return 0

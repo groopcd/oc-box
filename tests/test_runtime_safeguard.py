@@ -9,6 +9,7 @@ import subprocess
 import shutil
 import sys
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
@@ -261,6 +262,84 @@ class RuntimeSafeguardTests(unittest.TestCase):
                 with self.assertRaisesRegex(box.BoxError, "Stop was requested"):
                     scope.begin(box, self.data)
         self.assertEqual(native_runtime_guard.load(self.path), previous)
+
+    def test_explicit_stop_publishes_intent_before_reading_guard_state(self):
+        baseline = self.seed()
+        token = workspace_control.capture(self.path)
+
+        def guarded_record(_box, path):
+            self.assertEqual(path, self.path)
+            self.assertFalse(workspace_control.unchanged(self.path, token))
+            return baseline
+
+        with (
+            patch.object(box, "check_backend"),
+            patch.object(box, "state_root", return_value=self.root),
+            patch.object(box, "find_workspace", return_value=(self.path, self.data)),
+            patch.object(guard, "load", side_effect=guarded_record),
+            patch.object(box, "inspect_owned", return_value={"Id": CONTAINER}),
+            patch.object(box, "stop_container") as stop,
+        ):
+            self.assertEqual(box.main(["stop", "--project", str(self.project)]), 0)
+        stop.assert_called_once_with({**self.data, "container": CONTAINER})
+
+    def test_live_config_copy_cannot_spawn_after_stop_is_published(self):
+        baseline = self.seed()
+
+        def config(*_args, **_kwargs):
+            workspace_control.request_stop(self.path)
+            return b"synthetic config copy payload"
+
+        with (
+            self.synthetic_admission(OLD),
+            guard.admit(box, self.path, self.data, self.args(), baseline),
+            patch.object(box, "ensure_opencode_version"),
+            patch.object(box, "config_archive", side_effect=config),
+            patch.object(
+                box, "run"
+            ),  # The earlier seed command must not run in this fixture.
+            patch.object(subprocess, "Popen") as spawn,
+            self.assertRaisesRegex(box.BoxError, "Stop was requested"),
+        ):
+            box.prepare_runtime(self.path, self.data, OLD)
+        spawn.assert_not_called()
+
+    def test_guarded_sync_does_not_open_the_unbound_history_source_lease(self):
+        baseline = self.seed()
+        args = box.parser().parse_args(["sync"])
+        with (
+            self.synthetic_admission(OLD),
+            guard.admit(box, self.path, self.data, args, baseline) as scope,
+            patch.object(guard.Admission, "start", return_value=None),
+            patch.object(box, "check_private_output"),
+            patch.object(box, "prepare_runtime"),
+            patch.object(workspace_service, "history_source") as lease,
+            patch.object(box, "sync_sessions") as sync,
+            patch.object(box, "stop_container"),
+        ):
+            self.assertEqual(box.launch_environment(self.path, self.data, args), 0)
+            self.assertTrue(scope.launching)
+        lease.assert_not_called()
+        sync.assert_called_once_with(self.path, self.data, announce=False)
+
+    def test_guarded_owner_matches_authenticated_native_info_not_the_lease_frame(self):
+        connection = {"url": "http://127.0.0.1:49152", "password": "synthetic-only"}
+        with patch.object(
+            workspace_service, "api", return_value={"version": NEW}
+        ) as api:
+            workspace_service.confirm_guarded_owner(
+                box, self.data, connection, NEW, time.monotonic() + 30
+            )
+        api.assert_called_once_with(
+            box, self.data, connection, "GET", "/api/info", timeout=10
+        )
+        with (
+            patch.object(workspace_service, "api", return_value={"version": OLD}),
+            self.assertRaisesRegex(box.BoxError, "readiness did not match"),
+        ):
+            workspace_service.confirm_guarded_owner(
+                box, self.data, connection, NEW, time.monotonic() + 30
+            )
 
     def test_real_owner_signal_completes_receipt_and_warm_launch_skips_probe(self):
         with (
