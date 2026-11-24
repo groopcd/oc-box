@@ -23,8 +23,8 @@ For future host-authorized enrollment and reset, the account store can bind
 an authenticated review to the existing store generation and explicit
 workspace scope. A reviewed protocol upload refuses a changed store or an
 expanded reset scope; it neither grants enrollment authorization nor revokes
-existing browsers. The browser approval and native owner fences still have
-to be implemented.
+existing browsers. Production native owner exclusion/revocation is still
+required.
 
 The in-process approval gate reserves one live account bootstrap for one
 reviewed workspace registration and uses the same local PAKE identifiers.
@@ -35,8 +35,9 @@ Only the one-time host result carries its live guard into the account
 store's locked compare-and-swap. Expiry and retirement invalidate the
 guard; a possibly active verifier prevents verified drain. Offline
 composition with the real helpers opens no listener and writes no store.
-Actual host confirmation, owner exclusion/revocation, the browser
-enrollment workflow, and HTTPS routes remain separate requirements.
+The unserved foreground commit can publish after local confirmation only
+with an independently held owner fence. There is no production producer for
+that fence, default authority, served browser enrollment, or launcher route.
 
 The source contains internal encrypted account records, bounded PAKE
 orchestration with a pinned-descriptor worker interface, and expiring browser

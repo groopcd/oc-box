@@ -48,7 +48,7 @@ def wire(value):
     return json.dumps(value, separators=(",", ":"), ensure_ascii=True).encode("ascii")
 
 
-class EnrollmentIngressTests(EnrollmentFixture):
+class EnrollmentIngressFixture(EnrollmentFixture):
     def setUp(self):
         super().setUp()
         self.bind()
@@ -123,6 +123,8 @@ class EnrollmentIngressTests(EnrollmentFixture):
     def proof_finish(self, challenge):
         return {"challenge": challenge, "ke3": b64(KE3)}
 
+
+class EnrollmentIngressTests(EnrollmentIngressFixture):
     def test_final_wire_delivery_leaves_result_for_the_host_not_the_browser(self):
         challenge = self.prepared()
         writer, reader = socket.socketpair()
