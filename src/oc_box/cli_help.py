@@ -31,7 +31,7 @@ _COMMAND_GROUPS = (
         "Interfaces and sharing",
         (
             ("terminal", "Open a session terminal or a maintenance shell"),
-            ("web", "Open the native OpenCode browser interface"),
+            ("web", "Open Studio with the native OpenCode browser interface"),
             ("tui", "Open the experimental workspace manager"),
             ("share", "Share a host file or directory read-only with a live workspace"),
             ("attach", "Attach a host image to a native OpenCode session"),

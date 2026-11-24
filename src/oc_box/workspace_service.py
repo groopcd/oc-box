@@ -1478,14 +1478,12 @@ class Gateway:
         attachments=False,
         shell_addon_scripts=None,
         selection_snapshot_reader=None,
-        workspace_layout=False,
     ):
         self.box, self.data, self.connection, self.port = box, data, connection, port
         self.attachments = attachments
         if shell_addon_scripts is not None:
             self.shell_addon_scripts = shell_addon_scripts
         self.selection_snapshot_reader = selection_snapshot_reader
-        self.workspace_layout = workspace_layout
         self.closed = threading.Event()
         self.children = set()
         self.lock = threading.Lock()
@@ -1639,8 +1637,6 @@ def web_session(box, data, connection, args):
     else:
         import ui_state
     options = {"selection_snapshot_reader": ui_state.read_snapshot}
-    if getattr(args, "workspace_layout", False):
-        options["workspace_layout"] = True
     if getattr(args, "attachments", False):
         if __package__:
             from . import web_attachments
@@ -1674,7 +1670,7 @@ def web_session(box, data, connection, args):
             raise box.BoxError("Invalid native OpenCode browser pairing response.")
         link = gateway.url + "/auth/connect/" + pair["code"]
         print(
-            "oc-box: OpenCode web workspace session index\n"
+            "oc-box: OpenCode web workspace Studio\n"
             + link
             + "\nThis one-use link grants access to this workspace service. Keep this command open; Ctrl-C closes web access.",
             flush=True,
@@ -1742,7 +1738,7 @@ def web_parser():
 
     result = argparse.ArgumentParser(
         prog="oc-box web",
-        description="Open the native web UI on the private V2 workspace service; attach to a running session or own a new foreground lease.",
+        description="Open Studio around the native web UI on the private V2 workspace service; attach to a running session or own a new foreground lease.",
         epilog=(
             "Run on the host with OpenCode 2.x. Keep the command open while using "
             "the loopback browser relay. Sign in with the native one-use link."
@@ -1777,10 +1773,12 @@ def web_parser():
         action="store_true",
         help="opt in to the visible browser File-drop adapter (native 2.2.6/2.3.0 only; no automatic Send)",
     )
+    # Keep scripts using the previous explicit opt-in working. There is only
+    # one public browser shell now; this compatibility flag selects nothing.
     result.add_argument(
         "--workspace-layout",
         action="store_true",
-        help="opt in to the experimental browser workspace layouts",
+        help="compatibility flag; Studio is now the only browser workspace layout on launch",
     )
     result.add_argument(
         "--no-vault",

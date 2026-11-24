@@ -136,16 +136,17 @@ session connections have separate explicit actions.
 
 ## 5. Open another view of a running V2 workspace
 
-From another host terminal you can try the opt-in browser layout or the
-optional Textual dashboard:
+From another host terminal you can open Studio in the browser or the optional
+Textual dashboard:
 
 ```sh
-oc-box web --project ~/devel/demo --workspace-layout
+oc-box web --project ~/devel/demo
 oc-box tui --project ~/devel/demo --read-only
 ```
 
 Keep the browser's one-use pairing link private. It grants access to the
 workspace over localhost only. Close the foreground web command when done.
+On the initial 1.8/1.9 releases, add `--workspace-layout` to open Studio.
 The [client guide](guides/clients.md) explains the separate owner, browser,
 dashboard, and native session-shell lifetimes.
 

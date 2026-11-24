@@ -1,12 +1,14 @@
 # Browser workspace runtime rollout
 
-The experimental `oc-box web --workspace-layout` path adds Studio, Dashboard,
-Chat focus and a metadata-only browser manager. It retains one unmodified
+The live `oc-box web` Studio shell includes Dashboard, Chat focus and a
+metadata-only browser manager. It retains one unmodified
 OpenCode iframe and the existing localhost one-use pairing. Open TUI tabs and
 project history are distinct; history is an explicit bounded read of the
 registered directory in the leased private service. The browser has no host
 registry, global catalog, host logs, storage operations or backup authority.
-It does not start a manager terminal or duplicate Textual. See the
+It does not start a manager terminal or duplicate Textual. The initial 1.8/1.9
+releases used `--workspace-layout` to select Studio explicitly; the updated
+launcher opens it by default. See the
 [CLI reference](../cli.md#web--browser-interface) and [shell contract](../web-shell.md).
 
 The guest-only release does not expose host certificate preparation or

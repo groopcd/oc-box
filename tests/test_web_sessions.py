@@ -300,7 +300,8 @@ class WebSessionsTests(unittest.TestCase):
         self.assertIn('href="/"', text)
         self.assertIn("&lt;img", text)
         self.assertNotIn("<img", text)
-        self.assertIn("independent of TUI tabs", text)
+        self.assertIn("Native browser tabs stay independent", text)
+        self.assertIn('data-layout="studio"', text)
         self.assertIn(web.INDEX, text)
         self.assertNotIn("ses_closed", text)
         self.assertNotIn(self.connection["password"], text)
@@ -695,7 +696,7 @@ class WebSessionsTests(unittest.TestCase):
                 self.assertIn(b"Open native OpenCode Home", page)
                 self.assertNotIn(b'href="/server/', page)
 
-    def test_history_requires_native_auth_and_trusted_layout_before_querying(self):
+    def test_history_requires_native_auth_before_querying(self):
         from oc_box import web_history
 
         gateway = service.Gateway(box, self.data, self.connection)
@@ -706,14 +707,12 @@ class WebSessionsTests(unittest.TestCase):
             "time": {"created": 1, "updated": 3, "archived": 3},
             "isChild": True,
         }
-        for enabled, authorized, suffix, expected in (
-            (True, False, "", "401 Unauthorized"),
-            (False, True, "", "404 Not Found"),
-            (True, True, "?session=ses_history", "200 OK"),
-            (True, True, "", "200 OK"),
+        for authorized, suffix, expected in (
+            (False, "", "401 Unauthorized"),
+            (True, "?session=ses_history", "200 OK"),
+            (True, "", "200 OK"),
         ):
-            with self.subTest(enabled=enabled, authorized=authorized, suffix=suffix):
-                gateway.workspace_layout = enabled
+            with self.subTest(authorized=authorized, suffix=suffix):
                 request = (
                     f"GET {web.HISTORY}{suffix} HTTP/1.1\r\nHost: 127.0.0.1:23456\r\n\r\n"
                 ).encode()
@@ -743,10 +742,8 @@ class WebSessionsTests(unittest.TestCase):
                     catalog.assert_not_called()
                     select.assert_not_called()
 
-    def test_opt_in_index_offers_history_without_guessing_a_missing_tui_selection(self):
-        gateway = service.Gateway(
-            box, self.data, self.connection, workspace_layout=True
-        )
+    def test_studio_offers_history_without_guessing_a_missing_tui_selection(self):
+        gateway = service.Gateway(box, self.data, self.connection)
         gateway.url = "http://127.0.0.1:23456"
         request = (
             f"GET {web.INDEX} HTTP/1.1\r\nHost: 127.0.0.1:23456\r\n\r\n"
@@ -762,6 +759,7 @@ class WebSessionsTests(unittest.TestCase):
             self.assertTrue(web.respond(gateway, stream, None, request))
         response = stream.sendall.call_args.args[0]
         self.assertIn(b"200 OK", response)
+        self.assertIn(b'data-layout="studio"', response)
         self.assertIn(b"Workspace history", response)
         self.assertIn(b"&quot;selection&quot;: null", response)
         select.assert_not_called()
@@ -838,7 +836,7 @@ class WebSessionsTests(unittest.TestCase):
                 ),
                 0,
             )
-        self.assertIn("workspace session index", output.getvalue())
+        self.assertIn("workspace Studio", output.getvalue())
 
     def test_owning_web_honors_saved_empty_or_open_tabs_instead_of_newest_history(self):
         state = {"last": "ses_closed"}
@@ -1067,16 +1065,17 @@ class WebSessionsTests(unittest.TestCase):
                 with opener.open(gateway.url + route, timeout=5) as response:
                     self.assertEqual(response.read(), b"native-unchanged")
             with patch.object(
-                service, "web_session_catalog", side_effect=ValueError("private")
+                service,
+                "web_session_catalog",
+                side_effect=ValueError("SYNTHETIC_PRIVATE_ERROR"),
             ):
-                with self.assertRaises(HTTPError) as refusal:
-                    opener.open(gateway.url + web.INDEX, timeout=5)
-                self.assertEqual(refusal.exception.code, 503)
-                body = refusal.exception.read()
-                self.assertIn("text/html", refusal.exception.headers["Content-Type"])
+                with opener.open(gateway.url + web.INDEX, timeout=5) as response:
+                    body = response.read()
+                    self.assertIn("text/html", response.headers["Content-Type"])
+                self.assertIn(b'data-layout="studio"', body)
                 self.assertIn(b'href="/"', body)
                 self.assertNotIn(b'href="/server/', body)
-                self.assertNotIn(b"private", body)
+                self.assertNotIn(b"SYNTHETIC_PRIVATE_ERROR", body)
 
 
 if __name__ == "__main__":

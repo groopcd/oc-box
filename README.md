@@ -15,7 +15,7 @@ as [legacy, with its own guide](docs/legacy/README.md).
 [Contributing](CONTRIBUTING.md)
 
 > **Release channels:** stable is the default. Stable `1.8` and development `1.9`
-> start with the same features, including the optional dashboard and browser
+> start with the same features, including the optional Textual dashboard and browser
 > workspace layout. Older stable `1.6` releases do not include the dashboard.
 > Use a published release that supports the feature; branch HEAD is not an update.
 > [What changed in 1.8 and 1.9](docs/releases/1.8-1.9.md) ·
@@ -32,7 +32,9 @@ read-only sample data. [Read the TUI guide](docs/tui.md#tui-guide).*
 ![Studio view of the offline oc-box browser redesign, with synthetic sessions, chat, and a workspace inspector](docs/assets/readme-web-studio-demo.png)
 
 *The Studio view in the offline browser redesign demo, with synthetic data.
-This is a design preview, not the live `oc-box web` interface.
+This is a design preview, not the live interface. The live Studio shell opens
+with `oc-box web` on this branch, or `oc-box web --workspace-layout` on the
+initial 1.8/1.9 releases. The preview's **Full TUI** is not a live browser feature.
 [Try the offline demo](docs/mockups/README.md) ·
 [See the live Dashboard capture](docs/assets/readme-web-interface.md).*
 
@@ -163,7 +165,7 @@ reading activity logs. Help does not need or change a workspace.
 | Read resource and workspace status | `oc-box --status` |
 | Stop a workspace | `oc-box stop --project ~/devel/demo` |
 | Open the existing V2 session shell | `oc-box terminal --project ~/devel/demo` |
-| Open the opt-in live browser workspace | `oc-box web --project ~/devel/demo --workspace-layout` |
+| Open the live browser workspace in Studio | `oc-box web --project ~/devel/demo` |
 | Inspect workspaces in the optional dashboard | `oc-box tui --read-only` |
 | Read fixed startup/preparation metadata | `oc-box logs --tail` |
 | Import history, repair identity or rebuild the OS | [Manage workspaces](docs/guides/workspaces.md) |

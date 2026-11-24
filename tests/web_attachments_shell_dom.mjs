@@ -2,6 +2,7 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import vm from "node:vm";
+import { addStudioControls } from "./web_studio_dom_fixture.mjs";
 import { File } from "node:buffer";
 import { createRequire } from "node:module";
 const addon = createRequire(import.meta.url)("../src/oc_box/web_attachments.js");
@@ -37,6 +38,7 @@ class Events {
 }
 class Element extends Events {
   children = [];
+  dataset = {};
   attrs = new Map();
   hidden = false;
   textContent = "";
@@ -94,6 +96,7 @@ async function fixture(version = "2.2.6") {
     selectionNotice: "No native focus proof"
   }) };
   const window = new Events();
+  addStudioControls(elements, id => new Element(id), window);
   window.location = new URL("/auth/oc-box-sessions", origin);
   window.history = { replaceState(_state, _title, url) { window.location = new URL(url, origin); } };
   let interval;

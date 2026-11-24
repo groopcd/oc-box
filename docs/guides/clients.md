@@ -74,13 +74,12 @@ thumbnails/cards before pressing native Send; the adapter never submits a
 prompt automatically. Browser/native history and provider retention still apply.
 See the [web reference](../cli.md#web--browser-interface) for limits and privacy.
 
-## Try the Studio layout
+## Open Studio
 
-On a release that supports `--workspace-layout`, opt into the browser workspace
-layout from a host terminal:
+From a host terminal:
 
 ```sh
-oc-box web --project ~/devel/demo --workspace-layout
+oc-box web --project ~/devel/demo
 ```
 
 In the wide Studio layout, the left pane shows verified open TUI tabs or
@@ -88,6 +87,7 @@ explicitly requested workspace history. The middle pane is one unmodified
 native OpenCode conversation. The right pane shows workspace-only session
 metadata, not host health, resources or privileged controls. The layout does
 not alter native one-use pairing or add browser attachments by itself.
+On the initial 1.8/1.9 releases, use `--workspace-layout` to select Studio.
 See the [web workspace reference](../web-shell.md) for the other layouts
 and data boundaries.
 

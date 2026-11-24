@@ -70,27 +70,20 @@ def response(query="", *, authenticated=True):
     assert b"Content-Security-Policy: default-src 'none';" in headers
     return headers, body
 
-_, default = response()
-assert b"data-layout" not in default
-for disabled in (False, 1, "true"):
-    gateway.workspace_layout = disabled
-    assert response()[1] == default
-assert response("?layout=studio")[0].startswith(b"HTTP/1.1 503 ")
-gateway.workspace_layout = True
+assert response("?layout=compact")[0].startswith(b"HTTP/1.1 503 ")
 assert response(authenticated=False)[0].startswith(b"HTTP/1.1 401 ")
-headers, enhanced = response()
+headers, body = response()
 assert headers.startswith(b"HTTP/1.1 200 ")
-legacy, layout = Parsed(default), Parsed(enhanced)
-assert layout.frames == legacy.frames == [layout.elements["native"]]
-assert layout.scripts == legacy.scripts == [
+layout = Parsed(body)
+assert layout.frames == [layout.elements["native"]]
+assert layout.scripts == [
     {"defer": None, "src": web.SCRIPT}, {"defer": None, "src": "/auth/oc-box-attachments.js"},
 ]
 assert {"href": "/", "target": "_blank", "rel": "noopener noreferrer"} in layout.links
-assert layout.elements["web-shell"]["data-bootstrap"] == legacy.elements["web-shell"]["data-bootstrap"]
 assert layout.elements["web-shell"]["data-layout"] == "studio"
 assert layout.elements["workspace-search"]["type"] == "search"
 assert layout.elements["workspace-manager-nav"].get("hidden", False) is None
-assert b"No conversation is guessed." in enhanced
+assert b"No conversation is guessed." in body
 print(json.dumps({"elements": layout.elements, "layouts": layout.layouts, "sections": layout.sections}))
 `], {
   cwd: repo, env: { ...process.env, PYTHONPATH: repo + "src" }, encoding: "utf8", timeout: 15_000,
@@ -416,4 +409,4 @@ const settle = async () => { for (let i = 0; i < 12; i++) await Promise.resolve(
   assert.equal(widths()[0], 928); // Dashboard has one gutter and no right pane.
   assert.equal(left.getAttribute("aria-valuemax"), "928");
 }
-console.log("PASS workspace layout: trusted opt-in, native frame and draft retained, honest searchable manager, selection invalidation and bounded Studio/Dashboard dividers.");
+console.log("PASS Studio: one authenticated shell, native frame and draft retained, searchable manager, selection invalidation and bounded Studio/Dashboard dividers.");

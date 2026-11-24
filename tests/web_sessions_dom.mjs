@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import vm from "node:vm";
+import { addStudioControls } from "./web_studio_dom_fixture.mjs";
 
 const source = fs.readFileSync(new URL("../src/oc_box/web_sessions.js", import.meta.url), "utf8");
 const origin = "http://127.0.0.1:23456";
@@ -24,6 +25,7 @@ class Element extends Events {
   constructor(id) {
     super(); this.id = id; this.attrs = new Map(); this.children = [];
     this.hidden = false; this.textContent = ""; this.writes = 0;
+    this.dataset = {};
   }
   set innerHTML(_) { throw Error("unsafe HTML"); }
   setAttribute(name, value) {
@@ -58,6 +60,7 @@ function fixture(initial = rows[1], membershipStatus = "valid") {
     selectionNotice: "No native focus evidence"
   }) };
   const window = new Events();
+  addStudioControls(elements, id => new Element(id), window);
   window.location = new URL("/auth/oc-box-sessions", origin);
   window.history = {
     replaceState(_state, _title, url) { window.location = new URL(url, origin); }
