@@ -227,6 +227,10 @@ jobs:
         run: >-
           python3 -B tests/smoke_host_drop_v2.py
           --opencode "$RUNNER_TEMP/opencode-v2-web/node_modules/.bin/opencode"
+      - name: Native image preview preference isolation on current stable OpenCode 2.x
+        run: >-
+          python3 -B tests/smoke_image_preview_preferences_v2.py
+          --opencode "$RUNNER_TEMP/opencode-v2-web/node_modules/.bin/opencode"
       - name: Native host credential round trip on current stable OpenCode 2.x
         run: >-
           python3 -B tests/smoke_host_backup_auth_v2.py

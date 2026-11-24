@@ -3050,10 +3050,10 @@ TUI clients belonging to that owner.  This overlay contains only those
 two image booleans: it does not set permissions, notifications or other
 preferences.  These are terminal preferences, not ‘opencode.json’ server
 settings.  The current native V2 settings reference is at
-<https://opencode.ai/docs/cli/config>.  A supporting native V2 release
-and host terminal are required; actual rendering on older releases is
-not established.  This option does not install another OpenCode version
-or change permissions.
+<https://opencode.ai/docs/cli/config>.  Image pixels still require
+native renderer and terminal graphics support; enabling the overlay is
+not proof that a particular terminal can draw them.  This option does
+not install another OpenCode version or change permissions.
 
 The persistent container ‘cli.json’ remains the base.  Existing
 container-local preferences and their original image values survive
@@ -3080,10 +3080,11 @@ unrelated native UI settings during an enabled generation does not
 persist the forced image values.  Additional full TUI clients inherit
 the actual running owner's override and cannot supply either flag while
 it is running.  API/history clients and session-shell terminals receive
-no overlay.  Saved enables are not applied to V1.  Web,
-terminal/maintenance, informational commands and history sync ignore the
-saved choice and reject the flags.  Only the boolean request is saved in
-host workspace preferences; no CLI snapshot is kept there.
+no overlay.  An owning V1 launch reports that a saved enable cannot
+apply and leaves the preference unchanged.  Web, terminal/maintenance,
+informational commands and history sync ignore the saved choice and
+reject the flags.  Only the boolean request is saved in host workspace
+preferences; no CLI snapshot is kept there.
 
      oc-box preferences --project ~/devel/demo --image-preview on
      oc-box --project ~/devel/demo --image-preview
@@ -5190,19 +5191,19 @@ Node: Synopsis930
 Node: Description5132
 Node: Commands10952
 Node: Options144396
-Node: Lifecycle and persistence207726
-Node: Distribution images210026
-Node: Sessions and recovery215103
-Node: Devices and host permissions221688
-Node: Resource reports224034
-Node: Configuration and environment226145
-Node: Files237526
-Node: Exit status248436
-Node: Examples249844
-Node: Troubleshooting251983
-Node: Installation and manuals264475
-Node: Authors and license274665
-Node: See also275272
+Node: Lifecycle and persistence207819
+Node: Distribution images210119
+Node: Sessions and recovery215196
+Node: Devices and host permissions221781
+Node: Resource reports224127
+Node: Configuration and environment226238
+Node: Files237619
+Node: Exit status248529
+Node: Examples249937
+Node: Troubleshooting252076
+Node: Installation and manuals264568
+Node: Authors and license274758
+Node: See also275365
 
 End Tag Table
 

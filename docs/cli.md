@@ -2731,8 +2731,9 @@ Set both `prompt.image_preview` and `session.image_preview` to `true` through
 that owner. This overlay contains only those two image booleans: it does not set
 permissions, notifications or other preferences. These are terminal preferences,
 not `opencode.json` server settings. The current native V2 settings reference is
-at <https://opencode.ai/docs/cli/config>. A supporting native V2 release and host
-terminal are required; actual rendering on older releases is not established.
+at <https://opencode.ai/docs/cli/config>. Image pixels still require native
+renderer and terminal graphics support; enabling the overlay is not proof
+that a particular terminal can draw them.
 This option does not install another OpenCode version or change permissions.
 
 The persistent container `cli.json` remains the base. Existing container-local
@@ -2757,7 +2758,8 @@ owning launch without changing it. Saving unrelated native UI settings during
 an enabled generation does not persist the forced image values. Additional
 full TUI clients inherit the actual running owner's override and cannot supply
 either flag while it is running. API/history clients and session-shell terminals
-receive no overlay. Saved enables are not applied to V1. Web,
+receive no overlay. An owning V1 launch reports that a saved enable cannot
+apply and leaves the preference unchanged. Web,
 terminal/maintenance, informational commands and history sync ignore the
 saved choice and reject the flags. Only the boolean request is saved in host
 workspace preferences; no CLI snapshot is kept there.

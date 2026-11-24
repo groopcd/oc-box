@@ -1,4 +1,4 @@
-"""Provider-free native 2.3.0 proof for ephemeral image CLI overrides.
+"""Provider-free native V2 proof for ephemeral image CLI overrides.
 
 Run with TMPDIR=/tmp/opencode python3 -B
 tests/smoke_image_preview_preferences_v2.py --opencode /path/to/opencode-v2.
@@ -64,7 +64,10 @@ def exercise(binary, root, *, explicit_false):
         OPENCODE_DISABLE_AUTOUPDATE="1",
     )
     release = opencode_compat.version(bounded([binary, "--version"], env, project))
-    require(release == "2.3.0", "Native image preferences fixture requires 2.3.0.")
+    require(
+        opencode_compat.major(release) == 2,
+        "Native image preferences fixture requires V2.",
+    )
     host = root / "host-config/opencode"
     host.mkdir(parents=True)
     defaults = {

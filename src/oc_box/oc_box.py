@@ -5529,7 +5529,7 @@ def _main_command(args, argv):
         saved = workspace_ui_preferences(path, data)
         if args.image_preview is None and saved.get("image_preview") is True:
             # Saved policy applies only to a new owner. V1 keeps ordinary
-            # behavior; invalid V2 CLI settings fail before any preference
+            # behavior with a notice; invalid V2 CLI settings fail before any preference
             # writes, credential unlock or reset.
             version = getattr(args, "_opencode_release", None)
             if version is None:
@@ -5539,6 +5539,12 @@ def _main_command(args, argv):
             if opencode_compat.major(version) == 2:
                 image_preview_snapshot = validate_image_preview(version)
                 args._image_preview_enabled = True
+            else:
+                startup_output.line(
+                    "oc-box: Image preview override is off: native OpenCode 2.x "
+                    "is required. The saved preference is unchanged.",
+                    flush=True,
+                )
         configure_host_drop(
             path, data, args, getattr(args, "_opencode_release", None), saved=saved
         )

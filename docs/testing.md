@@ -840,6 +840,24 @@ submission. Native UI composition/preview and the decision to send remain native
 host-file authorization or proof of rendering. No offline/native result alone
 is a desktop gesture, focused-composer or rootless-Podman pass.
 
+**Private X11 desktop regression.** With Xvfb, software OpenGL, Kitty or Konsole,
+`xclip`, `xdotool`, and Pillow with XCB support, run:
+
+```sh
+uv run --no-project --with pillow python3 -B tests/smoke_image_preview_x11_v2.py --opencode /path/to/clean/native
+uv run --no-project --with pillow python3 -B tests/smoke_host_clipboard_x11_v2.py --opencode /path/to/clean/native --terminal kitty
+```
+
+The preview smoke checks a synthetic transcript PNG's color pixels in memory
+with the override on and off. The clipboard smoke checks real X11 typed
+selection, a Ctrl+Y key event, PNG and followed URI-list symlink imports, strict
+symlink refusal, unchanged selections, and a separate explicit Send. Only
+the Podman exec boundary for the private helper is replaced with local
+execution. These are isolated-desktop checks, not physical hardware/input,
+Wayland, or Podman acceptance. Neither reads the user's clipboard nor saves
+screenshots. Native current-stable CI separately checks that the image preview
+overlay is effective without persisting it in native preferences.
+
 **Focused external-host observations remain outstanding.** On clean pinned
 source with disposable synthetic data, check Konsole's default direct drops
 with bare names/trailing spaces, quoting/escaping, batch handling, denied/protected inputs and
