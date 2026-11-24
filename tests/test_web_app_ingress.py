@@ -40,7 +40,12 @@ class NamedAppIngressTests(unittest.TestCase):
         )
         self.owner = Mock(return_value=True)
         cookie = web_native_pair.NativeCookie(
-            self.binding, ENDPOINT, self.authority, NATIVE, owner_current=self.owner
+            self.binding,
+            ENDPOINT,
+            self.authority,
+            NATIVE,
+            version="2.3.2",
+            owner_current=self.owner,
         )
         self.pair = Mock(return_value=cookie)
         flow = fixture.pake.PakeFlow(
@@ -71,7 +76,10 @@ class NamedAppIngressTests(unittest.TestCase):
 
     def app_ingress(self, endpoint=ENDPOINT):
         return app.NamedAppIngress(
-            self.sign_in, endpoint=endpoint, claim_bootstrap=self.bootstrap
+            self.sign_in,
+            endpoint=endpoint,
+            version="2.3.2",
+            claim_bootstrap=self.bootstrap,
         )
 
     def ticket(self, browser=fixture.BROWSER):
@@ -585,7 +593,12 @@ class NamedAppIngressTests(unittest.TestCase):
     def test_private_cookie_performs_its_own_live_lease_check(self):
         native_owner = Mock(return_value=True)
         self.pair.return_value = web_native_pair.NativeCookie(
-            self.binding, ENDPOINT, self.authority, NATIVE, owner_current=native_owner
+            self.binding,
+            ENDPOINT,
+            self.authority,
+            NATIVE,
+            version="2.3.2",
+            owner_current=native_owner,
         )
         token = self.sign_in_browser()
         self.assertIs(self.dispatch(token), self.permit)

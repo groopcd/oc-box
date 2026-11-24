@@ -7,7 +7,6 @@ It opens no listener. No native cookie or pairing link goes to the browser.
 """
 
 import base64
-import json
 import os
 import re
 import select
@@ -20,14 +19,29 @@ from pathlib import Path
 if __package__:
     from .web_admission import WebBinding
     from .web_local_origins import WORKSPACE_HOST
+    from .web_named_native_profile import (
+        NamedNativeWireError,
+        named_native_info,
+        named_native_json,
+        named_native_port,
+        named_native_supports,
+        named_native_worker_source,
+    )
     from .web_tls import HTTPSOrigin
 elif __name__ != "__main__":
     from web_admission import WebBinding
     from web_local_origins import WORKSPACE_HOST
+    from web_named_native_profile import (
+        NamedNativeWireError,
+        named_native_info,
+        named_native_json,
+        named_native_port,
+        named_native_supports,
+        named_native_worker_source,
+    )
     from web_tls import HTTPSOrigin
 
 
-_VERSION = "2.3.2"
 _HOST_TIMEOUT = 8
 _WORKER_TIMEOUT = 5
 _MAX_HEAD = 8192
@@ -61,18 +75,14 @@ def _authority(origin):
 
 
 def _port(endpoint):
-    match = (
-        re.fullmatch(r"http://127\.0\.0\.1:([1-9][0-9]{0,4})/?", endpoint)
-        if type(endpoint) is str and len(endpoint) <= 23
-        else None
-    )
-    if match is None or (port := int(match[1])) > 65535:
+    try:
+        return named_native_port(endpoint)
+    except NamedNativeWireError:
         _refuse()
-    return port
 
 
 def _cookie_name(authority):
-    # 2.3.2 names this from the forwarded authority, not the TCP peer port.
+    # Both audited releases name this from the authority, not the TCP peer port.
     _, _, port = authority.partition(":")
     return "opencode_session" + ("_" + port if port else "")
 
@@ -82,21 +92,22 @@ class NativeCookie:
 
     __slots__ = ("_binding", "_owner_current", "_scope", "_value")
 
-    def __init__(self, binding, endpoint, authority, value, *, owner_current):
+    def __init__(self, binding, endpoint, authority, value, *, version, owner_current):
         if (
             type(binding) is not WebBinding
             or binding.origin != "https://" + authority
+            or not named_native_supports(version)
             or not callable(owner_current)
             or type(value) is not str
             or _VALUE.fullmatch(value) is None
         ):
             _refuse()
         self._binding = binding
-        self._scope = endpoint, authority
+        self._scope = endpoint, authority, version
         self._value = value
         self._owner_current = owner_current
 
-    def upstream_cookie(self, *, binding, endpoint, origin):
+    def upstream_cookie(self, *, binding, endpoint, origin, version):
         """Return only the Cookie value for this trusted, still-leased upstream.
 
         Do not send it in a browser response, merge it with browser cookies,
@@ -106,7 +117,7 @@ class NativeCookie:
         if (
             type(binding) is not WebBinding
             or binding != self._binding
-            or self._scope != (endpoint, authority)
+            or self._scope != (endpoint, authority, version)
             or not _owner_matches(self._owner_current, binding)
         ):
             _refuse()
@@ -182,13 +193,6 @@ def _exchange(
                 _refuse()
 
 
-def _unique(pairs):
-    result = dict(pairs)
-    if len(result) != len(pairs):
-        _refuse()
-    return result
-
-
 def _json_reply(reply):
     status, headers, body = reply
     if (
@@ -203,25 +207,20 @@ def _json_reply(reply):
         or headers.get("content-length") != [str(len(body))]
     ):
         _refuse()
-    result = json.loads(
-        body.decode("utf-8"),
-        object_pairs_hook=_unique,
-        parse_constant=lambda _: _refuse(),
-    )
+    try:
+        result = named_native_json(body)
+    except ValueError:
+        _refuse()
     if type(result) is not dict:
         _refuse()
     return result
 
 
-def _identity(reply, port):
+def _identity(reply, endpoint, version):
     info = _json_reply(reply)
-    if (
-        info.get("version") != _VERSION
-        or type(info.get("pid")) is not int
-        or info["pid"] <= 0
-        or type(info.get("urls")) is not list
-        or f"http://127.0.0.1:{port}" not in info["urls"]
-    ):
+    try:
+        named_native_info(info, version, endpoint)
+    except NamedNativeWireError:
         _refuse()
     return info
 
@@ -254,9 +253,12 @@ def _parse_cookie(reply, authority):
     return value
 
 
-def _worker(endpoint, authority):
+def _worker(endpoint, authority, version):
     port = _port(endpoint)
-    if re.fullmatch(r"[a-z0-9.-]{1,253}(?::[1-9][0-9]{0,4})?", authority) is None:
+    if (
+        not named_native_supports(version)
+        or re.fullmatch(r"[a-z0-9.-]{1,253}(?::[1-9][0-9]{0,4})?", authority) is None
+    ):
         _refuse()
     password = os.environ.pop("OPENCODE_PASSWORD", "")
     if re.fullmatch(r"[A-Za-z0-9_-]{32,256}", password) is None:
@@ -272,7 +274,7 @@ def _worker(endpoint, authority):
     status, headers, _ = fetch("/api/info")
     if status != 401 or {"set-cookie", "set-cookie2", "location"} & headers.keys():
         _refuse()
-    before = _identity(fetch("/api/info", auth=auth), port)
+    before = _identity(fetch("/api/info", auth=auth), endpoint, version)
     minted = _json_reply(fetch("/api/pair", method="POST", auth=auth))
     if (
         minted.keys() != {"code", "expires_in"}
@@ -286,7 +288,9 @@ def _worker(endpoint, authority):
     if any(secret in value for secret in (code, password, auth[6:])):
         _refuse()
     paired = _identity(
-        fetch("/api/info", cookie=_cookie_name(authority) + "=" + value), port
+        fetch("/api/info", cookie=_cookie_name(authority) + "=" + value),
+        endpoint,
+        version,
     )
     if paired != before:
         _refuse()
@@ -335,7 +339,7 @@ def _owner_matches(owner_current, binding):
 
 
 def pair_cookie(box, data, connection, *, origin, binding, owner_current):
-    """Mint once on an already-held, verified 2.3.2 private workspace lease.
+    """Mint once on an already-held, verified exact-release private workspace lease.
 
     Supply the origin from the trusted local TLS profile, never Host/Origin
     request headers. The only subprocess output accepted is the verified
@@ -350,8 +354,8 @@ def pair_cookie(box, data, connection, *, origin, binding, owner_current):
             or type(workspace := data.get("id")) is not str
             or not workspace
             or connection.get("workspace") != workspace
-            or connection.get("version") != _VERSION
-            or data.get("opencode_version") != _VERSION
+            or not named_native_supports(version := data.get("opencode_version"))
+            or connection.get("version") != version
             or type(binding) is not WebBinding
             or binding.workspace_id != workspace
             or binding.origin != origin.value
@@ -371,16 +375,22 @@ def pair_cookie(box, data, connection, *, origin, binding, owner_current):
                 "-S",
                 "-B",
                 "-c",
-                Path(__file__).read_text(encoding="utf-8"),
+                named_native_worker_source(Path(__file__).read_text(encoding="utf-8")),
                 endpoint,
                 authority,
+                version,
             ],
         )
         value = _read_bridge(command)
         if not _owner_matches(owner_current, binding):
             _refuse()
         return NativeCookie(
-            binding, endpoint, authority, value, owner_current=owner_current
+            binding,
+            endpoint,
+            authority,
+            value,
+            version=version,
+            owner_current=owner_current,
         )
     except (
         box.BoxError,

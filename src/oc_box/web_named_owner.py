@@ -52,20 +52,16 @@ class OwnerIdentity:
     endpoint: str
 
     def __post_init__(self):
-        if (
-            any(
-                type(value) is not str
-                or len(value) != size
-                or re.fullmatch(r"[a-f0-9]+", value) is None
-                for value, size in (
-                    (self.workspace_id, 32),
-                    (self.generation, 32),
-                    (self.container_id, 64),
-                )
+        if any(
+            type(value) is not str
+            or len(value) != size
+            or re.fullmatch(r"[a-f0-9]+", value) is None
+            for value, size in (
+                (self.workspace_id, 32),
+                (self.generation, 32),
+                (self.container_id, 64),
             )
-            or type(self.version) is not str
-            or self.version != web_native_pair._VERSION
-        ):
+        ) or not web_native_pair.named_native_supports(self.version):
             raise OwnerLeaseError()
         try:
             web_native_pair._port(self.endpoint)
@@ -286,6 +282,7 @@ class NamedOwnerBinding:
             ingress = web_app_ingress.NamedAppIngress(
                 sign_in,
                 endpoint=self._lease.identity.endpoint,
+                version=self._lease.identity.version,
                 claim_bootstrap=claim_bootstrap,
             )
             relay = web_named_relay.NamedNativeRelay(

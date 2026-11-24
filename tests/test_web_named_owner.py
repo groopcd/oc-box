@@ -156,6 +156,7 @@ class NamedOwnerTests(unittest.TestCase):
             binding=bound.binding,
             endpoint=self.identity.endpoint,
             origin=self.origins.workspace,
+            version=self.identity.version,
         )
 
     def test_confirm_and_metadata_use_same_pins_and_upstream_only_native_cookie(self):
@@ -187,10 +188,11 @@ class NamedOwnerTests(unittest.TestCase):
                 ],
             )
             self.assertEqual(
-                command[-2:],
+                command[-3:],
                 [
                     self.identity.endpoint,
                     self.origin.removeprefix("https://"),
+                    self.identity.version,
                 ],
             )
             self.assertNotIn(_PASSWORD, repr(command))

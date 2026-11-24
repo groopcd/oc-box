@@ -159,7 +159,9 @@ class NamedControl:
             or not _match(_HEX32, self.data.get("id"))
             or not _match(_HEX64, stop_token)
             or not _match(_NAME, self.data.get("container"))
-            or self.data.get("opencode_version") != web_native_pair._VERSION
+            or not web_native_pair.named_native_supports(
+                self.data.get("opencode_version")
+            )
             or self.data.get("ready") is not True
             or self.data.get("podman_args")
         ):
@@ -198,6 +200,16 @@ class NamedControl:
     def pinned_data(self):
         return {**self.data, "container": self._run[0]}
 
+    def worker_arguments(self, source, binary):
+        return [
+            "python3",
+            "-c",
+            web_native_pair.named_native_worker_source(source),
+            "named-lease",
+            binary,
+            self.data["opencode_version"],
+        ]
+
     def run_current(self):
         if self._retired.is_set() or not self._stop_current():
             return False
@@ -230,7 +242,7 @@ class NamedControl:
             self.data["id"],
             self.generation,
             self._run[0],
-            web_native_pair._VERSION,
+            self.data["opencode_version"],
             connection["url"],
         )
         self._password = connection["password"]

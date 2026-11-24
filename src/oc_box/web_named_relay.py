@@ -309,25 +309,21 @@ def _read_reply(peer, *, deadline, check):
     return bytes(body)
 
 
-def _metadata(body, target, endpoint):
-    # Keep the original bytes only for closed, metadata-only schemas. In
-    # particular there are no arbitrary strings, error payloads or extra keys.
-    value = json.loads(
-        body.decode("utf-8"),
-        object_pairs_hook=pair._unique,
-        parse_constant=lambda _: _refuse(),
-    )
+def _metadata(body, target, endpoint, version):
+    # Native info carries private hostname/path/capability data. Validate the
+    # exact identity, then render only the already-allowed public metadata.
+    try:
+        value = pair.named_native_json(body)
+    except ValueError:
+        _refuse()
     if type(value) is not dict:
         _refuse()
     if target == "/api/info":
-        if (
-            value.keys() != {"version", "pid", "urls"}
-            or value["version"] != pair._VERSION
-            or type(value["pid"]) is not int
-            or not 0 < value["pid"] <= 2**31 - 1
-            or value["urls"] != [f"http://127.0.0.1:{pair._port(endpoint)}"]
-        ):
+        try:
+            public = pair.named_native_info(value, version, endpoint)
+        except pair.NamedNativeWireError:
             _refuse()
+        return json.dumps(public, separators=(",", ":")).encode("ascii")
     elif target == "/api/session/active":
         if (
             value.keys() != {"data"}
@@ -338,6 +334,7 @@ def _metadata(body, target, endpoint):
             )
         ):
             _refuse()
+        return body
     else:
         _refuse()
 
@@ -419,6 +416,7 @@ class NamedNativeRelay:
                         binding=ingress._binding,
                         endpoint=ingress._endpoint,
                         origin=ingress._origin,
+                        version=ingress._native_version,
                     )
                 except pair.NativePairError:
                     ingress.close()  # Never rebind or repair by pairing again.
@@ -464,7 +462,7 @@ class NamedNativeRelay:
         peer.settimeout(https._remaining(deadline))
         peer.sendall(wire)
         body = _read_reply(peer, deadline=deadline, check=check)
-        _metadata(body, target, ingress._endpoint)
+        body = _metadata(body, target, ingress._endpoint, ingress._native_version)
         io.finish_workspace(deadline, current)
         # Emit host-owned headers only. Never copy native cookies (including
         # rotations), headers, reason phrases or response status to the client.

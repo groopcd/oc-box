@@ -25,6 +25,19 @@ from urllib.parse import quote, urlparse
 from urllib.error import HTTPError
 from urllib.request import Request, build_opener, ProxyHandler
 
+if __package__:
+    from .web_named_native_profile import (
+        named_native_info,
+        named_native_json,
+        named_native_supports,
+    )
+elif __name__ != "__main__":
+    from web_named_native_profile import (
+        named_native_info,
+        named_native_json,
+        named_native_supports,
+    )
+
 
 def require_control_pipe():
     """Refuse credential-bearing readiness on a terminal or a disk file."""
@@ -141,8 +154,25 @@ def _deadline_http(parsed, method, path, data, headers, deadline, *, max_body=No
         connection.request(method, path, body=data, headers=headers)
         stream.settimeout(_deadline_timeout(deadline))
         with connection.getresponse() as response:
-            if max_body is not None and response.status != 200:
-                raise FixedError(READINESS)
+            if max_body is not None:
+                # The bounded mode is the exact named readiness probe, not the
+                # ordinary native JSON API. Never follow redirects or cookies.
+                headers = response.headers
+                if (
+                    response.status != 200
+                    or headers.get_all("Content-Type") != ["application/json"]
+                    or headers.get_all("Content-Encoding", []) not in ([], ["identity"])
+                    or any(
+                        key in headers
+                        for key in (
+                            "Location",
+                            "Set-Cookie",
+                            "Set-Cookie2",
+                            "Transfer-Encoding",
+                        )
+                    )
+                ):
+                    raise FixedError(READINESS)
             if response.status >= 400:
                 raise HTTPError(
                     path, response.status, "Private request failed", {}, None
@@ -161,7 +191,12 @@ def _deadline_http(parsed, method, path, data, headers, deadline, *, max_body=No
                 chunks.append(chunk)
             _deadline_timeout(deadline)
             body = b"".join(chunks)
-            value = json.loads(body) if body else None
+            if max_body is not None:
+                if headers.get_all("Content-Length") != [str(len(body))]:
+                    raise FixedError(READINESS)
+                value = named_native_json(body)
+            else:
+                value = json.loads(body) if body else None
             _deadline_timeout(deadline)
             return value
     finally:
@@ -1059,25 +1094,26 @@ def ready_plugins(request, directory, *, startup_deadline=None):
     raise FixedError(BUILD_PLUGIN_TIMEOUT)
 
 
-def _verify_named_owner(request, deadline):
+def _verify_named_owner(request, deadline, version):
     """Confirm the actual private native release before granting owner readiness."""
     info = request(
         "GET", "/api/info", deadline=min(deadline, time.monotonic() + 2), max_body=8192
     )
-    if (
-        not request.alive()
-        or type(info) is not dict
-        or info.keys() != {"pid", "version", "urls"}
-        or info["version"] != "2.3.2"  # Exact audited named pairing release.
-        or type(info["pid"]) is not int
-        or not 0 < info["pid"] <= 2**31 - 1
-        or info["urls"] != [request.endpoint["url"].rstrip("/")]
-    ):
+    if not request.alive():
         raise FixedError(READINESS)
+    try:
+        named_native_info(info, version, request.endpoint["url"])
+    except ValueError:
+        raise FixedError(READINESS) from None
 
 
 def main(argv):
-    action, binary = argv
+    action, binary, *identity = argv
+    if action == "named-lease":
+        if len(identity) != 1 or not named_native_supports(identity[0]):
+            raise FixedError(READINESS)
+    elif identity:
+        raise ValueError("Invalid private OpenCode arguments.")
     if action == "seed":
         seed_database()
     elif action == "auth":
@@ -1113,7 +1149,7 @@ def main(argv):
         with server(binary, startup_deadline=deadline) as request:
             ready_plugins(request, os.getcwd(), startup_deadline=deadline)
             if action == "named-lease":
-                _verify_named_owner(request, deadline)
+                _verify_named_owner(request, deadline, identity[0])
             # Control credentials are returned only through the owner's pipe,
             # kept in memory, and never written to the workspace or service.json.
             write_control_record(descriptor, request.endpoint)

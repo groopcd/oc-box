@@ -124,17 +124,21 @@ is not atomic with a write already in progress, cannot recall sent bytes, and
 does not prove that native work stopped.
 
 Only complete, fixed-length JSON replies of at most 8 KiB are eligible (8 KiB
-header limit, one response followed by EOF). The narrow 2.3.2 schemas permit
-the version, positive PID and pinned private loopback URL, or a map of native
-session IDs with `running` state only. Unexpected fields or values refuse. The
-body bytes are preserved, but all browser response headers are generated
-locally: no native `Set-Cookie`, challenge or redirect is forwarded. The
-exchange uses the earlier of the TLS I/O deadline or the session's absolute
+header limit, one response followed by EOF). The two exact native profiles
+are **2.3.2** and **2.4.1**, which use the same audited wire format here.
+`/api/info` must match the leased version and endpoint and contain the
+expected native hostname, temporary-path and capability fields. The relay
+discards those private fields and emits only the version, positive PID and
+pinned private loopback URL. `/api/session/active` preserves validated body
+bytes for the closed map of native session IDs with `running` state only.
+All browser response headers are generated locally: no native `Set-Cookie`,
+challenge or redirect is forwarded. The exchange uses the earlier of the TLS
+I/O deadline or the session's absolute
 expiry. It has no default connector; the private endpoint's container loopback
 port must never be treated as a host loopback destination.
 
-Synthetic HTTPS and private socket tests cover matching handoff, byte-exact
-replies, route/lease refusals, malformed native replies, and cancellation
+Synthetic HTTPS and private socket tests cover matching handoff, metadata
+projection, route/lease refusals, malformed native replies, and cancellation
 before registration, during startup, during native reads and before browser
 write. Subprocess fixtures replace only the Podman exec invocation: they
 exercise the same registered socket and actual child wait, including valid
@@ -150,8 +154,8 @@ The unserved [`web_named_owner.py`](../../src/oc_box/web_named_owner.py)
 consumer binds sign-in, `NativeCookie` and the metadata relay to the same
 explicit `VerifiedOwnerLease`. The handle is an internal trust contract, not
 proof that its producer verified anything. It pins the workspace ID, a
-per-owner generation, the full immutable container ID, the native version
-(exactly **2.3.2**) and the validated private `127.0.0.1` endpoint. A
+per-owner generation, the full immutable container ID, the selected exact
+native version and the validated private `127.0.0.1` endpoint. A
 read-only, bounded observation must still confirm that exact owner and
 container run. The consumer also polls the original held same-user Unix attach
 stream without reading its contents: EOF, error, unexpected data or loss of
@@ -171,9 +175,11 @@ replace a controller socket, even one that looks stale. Before starting its
 private native worker, it inspects the workspace container's ownership label,
 registered mounts and isolated network, capturing a full immutable ID and
 running `StartedAt` value. The worker starts against that full ID, checks the
-actual authenticated `/api/info` response for **2.3.2**, and reports readiness
-only over the existing private pipe. The host rechecks the exact run before
-publishing or lending the owner.
+actual authenticated `/api/info` response against the expected **2.3.2** or
+**2.4.1**, and reports readiness only over the existing private pipe. The host
+rechecks the exact run before publishing or lending the owner. The pairing
+worker, cookie scope and relay require that same release, not merely any
+supported one; alternate releases, aliases and untested patches do not match.
 
 The private `oc-box.named-owner/1` request and reply use same-user Unix peer
 credentials and a fresh challenge authenticated by a per-owner in-memory
@@ -377,6 +383,19 @@ owner-relay, security-review or publication acceptance.
   adapter, not named browser authentication or native cookie revocation.
   The guest's offline Chromium library check was incomplete, so the guest
   did not exercise the HTTPS browser composition.
+- **Exact named native wire:** `tests/smoke_web_named_native.py` passed with
+  unmodified Linux x64 OpenCode 2.3.2 (`e6543f6e5c39c40971ba38afd1819ac852c29ac735b5a89065d3d148d47f27ad`)
+  and 2.4.1 (`ec93043f18f8a6b4d8e71ec9260e292ba6f91b66b142782135d40f0b58b0c152`),
+  both SHA-256. It ran the named readiness worker, the held Unix control lease
+  handshake and the providerless pairing worker against fresh private
+  services. It verified the empty chunked pairing redirect, scoped cookie,
+  one-use redemption, readiness/pairing refusals for a declared version
+  mismatch, and relay projection for `/api/info` and idle session metadata.
+  The container facts and exec boundary were synthetic, and the relay
+  fixture connected directly to its disposable local native service. This
+  is native wire evidence, not Podman, trusted-browser, or full Studio
+  acceptance. The Studio transcript adapter remains independently pinned
+  to 2.4.1.
 - **Browser and native streams:** Two private Chromium HTTPS runs on exact
   `2767d46` passed all 12 checks with real OPAQUE and OpenCode 2.3.2. Copied
   tickets and replay refused, and the native cookie stayed on the server.
