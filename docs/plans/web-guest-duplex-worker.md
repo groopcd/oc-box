@@ -61,13 +61,27 @@ restart, fallback, payload diagnostic, or receipt on emergency pipe cleanup.
 (or that the worker never opened it); already-sent bytes, peer processing,
 and actions already admitted by OpenCode can survive that closure. It does
 not prove rollback, safe replay, native job completion, or history readiness.
-Future host integration must independently validate the terminal receipt,
-genuine stdout EOF with no surplus, and an exact non-forced clean host reap
-before discharging the registered activity. Neither local host pipe closure
-nor killing a host exec proves in-container retirement.
+`web_guest_duplex_host.DuplexHost` implements the matching unserved consumer.
+It takes exclusive ownership of two distinct original unbuffered exec pipes
+and the original unreaped process, with a pidfd and bounded poll slices. It
+keeps one send and one receive data credit, permits cancellation before
+`OPEN`, and finishes only a record that was partly written before
+cancellation. After sending `CANCEL` and closing the original input, it
+drains and discards any remaining old data. It then requires the exact tag
+and expected closure disposition, genuine stdout EOF with no surplus, and
+a terminal `waitpid` status of zero before its deadline. Unknown or forced
+local cleanup never supplies confirmation or resends cancellation. The
+binding and pre-spawn registration are exclusively the caller's responsibility;
+the host consumer does not run a command, accept a browser, or choose an
+owner. Callers must not duplicate or retain the original pipe handles, poll
+or reap the child independently, or treat the kernel descriptor checks as
+protection against a concurrent same-process substitution.
 
 `tests/test_web_guest_duplex_worker.py` runs this exact worker on direct
 local subprocess pipes and synthetic loopback sockets. It does not exercise
 Podman's stdin EOF propagation, the native OpenCode server, browser behavior,
-Gateway or owner lifetime coordination, or an installed host. Those remain
-separate validation gates.
+Gateway or owner lifetime coordination, or an installed host. The matching
+host tests cover idle and blocked loopback traffic, wrong/absent/duplicated
+receipt evidence, a kept-open pipe, nonzero or lost reap status, and an
+observably substituted descriptor. Actual Podman stdio, owner coordination
+and live browser behavior remain separate validation gates.

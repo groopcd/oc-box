@@ -28,6 +28,11 @@ stand in for a duplex native WebSocket relay. The missing evidence is an
 acknowledged native-side retirement on cancellation, followed by strict
 EOF and exact process reap, even when an upgraded stream is idle or
 backpressured. Privately tracking host workers alone is not that evidence.
+The unserved framed duplex worker and host verifier now prove this on
+local synthetic pipes and TCP. The next gate must show the same contract
+through rootless `podman exec -i`: the original exec must carry cancellation
+and stdout EOF correctly even under backpressure. Then the gateway must
+register that exact process and every other native helper before dispatch.
 
 A Studio grant must not outlive native cookie authority. Recheck the
 current browser cookie for every bounded protected exchange and fence an
