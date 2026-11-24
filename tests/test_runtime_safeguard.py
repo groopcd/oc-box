@@ -389,19 +389,39 @@ class RuntimeSafeguardTests(unittest.TestCase):
             check.assert_not_called()
 
     def test_pinned_descriptor_executes_and_does_not_resolve_path_again(self):
-        actual = Path(sys.executable).resolve(strict=True)
-        if actual.read_bytes()[:4] != b"\x7fELF":
-            self.skipTest("requires Linux ELF Python")
-        with patch.object(guard.shutil, "which", return_value=str(actual)) as which:
+        # A distro ELF avoids inheriting the test interpreter's mode or loader paths.
+        source = shutil.which("printf", path="/usr/bin:/bin")
+        self.assertIsNotNone(source, "requires a system printf executable")
+        source = Path(source)
+        self.assertTrue(source.is_file())
+        limit = 8 * 1024 * 1024
+        with source.open("rb") as stream:
+            binary = stream.read(limit + 1)
+        self.assertLessEqual(len(binary), limit)
+        self.assertEqual(binary[:4], b"\x7fELF", "system printf must be an ELF")
+
+        actual = self.root / "fixture-printf"
+        actual.write_bytes(binary)
+        actual.chmod(0o700)
+        alias = self.root / "opencode"
+        alias.symlink_to(actual.name)
+        with patch.object(guard.shutil, "which", return_value=str(alias)) as which:
             with guard.pinned_host(box) as selected:
+                # Remove the lookup alias without changing the pinned inode.
+                alias.unlink()
+                command = selected.command(box)
+                self.assertEqual(command, f"/proc/{os.getpid()}/fd/{selected.fd}")
                 result = subprocess.run(
-                    [selected.command(box), "-I", "-c", "print('pinned')"],
-                    env={"PATH": "/non-existent"},
+                    # Preserve the applet name for multicall printf builds.
+                    ["printf", "%s\n", "pinned"],
+                    executable=command,
+                    env={"PATH": str(self.root / "missing-bin")},
                     capture_output=True,
                     text=True,
+                    timeout=15,
                     check=True,
                 )
-                self.assertEqual(result.stdout.strip(), "pinned")
+                self.assertEqual(result.stdout, "pinned\n")
             which.assert_called_once_with("opencode")
 
     def test_isolated_release_read_does_not_inherit_config_or_credentials(self):
