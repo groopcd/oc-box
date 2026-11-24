@@ -67,3 +67,10 @@ launcher path or engine stop is wired, and the marker does not exclude
 unaudited or direct same-user writers. A production runner still needs
 enforced scope, exact owner/attach binding and independent drain and verified
 stop evidence before it can complete a record.
+
+An unserved attach precheck can capture the exact armed generation and its
+original gate. It refuses unarmed and stop-requested records and permanently
+retires its witness on an observed mismatch. This is only an attach routing
+precheck: it supplies no proof of a currently accepting controller, held
+Unix stream, counted client, or native session and never authorizes a new
+owning launch.

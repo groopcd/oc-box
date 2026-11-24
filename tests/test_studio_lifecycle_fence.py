@@ -109,6 +109,44 @@ class StudioLifecycleFenceTests(unittest.TestCase):
         self.assertEqual(self.gate.read_bytes(), prior)
         direct.assert_not_called()
 
+    def test_attach_observes_one_armed_lifetime_and_never_adopts_its_successor(self):
+        self.enroll_fixture()
+        with self.assertRaisesRegex(fence.FenceError, "wrong-lifetime"):
+            fence.observe_attach(self.scope)
+        direct = Mock(return_value=True)
+        with box.workspace_lock(self.record), fence.arm(self.scope) as first:
+            witness = fence.observe_attach(self.scope)
+            self.assertTrue(fence.attach_current(witness))
+            self.assertIs(
+                fence.route_stop(self.scope, direct_stop=direct),
+                fence.StopRoute.PENDING,
+            )
+            self.assertFalse(fence.attach_current(witness))
+            with self.assertRaisesRegex(fence.FenceError, "wrong-lifetime"):
+                fence.observe_attach(self.scope)
+            first.complete(drained=True, stopped=True)
+            with fence.arm(self.scope) as second:
+                self.assertFalse(fence.attach_current(witness))
+                new_witness = fence.observe_attach(self.scope)
+                self.assertTrue(fence.attach_current(new_witness))
+                second.complete(drained=True, stopped=True)
+        self.assertFalse(fence.attach_current(new_witness))
+        direct.assert_not_called()
+
+    def test_attach_witness_stays_retired_after_observed_marker_loss(self):
+        self.enroll_fixture()
+        with box.workspace_lock(self.record), fence.arm(self.scope) as owner:
+            witness = fence.observe_attach(self.scope)
+            self.assertTrue(fence.attach_current(witness))
+            marker = self.marker.read_bytes()
+            self.marker.unlink()
+            self.assertFalse(fence.attach_current(witness))
+            self.marker.write_bytes(marker)
+            self.assertFalse(fence.attach_current(witness))
+            # A separate observation does not revive that object.
+            self.assertTrue(fence.attach_current(fence.observe_attach(self.scope)))
+            owner.complete(drained=True, stopped=True)
+
     def test_killed_original_owner_cannot_turn_pending_into_ordinary_stop(self):
         self.enroll_fixture()
         ctx = multiprocessing.get_context("fork")
