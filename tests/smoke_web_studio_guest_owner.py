@@ -17,7 +17,7 @@ from smoke_web_named_native import (
 from smoke_session_sync_v2 import require
 
 from oc_box import oc_box as box
-from oc_box import workspace_control, workspace_service
+from oc_box import web_studio_guest_binding, workspace_control, workspace_service
 
 
 _NATIVE_SHA = "ec93043f18f8a6b4d8e71ec9260e292ba6f91b66b142782135d40f0b58b0c152"
@@ -77,14 +77,29 @@ def exercise(root, binary):
                         and owner._guest_proof.current() is identity,
                         "The original native child was not verified.",
                     )
-                    # A real V2 stop intent retires this proof even while the
-                    # native worker and the workspace lock are still held.
-                    workspace_control.request_stop(path)
-                    require(
-                        owner._guest_proof.current() is None
-                        and owner.child.poll() is None,
-                        "Stop intent did not fence the owner proof without replacing it.",
+                    gateway = workspace_service.Gateway(
+                        box, owner._guest_proof.pinned_data(), owner.connection
                     )
+                    with gateway._listener_preflight() as listener:
+                        binding = web_studio_guest_binding.bind_unserved(
+                            gateway, listener, owner._guest_proof
+                        )
+                        require(
+                            binding.current() is binding.native.binding
+                            and binding.native.native_pid == identity.native_pid
+                            and binding.native.binding.origin
+                            == listener.origin(gateway, listening=False),
+                            "The proof did not join the same worker and socket.",
+                        )
+                        # A real V2 stop intent retires this proof even while
+                        # the worker and the workspace lock are still held.
+                        workspace_control.request_stop(path)
+                        require(
+                            binding.current() is None
+                            and owner._guest_proof.current() is None
+                            and owner.child.poll() is None,
+                            "Stop intent did not fence the original gateway and owner.",
+                        )
                 require(
                     owner.child.returncode == 0 and not owner.address.exists(),
                     "Native worker did not observe EOF and cleanly reap its server.",
@@ -117,7 +132,7 @@ def main():
         print(f"FAIL original guest owner: {type(error).__name__}.", file=sys.stderr)
         return 1
     print(
-        "PASS native 2.4.1 original guest owner: authenticated child PID, exact stop intent, clean EOF and reap."
+        "PASS native 2.4.1 original guest owner and unserved gateway: authenticated child PID, exact stop intent, clean EOF and reap."
     )
     print(
         "Synthetic Podman inspect/exec; no guest routes, gateway drain or host acceptance."

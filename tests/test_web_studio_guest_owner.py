@@ -14,6 +14,7 @@ from unittest.mock import Mock, patch
 
 from oc_box import oc_box as box
 from oc_box import opencode_v2_io as worker
+from oc_box import web_studio_guest_binding as binding
 from oc_box import web_studio_guest_owner as guest
 from oc_box import workspace_control, workspace_service as service
 
@@ -249,3 +250,34 @@ class GuestOwnerTests(unittest.TestCase):
             self.owner.__enter__()
         self.assertEqual(self.owner.address.read_text(), "synthetic-stale")
         self.podman.assert_not_called()
+
+    def test_unserved_binding_rejects_copies_foreign_reservations_and_reuse(self):
+        with contextlib.ExitStack() as stack:
+            proof = self.seal(stack)
+            connection = self.owner.connection
+            actual = service.Gateway(box, proof.pinned_data(), connection)
+            copied = service.Gateway(box, proof.pinned_data(), dict(connection))
+            listener = stack.enter_context(actual._listener_preflight())
+            foreign = stack.enter_context(copied._listener_preflight())
+            for gateway, reservation, owner in (
+                (actual, foreign, proof),
+                (copied, foreign, proof),
+                (actual, listener, SimpleNamespace(connection=connection)),
+            ):
+                with self.assertRaises(binding.GuestBindingError):
+                    binding.bind_unserved(gateway, reservation, owner)
+            joined = binding.bind_unserved(actual, listener, proof)
+            with self.assertRaises(binding.GuestBindingError):
+                binding.bind_unserved(actual, listener, proof)
+            self.assertIs(joined.current(), joined.native.binding)
+            self.assertEqual(
+                joined.native.binding.origin,
+                f"http://127.0.0.1:{actual.listener.getsockname()[1]}",
+            )
+            with self.assertRaises(service._GatewayListenerError):
+                actual._start_listener(listener)
+            actual.connection = dict(connection)
+            self.assertIsNone(joined.current())
+            actual.connection = connection
+            self.assertIsNone(joined.current())
+        self.assertIsNone(joined.current())

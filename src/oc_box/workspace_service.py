@@ -1844,6 +1844,13 @@ class _GatewayListenerProof:
             host, port = self._address
             return f"http://{host}:{port}"
 
+    def is_unserved_probe(self, gateway):
+        return (
+            gateway is self._gateway
+            and self._probe_only
+            and self.origin(gateway, listening=False) is not None
+        )
+
     def _close_original(self):
         # Startup/unserved cleanup must not close a different socket that
         # replaced the descriptor. No shutdown/drain claim follows from this.
@@ -1880,6 +1887,7 @@ class Gateway:
         self.capacity = threading.BoundedSemaphore(32)
         self.listener = None
         self._listener_proof = None
+        self._guest_preview_bound = False
 
     def _reserve_listener(self, *, probe_only=False):
         """Bind the actual gateway socket, not the disposable port preflight."""

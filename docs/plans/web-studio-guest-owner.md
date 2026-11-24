@@ -52,8 +52,14 @@ WebSocket drain. The ordinary workspace shutdown implementation is unchanged.
   proves the unmodified ELF readiness, not that every packaged CLI entrypoint
   execs the ELF in place or that the default gateway drains.
 
+`web_studio_guest_binding.bind_unserved` joins the exact owning proof to the
+actual Gateway reservation, with the original owner connection and pinned
+container selection. It is scoped to a one-shot, non-listening probe; it
+does not mint a cookie, register a browser grant, or expose a protected API.
+
 `tests/smoke_web_studio_guest_owner.py` uses the exact unmodified 2.4.1 ELF
 with a synthetic project and substituted Podman inspect/exec. It tests the
-original native child, revocation on a real stop token change, and EOF/reap.
+original native child, the unserved listener binding, revocation on a real
+stop token change, and EOF/reap.
 It serves no guest routes, performs no inference and does not establish host
 acceptance.

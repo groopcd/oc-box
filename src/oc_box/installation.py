@@ -43,6 +43,7 @@ RUNTIME_FILES = (
     "web_studio_selection.py",
     "web_studio_send.py",
     "web_studio_guest.py",
+    "web_studio_guest_binding.py",
     "web_studio_guest_native.py",
     "web_studio_guest_owner.py",
     "web_named_studio_client.mjs",
