@@ -163,6 +163,47 @@ class HistoryRecoveryTests(unittest.TestCase):
         sync.assert_not_called()
         self.assertIn("startup-path-unverified", self.output.getvalue())
 
+    def test_running_legacy_owner_can_bind_another_client_without_start_authority(self):
+        self.info["Config"]["Cmd"] = ["-c", "exec sleep infinity"]
+        volume = self.data["home_volume"]
+        running = {**self.info, "State": {"Running": True, "Status": "running"}}
+        record = SimpleNamespace(
+            ready=True,
+            version=self.data["opencode_version"],
+            volume=volume,
+            container=self.ident,
+            digest="d" * 64,
+        )
+        inventory = [
+            {
+                "Name": volume,
+                "Driver": "local",
+                "Mountpoint": self.source.mount_signature[2],
+                "Labels": {box.LABEL: self.data["id"]},
+            }
+        ]
+        connection = {"version": record.version}
+        with (
+            patch.object(box.runtime_safeguard, "load", return_value=record),
+            patch.object(box, "inspect_owned", return_value=running),
+            patch.object(
+                box,
+                "podman",
+                return_value=SimpleNamespace(stdout=json.dumps(inventory)),
+            ) as podman,
+        ):
+            box.runtime_safeguard.bind_client(box, self.path, self.data, connection)
+        podman.assert_called_once_with(
+            "volume", "inspect", volume, capture=True, timeout=15
+        )
+        self.assertEqual(connection["_runtime_container"], record.container)
+        self.assertEqual(connection["_runtime_digest"], record.digest)
+        with self.assertRaisesRegex(recovery.RecoveryError, "startup-path-unverified"):
+            recovery.passive_workspace_mounts(box, self.data, running)
+        stopped = {**running, "State": {"Running": False, "Status": "exited"}}
+        with self.assertRaisesRegex(recovery.RecoveryError, "startup-path-unverified"):
+            recovery.live_attachment_mounts(box, self.data, stopped)
+
     def test_guarded_24_snapshot_retains_the_exact_captured_digest_on_refusal(self):
         digest = "d" * 64
         self.data["opencode_version"] = "2.4.1"

@@ -328,8 +328,9 @@ New containers use an absolute `/bin/sleep` path for their passive entrypoint.
 The safeguard refuses older containers whose stored entrypoint would look up
 `sleep` on the workspace `PATH`. It does not modify or replace those containers,
 or fall back from guarded to unguarded startup. Ordinary unguarded startup of
-existing containers is unchanged. Preserve existing workspace data; do not
-reset or downgrade to bypass a refusal.
+existing containers is unchanged. A verified, already-running guarded owner
+can still accept clients; attaching does not authorize a new start. Preserve
+existing workspace data; do not reset or downgrade to bypass a refusal.
 
 Before normal preparation can write state, oc-box durably records the admitted
 version. An interruption, late startup failure or missing readiness does not
