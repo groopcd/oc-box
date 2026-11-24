@@ -273,6 +273,17 @@ client had exited. No CLI, artifact distribution or host unlock is enabled by
 this composition. A local fixture uses real TLS, the signed owner-control
 exchange and encrypted-store replacement with synthetic native/Podman I/O.
 
+`prepare_named_launch` is the internal pre-owner entry point for explicit
+host choices. It reserves both loopback sockets, checks the reviewed browser
+and verifier source/binary inputs, and then prompts on the host for the
+separate encrypted **web account store** passphrase. It does not initialize an
+account store, ask for a browser password or provider vault, select compiled
+artifacts, or inspect/create/launch a workspace. The caller still owns
+normal vault and workspace preparation. Its retained handle starts only one
+exact owner's sites with a scope present in the authenticated account store.
+Once an owner attach exists, a false close retains every path-bound resource;
+do not treat that as a normal client exit. No CLI calls this internal API yet.
+
 A later LAN instance can use distinct existing sites and certificates under
 operator control. Isolated guest LAN tests can establish transport behavior
 using a synthetic private CA, without touching public DNS or requesting a

@@ -67,6 +67,7 @@ _WEB_RUNTIME_FILES = (
     "web_named_foreground.py",
     "web_named_handoff.py",
     "web_named_http.py",
+    "web_named_launch.py",
     "web_named_listeners.py",
     "web_named_owner.py",
     "web_named_protocol.py",
