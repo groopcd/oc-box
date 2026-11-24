@@ -46,7 +46,9 @@ _OFF = (OSError, ValueError, RuntimeError, TypeError)
 def launcher_bytes(release):
     """The exact shell wrapper written on activation."""
     return (
-        "#!/bin/sh\nexec python3 " + shlex.quote(str(release / "oc_box.py")) + ' "$@"\n'
+        "#!/bin/sh\nexec python3 -B "
+        + shlex.quote(str(release / "oc_box.py"))
+        + ' "$@"\n'
     ).encode()
 
 

@@ -21,6 +21,7 @@ oc-box purge [--project PATH | --workspace ID] [--delete-sessions | --all] [-y]
 oc-box list
 oc-box distros
 oc-box doctor [--json | --table] [--feature FEATURE]...
+oc-box runtime-check VERSION
 oc-box completion bash
 oc-box web [--project PATH | --workspace ID] [--session ID] [--port N] [--no-open] [--no-vault] [--attachments] [--workspace-layout] [LIFECYCLE-LOG-OPTIONS]
 oc-box --status [--project PATH | --workspace ID] [--json | --table]
@@ -30,6 +31,7 @@ oc-box logs [--log-dir PATH] --path
 oc-box tui [--project PATH | --workspace ID] [--read-only] [--demo]
 oc-box upgrade [--check] [--stable | --devel] [--vault] [--tui]
 oc-box upgrade --auto-update on|off
+oc-box --uninstall [--dry-run]
 oc-box secrets init|passwd [--min-passphrase-length N]
 oc-box secrets list
 oc-box secrets set|remove NAME
@@ -212,6 +214,26 @@ launches require it even with `--no-vault`; ordinary V1 launches without vault
 values and attach-only clients do not. It is separate from the version-neutral
 `launch` prerequisites: doctor does not start OpenCode to infer its version.
 
+### runtime-check
+
+Test an exact stable OpenCode 2.x release before installing it on the host:
+
+```sh
+oc-box runtime-check 2.4.0
+```
+
+The check uses disposable local rootless Podman containers and public package
+downloads. It requires a pinned official tool image in the local rootless
+store; if it is missing, the check prints the exact one-time pull command.
+It prepares the exact native CLI and matching SDK with oc-box's
+generated Build permissions plugin, then checks required plugin activation in
+an offline synthetic project. It does not open a real project, private home,
+host OpenCode store or vault, or run the user's plugins or providers. It does
+not enroll or change any workspace. A pass does not certify every workspace,
+credential backend, platform, or future OpenCode integration. The console
+prints one result line; `oc-box logs --tail` shows the staging, offline probe,
+and cleanup outcomes and timings. Raw native and installer output is not saved.
+
 ### start
 
 Create or resume an environment. This is the default when no command is given.
@@ -275,7 +297,39 @@ at handoff. No badge is added to native UI or subprocess streams, credential
 prompts, or other commands such as `status`, `logs`, `web`, and `terminal`.
 Pipes and `TERM=dumb` receive neither badge nor padding.
 The container OpenCode version is verified against the host on every launch;
-exact upgrades and downgrades are supported, with no fallback to another release.
+there is no automatic switch to another release. On an existing stopped
+standard V2 workspace, a forward stable `2.x.y` update (including a patch
+update) must pass isolated preflight before normal preparation. To enroll
+without changing versions, use `oc-box start --runtime-guard`. After preflight
+and admission, the workspace remembers the exact runtime artifact; unchanged
+launches do not repeat package downloads or the synthetic check.
+
+A confirmed required-plugin failure is remembered for
+that exact release, host artifact, and probe code. It leaves the existing
+runtime in place and prints a GitHub issue link. A different candidate, such as
+`2.4.1` after a refusal of `2.4.0`, gets its own check. An explicit
+`--runtime-guard` rechecks a remembered refusal rather than bypassing it.
+Unavailable downloads, timeouts, uncertain cleanup and artifact mismatches are
+not recorded as proof that an upstream version is unsupported. Report the
+versions and fixed refusal category, not private output.
+
+Guarded admission currently requires the official native host executable with
+the same bytes as the verified container artifact and a standard stopped
+container/home pair on a glibc-based catalog distribution. Alpine, script shims,
+custom devices and custom Podman arguments are not supported. Only owning `start`
+admits a changed version. Guarded `web`,
+`sync` and plain history-preserving `purge` use the already verified runtime;
+`reset`, maintenance and `start --import-session` are unavailable on guarded
+workspaces. An existing private owner still serves additional clients without
+starting a preflight or refreshing its credentials.
+
+Before normal preparation can write state, oc-box durably records the admitted
+version. An interruption, late startup failure or missing readiness does not
+permit an older version to reopen that state. The guard is not a rollback and
+does not govern independent host OpenCode processes, raw Podman operations,
+or older oc-box launchers. Retaining the old container runtime does not make
+the normal host database safe for an older helper; automatic fallback is
+deferred. Ordinary unguarded V1/V2 migration paths remain separate.
 With a V2 release supporting image previews, `--image-preview` enables prompt
 and transcript image previews through an ephemeral native-CLI overlay for this
 owning TUI generation, without replacing saved private preferences. See the
@@ -650,12 +704,19 @@ not a guarantee: the native reporting APIs and private saved-tab layout can
 change within 2.x, and not every release has been tested.
 
 Studio replaces the compact session index. Studio, Dashboard and Chat focus
-change the layout, not the selected native conversation.
-The separate no-chat manager distinguishes
-verified open tabs from on-demand, read-only history for the registered
-workspace project. It makes other views unavailable rather than granting host
-catalogs, logs, workspace/backup operations, or a host terminal. It is not
-the offline demo's Full TUI or the local `oc-box tui` manager.
+change the layout, not the selected native conversation. Studio shows the
+workspace name, a neutral guest label, a sessions rail and a closable workspace
+inspector; wide Studio panes resize by dragging or with the divider arrow keys.
+The rail and the separate no-chat workspace manager distinguish verified open
+TUI tabs from on-demand, metadata-only history for the registered workspace
+project. **Archived** filters that history; it does not read host archives.
+The browser manager offers seven no-chat views. Status and Sessions show
+workspace metadata; Settings changes display preferences for the current page
+only. Terminals, Logs, Storage and Backup/restore provide host-side guidance,
+not browser access to those operations. Use Left/Right, Home/End, or 1–7 on
+the manager tabs. Opening a view never fetches history or starts monitoring.
+The browser manager is not the offline demo's Full TUI or the local
+`oc-box tui` manager.
 
 The one-use link is the only browser sign-in method and the HTTP relay binds
 to `127.0.0.1` only. Vault unlock supplies workspace credentials, not browser
@@ -1786,9 +1847,13 @@ are preserved as `legacy-docs`. No workspaces or credentials are migrated/delete
 GitHub automatic updates are off by default and follow the saved release channel.
 `--auto-update on` saves `auto_update: true` in the existing host oc-box
 configuration, retaining settings such as `pass_env`.
-Normal installed `start` launches check before Podman/workspace setup and, when
-updated, continue with the same arguments. No background daemon, active-session
-update, or automatic check for list/status/terminal/reset/purge is introduced.
+The verified active launcher checks before Podman/workspace setup. The installer
+rechecks the active source, and only a compatible, verified target continues
+with the same arguments, holding its use lock across the restart. Use explicit
+upgrade for a target without the automatic handoff protocol. A retained copy
+using this protocol does not update or recreate a missing installation.
+No background daemon, active-session update, or automatic check for
+list/status/terminal/reset/purge is introduced.
 Direct source-checkout launches skip automatic updates. A concurrent check does
 not block another normal launcher. Network/download failures are reported and
 the normal launch continues with the installed version; explicit upgrade failures
@@ -1804,6 +1869,27 @@ download. HTTPS is required; shell commands or a custom upstream URL are not
 accepted. Use manual source installation for a reviewed alternate deployment.
 Updates inside a container are refused because its private HOME is not the host
 installation. Git is required for public updates; build tools are not.
+
+### uninstall
+
+Run `oc-box --uninstall` as the regular host user from the verified active
+GitHub-installed launcher. Review the selected release and installed files on
+the controlling terminal, then type `UNINSTALL OC-BOX`. `--dry-run` prints
+the launcher-only review without prompting or deleting anything. Use
+`oc-box --uninstall --help` for the dedicated help.
+
+This removes only the reviewed launcher, selected installed release, and its
+verified links, manuals and completion. It keeps older releases and all
+workspace containers, home volumes, project files and markers, registry,
+vault, settings, logs, backups and host OpenCode history. It does not contact
+Podman or OpenCode. A missing or changed [installation receipt](installation.md#installation-ownership-receipt),
+an in-use launcher or an unverified installation refuses. Use the owning
+package manager for a Python-package installation; oc-box will not invoke
+that manager or delete its environment.
+
+Full cleanup is not enabled in this candidate. `--full` refuses rather than
+falling back to launcher-only removal. Neither mode may remove host OpenCode
+history.
 
 ### secrets
 
@@ -3232,6 +3318,14 @@ unchanged. No automatic prompt admission or host-path/URL reading.
 
 Web only: accepted for compatibility with earlier 1.8/1.9 commands. Studio
 opens with or without this flag. The old compact session index is not served.
+
+### --runtime-guard
+
+Enroll an existing stopped standard OpenCode 2.x workspace on an owning
+`start`, even without a version change. Rechecks an isolated refusal rather
+than overriding it. The guard persists after runtime admission; there is no
+switch to delete the version fence. This option is not a request for rollback,
+and does not apply to attach-only clients or `reset`.
 
 ### --no-vault
 

@@ -10,6 +10,8 @@ import argparse
 import base64
 import contextlib
 import contextvars
+from dataclasses import dataclass
+import errno
 import hashlib
 import json
 import math
@@ -37,6 +39,8 @@ else:
     import startup_output
 
 CONNECTION = contextvars.ContextVar("oc_box_v2_connection")
+LIFECYCLE_LOCK = contextvars.ContextVar("oc_box_owner_lifecycle_lock", default=None)
+_NAMED_ONLY = "named-only"
 MAX_CONTROL = 16384
 PROXY = """import os,select,socket,sys
 s=socket.create_connection(('127.0.0.1',int(sys.argv[1])),timeout=10); s.settimeout(None)
@@ -455,7 +459,7 @@ def read_control(stream):
     return value
 
 
-def validate_workspace(box, path, data):
+def _validate_workspace_identity(box, path, data):
     project = box.validate_project(data["project"])
     selected, _ = box.find_workspace(project)
     if (
@@ -464,6 +468,10 @@ def validate_workspace(box, path, data):
         or data.get("restore_incomplete")
     ):
         raise box.BoxError("Workspace identity changed; refusing live session access.")
+
+
+def validate_workspace(box, path, data):
+    _validate_workspace_identity(box, path, data)
     info = box.inspect_owned(data, env=box.maintenance_host_env())
     if not info or not info["State"].get("Running") or info["State"].get("Paused"):
         raise box.BoxError(
@@ -491,6 +499,14 @@ def client_command(
     file_preview=False,
 ):
     """No host pass_env, auth refresh, profiles, or vault unlock on attach."""
+    safeguard = getattr(box, "runtime_safeguard", None)
+    guarded = safeguard.current() if safeguard else None
+    guarded_container = (
+        guarded.record.container if guarded else connection.get("_runtime_container")
+    )
+    guarded_digest = (
+        guarded.record.digest if guarded else connection.get("_runtime_digest")
+    )
     image_preview = connection.get("image_preview", False)
     if type(image_preview) is not bool:
         raise box.BoxError("Invalid private workspace image-preview setting.")
@@ -507,7 +523,7 @@ def client_command(
             box.container_project(data),
             "--env",
             "OPENCODE_PASSWORD",
-            data["container"],
+            guarded_container or data["container"],
         ]
     )
     names = {
@@ -563,6 +579,10 @@ def client_command(
             if verified is not None:
                 # Use the inspected immutable container ID, not a mutable name.
                 container, mounts = verified
+                if guarded_container and container != guarded_container:
+                    raise box.BoxError(
+                        "The live file-open client no longer matches the guarded container."
+                    )
                 reason = file_preview_host.readiness_reason()
                 if reason is None:
                     refusals = []
@@ -617,8 +637,16 @@ def client_command(
         else "xterm-256color"
     )
     bridge = "import os,sys,json; env=json.loads(sys.argv[1]); env['OPENCODE_PASSWORD']=os.environ['OPENCODE_PASSWORD']; os.execvpe(sys.argv[2],sys.argv[2:],env)"
+    if (
+        guarded_digest
+        and safeguard
+        and (interactive or (guarded and guarded.launching))
+    ):
+        arguments = safeguard.bound_command(arguments, guarded_digest)
     command.extend(["python3", "-I", "-S", "-c", bridge, json.dumps(names), *arguments])
     result = box.ContainerCommand(command, env)
+    if guarded:
+        result.guarded_spawn = True
     if preview_host_open is not None:
         result.preview_host_open = preview_host_open
     return result
@@ -726,6 +754,20 @@ def api(box, data, connection, method, target, value=None, *, timeout=60):
     # None convention. run still checks command failure; nonempty malformed JSON
     # must remain an error rather than being mistaken for a no-content success.
     return json.loads(result.stdout) if result.stdout.strip() else None
+
+
+def confirm_guarded_owner(box, data, connection, expected, deadline):
+    """A fresh lease frame carries credentials, not the native release."""
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise box.BoxError("Guarded OpenCode owner readiness expired.")
+    info = api(box, data, connection, "GET", "/api/info", timeout=min(remaining, 10))
+    if time.monotonic() >= deadline:
+        raise box.BoxError("Guarded OpenCode owner readiness expired.")
+    if not isinstance(info, dict) or info.get("version") != expected:
+        raise box.BoxError(
+            "Private owner readiness did not match the guarded OpenCode release."
+        )
 
 
 def wait_history(box, data, connection, *, timeout=30, interval=0.2):
@@ -1067,7 +1109,17 @@ def wait_history(box, data, connection, *, timeout=30, interval=0.2):
 
 
 class Owner:
-    def __init__(self, box, path, data, *, image_preview=False, ui_bridge=False):
+    def __init__(
+        self,
+        box,
+        path,
+        data,
+        *,
+        image_preview=False,
+        ui_bridge=False,
+        named_stop_token=None,
+        guest_stop_token=None,
+    ):
         if type(image_preview) is not bool:
             raise box.BoxError("Invalid private workspace image-preview setting.")
         self.box, self.path, self.data = box, path, data
@@ -1082,11 +1134,44 @@ class Owner:
         self.child = None
         self.listener = None
         self.bound = False
+        self._named_stop_token = named_stop_token
+        self._named_control = None
+        self._guest_stop_token = guest_stop_token
+        self._guest_proof = None
 
     def __enter__(self):
         box = self.box
         # The caller owns the lifecycle lock. A refused connection is stale;
         # a live controller must never be replaced by a new server.
+        named = self._named_stop_token is not None
+        guest = self._guest_stop_token is not None
+        safeguard = getattr(box, "runtime_safeguard", None)
+        guarded = safeguard.current() if safeguard else None
+        if named and guarded:
+            # These startup envelopes were verified separately. Do not waive
+            # either exact readiness check to let one masquerade as the other.
+            raise box.BoxError(
+                "Named HTTPS cannot use the guarded workspace owner contract yet."
+            )
+        if guest and (named or guarded or self._guest_proof is not None):
+            raise box.BoxError("This workspace owner cannot supply Studio guest proof.")
+        live = live_connection()
+        if guest and (
+            self.address.exists()
+            or self.address.is_symlink()
+            or (live is not None and live.get("workspace") == self.data["id"])
+        ):
+            raise box.BoxError(
+                "Studio guest proof cannot replace a workspace controller."
+            )
+        if (named and (self.address.exists() or self.address.is_symlink())) or (
+            live is not None
+            and live.get("workspace") == self.data["id"]
+            and (named or live.get("web_mode") == _NAMED_ONLY)
+        ):
+            raise box.BoxError(
+                "Named workspace mode cannot replace an existing controller."
+            )
         if self.address.exists():
             info = self.address.lstat()
             if not stat.S_ISSOCK(info.st_mode) or info.st_uid != os.getuid():
@@ -1104,20 +1189,81 @@ class Owner:
                         "A private workspace service already owns this workspace."
                     )
         script = (box.PACKAGE / "opencode_v2_io.py").read_text()
-        command = box.exec_command(
-            self.data, ["python3", "-c", script, "lease", box.CONTAINER_OPENCODE]
-        )
+        execution_data = self.data
+        worker = ["python3", "-c", script, "lease", box.CONTAINER_OPENCODE]
+        if named:
+            if __package__:
+                from . import web_named_protocol
+            else:
+                import web_named_protocol
+            try:
+                if self.bound or self._named_control is not None:
+                    raise web_named_protocol.OwnerLeaseError()
+                self._named_control = web_named_protocol.NamedControl(
+                    self, self._named_stop_token
+                )
+                execution_data = self._named_control.pinned_data()
+                worker = self._named_control.worker_arguments(
+                    script, box.CONTAINER_OPENCODE
+                )
+            except (
+                box.BoxError,
+                OSError,
+                ValueError,
+                KeyError,
+                TypeError,
+                AttributeError,
+                RecursionError,
+            ):
+                raise box.BoxError(
+                    "Named workspace owner could not be verified."
+                ) from None
+        if guest:
+            if __package__:
+                from . import web_studio_guest_owner, workspace_control
+            else:
+                import web_studio_guest_owner
+                import workspace_control
+            try:
+                self._guest_proof = web_studio_guest_owner.GuestOwnerProof(
+                    self, self._guest_stop_token
+                )
+                command = self._guest_proof.worker_command(script)
+            except (
+                box.BoxError,
+                OSError,
+                ValueError,
+                KeyError,
+                TypeError,
+                AttributeError,
+                subprocess.SubprocessError,
+                RecursionError,
+            ):
+                raise box.BoxError(
+                    "Studio guest original workspace owner could not be verified."
+                ) from None
+        else:
+            command = box.exec_command(execution_data, worker)
         self.errors = box.captured_output(private=True)
         self.error_file = self.errors.__enter__()
         try:
-            self.child = subprocess.Popen(
-                command,
-                env=command.environment,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=self.error_file,
-                start_new_session=True,
-            )
+            with (
+                workspace_control.admission(self.path)
+                if guest
+                else guarded.spawn(box)
+                if guarded
+                else contextlib.nullcontext()
+            ):
+                if guest:
+                    self._guest_proof.before_spawn()
+                self.child = subprocess.Popen(
+                    command,
+                    env=command.environment,
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=self.error_file,
+                    start_new_session=True,
+                )
             assert self.child.stdout is not None
             output = bytearray()
             deadline = time.monotonic() + 180
@@ -1127,14 +1273,69 @@ class Owner:
                         "Private workspace service failed to start; private output was not logged."
                     )
                 if select.select([self.child.stdout], [], [], 0.1)[0]:
-                    output.extend(os.read(self.child.stdout.fileno(), 4096))
-                if len(output) > MAX_CONTROL:
+                    chunk = os.read(self.child.stdout.fileno(), 4096)
+                    if guest and not chunk:
+                        raise box.BoxError(
+                            "Studio guest original workspace owner could not be verified."
+                        )
+                    output.extend(chunk)
+                if len(output) > (4096 if guest else MAX_CONTROL):
                     raise box.BoxError(
                         "Invalid private workspace service readiness response."
                     )
-            self.connection = validate_endpoint(json.loads(output.split(b"\n", 1)[0]))
+            if named:
+                try:
+                    if not output.endswith(b"\n") or output.count(b"\n") != 1:
+                        raise web_named_protocol.OwnerLeaseError()
+                    self.connection = validate_endpoint(
+                        json.loads(output, object_pairs_hook=web_named_protocol._unique)
+                    )
+                    self._named_control.seal(self.connection)
+                except (
+                    OSError,
+                    ValueError,
+                    KeyError,
+                    TypeError,
+                    AttributeError,
+                    RecursionError,
+                ):
+                    raise box.BoxError(
+                        "Named workspace owner could not be verified."
+                    ) from None
+                self.connection["web_mode"] = _NAMED_ONLY
+            elif guest:
+                try:
+                    if time.monotonic() >= deadline:
+                        raise web_studio_guest_owner.GuestOwnerError()
+                    self.connection = self._guest_proof.seal(bytes(output))
+                    if time.monotonic() >= deadline:
+                        raise web_studio_guest_owner.GuestOwnerError()
+                except (
+                    box.BoxError,
+                    OSError,
+                    ValueError,
+                    KeyError,
+                    TypeError,
+                    AttributeError,
+                    subprocess.SubprocessError,
+                    RecursionError,
+                ):
+                    raise box.BoxError(
+                        "Studio guest original workspace owner could not be verified."
+                    ) from None
+            else:
+                self.connection = validate_endpoint(
+                    json.loads(output.split(b"\n", 1)[0])
+                )
+            if guarded:
+                confirm_guarded_owner(
+                    box, self.data, self.connection, guarded.record.version, deadline
+                )
             self.connection["workspace"] = self.data["id"]
             self.connection["image_preview"] = self.image_preview
+            if guarded:
+                self.connection["_runtime_container"] = guarded.record.container
+                self.connection["_runtime_digest"] = guarded.record.digest
             if __package__:
                 from . import ui_state
             else:
@@ -1166,8 +1367,31 @@ class Owner:
     def publish(self, session):
         if session is not None and not self.box.valid_session_id(session):
             raise self.box.BoxError("Invalid live workspace session ID.")
-        with self.condition:
+        safeguard = getattr(self.box, "runtime_safeguard", None)
+        guarded = safeguard.current() if safeguard else None
+        if self._guest_proof is not None:
+            try:
+                self._guest_proof.before_publish()
+            except (
+                self.box.BoxError,
+                OSError,
+                ValueError,
+                KeyError,
+                TypeError,
+                AttributeError,
+                subprocess.SubprocessError,
+                RecursionError,
+            ):
+                raise self.box.BoxError(
+                    "Studio guest original workspace owner could not be verified."
+                ) from None
+        with (
+            guarded.spawn(self.box) if guarded else contextlib.nullcontext(),
+            self.condition,
+        ):
             self.session, self.ready = session, True
+            if guarded:
+                guarded.launching = False
 
     def default_session(self):
         """Recheck persisted open membership without inventing an active tab."""
@@ -1227,6 +1451,11 @@ class Owner:
                     "3i", stream.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12)
                 )
                 if uid != os.getuid():
+                    return
+                if self._named_control is not None:
+                    # Indistinguishable legacy attach/info clients cannot
+                    # receive the private credential from a named-only owner.
+                    self._named_control.serve(stream)
                     return
                 stream.settimeout(5)
                 request = read_control(stream)
@@ -1308,6 +1537,9 @@ class Owner:
 
     def shutdown(self):
         self.closing = True
+        guest_retired = True
+        if self._guest_proof is not None:
+            self._guest_proof.retire()
         if self.listener:
             self.listener.close()
             if hasattr(self, "thread"):
@@ -1315,57 +1547,77 @@ class Owner:
             if self.bound:
                 self.address.unlink(missing_ok=True)
         if self.child:
-            if self.child.stdin:
-                self.child.stdin.close()
-            try:
-                self.child.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                os.killpg(self.child.pid, signal.SIGKILL)
-                self.child.wait(timeout=5)
+            if self._guest_proof is not None:
+                guest_retired = False
+                try:
+                    self._guest_proof.retire_worker(self.child)
+                except (OSError, ValueError, subprocess.SubprocessError):
+                    pass
+                else:
+                    guest_retired = True
+            else:
+                if self.child.stdin:
+                    self.child.stdin.close()
+                try:
+                    self.child.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    os.killpg(self.child.pid, signal.SIGKILL)
+                    self.child.wait(timeout=5)
             if self.child.stdout:
                 self.child.stdout.close()
         if hasattr(self, "token"):
             CONNECTION.reset(self.token)
         if hasattr(self, "errors"):
             self.errors.__exit__(None, None, None)
+        if not guest_retired:
+            raise self.box.BoxError(
+                "Studio guest native owner retirement could not be verified."
+            )
 
     def __exit__(self, *_):
         self.shutdown()
 
 
+@dataclass(frozen=True, slots=True, repr=False)
+class AttachedControl:
+    """Trusted borrower view of one same-user attach, not owner attestation."""
+
+    connection: dict
+    stream: socket.socket
+    peer_pid: int
+
+
 @contextlib.contextmanager
-def attach(box, path, data):
-    validate_workspace(box, path, data)
+def _attach_control(box, path, data, *, named=None):
+    """Hold the original connected stream, never acquire a second lease.
+
+    Borrowers must not close it, read additional replies, or treat a same-user
+    PID and connected descriptor as proof of the native owner's generation.
+    """
+    if named is None:
+        validate_workspace(box, path, data)
     stream = socket.socket(socket.AF_UNIX)
     try:
         stream.settimeout(5)
-        stream.connect(str(socket_path(box, data)))
-        _, uid, _ = struct.unpack(
+        stream.connect(
+            str(socket_path(box, data) if named is None else named.owner.address)
+        )
+        peer_pid, uid, _ = struct.unpack(
             "3i", stream.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12)
         )
         if uid != os.getuid():
             raise box.BoxError("Private workspace controller belongs to another user.")
-        stream.sendall(
-            (json.dumps({"action": "attach", "workspace": data["id"]}) + "\n").encode()
-        )
-        connection = read_control(stream)
-        if connection.get("error"):
-            raise box.BoxError(connection["error"])
-        validate_endpoint(connection)
-        if (
-            connection.get("workspace") != data["id"]
-            or connection.get("version") != data.get("opencode_version")
-            or "session" not in connection
-            or (
-                connection["session"] is not None
-                and not box.valid_session_id(connection["session"])
-            )
-        ):
-            raise box.BoxError(
-                "Live service does not match this workspace/version/session."
-            )
+        if named is not None:
+            connection = named.exchange(stream, peer_pid)
+        else:
+            connection = _legacy_attachment(box, data, stream)
+            safeguard = getattr(box, "runtime_safeguard", None)
+            if safeguard:
+                safeguard.bind_client(box, path, data, connection)
     except (OSError, ValueError) as exc:
         stream.close()
+        if named is not None:
+            raise
         raise box.BoxError(
             "No ready live OpenCode 2.x workspace service. Start oc-box or 'oc-box web' first; no credentials were refreshed."
         ) from exc
@@ -1373,9 +1625,38 @@ def attach(box, path, data):
         stream.close()
         raise
     try:
-        yield connection
+        yield AttachedControl(connection, stream, peer_pid)
     finally:
         stream.close()
+
+
+def _legacy_attachment(box, data, stream):
+    stream.sendall(
+        (json.dumps({"action": "attach", "workspace": data["id"]}) + "\n").encode()
+    )
+    connection = read_control(stream)
+    if connection.get("error"):
+        raise box.BoxError(connection["error"])
+    validate_endpoint(connection)
+    if (
+        connection.get("workspace") != data["id"]
+        or connection.get("version") != data.get("opencode_version")
+        or "session" not in connection
+        or (
+            connection["session"] is not None
+            and not box.valid_session_id(connection["session"])
+        )
+    ):
+        raise box.BoxError(
+            "Live service does not match this workspace/version/session."
+        )
+    return connection
+
+
+@contextlib.contextmanager
+def attach(box, path, data):
+    with _attach_control(box, path, data) as attached:
+        yield attached.connection
 
 
 def relay_command(box, data, port):
@@ -1470,6 +1751,145 @@ class NativeResponseHeaders:
         return bytes(output)
 
 
+class _GatewayListenerError(ValueError):
+    def __init__(self):
+        super().__init__(
+            "The original loopback gateway listener could not be verified."
+        )
+
+
+def _gateway_listener_snapshot(listener, *, accepting):
+    """Read kernel facts about this exact TCP socket, not a reported URL."""
+    if type(listener) is not socket.socket:
+        raise _GatewayListenerError()
+    identity = _gateway_socket_identity(listener)
+    if (
+        listener.get_inheritable()
+        or listener.getsockopt(socket.SOL_SOCKET, socket.SO_DOMAIN) != socket.AF_INET
+        or listener.getsockopt(socket.SOL_SOCKET, socket.SO_TYPE) != socket.SOCK_STREAM
+        or listener.getsockopt(socket.SOL_SOCKET, socket.SO_PROTOCOL)
+        != socket.IPPROTO_TCP
+        or listener.getsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR)
+        or listener.getsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT)
+        or listener.getsockopt(socket.SOL_SOCKET, socket.SO_ACCEPTCONN)
+        != int(accepting)
+    ):
+        raise _GatewayListenerError()
+    host, port = listener.getsockname()
+    if host != "127.0.0.1" or not 1 <= port <= 65535:
+        raise _GatewayListenerError()
+    try:
+        listener.getpeername()
+    except OSError as error:
+        if error.errno != errno.ENOTCONN:
+            raise
+    else:
+        raise _GatewayListenerError()
+    if _gateway_socket_identity(listener) != identity:
+        raise _GatewayListenerError()
+    return identity, (host, port)
+
+
+def _gateway_socket_identity(listener):
+    fd = listener.fileno()
+    info = os.fstat(fd)
+    if not stat.S_ISSOCK(info.st_mode):
+        raise _GatewayListenerError()
+    return fd, info.st_dev, info.st_ino
+
+
+class _GatewayListenerProof:
+    """Listener evidence only; never an owner lease or worker drain verdict."""
+
+    def __init__(self, gateway, *, probe_only, managed=False):
+        if gateway.closed.is_set() or gateway._listener_proof is not None:
+            raise _GatewayListenerError()
+        self._gateway = gateway
+        self._listener = gateway.listener
+        self._identity, self._address = _gateway_listener_snapshot(
+            self._listener, accepting=False
+        )
+        self._lock = threading.Lock()
+        self._probe_only = probe_only
+        self._managed = managed
+        self._managed_binding = None
+        self._listening = False
+        self._retired = False
+
+    def _matches(self, gateway, *, accepting):
+        if gateway.closed.is_set() or gateway.listener is not self._listener:
+            return False
+        try:
+            return (
+                _gateway_listener_snapshot(self._listener, accepting=accepting)
+                == (self._identity, self._address)
+                and not gateway.closed.is_set()
+                and gateway.listener is self._listener
+            )
+        except (AttributeError, OSError, ValueError):
+            return False
+
+    def _mark_listening(self, gateway):
+        # Called by the foreground startup path, after its own listen() and
+        # before starting the accept thread. An early external listen fails the
+        # separate unserved check before the transition is attempted.
+        with self._lock:
+            if (
+                gateway is not self._gateway
+                or self._probe_only
+                or self._retired
+                or self._listening
+                or not self._matches(gateway, accepting=True)
+            ):
+                raise _GatewayListenerError()
+            self._listening = True
+
+    def origin(self, gateway, *, listening):
+        """Return the pinned origin for this phase, or None; never rebind."""
+        if (
+            gateway is not self._gateway
+            or gateway._listener_proof is not self
+            or type(listening) is not bool
+        ):
+            return None
+        with self._lock:
+            if self._retired:
+                return None
+            if not self._matches(gateway, accepting=self._listening):
+                self._retired = True
+                return None
+            if listening != self._listening:
+                return None
+            host, port = self._address
+            return f"http://{host}:{port}"
+
+    def is_unserved_probe(self, gateway):
+        return (
+            gateway is self._gateway
+            and self._probe_only
+            and self.origin(gateway, listening=False) is not None
+        )
+
+    def _close_original(self):
+        # Never close a different socket that replaced the descriptor.
+        # This confirms only the local close, not acceptor or worker drain.
+        with self._lock:
+            self._retired = True
+            if self._listener.fileno() < 0:
+                return False
+            try:
+                original = _gateway_socket_identity(self._listener) == self._identity
+            except (OSError, ValueError):
+                original = False
+            if original:
+                self._listener.close()
+                return self._listener.fileno() < 0
+            # Fail closed without leaving a Python finalizer that could
+            # later close a descriptor now owned by a different socket.
+            self._listener.detach()
+            return False
+
+
 class Gateway:
     # Trusted first-party extension hook; never populated by browser input.
     shell_addon_scripts = ()
@@ -1494,19 +1914,66 @@ class Gateway:
         self.children = set()
         self.lock = threading.Lock()
         self.capacity = threading.BoundedSemaphore(32)
+        self.listener = None
+        self._listener_proof = None
+
+    def _reserve_listener(self, *, probe_only=False, managed=False):
+        """Bind the actual gateway socket, not the disposable port preflight."""
+        if self.listener is not None or self.closed.is_set():
+            raise _GatewayListenerError()
+        listener = socket.socket()
+        try:
+            self.listener = listener
+            listener.bind(("127.0.0.1", self.port))
+            try:
+                self._listener_proof = _GatewayListenerProof(
+                    self, probe_only=probe_only, managed=managed
+                )
+            except (AttributeError, OSError, ValueError):
+                raise _GatewayListenerError() from None
+        except BaseException:
+            listener.close()
+            raise
+        return self._listener_proof
+
+    @contextlib.contextmanager
+    def _listener_preflight(self):
+        """Borrow the real reservation for a private, unserved-only check."""
+        proof = self._reserve_listener(probe_only=True)
+        try:
+            yield proof
+        finally:
+            self.closed.set()
+            proof._close_original()
+
+    def _start_listener(self, proof):
+        """Activate that same reservation; retain the legacy accept behavior."""
+        if (
+            type(proof) is not _GatewayListenerProof
+            or proof is not self._listener_proof
+            or proof._probe_only
+            or proof._managed
+        ):
+            raise _GatewayListenerError()
+        listener = proof._listener
+        try:
+            if proof.origin(self, listening=False) is None:
+                raise _GatewayListenerError()
+            listener.listen(32)
+            listener.settimeout(0.2)
+            proof._mark_listening(self)
+            self.url = proof.origin(self, listening=True)
+            if self.url is None:
+                raise _GatewayListenerError()
+            self.thread = threading.Thread(target=self.serve, daemon=True)
+            self.thread.start()
+        except BaseException:
+            self.closed.set()
+            proof._close_original()
+            raise
 
     def __enter__(self):
-        self.listener = socket.socket()
-        try:
-            self.listener.bind(("127.0.0.1", self.port))
-            self.listener.listen(32)
-            self.listener.settimeout(0.2)
-        except BaseException:
-            self.listener.close()
-            raise
-        self.url = "http://127.0.0.1:" + str(self.listener.getsockname()[1])
-        self.thread = threading.Thread(target=self.serve, daemon=True)
-        self.thread.start()
+        self._start_listener(self._reserve_listener())
         return self
 
     def serve(self):
@@ -1623,7 +2090,7 @@ class Gateway:
 
     def __exit__(self, *_):
         self.closed.set()
-        self.listener.close()
+        self._listener_proof._close_original()
         self.thread.join(timeout=2)
         with self.lock:
             children = tuple(self.children)
@@ -1638,6 +2105,17 @@ class Gateway:
 
 
 def web_session(box, data, connection, args):
+    live = live_connection()
+    if connection.get("web_mode") == _NAMED_ONLY or (
+        live is not None
+        and live.get("workspace") == data["id"]
+        and live.get("web_mode") == _NAMED_ONLY
+    ):
+        raise box.BoxError(
+            "The one-use link is unavailable on a named-only workspace owner."
+        )
+    if connection.get("_runtime_container"):
+        data = {**data, "container": connection["_runtime_container"]}
     if __package__:
         from . import ui_state
     else:

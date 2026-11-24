@@ -1,0 +1,42 @@
+#!/usr/bin/python3 -I
+# SPDX-License-Identifier: GPL-3.0-or-later
+"""Use the pinned Zig driver; remove only known inert -L flags at final link."""
+
+import os
+import re
+import sys
+from pathlib import Path
+
+root = Path(__file__).resolve().parents[1]
+zig = root / "tools/zig-x86_64-linux-0.15.2/zig"
+args = iter(sys.argv[1:])
+result = [str(zig), "cc"]
+final = Path(sys.argv[0]).name == "ocop-link"
+seen = set()
+for arg in args:
+    if final and arg == "-L":
+        path = Path(next(args, ""))
+        if path == root / "tools/rust/lib/rustlib/x86_64-unknown-linux-gnu/lib":
+            key = "absolute Rust sysroot"
+        elif (
+            path.parent.parent == root / "target/release/deps"
+            and path.name == "raw-dylibs"
+            and re.fullmatch(r"rustc[A-Za-z0-9]{6}", path.parent.name)
+            and path.is_dir()
+            and not any(path.iterdir())
+        ):
+            key = "empty raw-dylibs"
+        else:
+            sys.exit("Unexpected Rust -L flag.")
+        if key in seen:
+            sys.exit("Duplicate Rust -L flag.")
+        seen.add(key)
+    elif final and arg.startswith("-L"):
+        sys.exit("Unexpected joined Rust -L flag.")
+    elif arg == "--target=x86_64-unknown-linux-gnu":
+        result.append("--target=x86_64-linux-gnu")
+    else:
+        result.append(arg)
+if final and seen != {"absolute Rust sysroot", "empty raw-dylibs"}:
+    sys.exit("Missing expected Rust -L flags.")
+os.execv(zig, result)

@@ -767,6 +767,7 @@ print("flat-history-source-ok")
                 "startup_output.py",
                 "workspace_control.py",
                 "opencode_v2_io.py",
+                "web_named_native_profile.py",
             ):
                 (root / name).write_bytes(
                     (Path(service.__file__).parent / name).read_bytes()

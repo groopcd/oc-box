@@ -1,0 +1,270 @@
+#!/usr/bin/python3 -I
+# SPDX-License-Identifier: GPL-3.0-or-later
+"""Offline contract check with the real profile, worker transport and library."""
+
+import argparse
+import base64
+import hashlib
+import os
+import re
+import subprocess
+import sys
+from contextlib import contextmanager
+from pathlib import Path
+from select import select
+from time import monotonic
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
+from oc_box import (  # noqa: E402
+    private_memory,
+    web_accounts,
+    web_admission,
+    web_local_origins,
+    web_pake_flow,
+    web_pake_profile,
+)
+
+NAME = "synthetic-user"
+WORKSPACE = "a" * 32
+BROWSER = "A" * 43
+OTHER = "B" * 42 + "E"
+PROFILE = b"oc-box.named.local/OPAQUE-25519-SHA512-v1"
+AUTH_ORIGIN = b"https://accounts.ocbox.test:9443"
+APP_ORIGIN = b"https://workspace.ocbox-app.test:9444"
+START, FINISH = b"OCOP\x01\x01", b"OCOP\x01\x02"
+
+
+def require(condition, category):
+    if not condition:
+        raise RuntimeError(category)
+
+
+def digest(*fields):
+    return hashlib.sha256(
+        b"".join(len(field).to_bytes(2, "big") + field for field in (PROFILE, *fields))
+    ).digest()
+
+
+def binding_bytes(name):
+    return (
+        digest(b"credential", name.encode("ascii")),
+        digest(b"client", name.encode("ascii")),
+        digest(b"verifier", AUTH_ORIGIN),
+    )
+
+
+def b64(message):
+    return base64.b64encode(message).decode("ascii")
+
+
+def read_exact(pipe, size):
+    deadline = monotonic() + 5
+    result = bytearray()
+    while len(result) < size:
+        read, _, _ = select((pipe,), (), (), max(0, deadline - monotonic()))
+        require(bool(read), "fixture read timeout")
+        chunk = os.read(pipe.fileno(), size - len(result))
+        require(bool(chunk), "fixture short frame")
+        result.extend(chunk)
+    return bytes(result)
+
+
+def pinned_bytes(path, expected):
+    require(re.fullmatch(r"[a-f0-9]{64}", expected), "invalid expected artifact digest")
+    data = path.read_bytes()
+    require(hashlib.sha256(data).hexdigest() == expected, "artifact digest mismatch")
+    return data
+
+
+@contextmanager
+def process(executable, *args):
+    with subprocess.Popen(
+        [executable, *args],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        cwd="/", env={}, bufsize=0,
+    ) as child:
+        try:
+            yield child
+        finally:
+            if not child.stdin.closed:
+                child.stdin.close()
+            try:
+                child.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                child.kill()
+                child.wait(timeout=5)
+                raise RuntimeError("fixture cleanup timeout") from None
+            require(child.stderr.read(1) == b"", "fixture emitted diagnostics")
+
+
+class Fixture:
+    def __init__(self, process, identities, wrong=False):
+        self.child = process
+        self.identities = identities
+        process.stdin.write(bytes([wrong]) + b"".join(identities))
+        fixed = read_exact(process.stdout, 128 + 192 + 96)
+        self.setup, self.record, self.ke1 = fixed[:128], fixed[128:320], fixed[320:]
+
+    def finish(self, context, ke2, verifier=None):
+        _, client, correct_verifier = self.identities
+        self.child.stdin.write(client + (verifier or correct_verifier) + context + ke2)
+        self.child.stdin.close()
+        status = read_exact(self.child.stdout, 1)
+        proof = read_exact(self.child.stdout, 64) if status == b"\0" else None
+        require(status in (b"\0", b"\x01"), "invalid client fixture status")
+        require(self.child.wait(timeout=5) == 0, "client fixture failed")
+        require(self.child.stdout.read(1) == b"", "extra client fixture output")
+        return proof
+
+
+def flow_case(profile, fixture_path, case):
+    origins = web_local_origins.LocalOrigins()
+    require(origins.account.value.encode("ascii") == AUTH_ORIGIN, "account origin drift")
+    require(origins.workspace.value.encode("ascii") == APP_ORIGIN, "workspace origin drift")
+    binding = web_admission.WebBinding(WORKSPACE, "synthetic-owner", origins.workspace.value)
+    credential, client, verifier = binding_bytes(NAME)
+    if case == "different credential":
+        credential = binding_bytes("synthetic-different")[0]
+    with process(fixture_path) as child:
+        fixture = Fixture(child, (credential, client, verifier), wrong=(case == "wrong password"))
+        name = "synthetic-other" if case == "unknown account" else NAME
+        scope = ("b" * 32,) if case == "out of scope" else (WORKSPACE,)
+        setup = b"\xff" * 128 if case == "invalid setup" else fixture.setup
+        record = b"\xff" * 192 if case == "invalid record" else fixture.record
+        ke1 = b"\xff" * 96 if case == "invalid KE1" else fixture.ke1
+        store = web_accounts.AccountStore(setup, (web_accounts.Account(name, scope, record),))
+        flow = web_pake_flow.PakeFlow(
+            binding, store=store, backend=profile, sizes=profile.sizes,
+            auth_origin=origins.account.value,
+        )
+        try:
+            challenge = flow.start(binding, browser_nonce=BROWSER, username=NAME, ke1=b64(ke1))
+            if case in ("invalid setup", "invalid record", "invalid KE1"):
+                require(challenge is None, "malformed start accepted")
+                return
+            require(challenge is not None, "missing challenge")
+            context = digest(AUTH_ORIGIN, APP_ORIGIN, challenge.challenge_id.encode("ascii"))
+            require(challenge.context == b64(context), "transcript context mismatch")
+            ke2 = base64.b64decode(challenge.ke2, validate=True)
+            require(len(ke2) == 320, "KE2 size mismatch")
+            if case == "different context":
+                context = digest(AUTH_ORIGIN, APP_ORIGIN, challenge.challenge_id.encode("ascii")[:-1])
+            if case == "different verifier":
+                verifier = digest(b"verifier", b"https://accounts.ocbox.test:9445")
+            if case == "cancel":
+                return
+            proof = fixture.finish(context, ke2, verifier)
+            if case in (
+                "wrong password", "different credential", "different context", "different verifier",
+                "unknown account", "out of scope",
+            ):
+                require(proof is None, "client emitted a proof for a mismatched exchange")
+                proof = bytes(64)  # A proof attempt on the wire must not grant access either.
+            else:
+                require(proof is not None, "matching client failed")
+            if case == "changed proof":
+                proof = bytes([proof[0] ^ 1]) + proof[1:]
+            fields = {"challenge_id": challenge.challenge_id, "ke3": b64(proof)}
+            require(flow.finish(binding, browser_nonce=OTHER, **fields) is None,
+                    "different browser authenticated")
+            expected = NAME if case == "valid" else None
+            require(flow.finish(binding, browser_nonce=BROWSER, **fields) == expected,
+                    "unexpected verification outcome")
+            require(flow.finish(binding, browser_nonce=BROWSER, **fields) is None,
+                    "replayed proof accepted")
+        finally:
+            flow.close()
+            require(not flow.cleanup_failed, "unconfirmed verifier cleanup")
+
+
+def malformed_frames(worker_path, fixture_path):
+    cred, client, verifier = binding_bytes(NAME)
+    with process(fixture_path) as child:
+        fixture = Fixture(child, (cred, client, verifier))
+        context = digest(AUTH_ORIGIN, APP_ORIGIN, BROWSER.encode("ascii"))
+        valid = START + fixture.setup + b"\x01" + fixture.record + cred + client + verifier
+        valid += context + fixture.ke1
+        # These frames cannot be emitted by the Python adapter. They check
+        # the worker independently of the adapter's input width checks.
+        with process(worker_path) as worker:
+            bad = valid[:134] + b"\0" + valid[135:]  # Mark a nonzero record absent.
+            worker.stdin.write(bad)
+            worker.stdin.close()
+            require(read_exact(worker.stdout, 7) == START + b"\x01", "invalid fake-record flag")
+            require(worker.wait(timeout=5) == 0 and not worker.stdout.read(1), "fake flag extra output")
+        for terminal, exit_code in ((b"", 0), (FINISH + bytes(63), 1)):
+            with process(worker_path) as worker:
+                worker.stdin.write(valid)
+                require(read_exact(worker.stdout, 7) == START + b"\0", "valid raw frame refused")
+                read_exact(worker.stdout, 320)
+                worker.stdin.write(terminal)
+                worker.stdin.close()
+                require(worker.wait(timeout=5) == exit_code and not worker.stdout.read(1),
+                        "worker acknowledged a cancelled or truncated FINISH")
+        with process(worker_path) as worker:
+            worker.stdin.write(valid)
+            require(read_exact(worker.stdout, 7) == START + b"\0", "valid raw frame refused")
+            ke2 = read_exact(worker.stdout, 320)
+            proof = fixture.finish(context, ke2)
+            require(proof is not None, "raw client failed")
+            worker.stdin.write(FINISH + proof + b"\0")
+            worker.stdin.close()
+            require(worker.wait(timeout=5) == 1 and not worker.stdout.read(1),
+                    "worker acknowledged an overlong FINISH")
+        with process(worker_path, "--probe") as worker:
+            worker.stdin.close()
+            require(worker.wait(timeout=5) == 1 and not worker.stdout.read(1),
+                    "verifier accepted a command-line mode")
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("build_dir", type=Path)
+    parser.add_argument("--worker-sha256", required=True)
+    parser.add_argument("--fixture-sha256", required=True)
+    args = parser.parse_args()
+    paths = args.build_dir.resolve(strict=True) / "target/release"
+    worker = paths / "ocop-worker"
+    fixture = paths / "ocop-fixture"
+    worker_bytes = pinned_bytes(worker, args.worker_sha256)
+    pinned_bytes(fixture, args.fixture_sha256)
+    vectors = (
+        "9bde0dbb59b36db6d5456b644ec23bf2b6034487953b833b0ce1f48eeb23a235",
+        "6e19b1d5f126af0275bb928a507ed6a3ca356e8ffb9d0cd434634e8007b252e6",
+        "c9ea55a7c83ee585683f9ac1ac8906c264821dd6230646e6fe481f0f23e8e106",
+    )
+    require(tuple(value.hex() for value in binding_bytes(NAME)) == vectors, "ID vector mismatch")
+    require(digest(AUTH_ORIGIN, APP_ORIGIN, BROWSER.encode()).hex() ==
+            "289bb5146939ce5c269129f4cdf43d07028697371ad2a8ce6730ece537957c6b",
+            "context vector mismatch")
+    fd = os.memfd_create("oc-box-ocop-research", os.MFD_CLOEXEC | os.MFD_ALLOW_SEALING)
+    try:
+        os.fchmod(fd, 0o500)
+        with os.fdopen(os.dup(fd), "wb") as stream:
+            stream.write(worker_bytes)
+        private_memory.seal(fd)
+        profile = web_pake_profile.LocalPakeProfile(
+            fd, expected_sha256=bytes.fromhex(args.worker_sha256),
+            origins=web_local_origins.LocalOrigins(),
+        )
+    finally:
+        os.close(fd)
+    try:
+        for case in (
+            "valid", "wrong password", "different credential", "different context",
+            "different verifier", "unknown account", "out of scope", "changed proof",
+            "invalid setup", "invalid record", "invalid KE1", "cancel", "valid",
+        ):
+            try:
+                flow_case(profile, fixture, case)
+            except Exception:
+                raise RuntimeError(f"verification case failed: {case}") from None
+            print(f"PASS {case}")
+    finally:
+        require(profile.close(), "unconfirmed worker drain")
+    malformed_frames(worker, fixture)
+    print("PASS raw worker framing and probe refusal")
+
+
+if __name__ == "__main__":
+    main()

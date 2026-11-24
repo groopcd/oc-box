@@ -76,10 +76,10 @@ class _Handler(socketserver.StreamRequestHandler):
 
 
 @contextlib.contextmanager
-def _peer(origin, override):
+def _peer(origin, override, version):
     with socketserver.TCPServer(("127.0.0.1", 0), _Handler) as server:
         endpoint = f"http://127.0.0.1:{server.server_address[1]}"
-        info = {"version": "2.3.2", "pid": 141, "urls": [endpoint]}
+        info = native_info(endpoint, version)
         replies = (
             _json_wire({"error": "synthetic unauthorized"}, 401),
             _json_wire(info),
@@ -107,18 +107,29 @@ def _peer(origin, override):
             thread.join(timeout=2)
 
 
-def _workspace(home, endpoint):
+def native_info(endpoint, version="2.3.2", pid=141):
+    return {
+        "version": version,
+        "pid": pid,
+        "hostname": "private-native-hostname",
+        "urls": [endpoint],
+        "paths": {"tmp": "/synthetic/private-native-tmp"},
+        "capabilities": {"persistentPty": True},
+    }
+
+
+def _workspace(home, endpoint, version="2.3.2"):
     return (
         {
             "id": "synthetic-workspace",
             "container": "synthetic-no-podman",
             "project": home,
             "home": home,
-            "opencode_version": "2.3.2",
+            "opencode_version": version,
         },
         {
             "workspace": "synthetic-workspace",
-            "version": "2.3.2",
+            "version": version,
             "url": endpoint,
             "password": PASSWORD,
             "session": None,
@@ -141,10 +152,10 @@ class NativePairTests(unittest.TestCase):
         )
 
     @contextlib.contextmanager
-    def _fixture(self, origin=ORIGIN, *, override=None):
-        with _peer(origin, override or {}) as (endpoint, requests):
+    def _fixture(self, origin=ORIGIN, *, override=None, version="2.3.2"):
+        with _peer(origin, override or {}, version) as (endpoint, requests):
             with tempfile.TemporaryDirectory() as home:
-                data, connection = _workspace(home, endpoint)
+                data, connection = _workspace(home, endpoint, version)
                 spawn = subprocess.Popen
 
                 def local_exec(command, **options):
@@ -155,7 +166,9 @@ class NativePairTests(unittest.TestCase):
                     self.assertEqual(
                         command[marker + 1 : marker + 5], ["python3", "-I", "-S", "-c"]
                     )
-                    self.assertEqual(command[-2:], [endpoint, origin.value[8:]])
+                    self.assertEqual(
+                        command[-3:], [endpoint, origin.value[8:], version]
+                    )
                     self.assertTrue(
                         not any(
                             secret in arg
@@ -194,6 +207,7 @@ class NativePairTests(unittest.TestCase):
                     "binding": binding,
                     "endpoint": connection["url"],
                     "origin": origin,
+                    "version": connection["version"],
                 }
                 self.assertEqual(token.upstream_cookie(**args), _cookie(origin))
                 for wrong in (
@@ -201,6 +215,7 @@ class NativePairTests(unittest.TestCase):
                     {"binding": replace(binding, owner_generation="replacement-owner")},
                     {"endpoint": connection["url"] + "/"},
                     {"origin": HTTPSOrigin(WORKSPACE_HOST, 9999)},
+                    {"version": "2.4.1"},
                 ):
                     with self.assertRaisesRegex(pair.NativePairError, ERROR):
                         token.upstream_cookie(**(args | wrong))
@@ -240,6 +255,9 @@ class NativePairTests(unittest.TestCase):
             {"url": "http://127.0.0.1:52142?x=1"},
             {"version": "2.3.2-dev"},
             {"version": "2.3.3"},
+            {
+                "version": "2.4.1"
+            },  # Even another supported release must match the lease.
             {"password": ""},
         ):
             with (
@@ -290,6 +308,11 @@ class NativePairTests(unittest.TestCase):
         for name, index, reply in (
             ("anonymous info", 0, _json_wire({"version": "2.3.2"})),
             ("wrong native version", 1, _json_wire({"version": "2.3.3"})),
+            (
+                "other audited native version",
+                1,
+                lambda info: _json_wire(info | {"version": "2.4.1"}),
+            ),
             ("bad mint", 2, _json_wire({"code": "unsafe/../", "expires_in": 300})),
             ("invalid native expiry", 2, _json_wire({"code": CODE, "expires_in": 301})),
             (
@@ -307,9 +330,7 @@ class NativePairTests(unittest.TestCase):
             (
                 "wrong loopback scope",
                 4,
-                _json_wire(
-                    {"version": "2.3.2", "pid": 141, "urls": ["http://127.0.0.1:1"]}
-                ),
+                _json_wire(native_info("http://127.0.0.1:1")),
             ),
             (
                 "different native PID on same port",

@@ -10,7 +10,7 @@ import unittest
 from unittest.mock import patch
 import zipfile
 
-from oc_box import installation, oc_box
+from oc_box import installation, oc_box, web_named_account_assets
 from tools import check_package
 from tools.check_release import source_identity
 
@@ -18,6 +18,33 @@ APP = Path(__file__).resolve().parents[1]
 
 
 class PackagingTests(unittest.TestCase):
+    def test_exact_named_assets_are_present_without_compiled_payloads(self):
+        source_names = {
+            web_named_account_assets._DOCUMENT[0],
+            *(row[4] for row in web_named_account_assets._SOURCES),
+        }
+        self.assertEqual(source_names, set(check_package._NAMED_STATIC_FILES))
+        toml = (APP / "pyproject.toml").read_text()
+        manifest = (APP / "MANIFEST.in").read_text()
+        for name in source_names:
+            with self.subTest(asset=name):
+                self.assertIn(name, installation.RUNTIME_FILES)
+                self.assertIn(f'"{name}"', toml)
+                self.assertIn(f"src/oc_box/{name}", manifest)
+        self.assertFalse(
+            any(name.endswith(".wasm") for name in installation.RUNTIME_FILES)
+        )
+        self.assertNotIn("*.wasm", manifest)
+        self.assertNotIn("*.wasm", toml)
+
+    def test_studio_assets_are_in_the_flat_copy_inventory(self):
+        for name in check_package._STUDIO_STATIC_FILES:
+            with self.subTest(asset=name):
+                self.assertIn(name, installation.PROGRAM_FILES)
+                self.assertEqual(
+                    installation.source_file(APP, name), APP / "src/oc_box" / name
+                )
+
     def test_archive_validation_requires_sync_runtime_docs_and_regressions(self):
         build = {
             "version": "1.7.1.dev0+gabcdef0",
@@ -32,6 +59,10 @@ class PackagingTests(unittest.TestCase):
             'VERSION_SERIES = "1.7"\nRELEASE_CHANNEL = "devel"\n'
             "VERSION_BASE_COMMIT_COUNT = 29\n"
         )
+        studio_assets = {
+            "oc_box/" + name: (APP / "src/oc_box" / name).read_bytes()
+            for name in check_package._STUDIO_STATIC_FILES
+        }
         wheel_names = {
             "oc_box/" + name
             for name in (
@@ -78,6 +109,7 @@ class PackagingTests(unittest.TestCase):
         }
         cases = (
             (None, None),
+            ("sdist-bytes", "src/oc_box/web_studio_shell.mjs"),
             *(
                 ("wheel", "oc_box/" + name)
                 for name in (
@@ -269,7 +301,7 @@ class PackagingTests(unittest.TestCase):
                         )
                         for name in sorted(wheel_names):
                             if kind != "wheel" or name != omitted:
-                                content = ""
+                                content = studio_assets.get(name, b"")
                                 if name.endswith("build-info.json"):
                                     content = json.dumps(build)
                                 elif name == "oc_box/version_info.py":
@@ -286,8 +318,12 @@ class PackagingTests(unittest.TestCase):
                     with tarfile.open(source, "w:gz") as archive:
                         for name in sorted(source_names):
                             if kind != "sdist" or name != omitted:
-                                content = b""
-                                if name == "build-info.json":
+                                content = studio_assets.get(
+                                    name.removeprefix("src/"), b""
+                                )
+                                if kind == "sdist-bytes" and name == omitted:
+                                    content = b"Unexpected Studio asset bytes"
+                                elif name == "build-info.json":
                                     content = json.dumps(
                                         {
                                             key: value
