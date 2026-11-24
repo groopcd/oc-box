@@ -44,27 +44,38 @@ protection against a same-user debugger or erasure of all memory copies.
 
 `browser_login.rs` shares the pinned suite with the verifier. It has no
 fixture password, identity, network code, form, or enrollment entry point.
-`browser_slot.mjs` accepts a caller-verified `WebAssembly.Module` and a private
-mutable buffer of 1–1024 UTF-8 bytes from an injected, trusted account-page
-workflow. It returns the synchronous `{ke1, finish(bindings), discard()}`
-interface of `web_pake_client.mjs` at `eb880f0`. The binding does not load or
-approve modules. A trusted caller owns input preparation and always clears
-oversized inputs refused before the slot takes ownership.
+`browser_slot.mjs` supplies the exact synchronous `openAttempt` contract of
+`web_pake_client.mjs` at `f1d4055`. The trusted controller provides
+`openAttempt: () => openLoginAttempt(verifiedModule)`; opening a handle does not
+access a password or start WASM. `start(readPassword)` preflights the module and
+I/O before calling the one-shot adapter reader. The glue does not load or approve
+modules, and there is no production reader.
+
+The trusted reader must transfer a private mutable `Uint8Array` view of 1–1024
+UTF-8 bytes. The slot owns that span, not the rest of the backing store. It wipes
+the view immediately after copying, before starting the PAKE operation. A
+private oversize view up to 64 KiB is wiped and refused; a shared/detached view
+or a larger input violates the reader contract and is refused with unconfirmed
+cleanup, not an unbounded wipe. A reader must clear any input it never hands
+over and must not allocate an unbounded view for the slot.
 
 - A fresh instance takes one password in a bounded slot and emits only KE1.
   At finish it consumes the slot, passing KE2, context, client ID and verifier
   ID to `ClientLogin::finish`. These are supplied or independently derived by
-  the trusted adapter; the distinct credential ID is verifier-only. KE3 is
-  emitted only after the library verifies the server proof. No session key,
-  export key, password or client state is returned to the adapter.
+  the trusted adapter from the fixed account/workspace origins. The slot copies
+  the exact binding bytes into private WASM I/O without mutating or retaining
+  the caller views. The distinct credential ID is verifier-only. KE3 is emitted
+  only after the library verifies the server proof. No session key, export key,
+  password or client state is returned to the adapter.
 - The only WASM import is `entropy.fill`. The glue requires a secure context,
   uses WebCrypto `getRandomValues` on a checked slice, and has no fallback.
   The build caps linear memory at 64 MiB. The glue refreshes typed-array
   views after calls that may grow memory.
-- Normal discard is idempotent and drops Rust's pending slot; the glue also
-  clears the caller's accepted buffer and the shared I/O slice. On a WASM or
-  entropy trap it drops the instance, never re-enters it, and does not claim
-  confirmed private cleanup. This is not guaranteed erasure of all copies.
+- Normal discard is idempotent and drops Rust's pending slot and clears its
+  shared I/O slice. On a WASM or entropy trap it clears accessible shared I/O,
+  drops the instance, never re-enters Rust, and returns `false`. The adapter
+  refuses a proof without confirmed cleanup and fences the rest of that account
+  document on uncertainty. None of this guarantees erasure of all copies.
 
 ## Reproduce with existing inputs
 
@@ -129,8 +140,8 @@ target) produced byte-identical native and WASM artifacts. The WASM was
 `802c138b34fe9b3734240d13397f227f9698724ca9795a993b40d295d81d15ae`;
 its only import was `entropy.fill`.
 
-A separate private headless Chromium 159 fixture combined this slot with
-the exact `eb880f0` adapter, Python account dispatcher, and the real Rust
+An earlier private headless Chromium 159 fixture combined the original slot
+with the exact `eb880f0` adapter, Python account dispatcher, and the real Rust
 verifier through `LocalPakeProfile`. It passed login across two account
 names/origin pairs with 37- and 1024-byte synthetic inputs. Wrong
 password, changed context/client ID/verifier ID/KE2, out-of-scope account
@@ -140,12 +151,35 @@ Normal discard and child shutdown were confirmed. The browser and the
 opt-in fixture derived public test-vector bytes locally; intercepted POST
 bodies contained only the declared PAKE fields.
 
-The fixture fulfilled browser requests via a CDP pipe in a private
-network namespace. HTTPS addressing, owner liveness and bootstrap headers
-were synthetic; no sockets were listening and no TLS trust, durable
-enrollment, app handoff redemption, native pairing or workspace admission
-was tested. This is same-library functional conformance, not a browser
-performance, independent interoperability, provenance or release result.
+For the new contract, `check_browser` pins the same WASM, verifier and synthetic
+seed fixture by size and SHA-256, verifies the exact `f1d4055` adapter bytes, and
+requires the recorded Chromium headless-shell 159.0.8154.6 binary. Use existing
+verified local inputs only. Example on Linux with user/network namespaces:
+
+```sh
+unshare --user --map-user=1000 --map-group=1000 --net \
+  env -i PATH=/usr/bin:/bin /usr/bin/python3 -I -B tools/web-pake-research/check_browser \
+  /path/to/first-build /path/to/chrome-headless-shell
+```
+
+The 22-case matrix uses real Chromium/WebCrypto and the sealed Python/Rust
+worker. It checks matching login on both origins, no KE3 on wrong input or
+mismatched public bindings, verifier refusal of a changed KE3, immutable
+origin configuration, single-use attempts, buffer scrubs, and cleanup fencing
+after a trap or an invalid over-limit reader. It checks abort before input,
+abort while the response to `/start` or `/finish` is held after dispatch, and
+pending-ticket invalidation by abort, `pagehide` and local expiry. A refusal
+does not undo a POST already processed; the fixture closes the flow and verifies
+worker teardown.
+
+Both fixtures fulfill browser requests via a CDP pipe in a private network
+namespace. The new runner requires down loopback, uses a disposable browser
+profile, and checks canonical PAKE fields (not the raw synthetic vector) on all
+browser POSTs. HTTPS addressing, owner liveness and bootstrap cookies are
+synthetic. No sockets listen; TLS trust, durable enrollment, handoff redemption,
+native pairing and workspace admission are not tested. This is same-library
+functional conformance, not performance, independent interoperability, provenance,
+or release evidence.
 
 ## Not ready to enable
 

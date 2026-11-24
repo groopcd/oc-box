@@ -109,6 +109,9 @@ The Node fixture checks both origins and the exact Python wire format with a
 synthetic session that checks its arguments; it does not verify a password,
 make browser requests, or establish browser trust. Run it from a source checkout:
 `PYTHONPATH=src python3 -B -m unittest discover -s tests -p test_web_pake_client.py -v`.
+The separate checkout-only [Chromium/WASM and verifier check](../../tools/web-pake-research/README.md#browser-conformance-scope)
+exercises the same contract with pinned artifacts through a private CDP pipe.
+It is not a trusted-HTTPS or host admission test.
 Activation still requires independent review of the exact native/WASM
 artifacts and interface, matching host-authorized enrollment (including
 password input encoding), a trusted account page, and the live gates above.
