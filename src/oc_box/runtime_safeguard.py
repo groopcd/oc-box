@@ -329,9 +329,11 @@ def load(box, path):
         raise box.BoxError(str(exc)) from None
 
 
-def _inspect(box, path, data, *, running):
+def _inspect(box, path, data, *, running, attach_only=False):
     """Keep the guarded operation on the same passive, ordinary resources."""
     try:
+        if attach_only and running is not True:
+            raise ValueError
         project = box.validate_project(Path(data["project"]))
         current_path, _ = box.find_workspace(project)
         if current_path != path or not workspace_identity.same_project(data, project):
@@ -347,7 +349,12 @@ def _inspect(box, path, data, *, running):
             or len(info["Mounts"]) != 2
         ):
             raise ValueError
-        signature = history_recovery.passive_workspace_mounts(box, data, info)
+        validate_mounts = (
+            history_recovery.live_attachment_mounts
+            if attach_only
+            else history_recovery.passive_workspace_mounts
+        )
+        signature = validate_mounts(box, data, info)
         volumes = json.loads(
             box.podman(
                 "volume", "inspect", data["home_volume"], capture=True, timeout=15
@@ -550,7 +557,8 @@ def bind_client(box, path, data, connection):
         not record.ready
         or record.version != connection.get("version")
         or record.volume != data.get("home_volume")
-        or record.container != _inspect(box, path, data, running=True)[0]
+        or record.container
+        != _inspect(box, path, data, running=True, attach_only=True)[0]
     ):
         raise box.BoxError(
             "The live lease does not match the guarded runtime and private resources."

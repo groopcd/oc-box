@@ -408,8 +408,9 @@ entrypoint.  The safeguard refuses older containers whose stored
 entrypoint would look up ‘sleep’ on the workspace ‘PATH’.  It does not
 modify or replace those containers, or fall back from guarded to
 unguarded startup.  Ordinary unguarded startup of existing containers is
-unchanged.  Preserve existing workspace data; do not reset or downgrade
-to bypass a refusal.
+unchanged.  A verified, already-running guarded owner can still accept
+clients; attaching does not authorize a new start.  Preserve existing
+workspace data; do not reset or downgrade to bypass a refusal.
 
 Before normal preparation can write state, oc-box durably records the
 admitted version.  An interruption, late startup failure or missing
@@ -5358,20 +5359,20 @@ Node: Name769
 Node: Synopsis930
 Node: Description5275
 Node: Commands11095
-Node: Options153514
-Node: Lifecycle and persistence217254
-Node: Distribution images219554
-Node: Sessions and recovery224631
-Node: Devices and host permissions231216
-Node: Resource reports233562
-Node: Configuration and environment235673
-Node: Files247054
-Node: Exit status257964
-Node: Examples259372
-Node: Troubleshooting261511
-Node: Installation and manuals274003
-Node: Authors and license284193
-Node: See also284800
+Node: Options153625
+Node: Lifecycle and persistence217365
+Node: Distribution images219665
+Node: Sessions and recovery224742
+Node: Devices and host permissions231327
+Node: Resource reports233673
+Node: Configuration and environment235784
+Node: Files247165
+Node: Exit status258075
+Node: Examples259483
+Node: Troubleshooting261622
+Node: Installation and manuals274114
+Node: Authors and license284304
+Node: See also284911
 
 End Tag Table
 

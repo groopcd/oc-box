@@ -259,7 +259,7 @@ class Source:
     runtime_digest: str | None = None
 
 
-def _signature(box, data, info):
+def _signature(box, data, info, *, attach_only=False):
     """Validate the passive entrypoint and bind/volume signature without I/O."""
     if not isinstance(info, dict):
         raise RecoveryError("invalid-container")
@@ -279,8 +279,17 @@ def _signature(box, data, info):
         # Podman start cannot override the stored argv. In a legacy rootfs
         # the runtime prefix is searched first and can shadow this command
         # before any executable verification or Reader helper runs.
-        raise RecoveryError("startup-path-unverified")
-    if entrypoint != [PASSIVE_ENTRYPOINT] or command != ["-c", PASSIVE_COMMAND]:
+        state = info.get("State")
+        if not (
+            attach_only is True
+            and isinstance(state, dict)
+            and state.get("Running") is True
+            and state.get("Status") == "running"
+        ):
+            raise RecoveryError("startup-path-unverified")
+        # A read-only binding to the existing owner never asks Podman to
+        # start this argv. All remaining identity and mount checks still apply.
+    elif entrypoint != [PASSIVE_ENTRYPOINT] or command != ["-c", PASSIVE_COMMAND]:
         raise RecoveryError("nonpassive-container")
     environment = config.get("Env")
     if not isinstance(environment, list) or not all(
@@ -340,6 +349,11 @@ def _signature(box, data, info):
 
 def passive_workspace_mounts(box, data, info):
     return _signature(box, data, info)
+
+
+def live_attachment_mounts(box, data, info):
+    """Observe the original running attachment only; never authorize a start."""
+    return _signature(box, data, info, attach_only=True)
 
 
 def capture(box, data, info, token, *, refusal=None, runtime_digest=None):
