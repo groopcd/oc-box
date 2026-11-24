@@ -130,6 +130,12 @@ class DropError(ValueError):
     """Fixed categories only, never private paths, data or native errors."""
 
 
+class TransferStartError(DropError):
+    def __init__(self, *, cleanup_verified):
+        super().__init__("Private host-import transfer could not start.")
+        self.cleanup_verified = cleanup_verified
+
+
 def preflight(version=None):
     if version is not None:
         try:
@@ -427,7 +433,7 @@ class Transfer:
         except (DropError, OSError, ValueError, subprocess.SubprocessError):
             self.failed = True
             self.close()
-            raise DropError("Private host-drop transfer could not start.") from None
+            raise TransferStartError(cleanup_verified=self.cleanup_verified) from None
 
     def put(self, images):
         if (
@@ -545,6 +551,7 @@ class Relay:
         self.clipboard_disable_reason = None
         self.protocol = None
         self.ident = None
+        self.structured_registered = False
         self.pending = bytearray()
         self.broken = False
         self.output = (
@@ -707,7 +714,12 @@ class Relay:
         # Protocol 72 is reserved by this opted-in host connection. Never expose
         # its raw file-data replies to the container as keyboard input.
         try:
-            return self.protocol.receive(payload) if self.protocol else True
+            protocol = self.protocol
+            if protocol is None:
+                return True
+            result = protocol.receive(payload)
+            self.structured_registered |= protocol.registered
+            return result
         except DropError:
             self.disable()
             return True
@@ -779,6 +791,18 @@ class Relay:
             print(
                 "oc-box: Host clipboard input framing recovered (input-framing-recovered). "
                 "No clipboard read was retried and nothing was restarted.",
+                file=sys.stderr,
+            )
+        elif self.paths_enabled and self.input.disable_reason is not None:
+            print(
+                "oc-box: Host pathname importing was disabled by terminal input "
+                "framing. Open a fresh client to try again; nothing was restarted.",
+                file=sys.stderr,
+            )
+        if self.ident is not None and not self.structured_registered:
+            print(
+                "oc-box: This Kitty client did not confirm structured file drops; "
+                "use a supported pathname paste instead.",
                 file=sys.stderr,
             )
         if self.clipboard_refused:

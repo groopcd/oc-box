@@ -278,7 +278,8 @@ An eligible client still needs direct Konsole or Yakuake, stable native
 OpenCode 2.x with a compatible renderer, verified project/home mounts, and a
 private staging directory. Seeing an
 assistant link or starting a client with host opening enabled does not authorize
-a transfer. The host relay requires a fresh matched Ctrl-click and bounds the
+a transfer. The hook's startup acknowledgement also carries no authority.
+The host relay requires a fresh matched Ctrl-click and bounds the
 one-use transfer. The result is a private copy, not a share or a write-back.
 Use this feature only with a workspace you trust to honor the click. See the
 [format, mount and lifetime limits](docs/cli.md#experimental-ctrl-click-host-file-opening).

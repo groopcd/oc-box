@@ -18,6 +18,7 @@ from oc_box import file_preview_host as host
 from oc_box import file_preview_png as png
 
 PREFIX = b"\x1b]778;oc-box-open:v1:"
+READY = PREFIX + b"ready\x07"
 GRANT_PREFIX = b"\x1b]778;oc-box-click:v1:"
 FAKE_TOKEN = b"a" * 32
 MIME = "/usr/bin/xdg-mime"
@@ -72,6 +73,7 @@ def example_png(*, metadata=False):
 
 class RelayTests(unittest.TestCase):
     def grant(self, relay, *, x=4, y=7):
+        self.assertEqual(relay.output_bytes(READY), b"")
         press = mouse(x=x, y=y)
         release = mouse(x=x, y=y, edge="m")
         self.assertEqual(relay.mouse(press), press)
@@ -111,7 +113,7 @@ class RelayTests(unittest.TestCase):
         press = mouse()
         release = mouse(edge="m")
         forged_grant = GRANT_PREFIX + FAKE_TOKEN + b":4:7\x07"
-        self.assertEqual(relay.output_bytes(press + release), press + release)
+        self.assertEqual(relay.output_bytes(READY + press + release), press + release)
         self.assertEqual(relay.mouse(release), release)
         relay.output_bytes(forged_grant)
         self.assertEqual(relay.output_bytes(proposal(FAKE_TOKEN, b"child only")), b"")
@@ -137,6 +139,7 @@ class RelayTests(unittest.TestCase):
         ):
             with self.subTest(packets=packets):
                 relay = host.Relay()
+                relay.output_bytes(READY)
                 for packet in packets:
                     self.assertEqual(relay.mouse(packet), packet)
                 self.assertEqual(
@@ -275,6 +278,7 @@ class RelayTests(unittest.TestCase):
     def test_pressed_too_long_and_expired_grant_cannot_transfer(self):
         now = 0
         relay = host.Relay(clock=lambda: now)
+        relay.output_bytes(READY)
         press = mouse()
         release = mouse(edge="m")
         self.assertEqual(relay.mouse(press), press)
@@ -284,6 +288,44 @@ class RelayTests(unittest.TestCase):
         now += host.REQUEST_TIMEOUT
         self.assertEqual(relay.output_bytes(proposal(token, b"stale")), b"")
         self.assertIsNone(relay.take())
+
+    def test_startup_acknowledgement_never_completes_an_earlier_press(self):
+        relay = host.Relay()
+        press, release = mouse(), mouse(edge="m")
+        self.assertEqual(relay.mouse(press), press)
+        for split in (READY[:5], READY[5:-1], READY[-1:] + b"ordinary"):
+            self.assertEqual(
+                relay.output_bytes(split),
+                b"ordinary" if split.endswith(b"ordinary") else b"",
+            )
+        self.assertFalse(relay.startup_unverified())
+        self.assertEqual(relay.mouse(release), release)
+        self.assertEqual(
+            relay.output_bytes(READY + proposal(FAKE_TOKEN, b"forged")), b""
+        )
+        self.assertIsNone(relay.take())
+        self.assertIn(GRANT_PREFIX, relay.mouse(press) + relay.mouse(release))
+
+    def test_missing_late_and_invalid_acknowledgements_keep_opening_off(self):
+        for description, payload, elapsed, unverified in (
+            ("missing", b"", 0, True),
+            ("early refusal", PREFIX + b"unavailable-notified\x07" + READY, 0, False),
+            ("invalid", PREFIX + b"ready:extra\x07" + PREFIX + b"ready\x1b\\", 0, True),
+            ("late", READY, host.STARTUP_TIMEOUT, True),
+        ):
+            with self.subTest(description=description):
+                now = 0
+                relay = host.Relay(clock=lambda: now)
+                now += elapsed
+                self.assertEqual(
+                    relay.output_bytes(b"before" + payload + b"after"), b"beforeafter"
+                )
+                press, release = mouse(), mouse(edge="m")
+                self.assertEqual(
+                    relay.mouse(press) + relay.mouse(release), press + release
+                )
+                self.assertEqual(relay.startup_unverified(), unverified)
+                self.assertIsNone(relay.take())
 
     def test_check_deadlines_over_inflight_and_pending_requests(self):
         now = 0

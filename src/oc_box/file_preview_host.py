@@ -25,6 +25,7 @@ CHUNK_BYTES = 4096
 REQUEST_TIMEOUT = 15.0
 FRAME_TIMEOUT = 2.0
 PENDING_TIMEOUT = 2.0
+STARTUP_TIMEOUT = 12.0
 _CLICK_TIMEOUT = 2.0
 _ID_BYTES = 32
 _ID = re.compile(rb"[0-9a-f]{32}")
@@ -121,6 +122,8 @@ class Relay:
 
     def __init__(self, *, clock=None):
         self._clock = time.monotonic if clock is None else clock
+        self._startup_deadline = self._clock() + STARTUP_TIMEOUT
+        self._startup = None
         self._tail = b""
         self._body = None
         self._body_deadline = 0.0
@@ -163,7 +166,7 @@ class Relay:
 
     def mouse(self, packet):
         """Forward mouse bytes; attach a nonce to a matched host Ctrl-click."""
-        if self._failed:
+        if self._failed or self._startup != b"ready":
             return packet
         event = _MOUSE.fullmatch(packet)
         previous, self._press = self._press, None
@@ -196,7 +199,14 @@ class Relay:
     def _receive(self, now, *, valid_end):
         if self._echo:
             return
-        request_id, sep, message = bytes(self._body).partition(b":")
+        body = bytes(self._body)
+        if body in (b"ready", b"unavailable-notified"):
+            # Evidence of client compatibility only. Terminal output never
+            # authorizes a transfer or fills in either half of a host click.
+            if valid_end and self._startup is None and now < self._startup_deadline:
+                self._startup = body
+            return
+        request_id, sep, message = body.partition(b":")
         if not _ID.fullmatch(request_id):
             return
         if not (valid_end and sep):
@@ -325,6 +335,10 @@ class Relay:
     def check(self) -> None:
         """Expire stale state on idle ticks; raise on an unclosed timed-out OSC."""
         self._expire(self._clock())
+
+    def startup_unverified(self):
+        """Report missing native readiness after restoring the host terminal."""
+        return self._startup is None
 
     def take(self) -> tuple[str, bytes] | None:
         """Consume one complete transfer; no staging or process work here."""

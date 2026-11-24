@@ -354,6 +354,12 @@ stable 2.x. Check that launcher refusal reports a fixed reason before handoff,
 without mount inspection on version or terminal refusal; a disabled preference
 must remain quiet. The native fixture checks that a miss, an ungranted click and
 output alone cannot start a transfer, even on a new minor release.
+The launcher's PTY tests also check missing or overdue native hook startup,
+invalid and duplicate announcements, ordinary output and exit preservation,
+and the requirement for a new matched click after readiness.
+The native smoke's `--hook-state missing` and `--hook-state incompatible`
+cases verify that neither client receives a grant and that the incompatible
+hook reports its refusal using the native TUI.
 
 Exercise verified fresh GitHub setup versus upgrade, early failure,
 reinstallation, existing/symlinked state, and an unverified installation

@@ -791,7 +791,17 @@ def run_native_tui(
                     )
                     startup_output.line("oc-box: " + policy, flush=True)
             return run_tui(command, file_drops=drops)
-    except host_drop.DropError:
+    except host_drop.DropError as error:
+        if (
+            isinstance(error, host_drop.TransferStartError)
+            and not error.cleanup_verified
+        ):
+            startup_output.line(
+                "oc-box: Temporary import cleanup could not be verified; "
+                "container files may remain. No workspace was restarted for cleanup.",
+                file=sys.stderr,
+                flush=True,
+            )
         if not client_started and not required:
             startup_output.line(
                 "oc-box: Host importing could not start; opening the ordinary native TUI. "
@@ -799,8 +809,12 @@ def run_native_tui(
                 flush=True,
             )
             return run_tui(command)
+        if not client_started:
+            raise BoxError(
+                "Private host importing could not start; no workspace restart was attempted."
+            ) from None
         raise BoxError(
-            "Host file-drop transfer failed; no automatic retry or workspace restart was attempted."
+            "Host importing failed after launch; no automatic retry or workspace restart was attempted."
         ) from None
 
 

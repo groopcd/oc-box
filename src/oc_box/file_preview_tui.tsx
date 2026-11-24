@@ -141,20 +141,6 @@ export function install(context) {
     pressed = clicked = undefined
     pending?.abort()
   }
-  const unwatch = context.ui.slot({
-    append: "app",
-    render: () => {
-      createEffect(() => {
-        const session = activeSession()
-        if (session) context.data.session.get(session)?.location?.directory
-        invalidate()
-      })
-      onCleanup(invalidate)
-      return null
-    },
-  })
-  renderer.on("blur", invalidate)
-
   async function open(id, item) {
     if (pending) return
     const controller = pending = new AbortController()
@@ -217,14 +203,39 @@ export function install(context) {
     }
     return true
   }
-  root.processMouseEvent = wrapped
-  renderer.prependInputHandler(input)
-  return () => {
+  const undo: Array<() => void> = []
+  function dispose() {
     closed = true
     invalidate()
-    unwatch()
-    renderer.removeInputHandler(input)
-    renderer.off("blur", invalidate)
-    if (root.processMouseEvent === wrapped) root.processMouseEvent = original
+    while (undo.length) {
+      try { undo.pop()?.() } catch { /* Continue restoring the other hooks. */ }
+    }
   }
+  try {
+    undo.push(() => {
+      if (root.processMouseEvent === wrapped) root.processMouseEvent = original
+    })
+    root.processMouseEvent = wrapped
+    if (root.processMouseEvent !== wrapped) throw new Error("file-open-hook")
+    undo.push(() => renderer.removeInputHandler(input))
+    renderer.prependInputHandler(input)
+    undo.push(() => renderer.off("blur", invalidate))
+    renderer.on("blur", invalidate)
+    undo.push(context.ui.slot({
+      append: "app",
+      render: () => {
+        createEffect(() => {
+          const session = activeSession()
+          if (session) context.data.session.get(session)?.location?.directory
+          invalidate()
+        })
+        onCleanup(invalidate)
+        return null
+      },
+    }))
+  } catch (error) {
+    dispose()
+    throw error
+  }
+  return dispose
 }

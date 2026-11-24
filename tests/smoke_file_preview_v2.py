@@ -63,7 +63,7 @@ def png_for_test():
     )
 
 
-def exercise(binary, root, *, private_mounts=False):
+def exercise(binary, root, *, private_mounts=False, hook_state="ready"):
     project = root / "project"
     project.mkdir()
     native = root / "native"
@@ -81,6 +81,10 @@ def exercise(binary, root, *, private_mounts=False):
     plugin.mkdir()
     for name, content in ui_state.package_sources(SOURCE / "oc_box").items():
         (plugin / name).write_bytes(content)
+    if hook_state == "incompatible":
+        (plugin / "file_preview_tui.tsx").write_text(
+            'export function install() { throw new Error("synthetic incompatible hook") }\n'
+        )
     manifest = plugin / "package.json"
     manifest.write_text(
         json.dumps(
@@ -94,7 +98,7 @@ def exercise(binary, root, *, private_mounts=False):
     (config / "cli.json").write_text(
         json.dumps(
             {
-                "plugins": [str(plugin)],
+                "plugins": [] if hook_state == "missing" else [str(plugin)],
                 "highlights": False,
                 "animations": False,
             }
@@ -249,7 +253,11 @@ sys.stdout.buffer.write(path.read_bytes())
             sid,
             file,
             private_mounts=private_mounts,
+            hook_state=hook_state,
         )
+    if hook_state != "ready":
+        print(f"PASS: OpenCode {version} native {hook_state} hook left opening off.")
+        return
     scope = (
         "real reader and disposable mounts" if private_mounts else "synthetic reader"
     )
@@ -259,7 +267,16 @@ sys.stdout.buffer.write(path.read_bytes())
 
 
 def run_client(
-    binary, root, project, env, endpoint, sid, file, *, private_mounts=False
+    binary,
+    root,
+    project,
+    env,
+    endpoint,
+    sid,
+    file,
+    *,
+    private_mounts=False,
+    hook_state="ready",
 ):
     master, slave = pty.openpty()
     rows, columns = 52, 150
@@ -376,6 +393,18 @@ def run_client(
         wait("END_PROBE", 16)
         pump(0.7)
         assert not log() and not opened.exists() and not candidates
+        if hook_state != "ready":
+            if hook_state == "incompatible":
+                wait("Host file opening is off")
+            x, y = locate("ABS_LINK")
+            press = f"\x1b[<16;{x};{y}M".encode()
+            release = f"\x1b[<16;{x};{y}m".encode()
+            assert input_wire.feed(press + release) == press + release
+            os.write(master, press + release)
+            pump(0.5)
+            assert not log() and not opened.exists() and not candidates
+            assert preview_wire.startup_unverified() == (hook_state == "missing")
+            return
         click("ABS_LINK", authorized=False)
         assert not log() and not candidates
         for label in ("TRAVERSAL_LINK", "REMOTE_FILE", "WEB_LINK"):
@@ -466,6 +495,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--opencode", required=True)
     parser.add_argument("--private-mounts", action="store_true")
+    parser.add_argument(
+        "--hook-state", choices=("ready", "missing", "incompatible"), default="ready"
+    )
     args = parser.parse_args()
     binary = str(Path(shutil.which(args.opencode) or args.opencode).absolute())
     if args.private_mounts:
@@ -480,7 +512,7 @@ if __name__ == "__main__":
                 "path=Path(sys.argv[1]); sys.path.insert(0,str(path.parent));"
                 "spec=importlib.util.spec_from_file_location('fixture',path);"
                 "fixture=importlib.util.module_from_spec(spec); spec.loader.exec_module(fixture);"
-                "fixture.exercise(sys.argv[2],Path(sys.argv[3]),private_mounts=True)"
+                "fixture.exercise(sys.argv[2],Path(sys.argv[3]),private_mounts=True,hook_state=sys.argv[4])"
             )
             subprocess.run(
                 [
@@ -497,10 +529,11 @@ if __name__ == "__main__":
                     str(Path(__file__).resolve()),
                     binary,
                     directory,
+                    args.hook_state,
                 ],
                 check=True,
                 timeout=90,
             )
         raise SystemExit(0)
     with tempfile.TemporaryDirectory(prefix="oc-box-preview-native-") as directory:
-        exercise(binary, Path(directory))
+        exercise(binary, Path(directory), hook_state=args.hook_state)

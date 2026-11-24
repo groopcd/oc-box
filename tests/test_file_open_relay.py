@@ -36,6 +36,7 @@ def transfer(token, content):
                   b'data:' + base64.b64encode(content), b'end'):
         os.write(1, prefix + frame + b'\\x07')
 transfer(b'1' * 32, b'forged')
+os.write(1, b'\\x1b]778;oc-box-open:v1:ready\\x07')
 os.write(1, b'READY')
 content = b''
 saw_grant = False
@@ -81,6 +82,51 @@ FAILING_NATIVE = NATIVE.replace(
 
 
 class TerminalArtifactTests(unittest.TestCase):
+    def test_missing_hook_keeps_native_tui_and_reports_after_exit(self):
+        no_hook = NATIVE.replace(
+            "os.write(1, b'\\x1b]778;oc-box-open:v1:ready\\x07')\n", ""
+        )
+        self.assertNotEqual(no_hook, NATIVE)
+        with tempfile.TemporaryDirectory(
+            prefix="oc-box-host-open-missing-hook-"
+        ) as root:
+            marker = Path(root) / "opened"
+            master, slave = pty.openpty()
+            self.addCleanup(os.close, master)
+            self.addCleanup(os.close, slave)
+            before = termios.tcgetattr(slave)
+            child = subprocess.Popen(
+                [sys.executable, "-B", "-c", DRIVER, no_hook, str(marker)],
+                stdin=slave,
+                stdout=slave,
+                stderr=slave,
+                env={"PYTHONPATH": str(SOURCE), "PATH": "/usr/bin:/bin"},
+            )
+            output = bytearray()
+
+            def expect(text):
+                end = time.monotonic() + 5
+                while text not in output and time.monotonic() < end:
+                    if select.select([master], [], [], 0.1)[0]:
+                        output.extend(os.read(master, 4096))
+                self.assertIn(text, output)
+
+            try:
+                expect(b"READY")
+                os.write(master, b"\x1b[<16;6;8M\x1b[<16;6;8mCHECK-NO-GRANT")
+                expect(b"NO-PREMATURE-GRANT")
+                self.assertNotIn(b"native-hook-unverified", output)
+                os.write(master, b"Q")
+                expect(b"native-hook-unverified")
+                self.assertEqual(child.wait(timeout=5), 0)
+                self.assertEqual(termios.tcgetattr(slave), before)
+                self.assertFalse(marker.exists())
+                self.assertNotIn(b"oc-box-open:v1:", output)
+            finally:
+                if child.poll() is None:
+                    child.kill()
+                    child.wait(timeout=4)
+
     def test_only_fresh_host_click_can_launch_worker(self):
         with tempfile.TemporaryDirectory(prefix="oc-box-host-open-relay-") as root:
             marker = Path(root) / "opened"

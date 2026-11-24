@@ -2884,6 +2884,9 @@ are eligible without a minor-version allowlist, but the client must still
 provide a compatible native renderer. If a requested feature fails launcher
 admission, startup reports that host opening is off, with a reason; the native
 plugin warns during initialization if it cannot set up its renderer hook.
+Opening stays off unless the hook confirms startup. If no confirmation or TUI
+warning arrives, oc-box reports the missing hook after restoring the terminal,
+without interrupting the native client.
 Terminals that do not pass Ctrl-click to OpenCode still cannot use the feature.
 Leave terminal hyperlink handlers at their normal settings; this feature does
 not use them. It is not available in web, V1, plain host OpenCode, or the
@@ -2917,6 +2920,8 @@ operator-trusted compatibility selection, not cryptographic emulator identity.
 The pathname bridge accepts a complete qualifying paste. Konsole uses that bridge
 only, with no OSC 72 probes/registration and unchanged child output. The Kitty
 profile enables structured OSC 72 drops only after an affirmative capability reply.
+If the reply is missing, oc-box reports after restoring the terminal that
+structured drops were not confirmed; pathname pastes remain available.
 Kitty graphics support, including Konsole's graphics support, is not proof of
 drag-and-drop capability. This is not a guarantee about every emulator/version.
 

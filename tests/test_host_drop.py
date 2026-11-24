@@ -285,6 +285,40 @@ class HostDropTests(unittest.TestCase):
                 )
                 self.assertNotIn(str(failure), errors.getvalue())
 
+    def test_only_kitty_requires_matching_structured_drop_confirmation(self):
+        for profile, reply, fallback in (
+            ("konsole", None, False),
+            ("kitty", None, True),
+            ("kitty", "wrong", True),
+            ("kitty", "matched", False),
+        ):
+            with self.subTest(profile=profile, reply=reply):
+                relay = host_drop.Relay(
+                    self.facade, self.data, self.connection, profile=profile
+                )
+                relay.start()
+                if reply is not None:
+                    ident = relay.ident if reply == "matched" else "0"
+                    relay.control(f"72;t=q:i={ident};".encode())
+                relay.stop()
+                with contextlib.redirect_stderr(io.StringIO()) as errors:
+                    relay.__exit__()
+                self.assertEqual(
+                    "did not confirm structured file drops" in errors.getvalue(),
+                    fallback,
+                )
+
+    def test_drop_only_framing_refusal_is_reported_after_exit(self):
+        relay = host_drop.Relay(
+            self.facade, self.data, self.connection, profile="konsole"
+        )
+        # A nested ESC is not a valid input boundary for a framed pathname paste.
+        relay.input_bytes(b"\x1b[200~invalid\x1bX")
+        self.assertIsNotNone(relay.input.disable_reason)
+        with contextlib.redirect_stderr(io.StringIO()) as errors:
+            relay.__exit__()
+        self.assertIn("Host pathname importing was disabled", errors.getvalue())
+
     def test_clipboard_framing_refusal_reports_one_fixed_warning_on_client_exit(self):
         clipboard = Mock()
         relay = host_drop.Relay(

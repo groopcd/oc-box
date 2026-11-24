@@ -3214,11 +3214,13 @@ releases are eligible without a minor-version allowlist, but the client
 must still provide a compatible native renderer.  If a requested feature
 fails launcher admission, startup reports that host opening is off, with
 a reason; the native plugin warns during initialization if it cannot set
-up its renderer hook.  Terminals that do not pass Ctrl-click to OpenCode
-still cannot use the feature.  Leave terminal hyperlink handlers at
-their normal settings; this feature does not use them.  It is not
-available in web, V1, plain host OpenCode, or the maintenance/session
-terminals.
+up its renderer hook.  Opening stays off unless the hook confirms
+startup.  If no confirmation or TUI warning arrives, oc-box reports the
+missing hook after restoring the terminal, without interrupting the
+native client.  Terminals that do not pass Ctrl-click to OpenCode still
+cannot use the feature.  Leave terminal hyperlink handlers at their
+normal settings; this feature does not use them.  It is not available in
+web, V1, plain host OpenCode, or the maintenance/session terminals.
 
 5.48 -host-drop
 ===============
@@ -3252,7 +3254,9 @@ compatibility selection, not cryptographic emulator identity.  The
 pathname bridge accepts a complete qualifying paste.  Konsole uses that
 bridge only, with no OSC 72 probes/registration and unchanged child
 output.  The Kitty profile enables structured OSC 72 drops only after an
-affirmative capability reply.  Kitty graphics support, including
+affirmative capability reply.  If the reply is missing, oc-box reports
+after restoring the terminal that structured drops were not confirmed;
+pathname pastes remain available.  Kitty graphics support, including
 Konsole's graphics support, is not proof of drag-and-drop capability.
 This is not a guarantee about every emulator/version.
 
@@ -5192,19 +5196,19 @@ Node: Synopsis930
 Node: Description5132
 Node: Commands10952
 Node: Options144396
-Node: Lifecycle and persistence207923
-Node: Distribution images210223
-Node: Sessions and recovery215300
-Node: Devices and host permissions221885
-Node: Resource reports224231
-Node: Configuration and environment226342
-Node: Files237723
-Node: Exit status248633
-Node: Examples250041
-Node: Troubleshooting252180
-Node: Installation and manuals264672
-Node: Authors and license274862
-Node: See also275469
+Node: Lifecycle and persistence208268
+Node: Distribution images210568
+Node: Sessions and recovery215645
+Node: Devices and host permissions222230
+Node: Resource reports224576
+Node: Configuration and environment226687
+Node: Files238068
+Node: Exit status248978
+Node: Examples250386
+Node: Troubleshooting252525
+Node: Installation and manuals265017
+Node: Authors and license275207
+Node: See also275814
 
 End Tag Table
 
