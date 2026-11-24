@@ -261,6 +261,18 @@ stream; the lease holder must keep it until listener workers are also
 confirmed stopped. The assembler performs no vault prompt, listener
 activation, or workspace transition.
 
+`web_named_foreground.NamedForeground` is the internal launcher handoff for
+an already running, opted-in named owner. Keep its original reservation,
+reviewed asset context and `AccountSnapshot` through `start(expires_at=...)`.
+It attaches through the actual owner-control protocol, selects the managed
+relay for that exact container, and returns only the fixed workspace entry URL.
+Retain the foreground handle on startup refusal. Only a true `close()` permits
+releasing the borrowed account snapshot, reservation and owner. A false result
+leaves the attach held; it is not permission to sync, stop or restart as if the
+client had exited. No CLI, artifact distribution or host unlock is enabled by
+this composition. A local fixture uses real TLS, the signed owner-control
+exchange and encrypted-store replacement with synthetic native/Podman I/O.
+
 A later LAN instance can use distinct existing sites and certificates under
 operator control. Isolated guest LAN tests can establish transport behavior
 using a synthetic private CA, without touching public DNS or requesting a
