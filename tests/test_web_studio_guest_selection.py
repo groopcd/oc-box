@@ -10,6 +10,7 @@ from unittest.mock import Mock, patch
 from oc_box import web_studio_guest as guest
 from oc_box import web_studio_guest_binding as guest_binding
 from oc_box import web_studio_guest_native as native
+from oc_box import web_studio_guest_read as guest_read
 from oc_box import web_studio_guest_selection as selection
 from oc_box import web_studio_guest_send as guest_send
 from oc_box import web_studio_send
@@ -284,3 +285,62 @@ class GuestSelectionTests(unittest.TestCase):
         with self.assertRaises(web_studio_send.SendError):
             peer.query("/api/session/ses_exact/prompt", body=b"{}")
         tunnel.send.assert_called_once()
+
+    def test_guest_catalog_matches_native_pid_workspace_and_exact_projection(self):
+        identity = SimpleNamespace(
+            version="2.4.1", endpoint="http://127.0.0.1:48232", native_pid=441
+        )
+        info = {
+            "version": identity.version,
+            "pid": identity.native_pid,
+            "urls": [identity.endpoint],
+            "hostname": "fixture",
+            "paths": {"tmp": "/tmp/fixture"},
+            "capabilities": {"persistentPty": True},
+        }
+        location = {
+            "directory": "/fixture",
+            "project": {
+                "id": "p_fixture",
+                "directory": "/fixture",
+                "canonical": "/fixture",
+            },
+        }
+        row = {
+            "id": "ses_exact",
+            "location": {"directory": "/fixture"},
+            "projectID": "p_fixture",
+            "time": {"created": 1, "updated": 2},
+            "title": "Synthetic session",
+        }
+        peer = Mock()
+        peer.query.side_effect = [
+            info,
+            location,
+            {"data": [row], "cursor": {"next": None, "previous": None}},
+            info,
+            location,
+        ]
+        view = guest_read._catalog(peer, identity, "/fixture", ("must-not-show",))
+        self.assertEqual(view["sessions"][0]["id"], "ses_exact")
+        self.assertEqual(view["sessions"][0]["title"], "Synthetic session")
+        self.assertEqual(peer.query.call_args.kwargs, {"closing": True})
+        contaminated = {**row, "title": "Synthetic token must-not-show"}
+        peer.query.side_effect = [
+            info,
+            location,
+            {"data": [contaminated], "cursor": {"next": None, "previous": None}},
+        ]
+        with self.assertRaises(ValueError):
+            guest_read._catalog(peer, identity, "/fixture", ("must-not-show",))
+        peer.query.side_effect = [{**info, "pid": 999}, location]
+        with self.assertRaises(ValueError):
+            guest_read._catalog(peer, identity, "/fixture", ())
+        invalid = {**row, "location": {"directory": "/other"}}
+        peer.query.side_effect = [
+            info,
+            location,
+            {"data": [invalid], "cursor": {"next": None, "previous": None}},
+        ]
+        with self.assertRaises(ValueError):
+            guest_read._catalog(peer, identity, "/fixture", ())

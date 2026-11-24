@@ -58,6 +58,10 @@ existing workspace/session preflight and native queue-acknowledgment
 schema through the registered OGD tunnel. It never uses host Basic auth
 or retries a possible POST. Its current tests cover exact private wire
 bytes and refusal/acknowledgment handling without enabling any route.
+The read seam uses the existing bounded project/catalog and transcript
+projections, checks the exact native PID and workspace, and repeats the
+live selection check after retiring its transport. It is not a general
+native JSON proxy.
 
 ## Named HTTPS: the stop fence must cover every supported writer
 

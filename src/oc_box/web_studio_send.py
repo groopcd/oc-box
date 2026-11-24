@@ -156,8 +156,13 @@ def _acknowledged(value, session, text):
         _refuse()
 
 
-def _read_reply(recv, *, closing):
+def _read_reply(recv, *, closing, limit=_MAX_REPLY, raw=False):
     """Strict single response for the outstanding fixed request; no pipelining."""
+    if (
+        type(limit) is not int
+        or not 1 <= limit <= web_studio_conversation.MAX_REPLY_BYTES
+    ):
+        _refuse()
     data = bytearray()
     separator = b"\r\n\r\n"
     while (boundary := data.find(separator)) < 0:
@@ -178,8 +183,9 @@ def _read_reply(recv, *, closing):
         or headers.get("content-encoding", []) not in ([], ["identity"])
         or headers.get("content-type") != ["application/json"]
         or len(lengths) != 1
-        or re.fullmatch(r"[1-9][0-9]{0,4}", lengths[0]) is None
-        or (length := int(lengths[0])) > _MAX_REPLY
+        or re.fullmatch(r"[1-9][0-9]{0," + str(len(str(limit)) - 1) + r"}", lengths[0])
+        is None
+        or (length := int(lengths[0])) > limit
     ):
         _refuse()
     body = data[split:]
@@ -192,7 +198,8 @@ def _read_reply(recv, *, closing):
         body.extend(chunk)
     if closing and recv(1):
         _refuse()
-    return web_studio_conversation._json(bytes(body))
+    payload = bytes(body)
+    return payload if raw else web_studio_conversation._json(payload)
 
 
 def _preflight(get, scope):
