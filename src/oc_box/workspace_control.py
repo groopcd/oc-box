@@ -33,6 +33,7 @@ _MARKER = "history-stop.json"
 _ADMISSION = "admission.lock"
 _WRITER = "marker.lock"
 _READY = b"1\n"
+_DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 _MAX_MARKER_BYTES = 256
 _TOKEN = re.compile(r"[0-9a-f]{64}\Z")
 _WRITER_TIMEOUT = 1.0
@@ -107,8 +108,8 @@ def _file_info(fd, *, private=True):
     return info
 
 
-def _same_file(directory, name, fd):
-    info = _file_info(fd)
+def _same_file(directory, name, fd, *, private=True):
+    info = _file_info(fd, private=private)
     try:
         current = os.stat(name, dir_fd=directory, follow_symlinks=False)
     except FileNotFoundError:
@@ -138,40 +139,47 @@ def _open_file(directory, name, *, write=False, create=False, private=True):
 
 
 @contextmanager
-def _control(path, *, create):
+def _workspace_directory(path):
+    """Pin the registry parent without following links; validate its registry."""
     path = Path(path).absolute()
     if path.name != "workspace.json" or ".." in path.parts:
         raise ControlError("invalid-path")
-    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
-    fd = os.open(path.anchor, flags)
+    fd = os.open(path.anchor, _DIR_FLAGS)
     try:
         # Public ancestors such as /tmp and /home need not be owned/private.
         # Open each component without following links; validate the workspace
         # registry parent, accepting its legitimate owned legacy 0755 mode.
         for component in path.parent.parts[1:]:
-            child = os.open(component, flags, dir_fd=fd)
+            child = os.open(component, _DIR_FLAGS, dir_fd=fd)
             os.close(fd)
             fd = child
         _directory_info(fd, private=False)
         registry = _open_file(fd, path.name, private=False)
         os.close(registry)
+        yield fd
+    finally:
+        os.close(fd)
+
+
+@contextmanager
+def _control(path, *, create):
+    with _workspace_directory(path) as directory:
         created = False
         if create:
             try:
-                os.mkdir(_DIRECTORY, 0o700, dir_fd=fd)
+                os.mkdir(_DIRECTORY, 0o700, dir_fd=directory)
                 created = True
             except FileExistsError:
                 pass
         try:
-            child = os.open(_DIRECTORY, flags, dir_fd=fd)
+            child = os.open(_DIRECTORY, _DIR_FLAGS, dir_fd=directory)
         except FileNotFoundError:
             raise ControlError("missing-control") from None
-        os.close(fd)
-        fd = child
-        _directory_info(fd, private=True)
-        yield fd, created
-    finally:
-        os.close(fd)
+        try:
+            _directory_info(child, private=True)
+            yield child, created
+        finally:
+            os.close(child)
 
 
 def _pause(deadline, category="control-timeout"):
