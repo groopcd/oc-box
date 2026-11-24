@@ -215,6 +215,24 @@ class PreparedNamedLaunch:
         self._foreground = None
         self._attempted = self._retired = self._released = self._uncertain = False
 
+    def require_workspace(self, workspace):
+        """Check authenticated host scope before launch and again before attach."""
+        if self._retired or self._account.current() is not True:
+            raise NamedLaunchError(
+                "The host web account store changed; prepare a new named launch."
+            )
+        if (
+            type(workspace) is not str
+            or re.fullmatch(r"[a-f0-9]{32}", workspace) is None
+            or not any(
+                workspace in account.workspace_ids
+                for account in self._account.store.accounts
+            )
+        ):
+            raise NamedLaunchError(
+                "No named web account is enrolled for this workspace."
+            )
+
     def start(self, owner, *, expires_at, studio=False):
         if self._attempted or self._retired:
             raise NamedLaunchError("Named HTTPS cannot reuse this launch preparation.")
@@ -225,13 +243,7 @@ class PreparedNamedLaunch:
             raise NamedLaunchError(
                 "Named HTTPS requires the prepared workspace owner."
             ) from None
-        if not any(
-            workspace in account.workspace_ids
-            for account in self._account.store.accounts
-        ):
-            raise NamedLaunchError(
-                "No named web account is enrolled for this workspace."
-            )
+        self.require_workspace(workspace)
         self._foreground = web_named_foreground.NamedForeground(
             owner,
             profile=self._profile,
@@ -400,5 +412,12 @@ def run_named_client(box, owner, prepared, *, no_open):
     except KeyboardInterrupt:
         return 130
     finally:
-        if prepared.close() is not True:
+        try:
+            drained = prepared.close()
+        except BaseException:
+            # An interruption or fault *during* teardown cannot bypass the
+            # retained-owner error path. Observing the accept fence, or the
+            # original client exiting, does not prove that the close completed.
+            raise NamedClientUndrained() from None
+        if drained is not True:
             raise NamedClientUndrained() from None

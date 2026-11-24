@@ -122,12 +122,13 @@ class PrepareNamedLaunchTests(unittest.TestCase):
             )
         )
         self.assets = object()
+        self.account_current = Mock(return_value=True)
         self.snapshot = web_accounts.AccountSnapshot(
             web_accounts.AccountStore(
                 b"s" * 128,
                 (web_accounts.Account("synthetic", (_WORKSPACE,), b"r" * 192),),
             ),
-            lambda: True,
+            self.account_current,
             lambda: self.events.append("snapshot-closed"),
         )
         self.owner = SimpleNamespace(data={"id": _WORKSPACE})
@@ -274,6 +275,24 @@ class PrepareNamedLaunchTests(unittest.TestCase):
         finally:
             self.assertTrue(prepared.close())
 
+    def test_workspace_scope_preflight_never_attaches_and_is_rechecked_at_start(self):
+        prepared = launch.prepare_named_launch(self.inputs)
+        try:
+            with self.assertRaisesRegex(
+                launch.NamedLaunchError, "No named web account"
+            ):
+                prepared.require_workspace("b" * 32)
+            prepared.require_workspace(_WORKSPACE)
+            self.compose.assert_not_called()
+            self.account_current.return_value = False
+            with self.assertRaisesRegex(
+                launch.NamedLaunchError, "account store changed"
+            ):
+                prepared.start(self.owner, expires_at=1)
+            self.compose.assert_not_called()
+        finally:
+            self.assertTrue(prepared.close())
+
     def test_uncertain_drain_never_abandons_any_prepared_host_resource(self):
         prepared = launch.prepare_named_launch(self.inputs)
         try:
@@ -345,6 +364,29 @@ class PrepareNamedLaunchTests(unittest.TestCase):
         finally:
             self.foreground.close.return_value = True
             self.assertTrue(prepared.close())
+
+    def test_close_interrupt_or_fault_is_an_unconfirmed_drain_not_a_client_exit(self):
+        for error in (KeyboardInterrupt(), OSError("private diagnostic")):
+            with self.subTest(error=type(error).__name__):
+                prepared = launch.prepare_named_launch(self.inputs)
+                self.foreground.wait_stopped.side_effect = KeyboardInterrupt()
+                self.foreground.close.side_effect = error
+                try:
+                    prior = len(self.events)
+                    with (
+                        redirect_stdout(io.StringIO()),
+                        self.assertRaises(launch.NamedClientUndrained) as refused,
+                    ):
+                        launch.run_named_client(
+                            None, self.owner, prepared, no_open=True
+                        )
+                    self.assertEqual(len(self.events), prior)
+                    self.assertNotIn("private diagnostic", str(refused.exception))
+                    self.assertTrue(refused.exception.__suppress_context__)
+                finally:
+                    self.foreground.close.side_effect = None
+                    self.foreground.close.return_value = True
+                    self.assertTrue(prepared.close())
 
     def test_browser_activation_passes_only_the_entry_url_over_stdin(self):
         prepared = launch.prepare_named_launch(self.inputs)
