@@ -64,6 +64,7 @@ class ConnectionUse:
     _cancel: Callable[[], None]
     _cancelled: Event = field(default_factory=Event, init=False)
     _drained: Event = field(default_factory=Event, init=False)
+    _cleanup_unconfirmed: Event = field(default_factory=Event, init=False)
 
     @property
     def cancelled(self) -> bool:
@@ -79,14 +80,24 @@ class BrowserRevocation:
     _callbacks_ok: bool
 
     def wait_drained(self, timeout: float = 5.0) -> bool:
-        if type(timeout) not in (int, float) or not 0 <= timeout <= 30:
-            raise ValueError("Invalid web revocation deadline.")
+        _check_drain_timeout(timeout)
         if not self.revoked or not self._callbacks_ok:
             return False
-        deadline = monotonic() + timeout
-        return all(
-            use._drained.wait(max(0.0, deadline - monotonic())) for use in self._uses
-        )
+        return _wait_drained(self._uses, timeout)
+
+
+def _check_drain_timeout(timeout):
+    if type(timeout) not in (int, float) or not 0 <= timeout <= 30:
+        raise ValueError("Invalid web revocation deadline.")
+
+
+def _wait_drained(uses, timeout):
+    deadline = monotonic() + timeout
+    return all(
+        not use._cleanup_unconfirmed.is_set()
+        and use._drained.wait(max(0.0, deadline - monotonic()))
+        for use in uses
+    )
 
 
 @dataclass(slots=True)
@@ -136,7 +147,7 @@ class BrowserAdmission:
         self._lock = Lock()
         self._sessions: dict[str, _Entry] = {}
         self._attempts: deque[float] = deque()
-        self._in_use = 0
+        self._uses: set[ConnectionUse] = set()
         self._closed = False
         self._cancellation_failed = False
 
@@ -280,10 +291,10 @@ class BrowserAdmission:
         with self._lock:
             pending = self._expired(monotonic())
             entry = self._entry(session)
-            if entry is not None and self._in_use < self._max_connections:
+            if entry is not None and len(self._uses) < self._max_connections:
                 use = ConnectionUse(cancel)
                 entry.connections.add(use)
-                self._in_use += 1
+                self._uses.add(use)
         try:
             self._notify(pending)
             yield use if use is not None and not use.cancelled else None
@@ -291,9 +302,11 @@ class BrowserAdmission:
             if use is not None:
                 with self._lock:
                     entry.connections.discard(use)
-                    # A cancelled use still consumes capacity until it exits.
-                    self._in_use -= 1
-                    use._drained.set()
+                    # Preserve the registration (including exact resource
+                    # handles) if the worker has fenced on unconfirmed cleanup.
+                    if not use._cleanup_unconfirmed.is_set():
+                        self._uses.remove(use)
+                        use._drained.set()
 
     def revoke(self, binding: WebBinding, session: BrowserSession) -> bool:
         """Revoke exactly the looked-up session, not other sign-ins."""
@@ -321,6 +334,15 @@ class BrowserAdmission:
     def close(self) -> None:
         """Permanently stop admission and cancel all remaining registered uses."""
         self._notify(self._begin_close())
+
+    def wait_drained(self, timeout: float = 5.0) -> bool:
+        """After close, require confirmed drain, including previously revoked uses."""
+        _check_drain_timeout(timeout)
+        with self._lock:
+            if not self._closed:
+                return False
+            uses = tuple(self._uses)
+        return _wait_drained(uses, timeout)
 
     def _begin_close(self) -> list[ConnectionUse]:
         """Latch the fence before returning callbacks for out-of-lock delivery."""

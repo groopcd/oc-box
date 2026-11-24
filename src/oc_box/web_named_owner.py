@@ -73,6 +73,17 @@ class OwnerIdentity:
             raise OwnerLeaseError() from None
 
 
+def connect_workspace_native(box, identity, *, track, check, deadline):
+    """Explicit managed connector for a *verified* lease, not an owner lookup."""
+    if type(identity) is not OwnerIdentity:
+        raise OwnerLeaseError()
+    # The registration carries the request's check and deadline. It owns the
+    # socket and exact process before any bytes or external work can start.
+    track.start_workspace_relay(
+        box, container_id=identity.container_id, endpoint=identity.endpoint
+    )
+
+
 def _absolute(path):
     return (
         type(path) is str
@@ -98,6 +109,8 @@ class VerifiedOwnerLease:
 
     ``connect_native(identity, *, track, check, deadline)`` must obey the
     NamedNativeRelay connector contract in the pinned container namespace.
+    A verified producer can explicitly bind ``connect_workspace_native`` to
+    the launcher module; there is no automatic connector or owner discovery.
     ``project`` and ``home`` are verified *container* paths. The only secret
     is the existing ephemeral native service control password for pairing,
     never a browser password or vault value.

@@ -130,6 +130,18 @@ class WebAdmissionTests(unittest.TestCase):
         with registry.connection(self.binding, session, cancel=failed_cancel) as use:
             self.assertIsNone(use)
 
+    def test_lifetime_drain_includes_uses_from_already_revoked_grants(self):
+        registry = self.registry()
+        _, session = self.sign_in(registry)
+        with registry.connection(self.binding, session, cancel=lambda: None) as use:
+            revoked = registry.begin_revocation(self.binding, session)
+            self.assertTrue(use.cancelled)
+            registry.close()
+            self.assertFalse(revoked.wait_drained(0))
+            self.assertFalse(registry.wait_drained(0))
+        self.assertTrue(revoked.wait_drained(0))
+        self.assertTrue(registry.wait_drained(0))
+
     def test_expiry_is_absolute_monotonic_and_cancels_idle_connections(self):
         registry = self.registry(session_ttl=10, max_sessions=2)
         token, session = self.sign_in(registry)
