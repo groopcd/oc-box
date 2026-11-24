@@ -106,7 +106,6 @@ async function transfer(id, kind, bytes, current) {
 }
 
 export function install(context) {
-  if (!/^2\.3\.(?:0|[1-9][0-9]*)$/.test(context.app.version)) throw new Error("native-version")
   const mounts = JSON.parse(process.env.OC_BOX_FILE_PREVIEW_ROOTS ?? "{}")
   const { roots, identities } = mounts
   if (!Array.isArray(roots) || roots.length !== 2 || roots[0] === roots[1] ||
@@ -119,7 +118,12 @@ export function install(context) {
   const root = renderer?.root
   const original = root?.processMouseEvent
   if (typeof original !== "function" || typeof renderer.getLinkAt !== "function" ||
-      typeof renderer.prependInputHandler !== "function" || typeof renderer.removeInputHandler !== "function") {
+      typeof renderer.prependInputHandler !== "function" || typeof renderer.removeInputHandler !== "function" ||
+      typeof renderer.on !== "function" || typeof renderer.off !== "function" ||
+      typeof context.ui?.slot !== "function" || typeof context.ui?.router?.current !== "function" ||
+      typeof context.ui?.toast?.show !== "function" ||
+      typeof context.data?.session?.get !== "function" ||
+      typeof context.data?.session?.message?.get !== "function") {
     throw new Error("file-open-hook")
   }
   let pressed

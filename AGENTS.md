@@ -25,6 +25,14 @@ explicit handoffs rather than assuming shared conversation context.
 
 ## Architecture
 
+Prefer capability and behavior checks over release-number allowlists. A new
+release using the same native contract should not need a launcher edit. When a
+requested optional integration cannot be enabled, report a fixed, actionable
+reason at startup or native client initialization; do not silently discard the
+saved choice. Keep version/profile fences that protect audited private storage,
+authentication, migration or execution semantics until an equivalent contract
+can be verified without touching real user state.
+
 Runtime implementation is under `src/oc_box/`; module names below refer to that
 directory. `paths.py` separates runtime files from checkout/sdist metadata and
 documentation. Wheels bundle resources alongside the package; the GitHub
@@ -335,7 +343,9 @@ their checkout ownership distinct from unrelated source and flat installations.
   refusals. No public API proves future composer attachment behavior. Do not
   reuse this eligibility policy as a shortcut for unrelated compatibility guards.
 - `file_preview*.py` / `file_preview_tui.tsx` / `file_open_formats.py`:
-  experimental host open, per native 2.3.x TUI CLI selection. Only verified
+  experimental host open, per stable native V2 TUI CLI selection. Native
+  capability checks, not a minor-version allowlist, govern renderer setup.
+  Only verified
   fresh GitHub installations get an automatic default, never a markerless
   upgrade, wheel, source checkout or restored workspace. Keep the owner-bound
   installation record out of archives. A saved host-only workspace choice
