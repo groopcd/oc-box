@@ -142,6 +142,13 @@ def _same_owner(gateway, owner):
     )
 
 
+def _accepts_worker_registry(binding, workers):
+    """Keep probes and live reservations distinct; never trust a copied binding."""
+    return type(binding) is _UnservedBinding or (
+        type(binding) is _ManagedBinding and binding.accepts_registry(workers)
+    )
+
+
 def bind_unserved(gateway, listener, owner):
     """Bind one explicitly reserved but non-activatable gateway for testing.
 

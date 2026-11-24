@@ -72,17 +72,9 @@ class GuestDuplexExec:
 
     def __init__(self, binding, workers, use):
         if (
-            type(binding)
-            not in (
-                web_studio_guest_binding._UnservedBinding,
-                web_studio_guest_binding._ManagedBinding,
-            )
-            or type(workers) is not web_guest_worker_drain.AcceptedWorkers
+            type(workers) is not web_guest_worker_drain.AcceptedWorkers
             or type(use) is not web_guest_worker_drain.AcceptedWorker
-            or (
-                type(binding) is web_studio_guest_binding._ManagedBinding
-                and not binding.accepts_registry(workers)
-            )
+            or not web_studio_guest_binding._accepts_worker_registry(binding, workers)
         ):
             raise GuestExecError()
         self._binding = binding
@@ -90,11 +82,16 @@ class GuestDuplexExec:
         self._use = use
         self._thread = current_thread()
         self._canceled = Event()
-        self._activity = workers.admit(use, wake=self._canceled.set)
+        # A failed receipt must leave the exact attempted exec reachable
+        # from its pinned worker record, not just a disconnected Event.
+        self._activity = workers.admit(use, wake=self._wake)
         if self._activity is None:
             raise GuestExecError()
         self._spent = self._attempted = self._retired = self._confirmed = False
         self._child = self._tunnel = None
+
+    def _wake(self):
+        self._canceled.set()
 
     def _thread_check(self):
         if current_thread() is not self._thread:

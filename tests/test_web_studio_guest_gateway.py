@@ -1,14 +1,17 @@
 """Original managed Gateway on synthetic registration, TCP and exec pipes."""
 
+from concurrent.futures import Future
 from contextlib import ExitStack
 from dataclasses import replace
 import os
 import socket
 import sys
 from threading import Event, Thread
+from time import monotonic
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
+from weakref import ref
 
 from oc_box import web_guest_duplex_exec as guest_exec
 from oc_box import web_guest_duplex_host as transport
@@ -107,6 +110,13 @@ class ManagedGatewayTests(GuestOwnerFixture, unittest.TestCase):
             self.assertEqual(relay.url, scope.native.binding.origin)
             self.assertIsNone(replace(scope).current())
             self.assertIs(scope.current(), scope.native.binding)
+            self.assertTrue(binding._accepts_worker_registry(scope, relay._workers))
+            self.assertFalse(
+                binding._accepts_worker_registry(replace(scope), relay._workers)
+            )
+            self.assertFalse(
+                binding._accepts_worker_registry(scope, worker_drain.AcceptedWorkers())
+            )
             with self.assertRaises(binding.GuestBindingError):
                 gateway._ManagedGateway(SimpleNamespace(owner=self.owner))
             with self.assertRaises(binding.GuestBindingError):
@@ -133,6 +143,37 @@ class ManagedGatewayTests(GuestOwnerFixture, unittest.TestCase):
             self.assertIsNone(relay.binding)
             self.assertIsNone(scope.current())
             self.assertEqual(scope.listener._listener.fileno(), -1)
+
+    def test_worker_record_retains_an_attempt_whose_exec_start_is_uncertain(self):
+        with ExitStack() as stack:
+            relay = self.start_gateway(stack)
+            scope = relay.binding
+            left, right = socket.socketpair()
+            stack.enter_context(right)
+            result = Future()
+
+            def work(use):
+                try:
+                    launch = guest_exec.GuestDuplexExec(scope, relay._workers, use)
+                    with patch.object(
+                        guest_exec.subprocess, "Popen", side_effect=OSError
+                    ):
+                        with self.assertRaises(guest_exec.GuestExecError):
+                            launch.start(deadline=monotonic() + 4)
+                    self.assertFalse(launch.retire())
+                    result.set_result(ref(launch))
+                except BaseException as error:
+                    result.set_exception(error)
+
+            if not relay._workers.dispatch(left, work):
+                left.close()
+                self.fail("Synthetic worker was not registered.")
+            reference = result.result(timeout=5)
+            self.assertFalse(relay.drain())
+            self.assertIsNotNone(
+                reference(), "uncertain exec lost its exact tracked handle"
+            )
+            self.assertFalse(self.owner.closing)
 
     def test_silent_workers_fill_capacity_before_native_dispatch_and_all_join(self):
         with ExitStack() as stack:

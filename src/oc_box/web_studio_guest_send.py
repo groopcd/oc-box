@@ -157,7 +157,7 @@ def send(
     refused = web_studio_send.SendResult.REFUSED
     unconfirmed = web_studio_send.SendResult.UNCONFIRMED
     if (
-        type(binding) is not web_studio_guest_binding._UnservedBinding
+        not web_studio_guest_binding._accepts_worker_registry(binding, workers)
         or type(admission) is not web_studio_guest.GuestAdmission
         or type(selections) is not web_studio_guest_selection.GuestSelections
         or admission._binding is not binding.native.binding
