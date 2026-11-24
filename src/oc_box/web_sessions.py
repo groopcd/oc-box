@@ -528,15 +528,17 @@ def _workspace_layout_body(
     *,
     first_party_studio,
     named_studio=False,
+    guest_studio=False,
 ):
     """Port the final Studio chrome; data and native UI stay behind their existing boundaries."""
     name = escape(workspace_name)
-    label = "Workspace conversation" if named_studio else "Native conversation"
+    standalone = named_studio or guest_studio
+    label = "Workspace conversation" if standalone else "Native conversation"
     title = escape((state["selection"] or {}).get("title") or label)
     access = "Named workspace" if named_studio else "Workspace guest"
-    refresh = "Refresh recent sessions" if named_studio else "Refresh TUI tabs"
-    source_name = "Recent" if named_studio else "TUI tabs"
-    catalog_name = "Recent workspace sessions" if named_studio else "Open TUI tabs"
+    refresh = "Refresh recent sessions" if standalone else "Refresh TUI tabs"
+    source_name = "Recent" if standalone else "TUI tabs"
+    catalog_name = "Recent workspace sessions" if standalone else "Open TUI tabs"
     native_access = (
         '<span class="workspace-tag" id="workspace-host-terminal">Native OpenCode: host terminal</span>'
         if named_studio
@@ -550,12 +552,14 @@ def _workspace_layout_body(
     reload_note = (
         "Native OpenCode access stays in the host terminal."
         if named_studio
+        else "Reload Studio to confirm this browser again."
+        if guest_studio
         else f'<a href="{INDEX}">Reload shell</a> (may interrupt a draft).'
     )
     addon_hidden = "" if attachments else " hidden"
     addon = (
         ""
-        if named_studio
+        if standalone
         else f"""<div class="workspace-addons"{addon_hidden}>
       <details><summary>Browser attachments</summary><div id="session-controls"></div></details>
       <p id="addon-status" role="status"{addon_hidden}></p>
@@ -567,7 +571,7 @@ def _workspace_layout_body(
       <div id="workspace-studio-transcript"></div>
       <div id="workspace-studio-composer" hidden></div>
     </div>"""
-        if first_party_studio or named_studio
+        if first_party_studio or standalone
         else ""
     )
     return f"""{_ICONS}
@@ -666,11 +670,13 @@ def _workspace_layout_body(
     </div>
   </aside>
 </div>
-{_workspace_manager(name, named_studio=named_studio)}
+{_workspace_manager(name, named_studio=standalone)}
 </main></body></html>"""
 
 
-def _named_studio_document(sessions, status, workspace_name, named_page):
+def _named_studio_document(
+    sessions, status, workspace_name, named_page, *, guest_challenge=None
+):
     """Render only bounded display metadata from the caller's verified catalog."""
     if (
         type(sessions) not in (list, tuple)
@@ -706,7 +712,20 @@ def _named_studio_document(sessions, status, workspace_name, named_page):
     }
     prefix = NAMED_STUDIO_ASSET_PREFIX
     entry = page = ""
-    if named_page is not None:
+    guest = guest_challenge is not None
+    if guest:
+        if (
+            named_page is not None
+            or type(guest_challenge) is not str
+            or re.fullmatch(r"[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]", guest_challenge)
+            is None
+        ):
+            raise ValueError("Invalid trusted Studio guest challenge.")
+        page = f' data-studio-challenge="{guest_challenge}"'
+        entry = (
+            f'<script type="module" src="{prefix}web_named_studio_entry.mjs"></script>'
+        )
+    elif named_page is not None:
         if (
             type(named_page) is not dict
             or named_page.keys() != {"page", "generation", "sessionID"}
@@ -734,24 +753,42 @@ def _named_studio_document(sessions, status, workspace_name, named_page):
         f'<link rel="stylesheet" href="{prefix}web_studio_shell.css">'
         f'<script defer src="{prefix}web_sessions.js"></script>'
         + entry
-        + '</head><body><main id="web-shell" data-layout="studio" data-named-studio'
+        + '</head><body><main id="web-shell" data-layout="studio"'
+        + (" data-guest-studio" if guest else " data-named-studio")
         + page
         + ' data-bootstrap="'
         + escape(json.dumps(state, ensure_ascii=True), quote=True)
         + '">'
     )
+    empty = (
+        '<section id="no-selection" role="status"><p>Studio controls are not connected.</p>'
+        '<button type="button" class="workspace-action" id="workspace-guest-confirm">'
+        "Confirm this browser</button></section>"
+        if guest
+        else '<section id="no-selection" role="status"><p>Studio controls are not connected.</p></section>'
+    )
     return (
         start
         + _workspace_layout_body(
             state,
-            '<section id="no-selection" role="status"><p>Studio controls are not connected.</p></section>',
+            empty,
             "",
             False,
             workspace_name,
             first_party_studio=False,
-            named_studio=True,
+            named_studio=not guest,
+            guest_studio=guest,
         )
     ).encode("utf-8", errors="replace")
+
+
+def guest_studio_document(*, challenge, workspace_name="Private workspace"):
+    """Unserved shell. No app/page bearer is present in any document response."""
+    if type(challenge) is not str:
+        raise ValueError("Invalid trusted Studio guest challenge.")
+    return _named_studio_document(
+        (), "unavailable", workspace_name, None, guest_challenge=challenge
+    )
 
 
 def document(

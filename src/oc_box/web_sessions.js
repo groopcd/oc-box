@@ -4,7 +4,7 @@
   "use strict";
   const root = document.getElementById("web-shell");
   if (!root) return;
-  const namedPage = root.dataset.namedStudio === "";
+  const namedPage = root.dataset.namedStudio === "" || root.dataset.guestStudio === "";
   const byId = id => document.getElementById("workspace-" + id);
   const tabs = document.getElementById("session-tabs");
   const groups = {

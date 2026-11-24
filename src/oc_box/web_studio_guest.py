@@ -16,7 +16,8 @@ from threading import Condition, Event, Lock
 from time import monotonic
 
 
-CONFIRM_PATH = "/auth/oc-box-studio-guest/confirm"  # Reserved contract, not served.
+PAGE_PATH = "/auth/oc-box-studio-guest/"  # Reserved contracts, not served.
+CONFIRM_PATH = PAGE_PATH + "confirm"
 _ORIGIN = re.compile(r"http://127\.0\.0\.1:([1-9][0-9]{0,4})")
 _TOKEN = re.compile(r"[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]")
 _HEADER = re.compile(r"[A-Za-z0-9-]{1,64}")
