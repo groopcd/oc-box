@@ -365,7 +365,7 @@ def exercise(path, chrome, binary, evidence, *, prove_send=False):
 
 
 def send_from_composer(page, origin, proof):
-    from named_browser_send_fixture import SEND_TEXT
+    from named_browser_send_fixture import REPLY_TEXT, SEND_TEXT
 
     url = origin.value + "/oc-box/studio/send"
     sends = []
@@ -396,6 +396,14 @@ def send_from_composer(page, origin, proof):
     require(
         editor.input_value() == "" and button.is_disabled() and sends == ["POST"],
         "The composer did not clear the one acknowledged Send.",
+    )
+    transcript = page.locator("#workspace-studio-transcript")
+    transcript.get_by_text(SEND_TEXT, exact=True).wait_for()
+    transcript.get_by_text(REPLY_TEXT, exact=True).wait_for()
+    require(
+        transcript.get_by_text("SYNTHETIC_" + _SESSION, exact=True).count() == 1
+        and sends == ["POST"],
+        "Refreshing the native transcript lost its seed or replayed Send.",
     )
 
 
@@ -439,7 +447,8 @@ def main():
     if args.prove_send:
         print(
             "PASS one authentic browser Send: native resume:true, queued acknowledgment, "
-            "exact synthetic provider turn, text retained after reopen, confirmed cleanup."
+            "same transcript refreshed with the exact synthetic provider turn, "
+            "text retained after reopen, confirmed cleanup."
         )
         print(
             "Synthetic owner and app grant, local exec substitution and fixed provider; "
