@@ -306,6 +306,14 @@ or error during `close()` is also an unconfirmed drain, even if a prior
 interrupt already ended the client loop. The launcher integration and its real
 host cancellation tests remain gated.
 
+`run_retained_named_client` is the foreground seam for a future owning caller
+that holds both the workspace lifecycle lock and a durable named stop fence.
+It latches Ctrl-C instead of unwinding those scopes. If teardown was not
+confirmed, it retains the original owner/handle and checks only the existing
+drain; it cannot start again, declare success, or release the caller to history
+and container stop without a positive verdict. This does not route
+second-terminal `stop` or make a process exit a drain acknowledgement.
+
 A later LAN instance can use distinct existing sites and certificates under
 operator control. Isolated guest LAN tests can establish transport behavior
 using a synthetic private CA, without touching public DNS or requesting a

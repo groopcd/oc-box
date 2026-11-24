@@ -1,10 +1,11 @@
 """Verify host-side sequencing without a native service or real secrets."""
 
-from contextlib import ExitStack, contextmanager, redirect_stdout
+from contextlib import ExitStack, contextmanager, redirect_stderr, redirect_stdout
 import io
 import json
 import os
 from pathlib import Path
+import signal
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 import unittest
@@ -387,6 +388,50 @@ class PrepareNamedLaunchTests(unittest.TestCase):
                     self.foreground.close.side_effect = None
                     self.foreground.close.return_value = True
                     self.assertTrue(prepared.close())
+
+    def test_retained_client_latches_repeated_ctrl_c_and_rechecks_only_its_drain(self):
+        prepared = launch.prepare_named_launch(self.inputs)
+        previous = signal.getsignal(signal.SIGINT)
+        calls = []
+
+        def wait(timeout):
+            signal.raise_signal(signal.SIGINT)
+            return False
+
+        def close(*, timeout):
+            calls.append((timeout, tuple(self.events)))
+            signal.raise_signal(signal.SIGINT)
+            if len(calls) == 1:
+                return False
+            if len(calls) == 2:
+                raise OSError("private drain diagnostic")
+            return True
+
+        self.foreground.wait_stopped.side_effect = wait
+        self.foreground.close.side_effect = close
+        with (
+            redirect_stdout(io.StringIO()),
+            redirect_stderr(io.StringIO()) as output,
+            patch.object(launch, "sleep") as pause,
+        ):
+            self.assertEqual(
+                launch.run_retained_named_client(
+                    None, self.owner, prepared, no_open=True
+                ),
+                130,
+            )
+        self.assertIs(signal.getsignal(signal.SIGINT), previous)
+        self.foreground.start.assert_called_once()
+        self.foreground.wait_stopped.assert_called_once_with(0.25)
+        open_resources = ("reserve", "assets", "host-prompt", "snapshot")
+        self.assertEqual(calls, [(5.0, open_resources)] * 3)
+        pause.assert_called_once_with(1)
+        self.assertEqual(
+            self.events[-3:], ["snapshot-closed", "assets-closed", "reserve-closed"]
+        )
+        self.assertIn("Keeping the original workspace owner", output.getvalue())
+        self.assertIn("drain verified after a shutdown delay", output.getvalue())
+        self.assertNotIn("private drain diagnostic", output.getvalue())
 
     def test_browser_activation_passes_only_the_entry_url_over_stdin(self):
         prepared = launch.prepare_named_launch(self.inputs)
