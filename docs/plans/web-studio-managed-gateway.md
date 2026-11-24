@@ -1,11 +1,10 @@
-# Private managed Gateway: raw native transport only
+# Private managed Gateway: original owner and opt-in Studio routes
 
 `web_studio_guest_gateway._ManagedGateway` is an explicit internal composition.
 It is **not** called by `oc-box web`, the owning launcher, `stop`, or
 `Owner.shutdown`. There is no flag, config, route, fallback, or release in this
 change. Legacy Gateway, including its one-use pairing and Studio wrapper, is
-unchanged. The private managed path does not mint a pairing link, rewrite the
-native pairing root redirect to a Studio page, or serve any Studio route.
+unchanged. Raw native transport remains the default for this internal class.
 Forwarded authentication, Host/Origin checks and native cookies belong to
 unmodified OpenCode. It reads a bounded initial head before starting native
 transport; beyond the head/final response handling this is a byte relay, not
@@ -64,6 +63,30 @@ lock object, original service child and immutable running container
 generation. The inspect is additional to the thread join budget. A lost
 lease is not positive drain, even when all local sockets and threads ended.
 No guest admission registry is opened in this raw-only profile.
+
+## Private Studio fixture profile
+
+The internal `studio=True` constructor adds a first-party document and fixed
+assets and API routes to this same accepted-worker registry. It does not mint
+or alter a native one-use link. On the exact native pairing request only,
+the existing response-header filter redirects the native `Location: /` to
+that first-party document; cookie and native request bytes are unchanged.
+Native Home and upgrade traffic remain native. Non-upgrade responses forbid
+browser connection reuse, rather than routing a second request on the socket.
+
+The document challenges without granting access. Confirmation and every
+bounded protected request register the exact accepted socket, then verify
+the current browser cookie over counted OGD v3 anonymous/authorized probes.
+Catalog, selection, conversation and Send make only their existing fixed
+requests; an admitted Send is never replayed. A protected use finishes only
+after its exact accepted socket closes and its relay records have retired.
+Guest admission, socket/worker drain and the retained native owner proof
+remain independent gates. Request/response bytes and credentials are not
+stored or logged. A close or a verified queue acknowledgement is not proof
+that native work finished or that it is safe to sync or stop.
+
+There is no installed `oc-box web` caller or attach-only activation. All
+current local composition tests remain distinct from host acceptance.
 
 The private caller must keep the original handle and owner/lock scope on
 `False` or interruption. A join timeout permits only another observation of
