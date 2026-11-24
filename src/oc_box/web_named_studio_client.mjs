@@ -6,9 +6,12 @@ const selectionPath = "/oc-box/studio/selection";
 const conversationPath = "/oc-box/studio/conversation?session=";
 const sendPath = "/oc-box/studio/send";
 const pageHeader = "X-OC-Box-Studio-Page";
+const appHeader = "X-OC-Box-Studio-App";
 const generationHeader = "X-OC-Box-Studio-Generation";
 const workspaceHost = "workspace.ocbox-app.test";
+export const guestPagePath = "/auth/oc-box-studio-guest/";
 const nonce = /^[A-Za-z0-9_-]{43}$/u;
+export const guestNonce = /^[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$/u;
 const sessionIDPattern = /^ses[A-Za-z0-9_-]{1,125}$/u;
 const json = "application/json";
 const chatJSON = json + "; charset=utf-8";
@@ -42,7 +45,7 @@ function sessionID(value) {
   return typeof value === "string" && sessionIDPattern.test(value);
 }
 
-async function replyJSON(response, url, type, limit, current) {
+export async function readStudioJSON(response, url, type, limit, current) {
   const length = response.headers.get("content-length");
   if (!current() || response.type !== "basic" || response.redirected || response.url !== url ||
       response.headers.get("content-type") !== type || response.headers.has("content-encoding") ||
@@ -81,22 +84,49 @@ async function replyJSON(response, url, type, limit, current) {
  * readiness step after the existing shell's checked route matches.
  */
 export function createNamedStudioController(root, bootstrap) {
+  return createStudioController(root, bootstrap, false);
+}
+
+export function guestDocument(root) {
+  const document = root?.ownerDocument;
+  const window = document?.defaultView;
+  if (!window || window.top !== window || window.isSecureContext !== true ||
+      !root.isConnected || root.hasAttribute("data-named-studio") ||
+      !root.hasAttribute("data-guest-studio") || window.navigator.serviceWorker?.controller ||
+      window.document !== document || document.getElementById("web-shell") !== root ||
+      document.hidden) return false;
+  const { origin, port, pathname, search, hash } = window.location;
+  return origin === `http://127.0.0.1:${port}` && /^[1-9][0-9]{0,4}$/u.test(port) &&
+    Number(port) <= 65535 && pathname === guestPagePath && !search && !hash;
+}
+
+export function createGuestStudioController(root, bootstrap) {
+  return guestDocument(root) ? createStudioController(root, bootstrap, true) : null;
+}
+
+function createStudioController(root, bootstrap, guest) {
   const document = root?.ownerDocument;
   const window = document?.defaultView;
   if (!window || mounted.has(document)) return null;
   const { origin, pathname } = window.location;
-  const chrome = () => root.hasAttribute("data-named-studio") ?
+  const chrome = () => guest || root.hasAttribute("data-named-studio") ?
     window.ocBoxNamedStudioChrome : window.ocBoxWebShell;
   const shell = chrome();
   const port = Number(window.location.port);
-  if (window.location.protocol !== "https:" || window.location.hostname !== workspaceHost ||
-      port < 1024 || port > 65535) return null;
-  let page;
+  if (!guest && (window.location.protocol !== "https:" || window.location.hostname !== workspaceHost ||
+      port < 1024 || port > 65535)) return null;
+  let page, app;
   try {
-    const [handle, generation, id] = exactFields(bootstrap, ["page", "generation", "sessionID"]);
-    if (typeof handle !== "string" || !nonce.test(handle) ||
-        !Object.is(generation, 0) || id !== null) return null;
-    page = handle;
+    if (guest) {
+      [app, page] = exactFields(bootstrap, ["app", "page"]);
+      if (typeof app !== "string" || typeof page !== "string" ||
+          !guestNonce.test(app) || !guestNonce.test(page)) return null;
+    } else {
+      const [handle, generation, id] = exactFields(bootstrap, ["page", "generation", "sessionID"]);
+      if (typeof handle !== "string" || !nonce.test(handle) ||
+          !Object.is(generation, 0) || id !== null) return null;
+      page = handle;
+    }
   } catch {
     return null;
   }
@@ -114,7 +144,7 @@ export function createNamedStudioController(root, bootstrap) {
     return !closed && window.top === window && window.isSecureContext === true &&
       window.document === document && root.ownerDocument === document && root.isConnected &&
       document.getElementById("web-shell") === root && !document.hidden &&
-      chrome() === shell && window.location.origin === origin &&
+      chrome() === shell && (!guest || guestDocument(root)) && window.location.origin === origin &&
       window.location.pathname === pathname && window.location.hash === "" &&
       !window.navigator.serviceWorker?.controller;
   }
@@ -130,8 +160,9 @@ export function createNamedStudioController(root, bootstrap) {
     }
   }
 
+  const pageHeaders = () => ({ [pageHeader]: page, ...(guest ? { [appHeader]: app } : {}) });
   const scopeHeaders = scope => ({
-    [pageHeader]: page,
+    ...pageHeaders(),
     [generationHeader]: String(scope.generation),
   });
 
@@ -151,7 +182,7 @@ export function createNamedStudioController(root, bootstrap) {
         cache: "no-store", referrerPolicy: "no-referrer", signal: abort.signal,
       });
       if (!Object.hasOwn(statuses, response.status)) throw new TypeError();
-      const value = await replyJSON(response, url, replyType, limit, live);
+      const value = await readStudioJSON(response, url, replyType, limit, live);
       if (!live()) throw new TypeError();
       return { status: response.status, value };
     } finally {
@@ -267,9 +298,13 @@ export function createNamedStudioController(root, bootstrap) {
     change = intent;
     const current = () => change === intent && liveSite();
     try {
-      const data = JSON.stringify({ page, sequence: intent.sequence, sessionID: id });
-      const { value } = await exchange(selectionPath, data, {}, json, maxChange, ok, current);
-      const [handle, generation, selected] = exactFields(value, ["page", "generation", "sessionID"]);
+      const changeRequest = { sequence: intent.sequence, sessionID: id };
+      const data = JSON.stringify(guest ? changeRequest : { page, ...changeRequest });
+      const { value } = await exchange(selectionPath, data, guest ? pageHeaders() : {},
+        json, maxChange, ok, current);
+      const [handle, generation, selected] = guest ?
+        [page, ...exactFields(value, ["generation", "sessionID"])] :
+        exactFields(value, ["page", "generation", "sessionID"]);
       if (!current() || handle !== page || selected !== id ||
           !Number.isSafeInteger(generation) || generation <= highestGeneration ||
           generation > intent.sequence) return false;
@@ -296,6 +331,7 @@ export function createNamedStudioController(root, bootstrap) {
     invalidate,
     dispose() {
       closed = true;
+      app = page = undefined;
       invalidate();
       listeners.abort();
     },

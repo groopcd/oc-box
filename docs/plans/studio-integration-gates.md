@@ -68,6 +68,17 @@ pinned OpenCode 2.4.1 executable. It uses real loopback sockets and
 worker pipes, with synthetic outer inspect and exec. It serves no HTTP
 routes and does not establish installed, browser or Podman acceptance.
 
+The separate first-party browser entry requires an explicit confirmation
+after native pairing. It keeps both guest bearers in document memory,
+uses fixed catalog, selection, transcript and Send requests, and
+discards the bearers on page exit. An intercepted Chromium fixture
+checks the actual front end, including a confirmed queue reply and a
+same-conversation refresh. Its HTTP replies are synthetic. The gateway
+still has to join these routes, proof of native authentication, and
+exact retirement on the same accepted socket. In particular, verify
+that a browser's reuse of a native HTTP connection does not bypass
+first-party routing at that gateway.
+
 ## Named HTTPS: the stop fence must cover every supported writer
 
 A stop requested from another terminal must be an intent for this exact

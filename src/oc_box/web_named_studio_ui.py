@@ -33,8 +33,8 @@ _PINNED = (
     ),
     (
         "web_sessions.js",
-        48491,
-        "d0bf72ffea4dfe80737116244a26801381a2bbbe1eabca48c04fd008b36df9db",
+        48526,
+        "2f29caee6b997c09f4832dbd4a4a7a685a7e8a9f804f66a47f1f7a789035aa69",
     ),
     (
         "web_studio_shell.css",
@@ -43,8 +43,8 @@ _PINNED = (
     ),
     (
         "web_studio_shell.mjs",
-        7096,
-        "0ddf7d75fe81e3077aa39fdcf8ee3e41767117ec12185390c333847e93836866",
+        7157,
+        "fdd6f95eb34df8f9c93b269fb77b22242ec4e95db6d5f810481d8526e9ffc16b",
     ),
     (
         "web_studio_transcript.css",
@@ -68,13 +68,13 @@ _PINNED = (
     ),
     (
         "web_named_studio_client.mjs",
-        12042,
-        "1c9ad79192663694885d7179b6cb07fdf691cfe8ec8d3f06e661763ca8894170",
+        13828,
+        "eae1f1b72ff61354adb72685f22f5998c545d2371f7574050b78bb4395e3a8f5",
     ),
     (
         "web_named_studio_entry.mjs",
-        4398,
-        "ea7e38f6e1bdec7109298ddbd443c078031b2f426e64f7aa92a1b9f19ffb8f7b",
+        7160,
+        "2d58412b40174dfb0e174044b27e153c409ac3f8fd9b758c523ab561d14c3e77",
     ),
 )
 ASSET_PATHS = frozenset(

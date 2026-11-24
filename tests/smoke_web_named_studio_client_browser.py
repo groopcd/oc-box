@@ -16,7 +16,12 @@ import tempfile
 from unittest.mock import patch
 from urllib.parse import urlsplit
 
-from oc_box import web_named_account_assets, web_named_studio_ui, web_sessions
+from oc_box import (
+    web_named_account_assets,
+    web_named_studio_ui,
+    web_sessions,
+    web_studio_guest,
+)
 
 from smoke_web_studio_shell_browser import RUNTIME, assets
 
@@ -111,7 +116,9 @@ def projection(*extra_messages):
 
 
 class FixtureWire:
-    def __init__(self):
+    def __init__(self, *, origin=ORIGIN, guest=False):
+        self.origin = origin
+        self.guest = guest
         self.static = assets()
         mime, html = self.static["/composed"]
         self.static["/named"] = (
@@ -140,13 +147,17 @@ class FixtureWire:
         if request.method == "GET" and not url.query and url.path in self.static:
             content_type, body = self.static[url.path]
             route.fulfill(content_type=content_type, body=body)
-        elif url.path.startswith("/oc-box/studio/"):
+        elif (
+            url.path.startswith("/oc-box/studio/")
+            or self.guest
+            and url.path == web_studio_guest.CONFIRM_PATH
+        ):
             target = url.path + ("?" + url.query if url.query else "")
             self.calls.append(
                 (target, request.method, request.all_headers(), request.post_data)
             )
             if (
-                f"{url.scheme}://{url.netloc}" != ORIGIN
+                f"{url.scheme}://{url.netloc}" != self.origin
                 or not self.replies
                 or self.replies[0][0] != target
             ):
@@ -603,6 +614,146 @@ def exercise_iframe_free_entry(browser, expect):
         context.close()
 
 
+def exercise_one_use_entry(browser, expect):
+    origin = "http://127.0.0.1:18443"
+    confirm = web_studio_guest.CONFIRM_PATH
+    target = web_studio_guest.PAGE_PATH
+    challenge, app, page_key = ("A" * 43, "B" * 42 + "A", "C" * 42 + "A")
+    wire = FixtureWire(origin=origin, guest=True)
+    prefix = web_sessions.NAMED_STUDIO_ASSET_PREFIX
+    for name, size, digest in web_named_studio_ui._PINNED:
+        mime = "text/css" if name.endswith(".css") else "text/javascript"
+        wire.static[prefix + name] = (
+            mime,
+            web_named_account_assets._source(name, size, digest),
+        )
+    wire.static[target] = (
+        "text/html",
+        web_sessions.guest_studio_document(challenge=challenge),
+    )
+    assert (
+        app.encode() not in wire.static[target][1]
+        and page_key.encode() not in wire.static[target][1]
+    )
+    context = browser.new_context(service_workers="block")
+    try:
+        context.set_default_timeout(5000)
+        context.route("**/*", wire.route)
+        page = context.new_page()
+        errors = []
+        page.on("pageerror", lambda error: errors.append(error))
+        page.goto(origin + target, wait_until="load")
+        center = page.locator("#workspace-studio-center")
+        expect(center).to_be_hidden()
+        expect(page.locator("iframe")).to_have_count(0)
+        expect(page.locator("#web-shell")).not_to_have_attribute(
+            "data-studio-challenge", challenge
+        )
+        button = page.get_by_role("button", name="Confirm this browser", exact=True)
+        button.evaluate("node => node.click()")
+        assert not wire.calls
+        wire.respond(
+            confirm, 200, compact({"app": app, "page": page_key}), "application/json"
+        )
+        wire.respond(
+            CATALOG,
+            200,
+            compact(
+                {
+                    "hasEarlier": False,
+                    "sessions": [
+                        {
+                            "id": "ses_alpha",
+                            "title": "Synthetic one-use row",
+                            "archived": False,
+                            "child": False,
+                        }
+                    ],
+                }
+            ),
+            "application/json",
+        )
+        button.click()
+        expect(page.locator("#workspace-guest-confirm")).to_have_count(0)
+        wire.respond(
+            CHANGE,
+            200,
+            compact({"generation": 1, "sessionID": "ses_alpha"}),
+            "application/json",
+        )
+        wire.respond(READ, 200, projection())
+        page.get_by_role("tab", name="Synthetic one-use row", exact=True).click()
+        expect(
+            center.get_by_text("Literal <b>fixture</b> 🦉", exact=True)
+        ).to_be_visible()
+        wire.respond(SEND, 200, b'{"status":"queued"}')
+        wire.respond(READ, 200, projection())
+        wire.respond(READ, 200, projection())
+        wire.respond(READ, 200, projection("Same transcript after the queued message"))
+        center.get_by_role("textbox", name="Message", exact=True).fill(
+            "One explicit guest Send"
+        )
+        center.get_by_role("button", name="Send", exact=True).click()
+        expect(
+            center.get_by_text("Same transcript after the queued message", exact=True)
+        ).to_be_visible()
+        expect(center.get_by_role("status")).to_contain_text(
+            "Execution is not confirmed"
+        )
+        assert [path for path, *_ in wire.calls] == [
+            confirm,
+            CATALOG,
+            CHANGE,
+            READ,
+            SEND,
+            READ,
+            READ,
+            READ,
+        ]
+        assert not errors and not wire.unexpected
+
+        for path, method, headers, body in wire.calls:
+            assert "authorization" not in headers and "referer" not in headers
+            if path == confirm:
+                assert method == "POST" and body == challenge
+                assert headers["content-type"] == "text/plain"
+                assert (
+                    "x-oc-box-studio-app" not in headers
+                    and "x-oc-box-studio-page" not in headers
+                )
+                continue
+            assert (
+                headers["x-oc-box-studio-app"] == app
+                and headers["x-oc-box-studio-page"] == page_key
+            )
+            if path == CHANGE:
+                assert json.loads(body) == {"sequence": 1, "sessionID": "ses_alpha"}
+            if path == SEND:
+                assert json.loads(body) == {
+                    "sessionID": "ses_alpha",
+                    "text": "One explicit guest Send",
+                }
+            if path in (READ, SEND):
+                assert headers["x-oc-box-studio-generation"] == "1"
+            else:
+                assert "x-oc-box-studio-generation" not in headers
+        assert (
+            page.evaluate(
+                "Object.keys(localStorage).length + Object.keys(sessionStorage).length"
+            )
+            == 0
+        )
+        assert app not in page.content() and page_key not in page.content()
+        page.reload(wait_until="load")
+        expect(
+            page.get_by_role("button", name="Confirm this browser", exact=True)
+        ).to_be_visible()
+        expect(center).to_be_hidden()
+        assert sum(path == confirm for path, *_ in wire.calls) == 1
+    finally:
+        context.close()
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--chromium", type=Path, required=True)
@@ -639,6 +790,7 @@ def main():
                 version = browser.version
                 exercise(browser, expect)
                 exercise_iframe_free_entry(browser, expect)
+                exercise_one_use_entry(browser, expect)
             finally:
                 browser.close()
     print(
@@ -649,6 +801,9 @@ def main():
     )
     print(
         "PASS iframe-free named entry updates the same transcript after one accepted Send."
+    )
+    print(
+        "PASS one-use entry requires trusted confirmation and keeps guest bearers in page memory."
     )
 
 

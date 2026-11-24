@@ -16,7 +16,7 @@ function sameSelection(a, b) {
  * null, reads a bounded transcript for {sessionID, generation}, and may send
  * {sessionID, generation, text}. A writable selection requires an admitted
  * send function. The shell's selected conversation is a cross-check, not
- * authority, both for the native iframe and the iframe-free named chrome.
+ * authority, both for the native iframe and the iframe-free Studio chrome.
  *
  * Caller-owned: invalidation on observed route/document, visibility, owner or
  * admission changes; advance the generation even on away/back. Call invalidate()
@@ -30,15 +30,15 @@ export function createStudioShellView(root, controller) {
       (controller.send !== undefined && typeof controller.send !== "function")) return null;
   const document = root.ownerDocument;
   const window = document.defaultView;
-  const named = root.dataset.namedStudio === "";
-  const shell = named ? window?.ocBoxNamedStudioChrome : window?.ocBoxWebShell;
+  const standalone = root.dataset.namedStudio === "" || root.dataset.guestStudio === "";
+  const shell = standalone ? window?.ocBoxNamedStudioChrome : window?.ocBoxWebShell;
   const chat = root.querySelector(":scope > #workspace-content > #workspace-chat");
   const frame = chat?.querySelector(":scope > #native");
   const center = chat?.querySelector(":scope > #workspace-studio-center");
   const transcriptSlot = center?.querySelector(":scope > #workspace-studio-transcript");
   const composerSlot = center?.querySelector(":scope > #workspace-studio-composer");
   if (document.getElementById("web-shell") !== root || !root.isConnected ||
-      (named ? root.querySelector("iframe") : !frame || shell?.frame !== frame) ||
+      (standalone ? root.querySelector("iframe") : !frame || shell?.frame !== frame) ||
       shell?.version !== 1 ||
       typeof shell.selection !== "function" || !center?.hidden || !transcriptSlot || !composerSlot ||
       !composerSlot.hidden || transcriptSlot.hasChildNodes() || composerSlot.hasChildNodes() ||
@@ -56,9 +56,9 @@ export function createStudioShellView(root, controller) {
   let highestGeneration = -1;
 
   function current() {
-    if (!root.isConnected || (named ? window.ocBoxNamedStudioChrome : window.ocBoxWebShell) !== shell ||
+    if (!root.isConnected || (standalone ? window.ocBoxNamedStudioChrome : window.ocBoxWebShell) !== shell ||
         !center.isConnected || document.hidden || chat.hidden ||
-        (named ? root.querySelector("iframe") : frame.hidden)) return null;
+        (standalone ? root.querySelector("iframe") : frame.hidden)) return null;
     try {
       const { sessionID, generation, writable } = readSelection() ?? {};
       if (typeof sessionID === "string" && sessionIDPattern.test(sessionID) &&
