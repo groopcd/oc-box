@@ -474,7 +474,10 @@ def check(directory, *, with_vault=False, with_tui=False):
         assert "COMMAND --help" in overview
         assert "--image-preview" not in overview and "--delete-sessions" not in overview
         web_help = run(cli, "web", "--help")
-        assert "--workspace-layout" in web_help and "native one-use link" in web_help
+        assert "Open Studio" in web_help and "native one-use link" in web_help
+        assert (
+            "--workspace-layout" in web_help and "--no-workspace-layout" not in web_help
+        )
         assert all(word not in web_help for word in ("--auth", "--bind", "web tls"))
         assert "web-tls-local" not in run(cli, "doctor", "--help")
         tls = subprocess.run(

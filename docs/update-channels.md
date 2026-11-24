@@ -39,7 +39,7 @@ full source hash and absolute commit count, even though PyPI versions cannot
 contain `+gHASH`.
 
 **The initial `1.8` and `1.9` releases share the optional seven-tab manager,
-temporary sharing, and opt-in browser workspace layout.** Older stable `1.6`
+temporary sharing, and the browser workspace layout.** Older stable `1.6`
 does not include these features. See [the release guide](releases/1.8-1.9.md)
 for the feature and validation boundaries. The native OpenCode **2.3.0**
 persisted-history recovery extension and later guarded **stable 2.3.x**

@@ -1421,25 +1421,26 @@ class WorkspaceServiceTests(unittest.TestCase):
             patch.object(box, "prepare_runtime") as prepare,
             contextlib.redirect_stdout(io.StringIO()),
         ):
-            self.assertEqual(
-                box.main(
-                    [
-                        "web",
-                        "--workspace",
-                        self.data["id"],
-                        "--no-open",
-                        "--attachments",
-                        "--workspace-layout",
-                        "--session",
-                        "ses_explicit",
-                    ]
-                ),
-                0,
-            )
+            for flags in ([], ["--workspace-layout"]):
+                with self.subTest(flags=flags):
+                    self.assertEqual(
+                        box.main(
+                            [
+                                "web",
+                                "--workspace",
+                                self.data["id"],
+                                "--no-open",
+                                "--attachments",
+                                "--session",
+                                "ses_explicit",
+                                *flags,
+                            ]
+                        ),
+                        0,
+                    )
             self.assertEqual(box.main(["start", "--workspace", self.data["id"]]), 0)
         self.assertEqual(web.call_args.args[2]["session"], "ses_shared")
         self.assertTrue(web.call_args.args[3].attachments)
-        self.assertTrue(web.call_args.args[3].workspace_layout)
         self.assertEqual(web.call_args.args[3].web_session, "ses_explicit")
         self.assertIn("ses_shared", tui.call_args.args[0])
         prepare.assert_not_called()

@@ -12,7 +12,7 @@ updates are distinct; read its source and scope qualifications.
   historical scope and original validation requirements, not a new host pass.
 - [Host-owned terminal input](trusted-terminal-input.md): possible clipboard
   and click authorization outside a raw PTY input stream.
-- [Browser workspace runtime](web-runtime.md): opt-in workspace layouts,
+- [Browser workspace runtime](web-runtime.md): workspace layouts,
   deferred TLS preparation and remaining named sign-in gates.
 - [Stable 1.8 and development 1.9](stable-1.8-devel-1.9.md): initial feature
   parity, release gates, and the bug/security backport policy.

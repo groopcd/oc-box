@@ -260,7 +260,7 @@ oc\-box sync \-\-workspace WORKSPACE_ID
 .fi
 .SS web — browser interface
 .PP
-Open the native OpenCode 2.x browser UI for a workspace. If its TUI or web owner is running, attach to that same private service/session without waiting for it to exit or unlocking/refreshing credentials. Otherwise perform a normal V2 startup (including global or selected vault unlock) and own a foreground web lease. New projects can be created using the host's default distro. Requires host OpenCode 2.x; 1.x has no web command through this launcher.
+Open Studio around the native OpenCode 2.x browser UI for a workspace. If its TUI or web owner is running, attach to that private service without waiting for it to exit or unlocking/refreshing credentials. Otherwise perform a normal V2 startup (including global or selected vault unlock) and own a foreground web lease. New projects can be created using the host's default distro. Requires host OpenCode 2.x; 1.x has no web command through this launcher.
 .PP
 .nf
 .fam C
@@ -268,14 +268,13 @@ oc\-box \-\-project ~/devel/demo
 # While it runs, use another host terminal:
 oc\-box web \-\-project ~/devel/demo
 oc\-box web \-\-project ~/devel/demo \-\-session SESSION_ID
-oc\-box web \-\-project ~/devel/demo \-\-workspace\-layout
 oc\-box terminal \-\-project ~/devel/demo
 .fam T
 .fi
 .PP
 The browser uses upstream's short\-lived one\-use pairing link and opens an authenticated common web shell at \fB/\:auth/\:oc\-box\-sessions\fR\&. This first\-party \fB/\:auth/\:\fR path bypasses native's service\-worker navigation fallback without changing or disabling that worker. Mirrored TUI tabs are eligible on any canonical stable native \fB2.x.y\fR release, including \fB2.3.2\fR; prereleases and noncanonical versions are not eligible. The release number permits a check, not a guarantee: the native reporting APIs and private saved\-tab layout can change within 2.x, and not every release has been tested.
 .PP
-\fB\-\-workspace\-layout\fR opts into the experimental browser workspace shell around the same native iframe. Studio, Dashboard and Chat focus change the layout, not the selected conversation. The separate no\-chat manager distinguishes verified open tabs from on\-demand, read\-only history for the registered workspace project. It makes other views unavailable rather than granting host catalogs, logs, workspace/backup operations, or a host terminal. The local Textual manager and the default browser view remain unchanged.
+Studio replaces the compact session index. Studio, Dashboard and Chat focus change the layout, not the selected native conversation. The separate no\-chat manager distinguishes verified open tabs from on\-demand, read\-only history for the registered workspace project. It makes other views unavailable rather than granting host catalogs, logs, workspace/backup operations, or a host terminal. It is not the offline demo's Full TUI or the local \fBoc\-box tui\fR manager.
 .PP
 The one\-use link is the only browser sign\-in method and the HTTP relay binds to \fB127.0.0.1\fR only. Vault unlock supplies workspace credentials, not browser authentication. Named sign\-in, LAN binding, and HTTPS/CA setup are deferred.
 .PP
@@ -1173,7 +1172,7 @@ oc\-box credentials \-\-project ~/devel/demo \-\-credential\-mode vault \-\-clea
 Web only: explicitly select the visible, source\-version\-bounded browser File\-drop adapter described under \fBweb\fR\&. Keeps the native app and its draft/Send controls unchanged. No automatic prompt admission or host\-path/URL reading.
 .SS \-\-workspace\-layout
 .PP
-Web only: opt into Studio, Dashboard, Chat focus, and the read\-only browser workspace manager. The existing one\-use link and localhost listener are unchanged. This does not enable named sign\-in or authorize host management.
+Web only: accepted for compatibility with earlier 1.8/1.9 commands. Studio opens with or without this flag. The old compact session index is not served.
 .SS \-\-no\-vault
 .PP
 V2\-only, for one **owning** start (including \fB\-\-import\-session\fR), reset, or web invocation. Skip vault use without changing the saved workspace policy. Global mode temporarily uses legacy env\-file forwarding; explicit env/selected modes skip vault entries but retain their env constraints. The next normal owner uses the saved/default policy again. Attached TUI/web clients reject this flag and never unlock or refresh an existing service. V1, info/status/list/doctor, credentials/secrets, terminal/maintenance, sync, stop, repair, purge, backup/info/ restore, upgrade, and other non\-owning commands reject it. It does not erase already persisted config/auth or hide secrets from existing container processes.

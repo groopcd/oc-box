@@ -302,7 +302,9 @@ def initial_state(gateway, sessions, status, requested=None, *, report=_UNREAD_R
 def _workspace_layout_body(state, conversation, fallback, attachments):
     """Presentation only; the existing bootstrap is the entire data source."""
     return (
-        '<header id="workspace-toolbar"><h1>oc-box workspace</h1>'
+        '<header id="workspace-toolbar"><div class="workspace-brand">'
+        '<span class="workspace-mark" aria-hidden="true">⬡</span>'
+        "<div><h1>oc-box</h1><p>Private workspace</p></div></div>"
         '<nav id="workspace-layouts" aria-label="Workspace layout">'
         '<button type="button" data-view="studio" aria-pressed="true">Studio</button>'
         '<button type="button" data-view="dashboard" aria-pressed="false">Dashboard</button>'
@@ -342,7 +344,8 @@ def _workspace_layout_body(state, conversation, fallback, attachments):
         'role="separator" aria-orientation="vertical" aria-label="Session pane width" '
         'aria-controls="workspace-library"></div>'
         '<section id="workspace-chat" aria-label="Native conversation">'
-        '<div class="workspace-chat-tools"><p id="selection-status">'
+        '<div class="workspace-chat-tools"><h2 id="workspace-conversation-title">Native conversation</h2>'
+        '<p id="selection-status">'
         + escape(state["selectionNotice"])
         + '</p><div id="retained-selection"></div><details'
         + ("" if attachments else " hidden")
@@ -353,8 +356,9 @@ def _workspace_layout_body(state, conversation, fallback, attachments):
         'role="separator" aria-orientation="vertical" aria-label="Status pane width" '
         'aria-controls="workspace-overview"></div>'
         '<section id="workspace-overview" aria-labelledby="workspace-overview-title">'
-        '<h2 id="workspace-overview-title">Workspace status</h2><div class="workspace-cards">'
+        '<h2 id="workspace-overview-title">Workspace overview</h2><div class="workspace-cards">'
         '<section><h3>Open TUI membership</h3><p id="catalog-status" role="status"></p></section>'
+        '<section><h3>Browser selection</h3><p id="workspace-current-session">No conversation selected.</p></section>'
         "<section><h3>Private workspace only</h3><p>This browser view shows verified open TUI tabs, "
         "and on-demand history for the workspace project. It does not report host data or "
         "workspace health. Native browser tabs stay independent.</p>"
@@ -369,9 +373,7 @@ def _workspace_layout_body(state, conversation, fallback, attachments):
     )
 
 
-def document(
-    url, sessions, status, state=None, addon_scripts=(), *, workspace_layout=False
-):
+def document(url, sessions, status, state=None, addon_scripts=()):
     if (
         not isinstance(addon_scripts, tuple)
         or len(addon_scripts) > 1
@@ -398,13 +400,6 @@ def document(
             + escape(ident)
             + "</small></li>"
         )
-    heading = "Open TUI sessions"
-    note = (
-        "Open TUI tabs, including idle sessions, in native tab order."
-        if status == "valid"
-        else "Saved TUI tab membership is unavailable. No current session or "
-        "historical session is guessed."
-    )
     conversation = (
         '<section id="no-selection"' + (" hidden" if selected else "") + ">"
         "<p>Select a TUI tab, use --session ID, or open native Home. No conversation is guessed.</p>"
@@ -429,7 +424,7 @@ def document(
     start = (
         '<!doctype html><html lang="en"><head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width, initial-scale=1">'
-        '<title>oc-box — workspace sessions</title><link rel="stylesheet" href="'
+        '<title>oc-box — Studio</title><link rel="stylesheet" href="'
         + STYLE
         + '"><script defer src="'
         + SCRIPT
@@ -438,42 +433,13 @@ def document(
             '<script defer src="' + script + '"></script>' for script in addon_scripts
         )
         + "</head><body>"
-        '<main id="web-shell"'
-        + (' data-layout="studio"' if workspace_layout is True else "")
-        + ' data-bootstrap="'
+        '<main id="web-shell" data-layout="studio" data-bootstrap="'
         + escape(json.dumps(state, ensure_ascii=True), quote=True)
         + '">'
     )
-    if workspace_layout is True:
-        return (
-            start
-            + _workspace_layout_body(state, conversation, fallback, bool(addon_scripts))
-        ).encode("utf-8", errors="replace")
     return (
         start
-        + "<header><h1>"
-        + heading
-        + "</h1><p>"
-        + note
-        + "</p><p>This shell is for this private workspace only. Its tabstrip "
-        "mirrors TUI membership; the single frame displays the unmodified native "
-        "web app. Native web tabs are "
-        "independent of TUI tabs; this page does not synchronize their membership."
-        "</p>"
-        + home_navigation()
-        + '<p><a href="'
-        + INDEX
-        + '">Reload shell</a> (reload may interrupt a draft). '
-        '<button id="refresh-tabs" type="button">Refresh TUI tabs without reloading conversation</button></p>'
-        '<p id="catalog-status" role="status"></p><p id="selection-status">'
-        + escape(state["selectionNotice"])
-        + "</p>"
-        '<div id="session-tabs" role="tablist" aria-label="Open native TUI tabs"></div>'
-        '<div id="retained-selection"></div><div id="session-controls"></div>'
-        '<p id="addon-status" role="status"></p></header>'
-        + conversation
-        + fallback
-        + "</main></body></html>"
+        + _workspace_layout_body(state, conversation, fallback, bool(addon_scripts))
     ).encode("utf-8", errors="replace")
 
 
@@ -634,9 +600,6 @@ def respond(gateway, stream, child, request):
             )
             return True
         if target.path == HISTORY:
-            if getattr(gateway, "workspace_layout", False) is not True:
-                _reply(stream, "404 Not Found", b"Workspace history is unavailable.")
-                return True
             if __package__:
                 from . import web_history
             else:
@@ -680,14 +643,11 @@ def respond(gateway, stream, child, request):
         ):
             # Explicit existing private IDs do not depend on readable TUI state.
             # No automatic/default target is admitted on this fallback path.
-            opted_in = getattr(gateway, "workspace_layout", False) is True
             explicit = (
                 gateway.connection.get("web_session_override") is not None
                 or "session" in query
             )
-            if not (opted_in and target.path == INDEX) and (
-                target.path not in (INDEX, SELECTION) or not explicit
-            ):
+            if target.path != INDEX and (target.path != SELECTION or not explicit):
                 raise
             sessions, status = [], "unavailable"
             report = {"status": "unavailable"}
@@ -727,7 +687,6 @@ def respond(gateway, stream, child, request):
             status,
             state,
             addon_scripts=getattr(gateway, "shell_addon_scripts", ()),
-            workspace_layout=getattr(gateway, "workspace_layout", False),
         )
     except (
         gateway.box.BoxError,

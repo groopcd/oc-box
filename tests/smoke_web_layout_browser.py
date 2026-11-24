@@ -1,4 +1,4 @@
-r"""Offline Chromium smoke test for the opt-in oc-box workspace web shell.
+r"""Offline Chromium smoke test for the oc-box workspace web launch.
 
 Run from the repository root with an unmodified stable OpenCode V2 executable
 and an installed Chromium (or Chrome Headless Shell) executable:
@@ -13,13 +13,14 @@ this does not test TLS, remote access, or an installed browser profile.
 """
 
 import argparse
+import io
 import json
 import os
 import subprocess
 import sys
 import tempfile
 import time
-from contextlib import contextmanager
+from contextlib import contextmanager, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 from urllib.parse import urlsplit
@@ -55,15 +56,13 @@ def browser_page(browser):
         context.close()
 
 
-def pair(browser, page, native, gateway):
+def pair(browser, page, link, gateway):
     index = gateway.url + web_sessions.INDEX
     anonymous = page.goto(index, wait_until="domcontentloaded")
     require(
         anonymous is not None and anonymous.status == 401,
         "Anonymous shell did not refuse.",
     )
-    code = native("POST", "/api/pair")["code"]
-    link = gateway.url + "/auth/connect/" + code
 
     def follow(target):
         try:
@@ -97,6 +96,40 @@ def pair(browser, page, native, gateway):
     page.bring_to_front()
 
 
+def launch_browser(browser, data, connection, flags, inspect):
+    """Follow the link printed by the real web launcher before its health loop."""
+    args = service.web_parser().parse_args(["--no-open", *flags])
+    args.web_session = args.session
+    gateway_type, gateway = service.Gateway, None
+    output = io.StringIO()
+
+    def remember_gateway(*args, **kwargs):
+        nonlocal gateway
+        gateway = gateway_type(*args, **kwargs)
+        return gateway
+
+    def before_keepalive(*_):
+        lines = output.getvalue().splitlines()
+        require(
+            gateway is not None
+            and len(lines) == 3
+            and lines[1].startswith(gateway.url + "/auth/connect/"),
+            "The launcher did not print a one-use link for its private gateway.",
+        )
+        with browser_page(browser) as page:
+            pair(browser, page, lines[1], gateway)
+            inspect(page, gateway)
+        raise KeyboardInterrupt
+
+    with (
+        patch.object(service, "Gateway", side_effect=remember_gateway),
+        patch.object(service, "build_opener", side_effect=before_keepalive) as opened,
+        redirect_stdout(output),
+    ):
+        result = service.web_session(box, data, connection, args)
+    require(result == 0 and opened.call_count == 1, "Web launch did not finish.")
+
+
 def rendered_session(page, gateway, ident, title):
     """Observe the real native app, not an iframe with only a plausible src."""
     frame = page.locator("iframe")
@@ -119,6 +152,14 @@ def workspace_views(page, gateway, first, history):
     layouts = page.get_by_role("navigation", name="Workspace layout", exact=True)
     frame = page.locator("#native")
     expect(root).to_have_attribute("data-layout", "studio")
+    expect(page.get_by_role("tab", name="Synthetic Bravo", exact=True)).to_be_visible()
+    # Saved membership is real but the fixture supplies no fresh focus report.
+    # A bare launcher must open Studio without guessing which tab to select.
+    expect(page.locator("#no-selection")).to_be_visible()
+    page.get_by_role("tab", name="Synthetic Alpha", exact=True).click()
+    expect(page.locator("#workspace-conversation-title")).to_have_text(
+        "Synthetic Alpha"
+    )
     rendered_session(page, gateway, first, "Synthetic Alpha")
     # Checking src alone would miss a replacement element or same-URL reload.
     mark = page.evaluate_handle(
@@ -346,27 +387,20 @@ def exercise(binary, browser, root):
                     side_effect=local_popen,
                 ),
             ):
-                with (
-                    service.Gateway(box, data, connection) as gateway,
-                    browser_page(browser) as page,
-                ):
-                    pair(browser, page, native, gateway)
-                    expect(page.locator("#workspace-layouts")).to_have_count(0)
-                    rendered_session(page, gateway, first, "Synthetic Alpha")
+                launch_browser(
+                    browser,
+                    data,
+                    connection,
+                    [],
+                    lambda page, gateway: workspace_views(
+                        page, gateway, first, history
+                    ),
+                )
                 print(
-                    f"PASS: Chromium {browser.version}, default shell and real "
-                    "one-use pairing (including replay refusal).",
+                    f"PASS: Chromium {browser.version}, Studio through the launcher's "
+                    "real one-use link (including replay refusal).",
                     flush=True,
                 )
-
-                with (
-                    service.Gateway(
-                        box, data, connection, workspace_layout=True
-                    ) as gateway,
-                    browser_page(browser) as page,
-                ):
-                    pair(browser, page, native, gateway)
-                    workspace_views(page, gateway, first, history)
 
             require(
                 snapshot() == before_tabs,

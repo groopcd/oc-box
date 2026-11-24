@@ -11,6 +11,8 @@
   const status = document.getElementById("catalog-status");
   const empty = document.getElementById("no-selection");
   const refresh = document.getElementById("refresh-tabs");
+  const conversationTitle = document.getElementById("workspace-conversation-title");
+  const currentSession = document.getElementById("workspace-current-session");
   const endpoint = "/auth/oc-box-sessions/catalog";
   const verifyEndpoint = "/auth/oc-box-sessions/selection";
   const historyEndpoint = "/auth/oc-box-sessions/history";
@@ -39,7 +41,7 @@
       activeRoot: value.activeRoot ?? null };
   }
   function selection() {
-    if (!selected || awaitingLoad || workspace?.manager()) return null;
+    if (!selected || awaitingLoad || workspace.manager()) return null;
     try {
       const url = new URL(frame.contentWindow.location.href);
       if (url.origin !== window.location.origin || url.pathname !== selected.route) return null;
@@ -60,27 +62,27 @@
     const activeId = membershipKnown && current && members.some(item => item.id === current.activeRoot) ?
       current.activeRoot : awaitingLoad ? selected?.id : current?.sessionID;
     tabs.replaceChildren();
-    for (const item of workspace?.visibleRows() ?? members) {
+    for (const item of workspace.visibleRows()) {
       const button = document.createElement("button");
       button.type = "button";
-      if (workspace?.manager()) {
+      if (workspace.manager()) {
         button.setAttribute("aria-label", "Open in native chat: " + (item.title || item.id));
       } else {
         button.setAttribute("role", "tab");
         button.setAttribute("aria-controls", "native");
         button.setAttribute("aria-selected", String(activeId === item.id));
       }
-      button.textContent = (item.title || item.id) + (workspace?.source() === "history" ?
+      button.textContent = (item.title || item.id) + (workspace.source() === "history" ?
         (item.child ? " · Child" : "") + (item.archived ? " · Archived" : "") : "");
       button.title = item.id;
-      if (workspace) button.dataset.sessionSource = workspace.source();
-      button.addEventListener("click", () => {
-        if (workspace) workspace.open(item);
-        else select(item, "Explicit TUI-tab click");
-      });
+      button.dataset.sessionSource = workspace.source();
+      button.addEventListener("click", () => workspace.open(item));
       tabs.append(button);
     }
     retained.replaceChildren();
+    conversationTitle.textContent = selected?.title || "Native conversation";
+    currentSession.textContent = selected ? (selected.title || selected.id) + " · " + selected.id :
+      "No conversation selected.";
     if (selected) {
       selected.member = membershipKnown && members.some(item => item.id === selected.id);
       const childOfOpenTab = membershipKnown && !selected.member &&
@@ -135,7 +137,7 @@
     changed();
   }
   async function observeNativeRoute() {
-    if (awaitingLoad || frame.hidden || document.hidden || workspace?.manager()) return;
+    if (awaitingLoad || frame.hidden || document.hidden || workspace.manager()) return;
     let url;
     try { url = new URL(frame.contentWindow.location.href); }
     catch { unboundView(); return; }
@@ -176,7 +178,7 @@
     }
     finally {
       busy = false;
-      if (workspace) refresh.disabled = workspace.isHistoryLoading();
+      refresh.disabled = workspace.isHistoryLoading();
     }
   }
   function frameReady() {
@@ -212,13 +214,13 @@
       changed();
     } catch {
       membershipKnown = false;
-      if (workspace) members = []; // A failed refresh cannot leave a stale count or action.
+      members = []; // A failed refresh cannot leave a stale count or action.
       render();
       changed();
       status.textContent = "TUI membership could not be refreshed. Conversation retained; retry or open native Home.";
     } finally {
       busy = false;
-      refresh.disabled = workspace?.isHistoryLoading() ?? false;
+      refresh.disabled = workspace.isHistoryLoading();
     }
   }
   function studioDividers(content) {
@@ -514,10 +516,10 @@
       selected = { ...row(data.selection), origin: data.selection.origin,
         member: members.some(item => item.id === data.selection.id) };
     }
-    if (root.dataset.layout === "studio") workspace = workspaceLayout();
+    workspace = workspaceLayout();
     notice.textContent = data.selectionNotice;
     render();
-    refresh.addEventListener("click", () => workspace ? workspace.refresh() : refreshTabs());
+    refresh.addEventListener("click", () => workspace.refresh());
     frame.addEventListener("load", () => { sawFrameLoad = true; frameReady(); });
     window.addEventListener("load", () => { if (!sawFrameLoad) frameReady(); }, { once: true });
     window.ocBoxWebShell = Object.freeze({
@@ -532,7 +534,7 @@
     window.addEventListener("pagehide", () => {
       window.clearInterval(timer);
       timer = null;
-      workspace?.cancel();
+      workspace.cancel();
     });
     window.addEventListener("pageshow", () => { startObserver(); void observeNativeRoute(); });
   } catch {

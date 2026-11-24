@@ -4815,7 +4815,6 @@ def main(argv=None):
         args.web_session = web.session
         args.no_vault = web.no_vault
         args.attachments = web.attachments
-        args.workspace_layout = web.workspace_layout
         args.log_dir = web.log_dir
         args.journald = web.journald
         args.lifecycle_diagnostics = web.lifecycle_diagnostics

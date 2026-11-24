@@ -624,8 +624,8 @@ oc-box sync --workspace WORKSPACE_ID
 
 ### web — browser interface
 
-Open the native OpenCode 2.x browser UI for a workspace. If its TUI or web owner
-is running, attach to that same private service/session without waiting for it
+Open Studio around the native OpenCode 2.x browser UI for a workspace. If its
+TUI or web owner is running, attach to that private service without waiting for it
 to exit or unlocking/refreshing credentials. Otherwise perform a normal V2
 startup (including global or selected vault unlock) and own a foreground web lease.
 New projects can be created using the host's default distro. Requires host
@@ -636,7 +636,6 @@ oc-box --project ~/devel/demo
 # While it runs, use another host terminal:
 oc-box web --project ~/devel/demo
 oc-box web --project ~/devel/demo --session SESSION_ID
-oc-box web --project ~/devel/demo --workspace-layout
 oc-box terminal --project ~/devel/demo
 ```
 
@@ -649,13 +648,13 @@ noncanonical versions are not eligible. The release number permits a check,
 not a guarantee: the native reporting APIs and private saved-tab layout can
 change within 2.x, and not every release has been tested.
 
-`--workspace-layout` opts into the experimental browser workspace shell around
-the same native iframe. Studio, Dashboard and Chat focus change the layout,
-not the selected conversation. The separate no-chat manager distinguishes
+Studio replaces the compact session index. Studio, Dashboard and Chat focus
+change the layout, not the selected native conversation.
+The separate no-chat manager distinguishes
 verified open tabs from on-demand, read-only history for the registered
 workspace project. It makes other views unavailable rather than granting host
-catalogs, logs, workspace/backup operations, or a host terminal. The local Textual manager and the default browser view
-remain unchanged.
+catalogs, logs, workspace/backup operations, or a host terminal. It is not
+the offline demo's Full TUI or the local `oc-box tui` manager.
 
 The one-use link is the only browser sign-in method and the HTTP relay binds
 to `127.0.0.1` only. Vault unlock supplies workspace credentials, not browser
@@ -3206,9 +3205,8 @@ unchanged. No automatic prompt admission or host-path/URL reading.
 
 ### --workspace-layout
 
-Web only: opt into Studio, Dashboard, Chat focus, and the read-only browser
-workspace manager. The existing one-use link and localhost listener are unchanged.
-This does not enable named sign-in or authorize host management.
+Web only: accepted for compatibility with earlier 1.8/1.9 commands. Studio
+opens with or without this flag. The old compact session index is not served.
 
 ### --no-vault
 
