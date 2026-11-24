@@ -22,6 +22,7 @@ class Parsed(HTMLParser):
     def __init__(self, body):
         super().__init__()
         self.elements, self.frames, self.scripts, self.links = {}, [], [], []
+        self.trail, self.parents = [], {}
         self.layouts, self.sections = [], []
         self.button = None
         self.feed(body.decode())
@@ -31,6 +32,9 @@ class Parsed(HTMLParser):
         if "id" in attrs:
             assert attrs["id"] not in self.elements
             self.elements[attrs["id"]] = attrs
+            self.parents[attrs["id"]] = [ident for _, ident in self.trail if ident]
+        if tag not in ("meta", "link", "input"):
+            self.trail.append((tag, attrs.get("id")))
         if tag == "iframe":
             self.frames.append(attrs)
         if tag == "script":
@@ -45,7 +49,10 @@ class Parsed(HTMLParser):
         assert tag not in ("form", "textarea")
 
     def handle_endtag(self, tag):
+        assert self.trail.pop()[0] == tag
         if tag == "button":
+            if self.button is not None:
+                self.button["text"] = self.button["text"].strip()
             self.button = None
 
     def handle_data(self, data):
@@ -54,6 +61,7 @@ class Parsed(HTMLParser):
 
 gateway = Namespace(
     box=Namespace(BoxError=RuntimeError), url="http://127.0.0.1:4242",
+    data={"project": "/host/no-browser-disclosure", "container_project": "/retained/Studio <example>"},
     connection={"session": "ses_alpha"}, shell_addon_scripts=("/auth/oc-box-attachments.js",),
 )
 rows = [
@@ -83,6 +91,26 @@ assert {"href": "/", "target": "_blank", "rel": "noopener noreferrer"} in layout
 assert layout.elements["web-shell"]["data-layout"] == "studio"
 assert layout.elements["workspace-search"]["type"] == "search"
 assert layout.elements["workspace-manager-nav"].get("hidden", False) is None
+def parent(element, expected):
+    assert layout.parents[element][-1] == expected, layout.parents[element]
+parent("workspace-toolbar", "workspace-masthead")
+parent("workspace-review", "workspace-masthead")
+parent("workspace-layouts", "workspace-review")
+parent("workspace-library", "workspace-content")
+parent("workspace-open-group", "workspace-library")
+parent("workspace-history-group", "workspace-library")
+parent("workspace-archived-group", "workspace-library")
+parent("session-tabs", "workspace-open-group")
+parent("workspace-inspector-toggle", "workspace-chat")
+parent("native", "workspace-chat")
+parent("workspace-inspector-close", "workspace-overview")
+parent("selection-status", "workspace-overview")
+assert "hidden" in layout.elements["workspace-history-group"]
+assert "hidden" in layout.elements["workspace-archived-group"]
+assert layout.elements["i-box"] and layout.elements["i-user"] and layout.elements["i-grid"]
+assert [item["id"] for item in layout.sections] == ["status", "sessions"]
+assert b"Studio &lt;example&gt;" in body and b"Workspace guest" in body
+assert all(value not in body for value in (b"/host/", b"no-browser-disclosure", b"/retained/", b"Full TUI", b"Preview sign-in"))
 assert b"No conversation is guessed." in body
 print(json.dumps({"elements": layout.elements, "layouts": layout.layouts, "sections": layout.sections}))
 `], {
@@ -134,7 +162,7 @@ class Element extends Events {
   }
   focus() { this.focused = true; }
   click() { this.emit("click"); }
-  append(child) { this.children.push(child); }
+  append(...children) { this.children.push(...children); }
   replaceChildren(...children) { this.children = children; }
   setPointerCapture(id) { this.capture = id; }
   hasPointerCapture(id) { return this.capture === id; }
@@ -166,6 +194,7 @@ function boot({ failInitialRoute = false, initialWidth = 1200 } = {}) {
   const showSection = section => get("workspace-manager-nav").children.find(b => b.dataset.section === section).click();
   const document = {
     getElementById: get,
+    createElementNS() { return new Element(); },
     createElement(tag) { assert.notEqual(tag, "iframe"); return new Element(); },
   };
   const window = new Events();
@@ -180,19 +209,21 @@ function boot({ failInitialRoute = false, initialWidth = 1200 } = {}) {
     Object.defineProperty(window, name, { get() { assert.fail("shell read browser state"); } });
   const wide = new Events(), roomy = new Events();
   window.matchMedia = query => {
-    if (query === "(min-width: 66rem)") return wide;
-    assert.equal(query, "(min-width: 46rem)");
+    if (query === "(min-width: 1001px)") return wide;
+    assert.equal(query, "(min-width: 681px)");
     return roomy;
   };
   function resize(width, desktop) {
     get("workspace-content").clientWidth = width;
+    const changedWide = wide.matches !== desktop;
     wide.matches = desktop;
-    const changed = roomy.matches !== (width >= 736);
-    roomy.matches = width >= 736;
+    const changed = roomy.matches !== (width >= 681);
+    roomy.matches = width >= 681;
     if (changed) roomy.emit("change");
+    if (changedWide) wide.emit("change");
     window.emit("resize");
   }
-  resize(initialWidth, initialWidth >= 1056);
+  resize(initialWidth, initialWidth >= 1001);
   const generations = [];
   window.addEventListener("oc-box:selection-changed", event => generations.push(event.detail?.sessionID ?? null));
   const network = { calls: [], catalog: bootstrap, selected: bravo, pending: null, history: null };
@@ -218,6 +249,8 @@ function boot({ failInitialRoute = false, initialWidth = 1200 } = {}) {
     shell: window.ocBoxWebShell, tick: () => observe() };
 }
 const settle = async () => { for (let i = 0; i < 12; i++) await Promise.resolve(); };
+const rowTitle = row => row.children[1].children[0].textContent;
+const rowDetails = row => row.children[1].children[1].textContent;
 
 {
   const f = boot({ failInitialRoute: true, initialWidth: 390 });
@@ -240,14 +273,27 @@ const settle = async () => { for (let i = 0; i < 12; i++) await Promise.resolve(
   f.network.history = [{
     id: "ses_bravo", title: "An archived child", isChild: true,
     time: { created: 1, updated: 2, archived: 2 },
+  }, {
+    id: "ses_history_only", title: "A non-archived session", isChild: false,
+    time: { created: 2, updated: 3 },
   }];
   assert.deepEqual(f.network.calls, []);
   get("workspace-history-tabs").click();
   await settle();
   assert.deepEqual(f.network.calls, ["/auth/oc-box-sessions/history"]);
   assert.match(get("workspace-search-status").textContent, /not TUI membership/i);
-  const historyRow = get("session-tabs").children[0];
-  assert.equal(historyRow.textContent, "An archived child · Child · Archived");
+  assert.equal(get("workspace-open-group").hidden, true);
+  assert.equal(get("workspace-history-group").hidden, false);
+  assert.equal(get("workspace-archived-group").hidden, false);
+  assert.equal(rowTitle(get("workspace-history-list").children[0]), "A non-archived session");
+  get("workspace-archived-tabs").click();
+  assert.equal(get("workspace-history-group").hidden, true);
+  assert.equal(get("workspace-archived-tabs").getAttribute("aria-pressed"), "true");
+  assert.deepEqual(f.network.calls, ["/auth/oc-box-sessions/history"]);
+  const historyRow = get("workspace-archived-list").children[0];
+  assert.equal(rowTitle(historyRow), "An archived child");
+  assert.equal(rowDetails(historyRow), "Child session · Archived · In open TUI tabs");
+  assert.equal(historyRow.children[0].children[0].getAttribute("href"), "#i-child");
   assert.equal(frame.srcWrites, 0);
   let release;
   f.network.pending = new Promise(resolve => { release = resolve; });
@@ -260,17 +306,18 @@ const settle = async () => { for (let i = 0; i < 12; i++) await Promise.resolve(
   f.switchView("manager");
   f.showSection("sessions");
   f.network.pending = new Promise(resolve => { release = resolve; });
-  get("session-tabs").children[0].click();
+  get("workspace-archived-list").children[0].click();
   f.showSection("status");
   release();
   await settle();
   assert.equal(frame.srcWrites, 0);
   assert.equal(f.root.dataset.layout, "manager");
   f.showSection("sessions");
-  get("session-tabs").children[0].click();
+  get("workspace-archived-list").children[0].click();
   await settle();
   assert.equal(frame.srcWrites, 1);
   assert.equal(frame.getAttribute("src"), bravo.route);
+  assert.equal(get("workspace-conversation-source").textContent, "OpenCode / Archived in workspace");
   assert.equal(f.network.calls[1], "/auth/oc-box-sessions/history?session=ses_bravo");
 }
 
@@ -301,25 +348,17 @@ const settle = async () => { for (let i = 0; i < 12; i++) await Promise.resolve(
   assert.equal(get("workspace-chat").hidden, true);
   assert.equal(get("workspace-overview").hidden, false);
   assert.match(get("catalog-status").textContent, /2 verified open/);
-  for (const name of ["settings", "terminals", "logs", "storage", "backup"]) {
-    f.showSection(name);
-    assert.equal(get("workspace-unavailable").hidden, false);
-    assert.equal(get("workspace-unavailable-title").textContent, sections.find(s => s.id === name).text);
-    assert.equal(get("workspace-overview").hidden, true);
-    assert.equal(get("workspace-library").hidden, true);
-    assert.equal(shell.selection(), null);
-  }
   f.showSection("sessions");
-  assert.equal(get("workspace-unavailable").hidden, true);
+  assert.equal(get("workspace-overview").hidden, true);
   assert.equal(get("workspace-library").hidden, false);
   assert.equal(get("fallback-links").hidden, true);
   const query = get("workspace-search");
   const rows = () => get("session-tabs").children;
   const search = string => { query.value = string; query.emit("input"); };
   search(" workspace ");
-  assert.deepEqual(rows().map(row => row.textContent), [bravo.title]);
+  assert.deepEqual(rows().map(rowTitle), [bravo.title]);
   search("SES_ALPHA");
-  assert.deepEqual(rows().map(row => row.textContent), [alpha.title]);
+  assert.deepEqual(rows().map(rowTitle), [alpha.title]);
   search("not an open session");
   assert.deepEqual(rows(), []);
   assert.match(get("workspace-search-status").textContent, /no .*match/i);
@@ -371,8 +410,17 @@ const settle = async () => { for (let i = 0; i < 12; i++) await Promise.resolve(
   assert.equal(inspector.focused, true);
   assert.equal(get("workspace-chat").inert, false);
   f.resize(1200, true);
-  assert.equal(inspector.hidden, true);
+  assert.equal(inspector.hidden, false);
   assert.equal(get("workspace-overview").hidden, false);
+  get("workspace-inspector-close").click();
+  assert.equal(inspector.getAttribute("aria-expanded"), "false");
+  assert.equal(get("workspace-divider-right").hidden, true);
+  get("workspace-inspector-link").click();
+  assert.equal(inspector.getAttribute("aria-expanded"), "true");
+  assert.equal(get("workspace-divider-right").hidden, false);
+  f.resize(900, false);
+  assert.equal(get("workspace-library").hidden, false);
+  assert.equal(get("workspace-overview").hidden, true);
   assert.equal(frame.srcWrites, 0);
   assert.equal(frame.draft, "synthetic unsent draft");
   assert.deepEqual(f.network.calls, []);
@@ -434,25 +482,25 @@ const settle = async () => { for (let i = 0; i < 12; i++) await Promise.resolve(
   const left = get("workspace-divider-left");
   const right = get("workspace-divider-right");
   const widths = () => ["left", "right"].map(side => parseInt(root.style.get("--workspace-" + side)));
-  assert.deepEqual(widths(), [248, 264]);
+  assert.deepEqual(widths(), [248, 278]);
   assert(left.emit("pointerdown", { pointerId: 1, clientX: 248, button: 0, isPrimary: true }).defaultPrevented);
   left.emit("pointermove", { pointerId: 2, clientX: 800 });
-  assert.deepEqual(widths(), [248, 264]);
+  assert.deepEqual(widths(), [248, 278]);
   left.emit("pointermove", { pointerId: 1, clientX: 800 });
-  assert.deepEqual(widths(), [548, 208]); // Preserve 420px chat + two 12px gutters.
-  assert.equal(left.getAttribute("aria-valuenow"), "548");
+  assert.deepEqual(widths(), [552, 208]); // Preserve 420px chat + two 10px gutters.
+  assert.equal(left.getAttribute("aria-valuenow"), "552");
   left.emit("pointerup", { pointerId: 1 });
   assert.equal(root.dataset.resizing, undefined);
   resize(1360, true);
-  assert.deepEqual(widths(), [548, 264]); // Opposite pane's preference returns as space allows.
+  assert.deepEqual(widths(), [552, 278]); // Opposite pane's preference returns as space allows.
   switchView("dashboard");
   switchView("studio");
-  assert.deepEqual(widths(), [548, 264]);
+  assert.deepEqual(widths(), [552, 278]);
   assert(right.emit("keydown", { key: "ArrowLeft", shiftKey: true }).defaultPrevented);
-  assert.deepEqual(widths(), [548, 328]);
+  assert.deepEqual(widths(), [552, 342]);
   left.emit("dblclick");
   right.emit("keydown", { key: "Enter" });
-  assert.deepEqual(widths(), [248, 264]);
+  assert.deepEqual(widths(), [248, 278]);
   right.emit("pointerdown", { pointerId: 3, clientX: 1000, button: 0, isPrimary: true });
   resize(650, false);
   assert.equal(right.hasPointerCapture(3), false);
@@ -460,7 +508,7 @@ const settle = async () => { for (let i = 0; i < 12; i++) await Promise.resolve(
   resize(1360, true);
   switchView("dashboard");
   left.emit("keydown", { key: "End" });
-  assert.equal(widths()[0], 928); // Dashboard has one gutter and no right pane.
-  assert.equal(left.getAttribute("aria-valuemax"), "928");
+  assert.equal(widths()[0], 930); // Dashboard has one gutter and no right pane.
+  assert.equal(left.getAttribute("aria-valuemax"), "930");
 }
 console.log("PASS Studio: one authenticated shell, native frame and draft retained, searchable manager, selection invalidation and bounded Studio/Dashboard dividers.");

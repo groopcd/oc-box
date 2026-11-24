@@ -650,12 +650,15 @@ not a guarantee: the native reporting APIs and private saved-tab layout can
 change within 2.x, and not every release has been tested.
 
 Studio replaces the compact session index. Studio, Dashboard and Chat focus
-change the layout, not the selected native conversation.
-The separate no-chat manager distinguishes
-verified open tabs from on-demand, read-only history for the registered
-workspace project. It makes other views unavailable rather than granting host
-catalogs, logs, workspace/backup operations, or a host terminal. It is not
-the offline demo's Full TUI or the local `oc-box tui` manager.
+change the layout, not the selected native conversation. Studio shows the
+workspace name, a neutral guest label, a sessions rail and a closable workspace
+inspector; wide Studio panes resize by dragging or with the divider arrow keys.
+The rail and the separate no-chat workspace manager distinguish verified open
+TUI tabs from on-demand, metadata-only history for the registered workspace
+project. **Archived** filters that history; it does not read host archives.
+The browser manager offers only Status and Sessions. It has no host metrics,
+catalogs, logs, workspace/backup operations or host terminal and is not the
+offline demo's Full TUI or the local `oc-box tui` manager.
 
 The one-use link is the only browser sign-in method and the HTTP relay binds
 to `127.0.0.1` only. Vault unlock supplies workspace credentials, not browser

@@ -299,85 +299,153 @@ def initial_state(gateway, sessions, status, requested=None, *, report=_UNREAD_R
     return {**state, "selection": selected, "selectionNotice": origin}
 
 
-def _workspace_layout_body(state, conversation, fallback, attachments):
-    """Presentation only; the existing bootstrap is the entire data source."""
+_ICONS = """<svg class="workspace-icons" width="0" height="0" aria-hidden="true">
+  <symbol id="i-box" viewBox="0 0 24 24"><path d="m12 2 9 5v10l-9 5-9-5V7zM3 7l9 5 9-5m-9 5v10m-4.5-17.5 9 5"/></symbol>
+  <symbol id="i-user" viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path d="M4 21v-2a5 5 0 0 1 5-5h6a5 5 0 0 1 5 5v2"/></symbol>
+  <symbol id="i-search" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6"/><path d="m15 15 5 5"/></symbol>
+  <symbol id="i-grid" viewBox="0 0 24 24"><path d="M3 4h18v16H3zm7 0v16m0-10h11"/></symbol>
+  <symbol id="i-chat" viewBox="0 0 24 24"><path d="M4 4h16v13H9l-5 4zM8 9h8m-8 4h5"/></symbol>
+  <symbol id="i-archive" viewBox="0 0 24 24"><path d="M3 4h18v5H3zm2 5v11h14V9m-9 4h4"/></symbol>
+  <symbol id="i-child" viewBox="0 0 24 24"><path d="M5 4v12h14m-4-4 4 4-4 4"/></symbol>
+</svg>"""
+
+
+def _icon(name):
     return (
-        '<header id="workspace-toolbar"><div class="workspace-brand">'
-        '<span class="workspace-mark" aria-hidden="true">⬡</span>'
-        "<div><h1>oc-box</h1><p>Private workspace</p></div></div>"
-        '<nav id="workspace-layouts" aria-label="Workspace layout">'
-        '<button type="button" data-view="studio" aria-pressed="true">Studio</button>'
-        '<button type="button" data-view="dashboard" aria-pressed="false">Dashboard</button>'
-        '<button type="button" data-view="focus" aria-pressed="false">Chat focus</button>'
-        '<button type="button" data-view="manager" aria-pressed="false">Workspace manager</button>'
-        '</nav><button id="workspace-sessions-toggle" type="button" hidden '
-        'aria-expanded="false" aria-controls="workspace-library">Sessions</button>'
-        '<button id="workspace-inspector-toggle" type="button" hidden '
-        'aria-expanded="false" aria-controls="workspace-overview">Inspector</button>'
-        + NATIVE_HOME
-        + '</header><nav id="workspace-manager-nav" aria-label="Workspace manager sections" hidden>'
-        + "".join(
-            f'<button type="button" data-section="{ident}" '
-            f'aria-pressed="{str(ident == "status").lower()}">{label}</button>'
-            for ident, label in (
-                ("status", "Status"),
-                ("settings", "Settings"),
-                ("sessions", "Sessions"),
-                ("terminals", "Terminals"),
-                ("logs", "Logs"),
-                ("storage", "Storage"),
-                ("backup", "Backup / restore"),
-            )
-        )
-        + '</nav><div id="workspace-content">'
-        '<aside id="workspace-library" aria-labelledby="workspace-library-title">'
-        '<h2 id="workspace-library-title">Open TUI sessions</h2>'
-        "<p>Open TUI tabs, including idle sessions, in native tab order.</p>"
-        '<div class="workspace-session-sources" role="group" aria-label="Session source">'
-        '<button type="button" id="workspace-open-tabs" aria-pressed="true">Open TUI tabs</button>'
-        '<button type="button" id="workspace-history-tabs" aria-pressed="false">Workspace history</button>'
-        '</div><label for="workspace-search">Search by title or session ID</label>'
-        '<input type="search" id="workspace-search" maxlength="128" autocomplete="off">'
-        '<button type="button" id="refresh-tabs">Refresh TUI tabs</button>'
-        '<p id="workspace-search-status" role="status"></p>'
-        '<div id="session-tabs" role="tablist" aria-label="Open native TUI tabs"></div>'
-        + fallback
-        + '</aside><div id="workspace-divider-left" class="workspace-divider" tabindex="0" '
-        'role="separator" aria-orientation="vertical" aria-label="Session pane width" '
-        'aria-controls="workspace-library"></div>'
-        '<section id="workspace-chat" aria-label="Native conversation">'
-        '<div class="workspace-chat-tools"><h2 id="workspace-conversation-title">Native conversation</h2>'
-        '<p id="selection-status">'
-        + escape(state["selectionNotice"])
-        + '</p><div id="retained-selection"></div><details'
-        + ("" if attachments else " hidden")
-        + '><summary>Browser attachments</summary><div id="session-controls"></div></details>'
-        '<p id="addon-status" role="status"'
-        + ("" if attachments else " hidden")
-        + "></p></div>"
-        + conversation
-        + '</section><div id="workspace-divider-right" class="workspace-divider" tabindex="0" '
-        'role="separator" aria-orientation="vertical" aria-label="Status pane width" '
-        'aria-controls="workspace-overview"></div>'
-        '<section id="workspace-overview" aria-labelledby="workspace-overview-title">'
-        '<h2 id="workspace-overview-title" tabindex="-1">Workspace overview</h2><div class="workspace-cards">'
-        '<section><h3>Open TUI membership</h3><p id="catalog-status" role="status"></p></section>'
-        '<section><h3>Browser selection</h3><p id="workspace-current-session">No conversation selected.</p></section>'
-        "<section><h3>Private workspace only</h3><p>This browser view shows verified open TUI tabs, "
-        "and on-demand history for the workspace project. It does not report host data or "
-        "workspace health. Native browser tabs stay independent.</p>"
-        '<p><a href="'
-        + INDEX
-        + '">Reload shell</a> (may interrupt a draft).</p></section></div></section>'
-        '<section id="workspace-unavailable" aria-labelledby="workspace-unavailable-title" hidden>'
-        '<h2 id="workspace-unavailable-title"></h2>'
-        "<p>This section is unavailable in the workspace browser manager. "
-        "This view has no access to host data or privileged operations.</p></section>"
-        "</div></main></body></html>"
+        f'<svg class="workspace-icon" aria-hidden="true"><use href="#i-{name}"/></svg>'
     )
 
 
-def document(url, sessions, status, state=None, addon_scripts=()):
+def _workspace_name(data):
+    # Display only the leaf of the registered in-container directory. In
+    # particular, do not reveal a restored workspace's host destination name.
+    path = data.get("container_project", data.get("project"))
+    if not isinstance(path, str) or not path.startswith("/"):
+        return "Private workspace"
+    leaf = path.rstrip("/").rsplit("/", 1)[-1]
+    label = "".join(char for char in leaf[:80] if char.isprintable()).strip()
+    return label if label and label not in (".", "..") else "Private workspace"
+
+
+def _workspace_layout_body(state, conversation, fallback, attachments, workspace_name):
+    """Port the final Studio chrome; data and native UI stay behind their existing boundaries."""
+    name = escape(workspace_name)
+    title = escape((state["selection"] or {}).get("title") or "Native conversation")
+    addon_hidden = "" if attachments else " hidden"
+    return f"""{_ICONS}
+<header id="workspace-masthead">
+  <div id="workspace-toolbar">
+    <h1 class="workspace-brand">{_icon("box")}oc-box</h1>
+    <div class="workspace-project"><span class="workspace-eyebrow">Workspace</span><bdi>{name}</bdi></div>
+    <span class="workspace-guest">{_icon("user")}Workspace guest</span>
+    <div class="workspace-top-end">
+      <span class="workspace-tag"><span class="workspace-dot" aria-hidden="true"></span>Private workspace</span>
+      {NATIVE_HOME}
+    </div>
+  </div>
+  <div id="workspace-review">
+    <p id="workspace-layout-note"><strong id="workspace-layout-name">Studio.</strong>
+      <span id="workspace-layout-description">Sessions, chat and workspace context.</span></p>
+    <nav id="workspace-layouts" class="workspace-picker" aria-label="Workspace layout">
+      <button type="button" data-view="studio" aria-pressed="true"><b aria-hidden="true">A</b> Studio</button>
+      <button type="button" data-view="dashboard" aria-pressed="false"><b aria-hidden="true">B</b> Dashboard</button>
+      <button type="button" data-view="focus" aria-pressed="false"><b aria-hidden="true">C</b> Chat focus</button>
+      <button type="button" data-view="manager" aria-pressed="false">{_icon("grid")} Workspace manager</button>
+    </nav>
+  </div>
+</header>
+<nav id="workspace-manager-nav" class="workspace-picker" aria-label="Workspace manager sections" hidden>
+  <button type="button" data-section="status" aria-pressed="true">Status</button>
+  <button type="button" data-section="sessions" aria-pressed="false">Sessions</button>
+</nav>
+<div id="workspace-content">
+  <aside id="workspace-library" aria-labelledby="workspace-library-title">
+    <div class="workspace-rail-head">
+      <h2 id="workspace-library-title">Sessions</h2>
+      <div class="workspace-actions">
+        <button type="button" class="workspace-action" id="refresh-tabs" aria-label="Refresh TUI tabs" title="Refresh TUI tabs">Refresh</button>
+        <button type="button" class="workspace-action" id="workspace-sessions-close" aria-label="Close sessions" hidden>×</button>
+      </div>
+    </div>
+    <label class="workspace-search" for="workspace-search">{_icon("search")}
+      <input type="search" id="workspace-search" aria-label="Search by title or session ID"
+        placeholder="Search sessions" maxlength="128" autocomplete="off">
+    </label>
+    <div class="workspace-picker workspace-session-sources" role="group" aria-label="Session source">
+      <button type="button" id="workspace-open-tabs" aria-pressed="true">TUI tabs</button>
+      <button type="button" id="workspace-history-tabs" aria-pressed="false" aria-label="Workspace history">History</button>
+      <button type="button" id="workspace-archived-tabs" aria-pressed="false" aria-label="Archived in workspace">Archived</button>
+    </div>
+    <section class="workspace-group" id="workspace-open-group">
+      <h3 class="workspace-eyebrow" id="workspace-open-title">Open TUI tabs</h3>
+      <div id="session-tabs" role="tablist" aria-labelledby="workspace-open-title"></div>
+    </section>
+    <section class="workspace-group" id="workspace-history-group" hidden>
+      <h3 class="workspace-eyebrow">Workspace history</h3><div id="workspace-history-list"></div>
+    </section>
+    <section class="workspace-group" id="workspace-archived-group" hidden>
+      <h3 class="workspace-eyebrow">Archived in workspace</h3><div id="workspace-archived-list"></div>
+    </section>
+    <p id="workspace-search-status" role="status"></p>
+    {fallback}
+    <nav class="workspace-rail-nav" aria-label="Workspace context">
+      <p class="workspace-eyebrow">Workspace manager</p>
+      <button type="button" id="workspace-inspector-link" aria-controls="workspace-overview"
+        aria-expanded="true">{_icon("grid")} Status</button>
+    </nav>
+    <p class="workspace-rail-note">This view shows one workspace, not the host’s sessions or archives.</p>
+  </aside>
+  <div id="workspace-divider-left" class="workspace-divider" tabindex="0" role="separator" aria-orientation="vertical"
+    aria-label="Resize sessions pane" aria-controls="workspace-library"
+    title="Drag or use Left/Right; double-click or press Enter to reset" hidden></div>
+  <section id="workspace-chat" aria-label="Native conversation">
+    <header class="workspace-chat-head">
+      <div><p class="workspace-eyebrow" id="workspace-conversation-source">OpenCode / Native conversation</p>
+        <h2 id="workspace-conversation-title" dir="auto">{title}</h2></div>
+      <div class="workspace-actions">
+        <button id="workspace-sessions-toggle" class="workspace-action" type="button"
+          aria-expanded="false" aria-controls="workspace-library" hidden>Sessions</button>
+        <button id="workspace-inspector-toggle" class="workspace-action" type="button"
+          aria-expanded="true" aria-controls="workspace-overview">{_icon("grid")} Inspector</button>
+      </div>
+    </header>
+    <div class="workspace-addons"{addon_hidden}>
+      <details><summary>Browser attachments</summary><div id="session-controls"></div></details>
+      <p id="addon-status" role="status"{addon_hidden}></p>
+    </div>
+    {conversation}
+  </section>
+  <div id="workspace-divider-right" class="workspace-divider" tabindex="0" role="separator" aria-orientation="vertical"
+    aria-label="Resize workspace inspector" aria-controls="workspace-overview"
+    title="Drag or use Left/Right; double-click or press Enter to reset" hidden></div>
+  <aside id="workspace-overview" aria-labelledby="workspace-overview-title">
+    <header class="workspace-inspector-head">
+      <div><p class="workspace-eyebrow" id="workspace-inspector-context">Workspace inspector</p>
+        <h2 id="workspace-overview-title" tabindex="-1">Status</h2></div>
+      <button type="button" class="workspace-action" id="workspace-inspector-close" aria-label="Close inspector">×</button>
+    </header>
+    <div class="workspace-cards">
+      <section><h3><bdi>{name}</bdi></h3><p id="catalog-status" role="status"></p></section>
+      <section><h3>Browser selection</h3><p id="workspace-current-session" dir="auto">No conversation selected.</p>
+        <p id="selection-status">{escape(state["selectionNotice"])}</p><div id="retained-selection"></div></section>
+      <section><h3>Session source</h3><p>TUI membership and workspace history are separate. Opening
+        history here doesn’t add a TUI tab. Native browser tabs stay independent.</p>
+        <p>No host data or workspace health metrics are available.</p>
+        <p><a href="{INDEX}">Reload shell</a> (may interrupt a draft).</p></section>
+    </div>
+  </aside>
+</div></main></body></html>"""
+
+
+def document(
+    url,
+    sessions,
+    status,
+    state=None,
+    addon_scripts=(),
+    *,
+    workspace_name="Private workspace",
+):
     if (
         not isinstance(addon_scripts, tuple)
         or len(addon_scripts) > 1
@@ -443,7 +511,9 @@ def document(url, sessions, status, state=None, addon_scripts=()):
     )
     return (
         start
-        + _workspace_layout_body(state, conversation, fallback, bool(addon_scripts))
+        + _workspace_layout_body(
+            state, conversation, fallback, bool(addon_scripts), workspace_name
+        )
     ).encode("utf-8", errors="replace")
 
 
@@ -691,6 +761,7 @@ def respond(gateway, stream, child, request):
             status,
             state,
             addon_scripts=getattr(gateway, "shell_addon_scripts", ()),
+            workspace_name=_workspace_name(gateway.data),
         )
     except (
         gateway.box.BoxError,
