@@ -30,6 +30,7 @@ from oc_box import (
     web_bootstrap,
     web_handoff,
     web_local_origins,
+    web_named_account_assets,
     web_named_bootstrap,
     web_named_handoff,
     web_named_headers,
@@ -44,7 +45,6 @@ from smoke_named_bootstrap_browser import material, require, run
 
 ROOT = Path(__file__).resolve().parents[1]
 RESEARCH = ROOT / "tools/web-pake-research"
-PAGE = ROOT / "tests/fixtures/named_browser"
 ACCOUNT_COOKIE = "__Host-ocbox-account"
 WORKSPACE_COOKIE = "__Host-ocbox-bootstrap"
 USERNAME = "synthetic-browser"
@@ -60,7 +60,6 @@ REFUSED = (403, b"Refused", FIXED + (("Content-Type", "text/plain"),))
 HANDOFF = web_named_handoff.HANDOFF_PATH
 CONFIRM = web_named_handoff.CONFIRM_PATH
 OPAQUE_DOCUMENT = "data:text/html,<!doctype html><title>Foreign fixture</title>"
-SLOT_SHA = "e8272c8e4e3bc675afa5325cefef3493864681d44dcd6144959e2811a3cb0c34"
 
 
 def loopback_namespace():
@@ -227,7 +226,7 @@ class Composition:
         self.app = web_app_ingress.NamedAppIngress(
             sign_in,
             endpoint=native.endpoint,
-            version=native.identity["version"],
+            version=native.version,
             claim_bootstrap=lambda nonce: bootstrap.claim_app(binding, nonce),
         )
         self.handoff = web_named_handoff.NamedHandoffIngress(
@@ -237,12 +236,6 @@ class Composition:
             origins=origins,
             sign_in=sign_in,
             translate_nonce=self.translate,
-        )
-        self.page = (
-            (PAGE / "account.html")
-            .read_bytes()
-            .replace(b"__ACCOUNT_ORIGIN__", origins.account.value.encode("ascii"))
-            .replace(b"__WORKSPACE_ORIGIN__", origins.workspace.value.encode("ascii"))
         )
         self.traffic = []
         self.ticket = None
@@ -278,31 +271,15 @@ class Composition:
             and target == web_named_bootstrap.ACCOUNT_ENTRY
             and method == "POST"
         ):
-            result = self.entry.account(**request)
-            return (
-                200,
-                self.page,
-                FIXED
-                + (
-                    ("Content-Type", "text/html; charset=utf-8"),
-                    (
-                        "Content-Security-Policy",
-                        web_named_handoff.account_policy(self.origins),
-                    ),
-                    ("Set-Cookie", result.cookie),
-                ),
-            )
-        if role == "account" and method == "GET" and target in self.assets:
-            nonce = web_named_headers.admit_headers(
-                origin=self.origins.account,
-                headers=request["headers"],
-                method=method,
-                actual_tls=request["actual_tls"],
-                cookie_name=ACCOUNT_COOKIE,
-            )
-            if self.translate(nonce) is not None:
-                content_type, body = self.assets[target]
-                return 200, body, FIXED + (("Content-Type", content_type),)
+            result = self.assets.document(self.entry.account(**request))
+            return result.status, result.body, result.headers
+        if (
+            role == "account"
+            and method == "GET"
+            and target in web_named_account_assets.ACCOUNT_ASSET_PATHS
+        ):
+            result = self.assets.asset(**request, translate_nonce=self.translate)
+            return result.status, result.body, result.headers
         if role == "account" and method == "POST" and target in ("/start", "/finish"):
             self.check_wire(request)
             result = self.pake(**request)
@@ -496,24 +473,37 @@ def wait_state(page, state):
     page.locator(f'#login-form[data-state="{state}"]').wait_for(timeout=10_000)
 
 
-def submit(page, wrong):
+def enter_vector(page, wrong):
     # Derive the public fixture vector in the renderer; don't pass it through
     # automation arguments, logs, static HTML or served JavaScript.
     field = page.locator("#login-password")
+    prepared = field.evaluate(
+        """(field, args) => {
+            const user = document.getElementById("login-user");
+            if (field.type !== "password" || field.disabled || user.disabled) return false;
+            user.value = args.user;
+            field.value = Array.from({ length: args.size }, (_, i) =>
+              String.fromCharCode(i === 0 && args.wrong ? 90 : 65 + i % 26)).join("");
+            return true;
+        }""",
+        {"user": USERNAME, "size": VECTOR_SIZE, "wrong": wrong},
+    )
+    require(prepared, "The masked form was not ready.")
+    return field
+
+
+def submit(page, wrong):
     try:
-        prepared = field.evaluate(
-            """(field, args) => {
-                const user = document.getElementById("login-user");
-                if (field.type !== "password" || field.disabled || user.disabled) return false;
-                user.value = args.user;
-                field.value = Array.from({ length: args.size }, (_, i) =>
-                  String.fromCharCode(i === 0 && args.wrong ? 90 : 65 + i % 26)).join("");
-                return true;
-            }""",
-            {"user": USERNAME, "size": VECTOR_SIZE, "wrong": wrong},
-        )
-        require(prepared, "The masked form was not ready.")
-        page.get_by_role("button", name="Sign in", exact=True).click()
+        field = enter_vector(page, wrong)
+        if wrong:
+            page.get_by_role("button", name="Show", exact=True).click()
+            require(
+                field.evaluate("element => element.type === 'text'"),
+                "Explicit reveal failed.",
+            )
+            page.get_by_role("button", name="Sign in", exact=True).click()
+        else:
+            field.press("Enter")
     except BrowserError:
         raise RuntimeError("Synthetic form interaction did not complete.") from None
     expected = "refused" if wrong else "verified"
@@ -522,8 +512,10 @@ def submit(page, wrong):
     except BrowserError:
         raise RuntimeError(f"Synthetic form did not reach {expected}.") from None
     require(
-        field.evaluate("element => element.value === ''"),
-        "Web password field was not cleared.",
+        field.evaluate(
+            "element => element.value === '' && element.type === 'password'"
+        ),
+        "Web password field was not cleared and re-masked.",
     )
 
 
@@ -590,7 +582,7 @@ def check_native_boundary(fixture, token, confirmed):
         binding=fixture.binding,
         endpoint=native.endpoint,
         origin=origin,
-        version=native.identity["version"],
+        version=native.version,
     )
     header = confirmed.header_value("set-cookie")
     require(
@@ -644,6 +636,44 @@ def browser_checks(pw, chrome, homes, hosts, fixture, product):
             browser.version == product.removeprefix("HeadlessChrome/"),
             "Browser product mismatch.",
         )
+        # A separate negative context receives a still-valid module at the
+        # same path and size, with only a producer label changed. A bare
+        # compile or magic check would not reject it. Only this case intercepts.
+        wasm = fixture.assets._assets[ASSETS + "client.wasm"].body
+        producer = b"\x09producers\x02\x08language\x01\x04Rust"
+        require(
+            wasm.count(producer) == 1,
+            "Pinned test module has an unexpected producer section.",
+        )
+        changed = wasm.replace(producer, producer[:-4] + b"Test", 1)
+        with browser.new_context() as invalid:
+            invalid.route(
+                origins.account.value + ASSETS + "client.wasm",
+                lambda route: route.fulfill(
+                    status=200,
+                    content_type="application/wasm",
+                    body=changed,
+                    headers={"Cache-Control": "no-store"},
+                ),
+            )
+            failed = invalid.new_page()
+            bootstrap_page(failed, workspace, account)
+            wait_state(failed, "unavailable")
+            require(
+                failed.locator("#login-password").is_disabled()
+                and failed.locator("#login-submit").is_disabled()
+                and not fixture.traffic
+                and failed.evaluate("""async () => {
+                    const module = await WebAssembly.compileStreaming(fetch("/account-assets/client.wasm"));
+                    return WebAssembly.Module.imports(module).length === 1;
+                }"""),
+                "Unverified WASM enabled an account input or sent PAKE traffic.",
+            )
+        print(
+            "PASS account page refused a valid WASM module with the wrong digest",
+            flush=True,
+        )
+
         with browser.new_context() as context, browser.new_context() as other:
             allowed = {
                 ("GET", workspace),
@@ -656,7 +686,10 @@ def browser_checks(pw, chrome, homes, hosts, fixture, product):
                 ("POST", origins.account.value + "/finish"),
                 ("GET", origins.account.value + "/favicon.ico"),
                 ("GET", origins.workspace.value + "/favicon.ico"),
-                *(("GET", origins.account.value + path) for path in fixture.assets),
+                *(
+                    ("GET", origins.account.value + path)
+                    for path in web_named_account_assets.ACCOUNT_ASSET_PATHS
+                ),
             }
             unexpected = False
 
@@ -670,7 +703,12 @@ def browser_checks(pw, chrome, homes, hosts, fixture, product):
             page.set_default_timeout(10_000)
             without_cookie = page.goto(origins.account.value + ASSETS + "client.wasm")
             require(
-                without_cookie is not None and without_cookie.status == 403,
+                without_cookie is not None
+                and without_cookie.status == 403
+                and page.evaluate("""() => fetch("/account-assets/client.wasm", {
+                    mode: "same-origin", credentials: "same-origin",
+                }).then(response => response.status)""")
+                == 403,
                 "An unpaired browser received the PAKE asset.",
             )
             first = bootstrap_page(page, workspace, account)
@@ -679,6 +717,30 @@ def browser_checks(pw, chrome, homes, hosts, fixture, product):
                 page.url == account
                 and page.evaluate("isSecureContext && document.cookie === ''"),
                 "Account page context or HttpOnly boundary changed.",
+            )
+            require(
+                page.evaluate("""() => {
+              const stage = document.querySelector(".login-stage");
+              const card = document.querySelector(".login-card");
+              return document.querySelector("#login-title").textContent === "Sign in to Synthetic workspace" &&
+                getComputedStyle(card).width === "430px" && getComputedStyle(card).borderRadius === "13px" &&
+                getComputedStyle(stage).backgroundImage.startsWith("radial-gradient");
+            }"""),
+                "Approved account card layout changed.",
+            )
+            enter_vector(page, wrong=False)
+            require(
+                page.evaluate("""() => {
+              const form = document.getElementById("login-form");
+              const password = document.getElementById("login-password");
+              if (!password.value || [...new FormData(form)].length) return false;
+              form.requestSubmit();
+              document.getElementById("login-submit").click();
+              password.dispatchEvent(new KeyboardEvent("keydown", {key: "Enter", bubbles: true}));
+              return form.dataset.state === "ready" && password.value.length > 0;
+            }""")
+                and not fixture.traffic,
+                "A script-triggered action could start a password exchange.",
             )
             app, account_cookie = cookies(context, origins)
             require(
@@ -841,37 +903,20 @@ def exercise(root, chrome, build_dir, native_binary):
             "Pinned Chromium executable mismatch.",
         )
     build = build_dir / "target"
-    worker = pinned(build / "release/ocop-worker", 524_480, research["WORKER_SHA"])
     seed = pinned(build / "release/ocop-fixture", 559_216, research["SEED_SHA"])
-    assets = {
-        ASSETS + "transport.mjs": (
-            "text/javascript",
-            pinned(
-                ROOT / "src/oc_box/web_pake_client.mjs", 12_182, research["ADAPTER_SHA"]
-            ),
-        ),
-        ASSETS + "slot.mjs": (
-            "text/javascript",
-            pinned(RESEARCH / "browser_slot.mjs", 6_787, SLOT_SHA),
-        ),
-        ASSETS + "sign-in.mjs": (
-            "text/javascript",
-            (PAGE / "sign-in.mjs").read_bytes(),
-        ),
-        ASSETS + "sign-in.css": ("text/css", (PAGE / "sign-in.css").read_bytes()),
-        ASSETS + "transfer.mjs": (
-            "text/javascript",
-            (ROOT / "src/oc_box/web_named_handoff_client.mjs").read_bytes(),
-        ),
-        ASSETS + "client.wasm": (
-            "application/wasm",
-            pinned(
-                build / "wasm32-unknown-unknown/release/ocop-browser.wasm",
-                204_179,
-                research["WASM_SHA"],
-            ),
-        ),
-    }
+    # Cargo's output names are hardlinks. Stage already-verified bytes into
+    # this private fixture only; the production loader requires a single link.
+    wasm_file, verifier_file = root / "approved.wasm", root / "approved-verifier"
+    wasm_file.write_bytes(
+        pinned(
+            build / "wasm32-unknown-unknown/release/ocop-browser.wasm",
+            204_179,
+            research["WASM_SHA"],
+        )
+    )
+    verifier_file.write_bytes(
+        pinned(build / "release/ocop-worker", 524_480, research["WORKER_SHA"])
+    )
     hosts = {
         "account": web_local_origins.ACCOUNT_HOST,
         "workspace": web_local_origins.WORKSPACE_HOST,
@@ -884,6 +929,17 @@ def exercise(root, chrome, build_dir, native_binary):
         origins = web_local_origins.LocalOrigins(
             *(server.server_address[1] for server in servers)
         )
+        pin = web_named_account_assets.ReviewedArtifactPin
+        prepared = cleanup.enter_context(
+            web_named_account_assets.prepare_account_assets(
+                origins=origins,
+                workspace_label="Synthetic workspace",
+                wasm_file=wasm_file,
+                wasm_pin=pin(204_179, bytes.fromhex(research["WASM_SHA"])),
+                verifier_file=verifier_file,
+                verifier_pin=pin(524_480, bytes.fromhex(research["WORKER_SHA"])),
+            )
+        )
         tls = web_local_origins.check_tls(origins, **pairs)
         binding = web_admission.WebBinding("a" * 32, "b" * 32, origins.workspace.value)
         bootstrap = web_bootstrap.BrowserBootstrap(origins=origins, binding=binding)
@@ -895,10 +951,9 @@ def exercise(root, chrome, build_dir, native_binary):
         store = web_accounts.AccountStore(
             setup, (web_accounts.Account(USERNAME, (binding.workspace_id,), record),)
         )
-        worker_fd = cleanup.enter_context(research["sealed"](worker))
         backend = web_pake_profile.LocalPakeProfile(
-            worker_fd,
-            expected_sha256=bytes.fromhex(research["WORKER_SHA"]),
+            prepared.verifier_fd,
+            expected_sha256=prepared.verifier_sha256,
             origins=origins,
         )
         cleanup.callback(
@@ -920,7 +975,7 @@ def exercise(root, chrome, build_dir, native_binary):
             pair_native=pair_native,
         )
         fixture = Composition(
-            origins, binding, bootstrap, sign_in, assets, native, owner_current
+            origins, binding, bootstrap, sign_in, prepared.bundle, native, owner_current
         )
         try:
             with ExitStack() as listeners:

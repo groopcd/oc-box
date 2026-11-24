@@ -20,13 +20,18 @@ from oc_box import (
 
 ENDPOINT = "http://127.0.0.1:43100"
 NATIVE = "a" * 10 + "." + "b" * 43
+VERSION = "2.3.2"
 
 
 class NamedBrowserHandoffTests(unittest.TestCase):
     def setUp(self):
-        self.enterContext(patch.dict(os.environ, {"OC_BOX_CONTAINER": "0"}))
+        environment = patch.dict(os.environ, {"OC_BOX_CONTAINER": "0"})
+        environment.start()
+        self.addCleanup(environment.stop)
         self.now = 100
-        self.enterContext(patch.object(web_handoff, "monotonic", new=lambda: self.now))
+        clock = patch.object(web_handoff, "monotonic", new=lambda: self.now)
+        clock.start()
+        self.addCleanup(clock.stop)
         self.origins = web_local_origins.LocalOrigins()
         self.binding = web_admission.WebBinding(
             fixture.WORKSPACE,
@@ -41,7 +46,7 @@ class NamedBrowserHandoffTests(unittest.TestCase):
                 ENDPOINT,
                 self.authority,
                 NATIVE,
-                version="2.3.2",
+                version=VERSION,
                 owner_current=self.owner,
             )
         )
@@ -73,7 +78,7 @@ class NamedBrowserHandoffTests(unittest.TestCase):
         self.app = web_app_ingress.NamedAppIngress(
             self.sign_in,
             endpoint=ENDPOINT,
-            version="2.3.2",
+            version=VERSION,
             claim_bootstrap=lambda nonce: self.bootstrap.claim_app(self.binding, nonce),
         )
         self.addCleanup(self.app.close)
