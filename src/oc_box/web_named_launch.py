@@ -86,7 +86,7 @@ class PreparedNamedLaunch:
         self._foreground = None
         self._attempted = self._retired = self._released = self._uncertain = False
 
-    def start(self, owner, *, expires_at):
+    def start(self, owner, *, expires_at, studio=False):
         if self._attempted or self._retired:
             raise NamedLaunchError("Named HTTPS cannot reuse this launch preparation.")
         self._attempted = True
@@ -109,7 +109,7 @@ class PreparedNamedLaunch:
             account=self._account,
             assets=self._assets,
         )
-        return self._foreground.start(expires_at=expires_at)
+        return self._foreground.start(expires_at=expires_at, studio=studio)
 
     def wait_stopped(self, timeout=None):
         return self._foreground is not None and self._foreground.wait_stopped(timeout)

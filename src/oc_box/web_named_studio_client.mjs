@@ -83,7 +83,9 @@ export function createNamedStudioController(root, bootstrap) {
   const window = document?.defaultView;
   if (!window || mounted.has(document)) return null;
   const { origin, pathname } = window.location;
-  const shell = window.ocBoxWebShell;
+  const chrome = () => root.hasAttribute("data-named-studio") ?
+    window.ocBoxNamedStudioChrome : window.ocBoxWebShell;
+  const shell = chrome();
   const port = Number(window.location.port);
   if (window.location.protocol !== "https:" || window.location.hostname !== workspaceHost ||
       port < 1024 || port > 65535) return null;
@@ -109,7 +111,7 @@ export function createNamedStudioController(root, bootstrap) {
     return !closed && window.top === window && window.isSecureContext === true &&
       window.document === document && root.ownerDocument === document && root.isConnected &&
       document.getElementById("web-shell") === root && !document.hidden &&
-      window.ocBoxWebShell === shell && window.location.origin === origin &&
+      chrome() === shell && window.location.origin === origin &&
       window.location.pathname === pathname && window.location.hash === "" &&
       !window.navigator.serviceWorker?.controller;
   }

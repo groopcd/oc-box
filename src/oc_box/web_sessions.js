@@ -38,6 +38,7 @@
   let membershipRefreshFailed = false;
   let workspace = null;
   let ready = false;
+  let recentMore = false;
   let named = null;
   let namedCatalogRead = null;
   let namedVerification = null;
@@ -84,12 +85,12 @@
       detail: selection()
     }));
   }
-  function clearNamedSelection() {
+  function clearNamedSelection(renderNow = true) {
     navigation += 1;
     namedVerification?.abort();
     selected = null;
     namedOpenFailed = false;
-    render();
+    if (renderNow) render();
     try { named.selectionChanged(null); }
     catch { return false; }
     return true;
@@ -111,7 +112,7 @@
     button.dataset.sessionId = item.id;
     button.dataset.sessionSource = source;
     button.addEventListener("click", event => {
-      if (!namedPage || (event.isTrusted && workspace.source() === source)) void workspace.open(item);
+      if (!namedPage || (event.isTrusted && workspace.source() === source)) void workspace.open(item, event);
     });
     return button;
   }
@@ -142,7 +143,7 @@
       titleNode.setAttribute("dir", "auto");
       titleNode.textContent = title;
       const description = document.createElement("small");
-      description.textContent = isTabs ? "Open TUI tab" :
+      description.textContent = isTabs ? (namedPage ? "Recent workspace session" : "Open TUI tab") :
         [item.child ? "Child session" : null, item.archived ? "Archived" : null,
           openIds.has(item.id) ? "In open TUI tabs" : null]
           .filter(Boolean).join(" · ") || "Workspace history";
@@ -177,10 +178,10 @@
       id.textContent = item.id;
       session.append(button, id);
       const provenance = document.createElement("td");
-      provenance.textContent = source === "tabs" ? "Open TUI tab" :
+      provenance.textContent = source === "tabs" ? (namedPage ? "Recent workspace session" : "Open TUI tab") :
         (item.archived ? "Archived in workspace" : "Workspace history") + (item.child ? " · Child session" : "");
       const membership = document.createElement("td");
-      membership.textContent = !membershipKnown ? "Unknown" :
+      membership.textContent = namedPage ? "Not reported" : !membershipKnown ? "Unknown" :
         openIds.has(item.id) ? "Open in TUI" : "Not in current TUI catalog";
       tr.append(session, provenance, membership);
       return tr;
@@ -212,12 +213,12 @@
       const sourceLabel = selected.historyKind === "archived" ? "Archived in workspace" :
         selected.historyKind === "history" ? "Workspace history" :
         selected.member ? "Open TUI tab" : childOfOpenTab ? "Child of open TUI tab" : "Browser selection";
-      conversationSource.textContent = "OpenCode / " + sourceLabel;
-      notice.textContent = selected.origin + (selected.member ? "" : childOfOpenTab ?
+      conversationSource.textContent = "OpenCode / " + (namedPage ? "Workspace session" : sourceLabel);
+      notice.textContent = namedPage ? selected.origin : selected.origin + (selected.member ? "" : childOfOpenTab ?
         " — viewing a child of open TUI tab " + selected.activeRoot :
         membershipKnown ? " — selection is not in the latest TUI membership; conversation retained" :
           " — TUI membership is unavailable; conversation retained");
-      if (!selected.member) {
+      if (!selected.member && !namedPage) {
         const label = document.createElement("p");
         label.textContent = (childOfOpenTab ? "Child conversation in the highlighted TUI tab: " :
           "Retained browser selection (not counted as TUI-open): ") + selected.title + " · " + selected.id;
@@ -232,11 +233,15 @@
       (membershipKnown ? members.length + " verified open TUI tab(s). " :
       "TUI membership unavailable; open count unknown. ") +
       "Refresh does not reload the selected conversation or verify native focus.";
+    if (namedPage) status.textContent = membershipRefreshFailed ? "Recent sessions could not be refreshed." :
+      membershipKnown ? `${members.length} recent session(s), up to 16.${recentMore ? " More sessions may exist." : ""}` :
+      "Recent workspace sessions unavailable.";
     byId("manager-tab-count").textContent = membershipKnown ? String(openIds.size) : "Unknown";
     byId("manager-selection").textContent = selected?.title || selected?.id || "None";
     byId("manager-selection-details").textContent = selected ?
       (selected.title || selected.id) + " · " + selected.id + ". " + notice.textContent : "No browser conversation selected.";
-    byId("manager-membership-status").textContent = membershipRefreshFailed ? "Refresh failed; open count unknown." :
+    byId("manager-membership-status").textContent = namedPage ? status.textContent :
+      membershipRefreshFailed ? "Refresh failed; open count unknown." :
       membershipKnown ? `${openIds.size} verified open TUI tabs` : "Unavailable; open count unknown.";
     byId("manager-history-status").textContent = workspace.historySummary();
     workspace.updateRefresh();
@@ -348,6 +353,7 @@
       if (namedPage) {
         data = await named.readCatalog({ signal: controller.signal });
         if (controller.signal.aborted) return;
+        recentMore = data.hasEarlier === true;
       } else {
         const response = await fetch(endpoint, { credentials: "same-origin", headers: { Accept: "application/json" } });
         if (!response.ok) throw new Error("catalog");
@@ -362,6 +368,7 @@
       if (controller?.signal.aborted) return;
       membershipKnown = false;
       membershipRefreshFailed = true;
+      recentMore = false;
       members = []; // A failed refresh cannot leave a stale count or action.
       render();
       changed();
@@ -573,7 +580,8 @@
       }
       managerSource.value = source;
       byId("manager-archive-filter").hidden = source !== "history";
-      const label = historySource() ? "Refresh workspace history" : "Refresh TUI tabs";
+      const label = historySource() ? "Refresh workspace history" :
+        namedPage ? "Refresh recent sessions" : "Refresh TUI tabs";
       for (const button of [refresh, sessionRefresh]) {
         button.setAttribute("aria-label", label);
         button.title = label;
@@ -784,36 +792,46 @@
             excludeArchives ? "No non-archived sessions in this workspace project." : "No sessions in this workspace project.") :
           visible.length === 0 ? "No workspace history matches this search." :
           `${visible.length} of ${list.length} ${source === "archived" ? "archived" : "workspace history"} rows. Not TUI membership.` :
+          namedPage ? (!membershipKnown ? "Recent workspace sessions unavailable." :
+            members.length === 0 ? "No recent workspace sessions." :
+            visible.length === 0 ? "No recent sessions match this search." :
+            `${visible.length} of ${members.length} recent sessions.`) :
           !membershipKnown ? "Verified open TUI sessions unavailable." :
           members.length === 0 ? "No verified open TUI sessions." :
           visible.length === 0 ? "No open TUI sessions match this search." :
           `${visible.length} of ${members.length} open TUI tabs.`;
         return visible;
       },
-      async open(item) {
+      async open(item, event) {
         if (!ready || (manager() && !managerSessions())) return;
         if (namedPage) {
           const history = historySource();
           const snapshot = history ? historyRows : members;
           if (namedVerification || document.hidden || !snapshot.includes(item) ||
               (history ? historyState !== "valid" : !membershipKnown)) return;
-          if (manager()) {
-            show(lastChat);
-            views.find(button => button.dataset.view === view).focus();
-          } else if (panel === "sessions") toggleSessions();
-          if (!clearNamedSelection()) return;
+          if (!clearNamedSelection(false)) return;
           const verification = new AbortController();
-          namedVerification = verification;
-          const before = navigation;
-          render();
+          let before = navigation;
           try {
-            const verified = await named.verifySelection(item.id, { signal: verification.signal });
+            // The controller must consume this trusted click before render()
+            // replaces its attached row or a layout change moves focus.
+            const pending = named.verifySelection(item.id, { signal: verification.signal, event });
+            if (manager()) {
+              show(lastChat);
+              views.find(button => button.dataset.view === view).focus();
+            } else if (panel === "sessions") toggleSessions();
+            // Leaving the manager invalidates the old view. Only bind the
+            // new verification to the destination after that transition.
+            before = navigation;
+            namedVerification = verification;
+            render();
+            const verified = await pending;
             if (verification.signal.aborted || before !== navigation || document.hidden || manager() ||
                 snapshot !== (history ? historyRows : members)) return;
             if (verified !== true) { namedOpenFailed = true; return; }
             selected = {
               ...item,
-              origin: history ? "Explicit workspace history selection" : "Explicit TUI-tab click",
+              origin: history ? "Explicit workspace history selection" : "Explicit recent workspace selection",
               historyKind: history ? (item.archived ? "archived" : "history") : null,
               activeRoot: item.activeRoot ?? (members.some(value => value.id === item.id) ? item.id : null),
             };
@@ -950,7 +968,8 @@
   }
   if (namedPage) {
     // The separately reviewed named entry supplies these callbacks, not a
-    // URL or ambient authority. verifySelection(id, {signal}) resolves true
+    // URL or ambient authority. verifySelection(id, {signal, event}) is
+    // invoked synchronously in the actual click and resolves true
     // only for that exact, currently admitted scope. selectionChanged(null)
     // synchronously clears the view and revokes/cancels the local controller
     // scope; non-null is a display cross-check after verification, not a grant.

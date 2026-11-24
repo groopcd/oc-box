@@ -14,6 +14,10 @@ from unittest.mock import patch
 from oc_box import opencode_v2_io, web_native_pair, workspace_service
 
 NATIVE_SHA = "e6543f6e5c39c40971ba38afd1819ac852c29ac735b5a89065d3d148d47f27ad"
+_NATIVE_PINS = {
+    "2.3.2": NATIVE_SHA,
+    "2.4.1": "ec93043f18f8a6b4d8e71ec9260e292ba6f91b66b142782135d40f0b58b0c152",
+}
 
 
 def require(ok, message):
@@ -32,10 +36,10 @@ class WorkerCommand(list):
 
 
 class NativeFixture:
-    def __init__(self, request):
+    def __init__(self, request, *, version, project, home):
         self.request = request
         self.endpoint = request.endpoint["url"]
-        self.version = "2.3.2"
+        self.version, self.project, self.home = version, project, home
         self.pairs = 0
         self.identity = request("GET", "/api/info", deadline=monotonic() + 4)
         require(
@@ -99,10 +103,11 @@ class NativeFixture:
 
 
 @contextmanager
-def native_fixture(root, binary):
+def native_fixture(root, binary, *, version="2.3.2"):
+    expected = _NATIVE_PINS[version]
     with binary.open("rb") as stream:
         require(
-            hashlib.file_digest(stream, "sha256").hexdigest() == NATIVE_SHA,
+            hashlib.file_digest(stream, "sha256").hexdigest() == expected,
             "Pinned native OpenCode executable mismatch.",
         )
     home, project = root / "native-home", root / "native-project"
@@ -138,7 +143,7 @@ def native_fixture(root, binary):
     exit_info = {}
     with ExitStack() as cleanup:
         with patch.dict(os.environ, env, clear=True), chdir(project):
-            version = subprocess.run(
+            observed = subprocess.run(
                 [binary, "--version"],
                 env=env,
                 stdin=subprocess.DEVNULL,
@@ -146,8 +151,8 @@ def native_fixture(root, binary):
                 timeout=8,
             )
             require(
-                version.returncode == 0
-                and version.stdout.strip() == b"opencode v2.3.2",
+                observed.returncode == 0
+                and observed.stdout.strip() == f"opencode v{version}".encode("ascii"),
                 "Pinned native version response mismatch.",
             )
             request = cleanup.enter_context(
@@ -157,7 +162,7 @@ def native_fixture(root, binary):
                     exit_info=exit_info,
                 )
             )
-        yield NativeFixture(request)
+        yield NativeFixture(request, version=version, project=project, home=home)
     require(
         exit_info == {"code": 0, "forced": False},
         "The private native service did not drain.",

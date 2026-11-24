@@ -1,6 +1,7 @@
 """Synthetic loopback TLS, owner control pair, and listener teardown only."""
 
 import errno
+from html import unescape
 import json
 import os
 import re
@@ -179,14 +180,17 @@ class NamedSiteLifecycleTests(unittest.TestCase):
         from_role=None,
         document=False,
         extra_headers=(),
+        fetch_mode=None,
+        fetch_dest=None,
+        fetch_site=None,
     ):
         origin = getattr(self.site, role).value
         fields = [
             f"{method} {path} HTTP/1.1",
             f"Host: {origin.removeprefix('https://')}",
-            f"Sec-Fetch-Site: {'cross-site' if from_role else 'same-origin'}",
-            f"Sec-Fetch-Mode: {'navigate' if document else 'same-origin'}",
-            f"Sec-Fetch-Dest: {'document' if document else 'empty'}",
+            f"Sec-Fetch-Site: {fetch_site or ('cross-site' if from_role else 'same-origin')}",
+            f"Sec-Fetch-Mode: {fetch_mode or ('navigate' if document else 'same-origin')}",
+            f"Sec-Fetch-Dest: {fetch_dest or ('document' if document else 'empty')}",
         ]
         if not document or from_role:
             fields.append(f"Origin: {getattr(self.site, from_role or role).value}")
@@ -225,7 +229,7 @@ class NamedSiteLifecycleTests(unittest.TestCase):
 
         self.connector.side_effect = connect
 
-    def begin_proof(self, *, studio=False):
+    def begin_proof(self, *, studio=False, studio_ui=False):
         backend = proof.SyntheticBackend()
         backend.sizes = proof.SIZES
         backend.close = Mock(return_value=True)
@@ -269,6 +273,7 @@ class NamedSiteLifecycleTests(unittest.TestCase):
             login_document=document,
             expires_at=monotonic() + 10,
             studio=studio,
+            studio_ui=studio_ui,
         )
 
         head, page = self.exchange("workspace", entry.WORKSPACE_ENTRY, document=True)
@@ -500,6 +505,53 @@ class NamedSiteLifecycleTests(unittest.TestCase):
             self.assertEqual(send.call_args.kwargs["text"], "Synthetic send")
         self.assertTrue(sites.close())
         self.assertTrue(registry._closed)
+        self.assertGreaterEqual(self.lease.control.fileno(), 0)
+
+    def test_authenticated_studio_landing_has_no_iframe_and_serves_only_exact_pinned_assets(
+        self,
+    ):
+        sites, confirm, _ = self.begin_proof(studio=True, studio_ui=True)
+        self.assertEqual(self.exchange("workspace", "/", document=True), (b"", b""))
+        confirmed, _ = self.exchange("workspace", handoff.CONFIRM_PATH, **confirm)
+        cookie = self.cookie(confirmed, "__Host-ocbox-app")
+        head, body = self.exchange(
+            "workspace", "/", document=True, cookie=cookie, fetch_site="none"
+        )
+        self.assertTrue(head.startswith(b"HTTP/1.1 200"))
+        self.assertNotIn(b"Set-Cookie:", head)
+        self.assertIn(b"frame-src 'none'", head)
+        self.assertIn(b"Recent workspace sessions", body)
+        self.assertNotIn(b"<iframe", body)
+        self.assertNotIn(cookie.encode("ascii"), body)
+        self.assertIn(b'/oc-box/studio/web_named_studio_entry.mjs"', body)
+        match = re.search(rb'data-studio-page="([^"]+)"', body)
+        state = json.loads(unescape(match[1].decode("ascii")))
+        self.assertEqual(state["generation"], 0)
+        self.assertIsNone(state["sessionID"])
+        asset = "/oc-box/studio/web_named_studio_entry.mjs"
+        head, script = self.exchange(
+            "workspace", asset, cookie=cookie, fetch_mode="cors", fetch_dest="script"
+        )
+        self.assertTrue(head.startswith(b"HTTP/1.1 200"))
+        self.assertIn(b"Content-Type: text/javascript; charset=utf-8", head)
+        self.assertIn(b"createNamedStudioController", script)
+        for path, mode in (
+            (asset, "no-cors"),
+            (asset + "?reload=1", "cors"),
+            ("/api/provider", "cors"),
+        ):
+            with self.subTest(path=path, mode=mode):
+                self.assertEqual(
+                    self.exchange(
+                        "workspace",
+                        path,
+                        cookie=cookie,
+                        fetch_mode=mode,
+                        fetch_dest="script",
+                    ),
+                    (b"", b""),
+                )
+        self.assertTrue(sites.close())
         self.assertGreaterEqual(self.lease.control.fileno(), 0)
 
     def test_shutdown_interrupts_upstream_and_retains_owner_until_drain(self):

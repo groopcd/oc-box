@@ -31,6 +31,7 @@ _STUDIO_STATIC_FILES = (
     "web_studio_composer.css",
     "web_studio_composer.mjs",
     "web_named_studio_client.mjs",
+    "web_named_studio_entry.mjs",
 )
 
 _NAMED_STATIC_FILES = (
@@ -76,7 +77,9 @@ _WEB_RUNTIME_FILES = (
     "web_named_services.py",
     "web_named_site_lifecycle.py",
     "web_named_studio_chat.py",
+    "web_named_studio_catalog.py",
     "web_named_studio_selection.py",
+    "web_named_studio_ui.py",
     "web_named_transport.py",
     "web_bootstrap.py",
     "web_account_ingress.py",

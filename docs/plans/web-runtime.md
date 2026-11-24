@@ -105,8 +105,10 @@ of TLS-socket ownership to the upstream relay. Stopping the sites cancels
 registered upstream traffic before joining workers. A socket-level
 integration fixture covers both verified loopback listeners and the complete
 request path through logout, using a synthetic verifier, owner and upstream.
-The internal dispatcher may serve the exact reviewed login bundle described
-below. It is not yet a launcher entry point and does not serve Studio.
+The internal dispatcher may serve the exact reviewed login bundle and, only
+with explicit Studio composition on the verified 2.4.1 profile, the pinned
+iframe-free Studio document, recent catalog and scoped conversation/Send
+routes. It is not yet a launcher entry point.
 
 The unserved named HTTPS transport takes ownership of one accepted connection,
 selects a validated TLS context and role by the actual IPv4 loopback endpoint,
@@ -513,6 +515,19 @@ process, PAKE, TLS and browser cookies are real. No real vault, enrollment,
 workspace owner attach, Studio relay, Podman, VM or production listener is
 used. This does not enable named mode, change the existing guest link, or
 establish live owner-relay, security-review or publication acceptance.
+
+### Authenticated named Studio browser composition
+
+`tests/smoke_named_studio_https_browser.py` uses the real reserved TLS
+dispatcher and an unmodified, pinned OpenCode 2.4.1 in a private loopback-only
+network namespace. A synthetic owner and already-authenticated app grant
+isolate the post-login path. Chromium navigates to the pinned first-party
+document, fetches the real recent native session catalog, clicks a session,
+and displays its real native text projection. It also checks that the
+named page has no native iframe or script-readable cookie and keeps an
+empty composer disabled. The fixture replaces only native exec and owner
+provenance at the boundary; no provider/native agent runs. This smoke does
+not verify PAKE login, browser Send, live Podman, or launcher deployment.
 
 ## Isolated feasibility results
 

@@ -5,8 +5,9 @@ services, actual browser grant registry, and original verified owner lease.
 Only native 2.4.1 owners are eligible for this selection adapter. The caller
 must use the existing reserved workspace TLS worker and must close the
 selection registry with that site. The verified listener composes this adapter
-only with an explicit internal Studio option; no CLI or Studio landing route
-enables it. It does not work on a guest cookie.
+only with an explicit internal Studio option. Its authenticated landing page
+uses the same registry when the pinned UI is composed. No CLI activates it,
+and it does not work on a guest cookie.
 
 The trusted TLS transport must admit only an exact `POST
 /oc-box/studio/selection`, with a fixed maximum 512-byte body and no alias,

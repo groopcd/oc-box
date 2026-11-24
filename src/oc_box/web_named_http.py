@@ -2,9 +2,9 @@
 
 The exact prelogin, account protocol, confirm, logout and read-only native
 metadata and optional exact account assets share the same owner/account
-lifetime. An explicit trusted Studio composition adds selection, bounded
-conversation and text Send, not a landing page or generic native forwarding.
-No public command enables this listener.
+lifetime. An explicit trusted Studio composition adds the first-party page,
+selection, bounded conversation and text Send, not generic native forwarding.
+No public command enables this listener yet.
 """
 
 import socket
@@ -22,8 +22,10 @@ if __package__:
         web_named_listeners,
         web_named_services,
         web_named_site_lifecycle,
+        web_named_studio_catalog,
         web_named_studio_chat,
         web_named_studio_selection,
+        web_named_studio_ui,
         web_named_transport,
     )
 else:
@@ -37,8 +39,10 @@ else:
     import web_named_listeners
     import web_named_services
     import web_named_site_lifecycle
+    import web_named_studio_catalog
     import web_named_studio_chat
     import web_named_studio_selection
+    import web_named_studio_ui
     import web_named_transport
 
 
@@ -59,6 +63,7 @@ def start_named_http(
     account_assets=None,
     login_document=None,
     studio=False,
+    studio_ui=False,
 ):
     """Activate the exact prepared sites, without taking their lifetime away.
 
@@ -93,6 +98,7 @@ def start_named_http(
         login_document=login_document,
         account_assets=account_assets,
         studio=studio,
+        studio_ui=studio_ui,
     )
     sites.start(
         account=application.account_site,
@@ -131,12 +137,15 @@ class NamedHTTPApplication:
         account_assets=None,
         login_document=None,
         studio=False,
+        studio_ui=False,
     ):
         assets = web_named_account_assets
         if (
             type(reader) is not web_named_transport.NamedHTTPSReader
             or type(services) is not web_named_services.NamedServices
             or type(studio) is not bool
+            or type(studio_ui) is not bool
+            or (studio_ui and not studio)
             or services.entry._origins != reader._origins
             or (
                 account_assets is None
@@ -173,11 +182,16 @@ class NamedHTTPApplication:
             origins=reader._origins,
             app=services.application.ingress,
         )
-        self._selection = self._chat = None
+        self._selection = self._chat = self._catalog = self._ui = None
         if studio:
             self._selection = web_named_studio_selection.NamedStudioSelection(services)
             self._chat = web_named_studio_chat.NamedStudioChat(
                 services._owner, self._selection.registry
+            )
+            self._catalog = web_named_studio_catalog.NamedStudioCatalog(services._owner)
+        if studio_ui:
+            self._ui = web_named_studio_ui.NamedStudioUI(
+                services, self._selection.registry
             )
 
     def _retire_studio(self):
@@ -192,6 +206,7 @@ class NamedHTTPApplication:
             named=self._dispatch,
             account_assets=self._account_assets is not None,
             include_studio=self._chat is not None,
+            include_studio_ui=self._ui is not None,
         )
 
     def account_site(self, stream, *, check, deadline):
@@ -225,6 +240,7 @@ class NamedHTTPApplication:
             include_core=True,
             account_assets=self._account_assets is not None,
             include_studio=self._chat is not None,
+            include_studio_ui=self._ui is not None,
         )
         try:
             self._dispatch(stream, request, deadline, check=check)
@@ -270,6 +286,21 @@ class NamedHTTPApplication:
                 deadline,
                 check=owner_current if reply.status == 200 else check,
             )
+        elif (
+            request.role == "workspace"
+            and self._ui is not None
+            and (
+                request.target == "/"
+                or request.target.encode("ascii") in web_named_studio_ui.ASSET_PATHS
+            )
+        ):
+            self._ui.respond(stream, request, deadline, check=owner_current)
+        elif (
+            request.role == "workspace"
+            and self._catalog is not None
+            and request.target == web_named_studio_catalog.PATH
+        ):
+            self._catalog.respond(stream, request, deadline, check=owner_current)
         elif (
             request.role == "workspace"
             and self._selection is not None

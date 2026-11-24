@@ -306,7 +306,7 @@ def exercise_named(open_page, expect, approved, requests):
     expect(center).to_be_hidden()
     expect(page.get_by_role("tab", name="Status")).to_be_focused()
     page.get_by_role("tab", name="Sessions").click()
-    page.get_by_role("button", name="Refresh TUI tabs").click()
+    page.locator("#workspace-manager-session-refresh").click()
     rows = page.get_by_role("table", name="Workspace session results")
     expect(rows.get_by_role("row")).to_have_count(3)
     rows.get_by_role("button", name="Open in Studio: Synthetic Beta").click()
@@ -321,7 +321,7 @@ def exercise_named(open_page, expect, approved, requests):
     expect(page.locator("#workspace-search-status")).to_have_text(
         "Workspace history is not available in this browser."
     )
-    page.get_by_role("button", name="TUI tabs").click()
+    page.get_by_role("button", name="Recent", exact=True).click()
     alpha.click()
     page.evaluate("namedFixture.verify(true, 'ses_alpha', true)")
     page.evaluate("window.dispatchEvent(new PageTransitionEvent('pagehide'))")
