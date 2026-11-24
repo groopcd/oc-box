@@ -75,6 +75,7 @@ class _Worker:
     thread: Thread
     start_done: Event = field(default_factory=Event)
     activities: dict[WorkerActivity, _Activity] = field(default_factory=dict)
+    retirement: object = None
     ended: bool = False
     closed: bool = False
 
@@ -183,9 +184,24 @@ class AcceptedWorkers:
                     except (OSError, ValueError):
                         pass
                     row.ended = True
-                    if failed or not row.closed or row.activities:
+                    closed = not failed and row.closed and not row.activities
+                    retirement = row.retirement
+                    if not closed:
                         self._failed = True
                         self._fence(pending)
+                if retirement is not None:
+                    confirmed = False
+                    try:
+                        confirmed = retirement(closed) is True
+                    except Exception:
+                        pass
+                    finally:
+                        with self._lock:
+                            if confirmed:
+                                row.retirement = None
+                            else:
+                                self._failed = True
+                                self._fence(pending)
             finally:
                 self._notify(pending)
 
@@ -209,6 +225,31 @@ class AcceptedWorkers:
                     self._failed = True
                     self._fence(pending)
                 return False
+        finally:
+            self._notify(pending)
+
+    def on_retirement(self, use, finish):
+        """Register one trusted finish hook before this exchange can admit work.
+
+        The same worker invokes ``finish(confirmed)`` once, only after it can
+        no longer dispatch and after checking exact closure and activity
+        retirement. The hook cannot reopen work; return exact True only once
+        the borrowed admission is also accounted for. Drain joins the hook.
+        """
+        if not callable(finish):
+            return False
+        pending = []
+        try:
+            with self._lock:
+                row = self._live(use)
+                if row is None or row.retirement is not None:
+                    return False
+                if not _same(use.stream, row.stamp, disown=True):
+                    self._failed = True
+                    self._fence(pending)
+                    return False
+                row.retirement = finish
+                return True
         finally:
             self._notify(pending)
 
@@ -274,28 +315,45 @@ class AcceptedWorkers:
         finally:
             self._notify(pending)
 
+    def _cancel(self, use, row, pending):
+        # Caller holds the lock. The worker remains responsible for close.
+        same = row.closed or _same(use.stream, row.stamp, disown=True)
+        if not same:
+            self._failed = True
+        if use.cancelled:
+            return
+        use._cancelled.set()
+        if same and not row.closed:
+            try:
+                use.stream.shutdown(socket.SHUT_RDWR)
+            except OSError as error:
+                if error.errno != errno.ENOTCONN:
+                    self._failed = True
+                _same(use.stream, row.stamp, disown=True)
+        for entry in row.activities.values():
+            notice = entry.notice
+            self._notifications.add(notice)
+            pending.append(notice)
+
+    def interrupt(self, use):
+        """Wake only this exact exchange; not a retirement receipt."""
+        if type(use) is not AcceptedWorker:
+            return
+        pending = []
+        try:
+            with self._lock:
+                row = self._workers.get(use)
+                if row is not None and not row.ended:
+                    self._cancel(use, row, pending)
+                    if self._failed:
+                        self._fence(pending)
+        finally:
+            self._notify(pending)
+
     def _fence(self, pending):
-        # Caller holds the lock. Only the original accepted descriptor may
-        # be woken; its owning worker remains responsible for closing it.
         self._closed = True
         for use, row in self._workers.items():
-            same = row.closed or _same(use.stream, row.stamp, disown=True)
-            if not same:
-                self._failed = True
-            if use.cancelled:
-                continue
-            use._cancelled.set()
-            if same and not row.closed:
-                try:
-                    use.stream.shutdown(socket.SHUT_RDWR)
-                except OSError as error:
-                    if error.errno != errno.ENOTCONN:
-                        self._failed = True
-                    _same(use.stream, row.stamp, disown=True)
-            for entry in row.activities.values():
-                notice = entry.notice
-                self._notifications.add(notice)
-                pending.append(notice)
+            self._cancel(use, row, pending)
 
     def _notify(self, pending):
         # The trusted hooks may only latch or wake exact registered work.
