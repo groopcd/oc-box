@@ -2,9 +2,27 @@
 
 This is the contract for the source-only guest fixture
 [`tools/podman_uninstall_guest.py`](../../tools/podman_uninstall_guest.py),
-**not** an acceptance report or an uninstall entry point. No VM or Podman was
-run to produce this audit. The old 5.8.1 guest's unrelated runtime results do
-not validate inventory or cleanup.
+**not** an uninstall entry point. Source inspection and mocked tests below
+do not establish native acceptance. The old 5.8.1 guest's unrelated runtime
+results do not validate inventory or cleanup.
+
+## Recorded external guest evidence
+
+The outer runner observed the clean source
+`9750f43ec00bd82355dbc9e91070b73808e0d968` on a disposable Fedora 44
+KVM guest with no NIC. The RPM-pinned Podman 5.8.1 executable SHA-256 was
+`62009c395cee3d3cb2126c5934386e3e24bcc44952cdd0a5e07e847a0f0af3b1`.
+Keep the two runs distinct:
+
+| Sanitized receipt SHA-256 | Observed scope |
+| --- | --- |
+| `b690155001840f57d261e3c982c1b287e028d074cf7ffb58f7f958ad01ccff11` | First console-prefix attempt failed; no fixture observation or acceptance. |
+| `25681c6d1932d2c662c34e0e2e17ef021681f1108d5c1ab46005839c234fb039` | `descriptor_incomplete`: same private profile, exact container IDs, stopped named-subpath consumer and dependency, zero home mount count, and distinct descriptor were observed. Outside the rootless namespace the operand-free list did not establish mounted state (`mounted_catalog_available=false`). Populated planner admission stayed false. |
+
+The runner reported both guests reaped and their disposable disk, ISO, and
+QMP socket removed. Retain the sanitized receipts only. This evidence does
+not cover the new opt-in namespace diagnostic, positive mounted/alias
+controls, normal-host compatibility, or uninstall.
 
 ## What the pinned source establishes
 
@@ -52,7 +70,7 @@ policy to turn a refusal into a pass.
    | --- | --- |
    | `version` | integer `1` |
    | `purpose` | `oc-box-uninstall-podman-581` |
-   | `nonce` | fresh lowercase 32-hex run identifier, also the sole CLI argument |
+   | `nonce` | fresh lowercase 32-hex run identifier, also the first CLI argument |
    | `uid` | numeric `ocbox-probe` UID |
    | `boot_id` | this guest's lowercase kernel boot UUID |
    | `fixture_sha256` | lowercase SHA-256 of `tools/podman_uninstall_guest.py` from the pinned archive |
@@ -88,10 +106,56 @@ configuration path, not production admission of arbitrary storage overrides.
 It evaluates the empty mount list when available and compares an independent,
 distinct synthetic directory against the home volume by no-follow descriptor
 identity. Positive mounted and same-device bind-alias controls are deliberately
-**not provisioned**: the fixture does not enter another namespace or mount a
-container or directory to compensate for missing evidence. There is no
-start/stop, engine reset, removal, or directory cleanup. Everything is left
-on the disposable disk for the outer harness.
+**not provisioned**: the fixture does not mount a container or directory to
+compensate for missing evidence. There is no start/stop, engine reset, removal,
+or guest-side directory cleanup. On every outcome, including refusal and
+timeout, the outer harness stops and reaps the guest, unmounts any transfer
+media, and removes that run's disk, ISO, QMP socket and other temporary VM
+storage. Verify removal and retain **only the sanitized receipt**, not the
+guest disk or raw streams. Do not remove any shared base image.
+
+### Explicit namespace diagnostic
+
+On a **new disposable run**, append `--namespace-diagnostic` after the nonce to
+opt in. It is not invoked based on a direct failure, has no production CLI
+entry point, and preserves the direct result and exit code. The optional
+probe runs only after the synthetic inventory reached the read-only phase.
+It requires Python with Linux `setns`, `pidfd_open`, and descriptor `execve`
+support; there is no fallback if the guest cannot provide those operations.
+
+The pinned 5.8.1
+[`GetRootlessPauseProcessPidPath`](https://github.com/podman-container-tools/podman/blob/c6077f645788743258a1a749f8005b4fb3cbe533/pkg/util/utils_supported.go)
+and [native pause join](https://github.com/podman-container-tools/podman/blob/c6077f645788743258a1a749f8005b4fb3cbe533/pkg/rootless/rootless_linux.c)
+use `$XDG_RUNTIME_DIR/libpod/tmp/pause.pid`. Only the already existing pause
+process under the pinned **synthetic** runtime is eligible. The probe checks
+the private PID file, a live pidfd and process start stamp, the Podman pause
+ELF or source-listed root-owned `catatonit -P`, the parent UID/GID mappings,
+and typed user/mount namespace descriptors. It neither creates nor signals
+the pause process and does not invoke `podman unshare`.
+
+Each bounded child joins just those two descriptors before exec of the
+pinned Podman file descriptor. It verifies the entered namespaces, mapped
+IDs, root and no-follow configuration/storage identities. It supplies the
+same fixed fixture argv prefix and private environment, plus only the three
+rootless context markers derived from the verified mappings. The native
+`info` profile, complete regular/external ID catalogs, inspected container
+IDs and ownership context, named volume generation, and the original direct
+snapshot must corroborate the two matching **operand-free**
+`mount --format json` replies. A command failure, missing/empty stdout,
+scope change, disagreement, or uncertain child reap does not establish
+unmounted status. A successfully parsed `[]` may establish it **only**
+after those independent checks. No shell, networking namespace, retries,
+raw reply output, or mount operands are admitted. The probe has a
+40-second budget within the fixture deadline, five seconds per command,
+and the existing small-query and inspect byte caps. A failed child gets a
+bounded direct reap attempt; reaping uncertainty is a diagnostic refusal.
+
+On an opted-in run the receipt adds `namespace_probe` (`baseline_unverified`,
+`namespace_unavailable`, `namespace_unverified`, or `namespace_observed`),
+`namespace_context_verified`, and `namespace_both_observed_unmounted`.
+For example, the rootless probe may independently observe both unmounted
+while the direct fixture remains `descriptor_incomplete` with exit 1.
+These fields are diagnostic observations, never populated planner authority.
 
 ## Result and interpretation
 
@@ -104,7 +168,7 @@ never emitted.
 | `complete_diagnostic` | 0 | All intended **synthetic baseline** observations, including the two unmounted rows and distinct-descriptor negative control, agreed. Not uninstall acceptance or positive alias/mount proof. |
 | `descriptor_incomplete` | 1 | The named reference and dependency scan agreed, but mounted state or the negative descriptor comparison could not be established. |
 | `adapter_incomplete` | 1 | The populated inventory projection or a required fixture observation failed; populated planner admission must stay false. |
-| `provision_incomplete` | 1 | Setup or one checked synthetic step refused; optional `stage` is one of `store_setup`, `verify_empty`, `synthetic_image`, `local_home`, `volume_subpath`, `stopped_owner`, `stopped_consumer`, `freeze`. Retain the disk evidence. |
+| `provision_incomplete` | 1 | Setup or one checked synthetic step refused; optional `stage` is one of `store_setup`, `verify_empty`, `synthetic_image`, `local_home`, `volume_subpath`, `stopped_owner`, `stopped_consumer`, `freeze`. Retain only the sanitized receipt after verified teardown. |
 | `guard_refused` | 2 | Guest, owner, boot, source, executable, empty-home or invocation proof failed before provisioning. |
 
 When direct rootless overlay mount listing is unavailable, report it as

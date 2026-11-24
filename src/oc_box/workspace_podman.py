@@ -498,6 +498,29 @@ def _creation_time(value):
     return review._valid_created(value) and not value.startswith("0001-")
 
 
+def _mount_catalog(raw, observations, store_roots):
+    rows = _json(raw)
+    if type(rows) is not list or len(rows) > len(observations):
+        _fail("mount-catalog-unverified")
+    original = {item.ident: item.name for item in observations}
+    report = {}
+    for row in rows:
+        if type(row) is not dict or set(row) != {"id", "Names", "mountpoint"}:
+            _fail("mount-catalog-unverified")
+        ident, path = row["id"], row["mountpoint"]
+        if (
+            not review._matches(review._ENGINE_ID, ident)
+            or ident not in original
+            or ident in report
+            or row["Names"] != [original[ident]]
+            or not review._path(path)
+            or not any(path.startswith(root.path + "/") for root in store_roots)
+        ):
+            _fail("mount-catalog-unverified")
+        report[ident] = path
+    return tuple(sorted(report.items()))
+
+
 def _bound_profile(info, pinned_roots, storage_conf):
     """Project the exact schema against a caller's independently bound store."""
     if type(info) is not dict:
@@ -796,26 +819,7 @@ class _LocalInventory:
         code, raw = self._query(deadline, _SMALL, *_MOUNT_LIST, codes=(0, 125))
         if code == 125:
             return None
-        rows = _json(raw)
-        if type(rows) is not list or len(rows) > len(observations):
-            _fail("mount-catalog-unverified")
-        original = {item.ident: item.name for item in observations}
-        report = {}
-        for row in rows:
-            if type(row) is not dict or set(row) != {"id", "Names", "mountpoint"}:
-                _fail("mount-catalog-unverified")
-            ident, path = row["id"], row["mountpoint"]
-            if (
-                not review._matches(review._ENGINE_ID, ident)
-                or ident not in original
-                or ident in report
-                or row["Names"] != [original[ident]]
-                or not review._path(path)
-                or not any(path.startswith(root.path + "/") for root in self._roots[:2])
-            ):
-                _fail("mount-catalog-unverified")
-            report[ident] = path
-        return tuple(sorted(report.items()))
+        return _mount_catalog(raw, observations, self._roots[:2])
 
     def _volume(self, item):
         required = (

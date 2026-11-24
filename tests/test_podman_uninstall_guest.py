@@ -15,6 +15,7 @@ from unittest.mock import Mock, patch
 
 from oc_box import workspace_podman as native
 from tools import podman_uninstall_guest as guest
+from tools import podman_uninstall_namespace as namespace
 
 
 _NONCE = "f" * 32
@@ -462,6 +463,280 @@ class GuestFixtureTests(unittest.TestCase):
             [json.loads(line) for line in output.getvalue().splitlines()],
             [{"result": "guard_refused"}, {"result": "guard_refused"}],
         )
+
+    def test_namespace_diagnostic_is_explicit_and_does_not_change_base_exit(self):
+        permit = guest.Permit(_NONCE, _UID, _HOST_HASH)
+        with (
+            patch.object(guest, "_guard", return_value=(permit, {})),
+            patch.object(
+                guest, "_run_guest", return_value={"result": "descriptor_incomplete"}
+            ) as run,
+            redirect_stdout(io.StringIO()),
+        ):
+            self.assertEqual(guest.main([_NONCE]), 1)
+            run.assert_called_once_with(permit, {}, namespace_diagnostic=False)
+            run.reset_mock()
+            self.assertEqual(guest.main([_NONCE, "--namespace-diagnostic"]), 1)
+            run.assert_called_once_with(permit, {}, namespace_diagnostic=True)
+            run.reset_mock()
+            self.assertEqual(guest.main(["--namespace-diagnostic", _NONCE]), 2)
+            run.assert_not_called()
+        self.assertEqual(
+            guest._namespace_facts(None, None, "adapter_incomplete")["namespace_probe"],
+            "baseline_unverified",
+        )
+
+
+class NamespaceProbeTests(unittest.TestCase):
+    @contextmanager
+    def fixture(self, *, direct=False):
+        store = SyntheticStore()
+        store.mount_available = direct
+        with store.mocked():
+            self.assertEqual(store.engine.provision(), _IDS)
+            baseline = store.engine.scan()
+            yield store, baseline
+
+    def conduct(
+        self, store, baseline, *, mounts=(b"[]", b"[]"), fault=None, changed_exit=False
+    ):
+        commands = []
+        anchor = SimpleNamespace(uid=_UID, gid=4711, check=Mock())
+        rows = iter(mounts)
+
+        @contextmanager
+        def fenced(engine):
+            self.assertIs(engine, store.engine)
+            yield anchor
+            if changed_exit:
+                raise OSError("PRIVATE_FENCE_CLOSE")
+
+        def capture(actual_anchor, binary, argv, environment, pins, deadline, limit):
+            self.assertIs(actual_anchor, anchor)
+            self.assertIs(binary, store.executable)
+            self.assertEqual(argv[: len(store.engine.prefix)], store.engine.prefix)
+            self.assertEqual(
+                dict(environment),
+                {
+                    **store.engine.environment,
+                    "_CONTAINERS_USERNS_CONFIGURED": "done",
+                    "_CONTAINERS_ROOTLESS_UID": str(_UID),
+                    "_CONTAINERS_ROOTLESS_GID": "4711",
+                },
+            )
+            self.assertEqual(len(pins), len(store.engine.pins) + 3)
+            self.assertGreater(deadline, time.monotonic())
+            command = argv[len(store.engine.prefix) :]
+            self.assertTrue(native._read_only_query(command))
+            commands.append(command)
+            if fault is not None:
+                value = fault(command)
+                if value is not None:
+                    return value
+            if command == native._MOUNT_LIST:
+                return next(rows)
+            code, out = store.capture(
+                binary, argv, store.engine.environment, deadline, limit
+            )
+            self.assertEqual(code, 0)
+            return out
+
+        report = namespace.probe(store.engine, baseline, fence=fenced, capture=capture)
+        return report, commands, anchor
+
+    def test_namespace_observation_is_separate_and_rechecks_full_scope(self):
+        with self.fixture() as (store, baseline):
+            original = guest._report(baseline, _IDS, (True, True))
+            self.assertEqual(original["result"], "descriptor_incomplete")
+            observed, commands, anchor = self.conduct(store, baseline)
+            self.assertEqual(
+                observed,
+                {
+                    "namespace_probe": "namespace_observed",
+                    "namespace_context_verified": True,
+                    "namespace_both_observed_unmounted": True,
+                },
+            )
+            self.assertEqual(
+                {**original, **observed}["result"], "descriptor_incomplete"
+            )
+            self.assertFalse(original["mounted_catalog_available"])
+            self.assertIsNone(baseline.containers[0].mounted)
+            self.assertEqual(commands.count(native._MOUNT_LIST), 2)
+            self.assertEqual(commands.count(native._INFO), 2)
+            self.assertGreaterEqual(anchor.check.call_count, len(commands) * 2)
+
+    def test_blank_malformed_oversized_or_changed_mount_reports_never_mean_absence(
+        self,
+    ):
+        with self.fixture() as (store, baseline):
+            data = json.dumps(
+                [
+                    {
+                        "id": _IDS[0],
+                        "Names": [guest.OWNER],
+                        "mountpoint": store.roots[0].path + "/overlay/a/merged",
+                    }
+                ]
+            ).encode()
+            for rows in (
+                (b"", b"[]"),
+                (b"\n", b"[]"),
+                (b"{}", b"[]"),
+                (b" " * (native._SMALL + 1), b"[]"),
+                (b"[]", data),
+            ):
+                with self.subTest(rows=tuple(map(len, rows))):
+                    observed, _, _ = self.conduct(store, baseline, mounts=rows)
+                    self.assertEqual(
+                        observed["namespace_probe"], "namespace_unverified"
+                    )
+                    self.assertFalse(observed["namespace_both_observed_unmounted"])
+            observed, _, _ = self.conduct(store, baseline, mounts=(data, data))
+            self.assertTrue(observed["namespace_context_verified"])
+            self.assertFalse(observed["namespace_both_observed_unmounted"])
+
+    def test_direct_contradiction_and_fence_exit_failure_are_not_replaced(self):
+        with self.fixture(direct=True) as (store, baseline):
+            data = json.dumps(
+                [
+                    {
+                        "id": _IDS[0],
+                        "Names": [guest.OWNER],
+                        "mountpoint": store.roots[0].path + "/overlay/a/merged",
+                    }
+                ]
+            ).encode()
+            observed, _, _ = self.conduct(store, baseline, mounts=(data, data))
+            self.assertFalse(observed["namespace_context_verified"])
+            observed, _, _ = self.conduct(store, baseline, changed_exit=True)
+            self.assertFalse(observed["namespace_context_verified"])
+            self.assertFalse(observed["namespace_both_observed_unmounted"])
+
+    def test_namespace_scope_or_post_observation_change_fails_closed(self):
+        with self.fixture() as (store, baseline):
+
+            def fault(cmd):
+                if cmd == native._INFO:
+                    _, raw = store.capture(
+                        store.executable,
+                        (*store.engine.prefix, *cmd),
+                        store.engine.environment,
+                        time.monotonic() + 1,
+                        native._SMALL,
+                    )
+                    info = json.loads(raw)
+                    info["store"]["runRoot"] = "/foreign/PRIVATE_STORE"
+                    return json.dumps(info).encode()
+                return None
+
+            observed, commands, _ = self.conduct(store, baseline, fault=fault)
+            self.assertEqual(commands, [native._INFO])
+            self.assertEqual(observed["namespace_probe"], "namespace_unverified")
+            with patch.object(
+                store.engine, "scan", return_value=replace(baseline, volumes=())
+            ):
+                post, _, _ = self.conduct(store, baseline)
+            self.assertEqual(post["namespace_probe"], "namespace_unverified")
+            self.assertNotIn("PRIVATE_", json.dumps(observed))
+
+    def test_unavailable_anchor_does_not_dispatch_or_claim_mount_status(self):
+        with self.fixture() as (store, baseline):
+
+            def missing(_):
+                raise FileNotFoundError("PRIVATE_PAUSE_FILE")
+
+            capture = Mock()
+            observed = namespace.probe(
+                store.engine, baseline, fence=missing, capture=capture
+            )
+            capture.assert_not_called()
+            self.assertEqual(observed["namespace_probe"], "namespace_unavailable")
+            self.assertFalse(observed["namespace_both_observed_unmounted"])
+
+    def test_kernel_mapping_and_pause_process_shapes_are_strict(self):
+        normal = b"         0       2468          1\n         1     100000      65536\n"
+        self.assertEqual(
+            namespace._mappings(normal, _UID), ((0, _UID, 1), (1, 100000, 65536))
+        )
+        for bad in (
+            b"0 0 4294967295\n",
+            b"0 2469 1\n",
+            b"0 2468 2\n",
+            normal + b"2 200000 4\n",
+            normal + b"65537 100100 1\n",
+        ):
+            with self.assertRaises(namespace.ProofRefused):
+                namespace._mappings(bad, _UID)
+        raw = b"1234 (podman pause) S " + b"0 " * 18 + b"42 0\n"
+        self.assertEqual(namespace._process_stamp(raw, 1234), (b"podman pause", 42))
+        with self.assertRaises(namespace.ProofRefused):
+            namespace._process_stamp(raw, 2222)
+
+    def test_entered_namespace_mismatch_does_not_reach_store_observation(self):
+        anchor = SimpleNamespace(namespaces=(73, 74))
+
+        def metadata(path):
+            return SimpleNamespace(
+                st_dev=10, st_ino=73 if path.endswith("/user") else 99
+            )
+
+        with (
+            patch.object(namespace.os, "setns", create=True) as enter,
+            patch.object(namespace.os, "getresuid", return_value=(0, 0, 0)),
+            patch.object(namespace.os, "getresgid", return_value=(0, 0, 0)),
+            patch.object(namespace.os, "stat", side_effect=metadata),
+            patch.object(
+                namespace.os,
+                "fstat",
+                side_effect=lambda fd: SimpleNamespace(st_dev=10, st_ino=fd),
+            ),
+            patch.object(namespace.os, "open") as opened,
+            patch.object(namespace, "_joined_path") as binding,
+        ):
+            with self.assertRaises(namespace.ProofRefused):
+                namespace._join(anchor, (FixturePin("/synthetic/root"),))
+            self.assertEqual(
+                [call.args for call in enter.call_args_list],
+                [(73, namespace._USER), (74, namespace._MOUNT)],
+            )
+            opened.assert_not_called()
+            binding.assert_not_called()
+
+    def test_transport_refuses_failed_child_and_bounds_output_using_only_direct_pid(
+        self,
+    ):
+        @contextmanager
+        def tasks(_):
+            yield iter((1,))
+
+        binary = FixturePin("/synthetic/podman")
+        for output, status, expect_kill in (
+            (b"", [(8765, 125 << 8)], False),
+            (b"PRIVATE_OUTPUT", [(0, 0), (8765, 9)], True),
+        ):
+            with (
+                patch.object(namespace.os, "scandir", tasks),
+                patch.object(namespace.os, "pipe2", return_value=(41, 42)),
+                patch.object(namespace.os, "fdopen", return_value=io.BytesIO()),
+                patch.object(namespace.os, "open", return_value=43),
+                patch.object(namespace.os, "fork", return_value=8765),
+                patch.object(namespace.os, "pidfd_open", return_value=44),
+                patch.object(namespace.os, "set_blocking"),
+                patch.object(namespace.os, "read", return_value=output),
+                patch.object(namespace.os, "close"),
+                patch.object(namespace.os, "waitpid", side_effect=status),
+                patch.object(namespace.os, "kill") as kill,
+                patch.object(namespace, "_ready", return_value=True),
+            ):
+                with self.assertRaises(namespace.ProofRefused):
+                    namespace._capture(
+                        None, binary, (), {}, (), time.monotonic() + 2, 4
+                    )
+                if expect_kill:
+                    kill.assert_called_once_with(8765, namespace.signal.SIGKILL)
+                else:
+                    kill.assert_not_called()
 
 
 if __name__ == "__main__":

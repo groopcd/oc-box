@@ -4,6 +4,7 @@
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 import hashlib
+import importlib.util
 import io
 import json
 import os
@@ -462,13 +463,17 @@ class GuestEngine:
             and store["number"] == images
         )
 
-    def scan(self):
+    def scan(self, *, deadline=None):
         fixture = self
         native = self.native
         _require(self.phase in ("preflight", "read-only"))
+        scan_deadline = (
+            self.deadline if deadline is None else min(self.deadline, deadline)
+        )
 
         class FixtureInventory(native._LocalInventory):
             def _check(self):
+                native._remaining(scan_deadline)
                 fixture.check()
 
             def _info(self, deadline):
@@ -481,7 +486,9 @@ class GuestEngine:
             _require(executable is self.executable and environment is self.environment)
             _require(argv[:1] == ("--remote=false",))
             codes = (0, 125) if argv[1:] == native._MOUNT_LIST else (0, 1)
-            return self._query(argv[1:], deadline, limit, codes=codes)
+            return self._query(
+                argv[1:], min(deadline, scan_deadline), limit, codes=codes
+            )
 
         reader = FixtureInventory(
             self.uid,
@@ -721,7 +728,33 @@ def _report(snapshot, expected, descriptors):
     return {"result": result, **facts}
 
 
-def _run_guest(permit, mounts):
+def _namespace_facts(engine, snapshot, result):
+    unavailable = {
+        "namespace_probe": "namespace_unavailable",
+        "namespace_context_verified": False,
+        "namespace_both_observed_unmounted": False,
+    }
+    if result not in ("complete_diagnostic", "descriptor_incomplete"):
+        return {**unavailable, "namespace_probe": "baseline_unverified"}
+    try:
+        module = SOURCE / "tools/podman_uninstall_namespace.py"
+        with _descriptor(module, 0, leaf_owner=0) as (_, info):
+            _require(stat.S_ISREG(info.st_mode) and info.st_nlink == 1)
+            name = "_ocbox_uninstall_namespace_probe"
+            spec = importlib.util.spec_from_file_location(name, module)
+            _require(spec is not None and spec.loader is not None)
+            podman_uninstall_namespace = importlib.util.module_from_spec(spec)
+            sys.modules[name] = podman_uninstall_namespace
+            try:
+                spec.loader.exec_module(podman_uninstall_namespace)
+                return podman_uninstall_namespace.probe(engine, snapshot)
+            finally:
+                sys.modules.pop(name, None)
+    except (Exception, KeyboardInterrupt):
+        return unavailable
+
+
+def _run_guest(permit, mounts, *, namespace_diagnostic=False):
     # Trusted archive paths were checked before adding any checkout imports.
     sys.path.insert(0, str(SOURCE / "src"))
     from oc_box import workspace_podman as native
@@ -798,9 +831,12 @@ def _run_guest(permit, mounts):
             snapshot = engine.scan()
             engine._profile(2, 1)
             volume = next((row for row in snapshot.volumes if row.name == VOLUME), None)
-            return _report(
+            result = _report(
                 snapshot, expected, _alias_negative(native, root, volume, permit.uid)
             )
+            if namespace_diagnostic:
+                result.update(_namespace_facts(engine, snapshot, result["result"]))
+            return result
     except (Exception, KeyboardInterrupt):
         if phase == "provision_incomplete":
             return {
@@ -813,9 +849,14 @@ def _run_guest(permit, mounts):
 def main(argv=None):
     args = sys.argv[1:] if argv is None else argv
     try:
-        _require(len(args) == 1 and type(args[0]) is str and _TOKEN.fullmatch(args[0]))
+        _require(
+            len(args) in (1, 2)
+            and type(args[0]) is str
+            and _TOKEN.fullmatch(args[0])
+            and (len(args) == 1 or args[1] == "--namespace-diagnostic")
+        )
         permit, mounts = _guard(args[0])
-        result = _run_guest(permit, mounts)
+        result = _run_guest(permit, mounts, namespace_diagnostic=len(args) == 2)
     except (Exception, KeyboardInterrupt):
         result = {"result": "guard_refused"}
     print(json.dumps(result, sort_keys=True))
