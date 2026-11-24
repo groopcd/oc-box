@@ -105,3 +105,9 @@ kill. This validates the exact native auth exchanges and local managed
 transport, not original gateway/listener owner attestation, native logout
 continuity, browser composition, or Podman/host acceptance. None of those
 remaining prerequisites is waived.
+
+The protected-use fixture also verifies a fresh managed cookie check for
+an already confirmed page, then omits the browser cookie on the next use
+and proves the old page grant cannot revive. That is a cookie-removal
+control, not evidence that native would reject a separately replayed
+pre-logout cookie or immediately cancel an already admitted exchange.

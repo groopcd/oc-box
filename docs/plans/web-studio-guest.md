@@ -123,10 +123,14 @@ to a standalone backend on failure.
    `start(binding, app=..., page=..., cancel=..., deadline=...)`. Keep the
    pair in the confirming document's memory, out of URLs, cookies, shared
    web storage, native iframe and logs. A new document must confirm anew.
-   Only a returned `(use, grant)` with the exact live grant permits work;
-   `(use, None)` is an already registered refusal. Use `current(use)` before
-   and during native startup and downstream delivery. It is not an atomic
-   guarantee around an external write. A subsequent selection adapter must
+    A returned `(use, grant)` reserves the exchange, not native dispatch;
+    `(use, None)` is an already registered refusal. On the exact use, call
+    `authorize_native(use, grant, cookie=...)` once with that request's vetted
+    Cookie header, or `None` when absent. A denial fences and cancels this
+    page/grant; a later sign-in cannot revive it. Recheck `native_current(use)`
+    before and during protected native startup and downstream delivery. A
+    successful check applies to that exchange only and is not atomic with
+    a later logout or an external write. A subsequent selection adapter must
    separately verify exact session access and page selection, without
    inferring authority from a native focus report or a request ID.
 

@@ -182,7 +182,7 @@ def _exercise(fixture):
         children.append(child)
         return child
 
-    def confirm(value, *, origin=binding.origin):
+    def confirm(value, *, origin=binding.origin, return_bootstrap=False):
         body = admission.offer(binding).value.encode("ascii")
         request = guest.ConfirmationRequest(
             "POST",
@@ -218,7 +218,7 @@ def _exercise(fixture):
             admission.finish(use, confirmed=attempt.cleanup_confirmed),
             "Guest fixture use could not be retired.",
         )
-        return bootstrap is not None
+        return bootstrap if return_bootstrap else bootstrap is not None
 
     try:
         with patch.object(subprocess, "Popen", side_effect=local_popen):
@@ -259,6 +259,47 @@ def _exercise(fixture):
                 is None
                 and len(children) == 6,
                 "A public route reached the native verifier transport.",
+            )
+            bootstrap = confirm(cookie, return_bootstrap=True)
+            require(bootstrap is not None, "Synthetic page confirmation refused.")
+
+            def authorize(value):
+                attempt = native.ManagedGuestCookieVerifier(
+                    box, scope, observe_gateway=observe
+                )
+                registered = admission.start(
+                    binding,
+                    app=bootstrap.app,
+                    page=bootstrap.page,
+                    cancel=attempt.cancel,
+                    deadline=monotonic() + 8,
+                )
+                if registered is None:
+                    return None
+                use, grant = registered
+                require(
+                    grant is bootstrap.grant and not admission.native_current(use),
+                    "The guest app/page pair incorrectly authorized native work.",
+                )
+                token = pending.set(attempt)
+                try:
+                    accepted = admission.authorize_native(use, grant, cookie=value)
+                finally:
+                    pending.reset(token)
+                require(
+                    admission.native_current(use) is accepted
+                    and attempt.cleanup_confirmed
+                    and admission.finish(use, confirmed=True),
+                    "Native continuity or managed retirement was unconfirmed.",
+                )
+                return accepted
+
+            require(
+                authorize(cookie) is True
+                and authorize(None) is False
+                and authorize(cookie) is None
+                and len(children) == 10,
+                "An authenticated page survived cookie removal or was revived.",
             )
         require(
             all(child.returncode == 0 for child in children),
