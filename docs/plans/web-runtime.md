@@ -79,8 +79,14 @@ never includes a ticket in a URL or accepts a password field. The account
 step yields only a bootstrap cookie; the reviewed login assets, response
 writer and live routing still need to be connected.
 
-`tests/smoke_named_bootstrap_browser.py` exercises these exact handlers with
-Chromium on two synthetic loopback HTTPS sites. A fresh browser home trusts
+The prelogin-only transport reuses the already validated TLS contexts
+and admits only these two exact documents and their fixed body shapes.
+It checks the owner through response delivery. It is not yet a dispatcher
+for login assets, handoff, Studio, or native API traffic.
+
+`tests/smoke_named_bootstrap_browser.py` exercises these handlers and the
+bounded TLS transport with Chromium on two synthetic loopback HTTPS sites.
+A fresh browser home trusts
 only the test CA added to its private NSS database for this fixture. The test
 verifies a real cross-site form submission, host-only bootstrap cookies, and
 replay refusal without certificate bypass or changes to the operator's trust.

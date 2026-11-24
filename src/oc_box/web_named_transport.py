@@ -11,16 +11,25 @@ from dataclasses import dataclass
 from time import monotonic
 
 if __package__:
-    from . import web_local_origins, web_named_headers
+    from . import (
+        web_local_origins,
+        web_named_bootstrap,
+        web_named_headers,
+        web_named_listeners,
+    )
 else:
     import web_local_origins
+    import web_named_bootstrap
     import web_named_headers
+    import web_named_listeners
 
 _REQUEST_TIMEOUT = 5.0
 _HEAD_LIMIT = 16384  # Includes the request line and the terminating empty line.
 _BODY_LIMIT = 8192
 _CONFIRM_SIZE = 54
+_ENTRY_FORM_SIZE = 50
 _RESPONSE_LIMIT = 8192
+_DOCUMENT_LIMIT = 48 * 1024
 _HEAD_END = b"\r\n\r\n"
 _LENGTH = re.compile(r"0|[1-9][0-9]{0,3}")
 _UNSUPPORTED_FIELDS = frozenset(
@@ -47,6 +56,10 @@ _ROUTES = {
             (b"GET", b"/api/session/active"),
         )
     ),
+}
+_ENTRY_ROUTES = {
+    "account": (b"POST", web_named_bootstrap.ACCOUNT_ENTRY.encode("ascii")),
+    "workspace": (b"GET", web_named_bootstrap.WORKSPACE_ENTRY.encode("ascii")),
 }
 _RESPONSE_STATUS = {
     200: b"200 OK",
@@ -103,14 +116,19 @@ def _recv(stream, size, deadline):
     return data
 
 
-def _head(lines, role, origin):
+def _head(lines, role, origin, *, entry_origins=None):
     if len(lines) > web_named_headers._MAX_FIELDS + 1:
         _refuse()
     start = lines[0].split(b" ", 2)
+    entry = entry_origins is not None and tuple(start[:2]) == _ENTRY_ROUTES[role]
     if (
         len(start) != 3
         or start[2] != b"HTTP/1.1"
-        or tuple(start[:2]) not in _ROUTES[role]
+        or (
+            not entry
+            if entry_origins is not None
+            else tuple(start[:2]) not in _ROUTES[role]
+        )
     ):
         _refuse()
     method, target = start[0].decode("ascii"), start[1].decode("ascii")
@@ -125,14 +143,32 @@ def _head(lines, role, origin):
     # a dictionary or waiting for the body. The caller has completed TLS.
     headers = tuple(headers)
     web_named_headers.admit_headers(
-        origin=origin, headers=headers, method=method, actual_tls=True
+        origin=origin,
+        headers=headers,
+        method=method,
+        actual_tls=True,
+        form_origin=entry_origins.workspace if entry and role == "account" else None,
     )
     fields = {name.lower(): value.strip(" ") for name, value in headers}
+    sites = (
+        ("cross-site",)
+        if entry and role == "account"
+        else ("none", "same-origin")
+        if entry
+        else (None, "same-origin")
+    )
     if (
         fields.keys() & _UNSUPPORTED_FIELDS
         or any(name.startswith("sec-websocket-") for name in fields)
         or fields.get("connection", "close").lower() not in ("close", "keep-alive")
-        or fields.get("sec-fetch-site") not in (None, "same-origin")
+        or fields.get("sec-fetch-site") not in sites
+        or (
+            entry
+            and (
+                fields.get("sec-fetch-mode") != "navigate"
+                or fields.get("sec-fetch-dest") != "document"
+            )
+        )
     ):
         _refuse()
 
@@ -147,7 +183,13 @@ def _head(lines, role, origin):
         size = 0
     else:
         _refuse()
-    if role == "account":
+    if entry and role == "account":
+        if (
+            size != _ENTRY_FORM_SIZE
+            or fields.get("content-type") != "application/x-www-form-urlencoded"
+        ):
+            _refuse()
+    elif role == "account":
         if not size or fields.get("content-type") != "application/json":
             _refuse()
     elif target == "/oc-box/confirm":
@@ -158,7 +200,7 @@ def _head(lines, role, origin):
     return method, target, headers, size
 
 
-def _read(stream, *, role, origin, deadline):
+def _read(stream, *, role, origin, deadline, entry_origins=None):
     wire = bytearray()
     scan = 0
     while (end := wire.find(_HEAD_END, scan)) < 0:
@@ -167,7 +209,9 @@ def _read(stream, *, role, origin, deadline):
         scan = max(0, len(wire) - len(_HEAD_END) + 1)
         wire.extend(_recv(stream, min(4096, _HEAD_LIMIT - len(wire)), deadline))
     lines = bytes(wire[:end]).split(b"\r\n", web_named_headers._MAX_FIELDS + 1)
-    method, target, headers, size = _head(lines, role, origin)
+    method, target, headers, size = _head(
+        lines, role, origin, entry_origins=entry_origins
+    )
     body = wire[end + len(_HEAD_END) :]
     if len(body) > size:
         _refuse()
@@ -210,6 +254,10 @@ def _write_response(stream, response, deadline, *, check=None):
         + _HEAD_END
         + response.body
     )
+    _write_wire(stream, wire, deadline, check=check)
+
+
+def _write_wire(stream, wire, deadline, *, check=None):
     with memoryview(wire) as data:
         offset = 0
         while offset < len(data):
@@ -240,6 +288,23 @@ class NamedHTTPSReader:
             workspace_cert=workspace_cert,
             workspace_key=workspace_key,
         )
+        self._configure(origins, tls)
+
+    @classmethod
+    def from_reservation(cls, reservation):
+        """Reuse the already verified per-site TLS contexts, not certificate paths."""
+        if (
+            type(reservation) is not web_named_listeners.ReservedProfile
+            or type(reservation.origins) is not web_local_origins.LocalOrigins
+            or type(reservation.tls) is not web_local_origins.LocalTLS
+        ):
+            _refuse()
+        reader = cls.__new__(cls)
+        reader._configure(reservation.origins, reservation.tls)
+        return reader
+
+    def _configure(self, origins, tls):
+        self._origins = origins
         self._endpoints = {
             origins.account_bind: ("account", origins.account, tls.account),
             origins.workspace_bind: ("workspace", origins.workspace, tls.workspace),
@@ -271,7 +336,86 @@ class NamedHTTPSReader:
         """
         self._exchange(peer, handlers={"account": account, "workspace": workspace})
 
-    def _exchange(self, peer, *, handlers, native=None):
+    def respond_prelogin(self, peer, *, ingress, login_document):
+        """Serve the two exact bootstrap documents using trusted local HTML.
+
+        ``login_document`` is a prevalidated static artifact supplied by the
+        launcher, never request input. No other routes are dispatched by this
+        method and no native credential or grant is issued.
+        """
+
+        def prelogin(stream, request, deadline):
+            if (
+                type(ingress) is not web_named_bootstrap.NamedBootstrapIngress
+                or ingress._origins != self._origins
+                or type(login_document) is not bytes
+                or not 0 < len(login_document) <= _DOCUMENT_LIMIT
+            ):
+                _refuse()
+            arguments = dict(
+                method=request.method,
+                target=request.target,
+                headers=request.headers,
+                body=request.body,
+                actual_tls=True,
+            )
+            account_origin = self._origins.account.value
+            try:
+                if (
+                    request.role == "workspace"
+                    and request.target == web_named_bootstrap.WORKSPACE_ENTRY
+                ):
+                    page = ingress.workspace(**arguments)
+                    body, cookie = page.html, page.cookie
+                    cookie_name = "__Host-ocbox-bootstrap"
+                    policy = (
+                        "default-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action "
+                        + account_origin
+                    )
+                elif (
+                    request.role == "account"
+                    and request.target == web_named_bootstrap.ACCOUNT_ENTRY
+                ):
+                    body, cookie = login_document, ingress.account(**arguments).cookie
+                    cookie_name = "__Host-ocbox-account"
+                    policy = (
+                        "default-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'; "
+                        "script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; connect-src 'self'"
+                    )
+                else:
+                    _refuse()
+            except web_named_headers.NamedRequestError:
+                _write_response(
+                    stream,
+                    NamedResponse(403, b'{"error":"Named entry refused."}'),
+                    deadline,
+                )
+                return
+            if (
+                not 0 < len(body) <= _DOCUMENT_LIMIT
+                or re.fullmatch(
+                    re.escape(cookie_name)
+                    + r"=[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]; Secure; HttpOnly; SameSite=Strict; Path=/",
+                    cookie,
+                )
+                is None
+            ):
+                _refuse()
+            wire = (
+                b"HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Type: text/html; charset=utf-8\r\n"
+                b"Cache-Control: no-store\r\nReferrer-Policy: origin\r\n"
+                b"X-Content-Type-Options: nosniff\r\nCross-Origin-Resource-Policy: same-origin\r\n"
+                + f"Content-Security-Policy: {policy}\r\nSet-Cookie: {cookie}\r\n".encode(
+                    "ascii"
+                )
+                + f"Content-Length: {len(body)}\r\n\r\n".encode("ascii")
+                + body
+            )
+            _write_wire(stream, wire, deadline, check=ingress._live)
+
+        self._exchange(peer, handlers=None, prelogin=prelogin)
+
+    def _exchange(self, peer, *, handlers, native=None, prelogin=None):
         deadline = monotonic() + _REQUEST_TIMEOUT
         try:
             with peer:
@@ -302,13 +446,22 @@ class NamedHTTPSReader:
                         "http/1.1",
                     ):
                         _refuse()
-                    request = _read(stream, role=role, origin=origin, deadline=deadline)
-                    if handlers is None and native is None:
+                    request = _read(
+                        stream,
+                        role=role,
+                        origin=origin,
+                        deadline=deadline,
+                        entry_origins=self._origins if prelogin is not None else None,
+                    )
+                    if handlers is None and native is None and prelogin is None:
                         return request
                     _remaining(deadline)
                     try:
                         if native is not None:
                             native(stream, request, deadline)
+                            return
+                        if prelogin is not None:
+                            prelogin(stream, request, deadline)
                             return
                         response = handlers[role](request, deadline=deadline)
                     except Exception:  # noqa: BLE001 - never echo handler diagnostics.

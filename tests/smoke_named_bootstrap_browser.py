@@ -5,18 +5,18 @@ Run from the checkout with Playwright, OpenSSL and certutil (NSS tools):
   PYTHONPATH=src uv run --no-project --with playwright python -B \
     tests/smoke_named_bootstrap_browser.py --chromium /path/to/chromium
 
-Only a fresh browser home trusts the test CA. A private loopback HTTP fixture
-calls the exact unserved bootstrap handlers; it does not start OpenCode or
-Podman, serve a password field, or establish production listener acceptance.
+Only a fresh browser home trusts the test CA. A private loopback fixture
+uses the bounded named TLS transport and bootstrap handlers; it does not
+start OpenCode or Podman, serve a password field, or establish production
+listener acceptance.
 """
 
 import argparse
 import contextlib
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import os
 from pathlib import Path
 import shutil
-import ssl
+import socket
 import subprocess
 import tempfile
 import threading
@@ -29,6 +29,8 @@ from oc_box import (
     web_local_origins,
     web_named_bootstrap,
     web_named_headers,
+    web_named_listeners,
+    web_named_transport,
 )
 
 
@@ -128,64 +130,26 @@ def material(root, hosts):
     return ca, choices
 
 
-def fixture_handler(ingress, role):
-    class Handler(BaseHTTPRequestHandler):
-        protocol_version = "HTTP/1.1"
-
-        def log_message(self, *_):
+def accept_fixture(listener, reader, ingress, stop):
+    while not stop.is_set():
+        try:
+            peer, _ = listener.accept()
+        except TimeoutError:
+            continue
+        try:
+            reader.respond_prelogin(
+                peer,
+                ingress=ingress,
+                login_document=b"<!doctype html><h1>Account bootstrap accepted</h1>",
+            )
+        except web_named_headers.NamedRequestError:
             pass
 
-        def _reply(self, status, body, headers=()):
-            self.send_response_only(status)
-            for name, value in headers:
-                self.send_header(name, value)
-            self.send_header("Content-Length", str(len(body)))
-            self.send_header("Connection", "close")
-            self.end_headers()
-            self.close_connection = True
-            self.wfile.write(body)
 
-        def do_GET(self):
-            self._dispatch(b"")
-
-        def do_POST(self):
-            if self.headers.get_all("Content-Length") != ["50"]:
-                self._reply(403, b"Refused")
-                return
-            self.connection.settimeout(3)
-            self._dispatch(self.rfile.read(50))
-
-        def _dispatch(self, body):
-            args = dict(
-                method=self.command,
-                target=self.path,
-                headers=list(self.headers.raw_items()),
-                body=body,
-                actual_tls=isinstance(self.connection, ssl.SSLSocket),
-            )
-            try:
-                if role == "workspace":
-                    reply = ingress.workspace(**args)
-                    self._reply(200, reply.html, reply.headers())
-                else:
-                    accepted = ingress.account(**args)
-                    self._reply(
-                        200,
-                        b"<!doctype html><h1>Account bootstrap accepted</h1>",
-                        (
-                            ("Content-Type", "text/html; charset=utf-8"),
-                            ("Cache-Control", "no-store"),
-                            (
-                                "Content-Security-Policy",
-                                "default-src 'none'; frame-ancestors 'none'",
-                            ),
-                            ("Set-Cookie", accepted.cookie),
-                        ),
-                    )
-            except web_named_headers.NamedRequestError:
-                self._reply(403, b"Refused")
-
-    return Handler
+def stop_fixture(worker, stop):
+    stop.set()
+    worker.join(timeout=6)
+    require(not worker.is_alive(), "The synthetic TLS fixture did not drain.")
 
 
 def exercise(root, browser_exe):
@@ -214,15 +178,18 @@ def exercise(root, browser_exe):
 
     with contextlib.ExitStack() as cleanup:
         servers = [
-            cleanup.enter_context(
-                ThreadingHTTPServer(("127.0.0.1", 0), BaseHTTPRequestHandler)
-            )
+            cleanup.enter_context(socket.socket(socket.AF_INET, socket.SOCK_STREAM))
             for _ in range(2)
         ]
+        for server in servers:
+            server.bind(("127.0.0.1", 0))
         origins = web_local_origins.LocalOrigins(
-            *(server.server_port for server in servers)
+            *(server.getsockname()[1] for server in servers)
         )
         tls = web_local_origins.check_tls(origins, **pairs)
+        reader = web_named_transport.NamedHTTPSReader.from_reservation(
+            web_named_listeners.ReservedProfile(origins, tls, *servers)
+        )
         binding = web_admission.WebBinding("a" * 32, "b" * 32, origins.workspace.value)
         bootstrap = web_bootstrap.BrowserBootstrap(origins=origins, binding=binding)
         cleanup.callback(bootstrap.close)
@@ -232,17 +199,16 @@ def exercise(root, browser_exe):
             bootstrap=bootstrap,
             owner_current=lambda actual: actual == binding,
         )
-        for server, role in zip(servers, ("account", "workspace")):
-            server.RequestHandlerClass = fixture_handler(ingress, role)
-            server.socket = getattr(tls, role).wrap_socket(
-                server.socket, server_side=True
-            )
+        stop = threading.Event()
+        for server in servers:
+            server.listen(4)
+            server.settimeout(0.1)
             worker = threading.Thread(
-                target=server.serve_forever, kwargs={"poll_interval": 0.05}
+                target=accept_fixture,
+                args=(server, reader, ingress, stop),
             )
             worker.start()
-            cleanup.callback(worker.join, 5)
-            cleanup.callback(server.shutdown)
+            cleanup.callback(stop_fixture, worker, stop)
 
         account = origins.account.value + web_named_bootstrap.ACCOUNT_ENTRY
         workspace = origins.workspace.value + web_named_bootstrap.WORKSPACE_ENTRY
