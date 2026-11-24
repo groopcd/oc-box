@@ -8,6 +8,8 @@ write. Neither request credentials nor protocol diagnostics belong in logs.
 import base64
 import json
 import math
+import socket
+import ssl
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -52,14 +54,23 @@ _BODY_SIZES = {
 MAX_BODY_BYTES = max(_BODY_SIZES.values())
 _MAX_TARGET = max(map(len, _SHAPES))
 _MAX_REPLY_BYTES = 1024
+_VERIFIED = b'{"verified":true}'
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class _FinalWrite:
+    approval: web_enrollment.EnrollmentApproval
+    http: object
+    stream: socket.socket | None
 
 
 @dataclass(frozen=True, slots=True, repr=False)
 class EnrollmentReply:
     status: int
     body: bytes
-    _write_check: Callable[[], None] | None = None
+    _write_check: Callable[["EnrollmentReply"], None] | None = None
     _abort: Callable[[], None] | None = None
+    _final: _FinalWrite | None = None
 
     @property
     def headers(self) -> tuple[tuple[str, str], ...]:
@@ -68,11 +79,13 @@ class EnrollmentReply:
     def check_write(self):
         """The trusted writer calls this in addition to its transport gate."""
         if self._write_check is not None:
-            self._write_check()
+            self._write_check(self)
 
     def abort_write(self):
         """Fence the approval on a failed or uncertain write; never replay."""
-        if self._abort is not None:
+        if type(self._final) is _FinalWrite:
+            self._final.approval._abort_final_reply(self._final.http, self)
+        elif self._abort is not None:
             self._abort()
 
 
@@ -93,8 +106,14 @@ def write_enrollment_reply(stream, reply, deadline, *, check):
         import web_named_transport
     if type(reply) is not EnrollmentReply:
         raise web_named_headers.NamedRequestError()
+    final = reply._final
+    writer = object() if type(final) is _FinalWrite else None
     delivered = False
     try:
+        if writer is not None:
+            cutoff = final.approval._begin_final_write(final.http, reply, writer)
+            if cutoff is None:
+                raise web_named_headers.NamedRequestError()
         if (
             type(reply.status) is not int
             or reply.status not in (200, 403)
@@ -103,23 +122,49 @@ def write_enrollment_reply(stream, reply, deadline, *, check):
             or (reply.status == 403 and reply is not _REFUSAL)
             or (
                 reply.status == 200
-                and (not callable(reply._write_check) or not callable(reply._abort))
+                and (
+                    not callable(reply._write_check)
+                    or (final is None and not callable(reply._abort))
+                )
+            )
+            or (reply.body == _VERIFIED and writer is None)
+            or (
+                final is not None
+                and (
+                    writer is None
+                    or reply.status != 200
+                    or reply.body != _VERIFIED
+                    or type(stream) not in (socket.socket, ssl.SSLSocket)
+                    or stream is not final.stream
+                )
             )
             or not callable(check)
+            or type(deadline) not in (int, float)
+            or not 0 < deadline < math.inf
         ):
             raise web_named_headers.NamedRequestError()
+        if writer is not None:
+            deadline = min(deadline, cutoff)
 
         def current():
             web_enrollment._checkpoint(check, deadline)
             reply.check_write()
             web_enrollment._checkpoint(check, deadline)
 
+        if writer is not None:
+            current()
         web_named_transport._write_response(
             stream,
             web_named_transport.NamedResponse(reply.status, reply.body),
             deadline,
             check=current,
         )
+        if writer is not None:
+            current()
+            if not final.approval._end_final_write(
+                final.http, writer, deadline=deadline
+            ):
+                raise web_named_headers.NamedRequestError()
         delivered = True
         return reply.status
     except Exception:
@@ -127,7 +172,11 @@ def write_enrollment_reply(stream, reply, deadline, *, check):
     finally:
         if not delivered:
             try:
-                reply.abort_write()
+                if writer is not None:
+                    # A copy or replay cannot cancel another writer's claim.
+                    final.approval._end_final_write(final.http, writer)
+                elif final is None and reply.body != _VERIFIED:
+                    reply.abort_write()
             except Exception:
                 # Never return a successful verdict or a second HTTP frame.
                 # The approval owns the sticky teardown fence.
@@ -176,7 +225,7 @@ def _response_body(target, result):
         ):
             return None
         return _json({"ke2": _b64(result.ke2), "context": _b64(result.context)})
-    return b'{"verified":true}' if result is True else None
+    return _VERIFIED if result is True else None
 
 
 def _b64(value):
@@ -193,8 +242,12 @@ class EnrollmentIngress:
             origins
         ):
             raise ValueError("Invalid named enrollment ingress configuration.")
+        http = approval._bind_http()
+        if http is None:
+            raise ValueError("Invalid named enrollment ingress configuration.")
         self._account = origins.account
         self._approval = approval
+        self._http = http
 
     def __call__(
         self,
@@ -206,6 +259,7 @@ class EnrollmentIngress:
         actual_tls,
         check,
         deadline,
+        stream=None,
     ) -> EnrollmentReply:
         """Check raw fields; no authorization is obtained from a body or URL.
 
@@ -213,6 +267,8 @@ class EnrollmentIngress:
         request/proxy data. ``check`` and the absolute monotonic ``deadline``
         are trusted transport inputs. A successful response is provisional
         until the writer checks it before/during/after its one bounded write.
+        The final route binds to the original trusted stream now, not at
+        write time. Transport-free fixtures can never release a host result.
         """
         if (
             type(method) is not str
@@ -226,6 +282,10 @@ class EnrollmentIngress:
             or not callable(check)
             or type(deadline) not in (int, float)
             or not 0 < deadline < math.inf
+            or (
+                stream is not None
+                and type(stream) not in (socket.socket, ssl.SSLSocket)
+            )
         ):
             return _REFUSAL
         headers = tuple(headers[: web_named_headers._MAX_FIELDS + 1])
@@ -255,16 +315,21 @@ class EnrollmentIngress:
             return _REFUSAL
 
         approval = self._approval
+        http = self._http
         binding = dict(account_origin=self._account.value, account_nonce=nonce)
 
-        def check_write():
+        def check_write(reply):
             try:
                 web_enrollment._checkpoint(check, deadline)
-                if not approval.reply_current(**binding):
+                if not approval._reply_current(
+                    **binding,
+                    http=http,
+                    final=reply if target == PROOF_FINISH_PATH else None,
+                ):
                     raise web_named_headers.NamedRequestError()
                 web_enrollment._checkpoint(None, deadline)
             except Exception:
-                approval.cancel()
+                reply.abort_write()
                 raise web_named_headers.NamedRequestError() from None
 
         dispatch = {
@@ -272,16 +337,33 @@ class EnrollmentIngress:
             PROOF_START_PATH: approval.start_proof,
             PROOF_FINISH_PATH: approval.finish_proof,
         }[target]
+        final = None
+        if target == PROOF_FINISH_PATH:
+            # Commit this exact reply identity as part of finishing KE3, not
+            # by attaching writer authority to an already verified proof.
+            final = EnrollmentReply(
+                200, _VERIFIED, check_write, _final=_FinalWrite(approval, http, stream)
+            )
+            inputs["_final_reply"] = final
         try:
             # The coordinator reserves a valid matching phase before evaluating
             # the request guard, so a foreign cookie/challenge cannot cancel it.
-            result = dispatch(**binding, **inputs, check=check, deadline=deadline)
+            result = dispatch(
+                **binding, **inputs, check=check, deadline=deadline, _http=http
+            )
             body = _response_body(target, result)
             if body is None:
                 if result is not None and result is not False:
                     approval.cancel()  # Nothing may follow an unexpected stage reply.
                 return _REFUSAL
-            check_write()
-            return EnrollmentReply(200, body, check_write, approval.cancel)
+            reply = final or EnrollmentReply(200, body, check_write, approval.cancel)
+            reply.check_write()
+            return reply
         except Exception:  # noqa: BLE001 - the coordinator owns any sticky cleanup latch.
+            if final is not None:
+                final.abort_write()
             return _REFUSAL
+        except BaseException:
+            if final is not None:
+                final.abort_write()
+            raise

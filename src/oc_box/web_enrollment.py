@@ -3,8 +3,8 @@
 The host supplies a verified bootstrap claim for the exact review and transfers
 two dedicated, already-pinned workers. Browser requests select neither the
 account nor the workspace scope, and carry no raw password. Keep protocol
-values out of logs/URLs. Only the trusted host may take the verified result;
-it must still enforce local confirmation, owner exclusion and the store CAS.
+values out of logs/URLs. Only confirmed HTTP delivery can release a result
+to the host, which still enforces local confirmation, owner exclusion and CAS.
 """
 
 import math
@@ -146,6 +146,7 @@ class EnrollmentApproval:
         self._deadline = monotonic() + ttl
         self._phase = "approved"
         self._challenge = self._record = self._proof = None
+        self._http = self._final_reply = self._write_cutoff = self._writer = None
         self._busy = False
         self._draining = self._drain_attempted = self._workers_drained = False
         self._cleanup_uncertain = False
@@ -154,6 +155,8 @@ class EnrollmentApproval:
     def _close_locked(self):
         self._phase = "closed"
         self._challenge = self._record = self._proof = self._review = None
+        self._final_reply = self._write_cutoff = None
+        # A cancelled writer must still leave its original write scope.
 
     def _current_locked(self, phase):
         if self._phase != "closed" and (
@@ -173,12 +176,31 @@ class EnrollmentApproval:
             and origins.workspace.value == self._claim.workspace_origin
         )
 
-    def reply_current(self, *, account_origin, account_nonce):
+    def _bind_http(self):
+        """Fix the mode before the first admitted round; never attach late."""
+        with self._lock:
+            if (
+                self._http is None
+                and self._current_locked("approved")
+                and not self._busy
+            ):
+                self._http = object()
+                return self._http
+        self._drain_closed()
+        return None
+
+    def _reply_current(self, *, account_origin, account_nonce, http, final=None):
         """Check the original claim again before disclosing a prepared reply."""
         matching = self._claim.matches(account_origin, account_nonce)
         with self._lock:
             closed = self._current_locked("closed")
-            current = matching and not closed and not self._cleanup_uncertain
+            current = (
+                matching
+                and http is self._http
+                and not closed
+                and not self._cleanup_uncertain
+                and (final is None or self._final_reply is final)
+            )
         if closed:
             self._drain_closed()
         return current
@@ -197,9 +219,9 @@ class EnrollmentApproval:
             return self._cleanup_uncertain
 
     def drained(self):
-        """True only after both workers and the in-flight callback have drained."""
+        """True only after both workers and any admitted final writer drain."""
         with self._lock:
-            return self._workers_drained and not self._busy
+            return self._workers_drained and not self._busy and self._writer is None
 
     def _drain_workers(self, *, recheck=False):
         with self._lock:
@@ -232,12 +254,12 @@ class EnrollmentApproval:
         if closed:
             self._drain_workers()
 
-    def _reserve(self, origin, nonce, phase, running, challenge, valid):
+    def _reserve(self, origin, nonce, phase, running, challenge, valid, http):
         if not self._claim.matches(origin, nonce):
             self.expire()
             return None
         with self._lock:
-            if self._current_locked(phase) and not self._busy:
+            if http is self._http and self._current_locked(phase) and not self._busy:
                 if phase != "approved" and (
                     not web_bootstrap._valid(challenge)
                     or not secrets.compare_digest(_digest(challenge), self._challenge)
@@ -253,8 +275,8 @@ class EnrollmentApproval:
         return None
 
     @contextmanager
-    def _step(self, origin, nonce, phase, running, *, challenge=None, valid):
-        admitted = self._reserve(origin, nonce, phase, running, challenge, valid)
+    def _step(self, origin, nonce, phase, running, *, challenge=None, valid, http):
+        admitted = self._reserve(origin, nonce, phase, running, challenge, valid, http)
         try:
             yield admitted
         except _CLEANUP_ERRORS:
@@ -285,7 +307,14 @@ class EnrollmentApproval:
                 self._drain_closed()
 
     def start(
-        self, *, account_origin, account_nonce, request, check=None, deadline=None
+        self,
+        *,
+        account_origin,
+        account_nonce,
+        request,
+        check=None,
+        deadline=None,
+        _http=None,
     ):
         """One blinded registration response, with a browser-bound challenge."""
         with self._step(
@@ -294,6 +323,7 @@ class EnrollmentApproval:
             "approved",
             "responding",
             valid=_frame(request, _REQUEST_SIZE),
+            http=_http,
         ) as admitted:
             if admitted is None:
                 return None
@@ -332,6 +362,7 @@ class EnrollmentApproval:
         ke1,
         check=None,
         deadline=None,
+        _http=None,
     ):
         """Validate one canonical upload, then return KE2 for its fresh KE1."""
         with self._step(
@@ -341,6 +372,7 @@ class EnrollmentApproval:
             "starting-proof",
             challenge=challenge,
             valid=_frame(registration, _RECORD_SIZE) and _frame(ke1, _SIZES.ke1),
+            http=_http,
         ) as admitted:
             if admitted is None:
                 return None
@@ -393,8 +425,12 @@ class EnrollmentApproval:
         ke3,
         check=None,
         deadline=None,
+        _http=None,
+        _final_reply=None,
     ):
-        """Consume the exact KE3; only a verified, drained proof becomes ready."""
+        """Consume KE3 once; HTTP proof alone never makes a host result ready."""
+        if (_http is None) != (_final_reply is None):
+            return False
         with self._step(
             account_origin,
             account_nonce,
@@ -402,6 +438,7 @@ class EnrollmentApproval:
             "finishing",
             challenge=challenge,
             valid=_frame(ke3, _SIZES.ke3),
+            http=_http,
         ) as admitted:
             if admitted is None:
                 return False
@@ -422,15 +459,76 @@ class EnrollmentApproval:
                 ):
                     return False
                 self._challenge = None
-                self._phase = "ready"
+                if _http is None:
+                    self._phase = "fixture-ready"
+                else:
+                    self._final_reply, self._write_cutoff = _final_reply, cutoff
+                    self._phase = "awaiting-write"
                 return True
         return False
 
-    def take_for_host(self):
-        """Return the reviewed result once; never pass it to the browser."""
+    def _begin_final_write(self, http, reply, writer):
         with self._lock:
             if (
-                self._current_locked("ready")
+                http is not None
+                and http is self._http
+                and writer is not None
+                and self._current_locked("awaiting-write")
+                and reply is self._final_reply
+                and not self._busy
+                and self._workers_drained
+                and not self._cleanup_uncertain
+            ):
+                self._writer = writer
+                self._phase = "writing"
+                return self._write_cutoff
+        self._drain_closed()
+        return None
+
+    def _end_final_write(self, http, writer, *, deadline=None):
+        """Release one writer; only checked delivery supplies a cutoff here."""
+        with self._lock:
+            if writer is None or writer is not self._writer or http is not self._http:
+                return False
+            self._writer = None
+            if (
+                deadline is not None
+                and self._current_locked("writing")
+                and monotonic() < min(self._write_cutoff, deadline)
+            ):
+                self._final_reply = self._write_cutoff = None
+                self._phase = "delivered"
+                return True
+            self._close_locked()
+        self._drain_closed()
+        return False
+
+    def _abort_final_reply(self, http, reply):
+        with self._lock:
+            if reply is not None and http is self._http and reply is self._final_reply:
+                self._close_locked()
+        self._drain_closed()
+
+    def take_for_fixture(self):
+        """Take only the synthetic direct round-trip bytes, not a host result."""
+        with self._lock:
+            if (
+                self._http is None
+                and self._current_locked("fixture-ready")
+                and not self._busy
+            ):
+                record = self._record
+                self._close_locked()
+                return record
+        self._drain_closed()
+        return None
+
+    def take_for_host(self):
+        """Take the original reviewed result once, only after checked delivery."""
+        with self._lock:
+            if (
+                self._http is not None
+                and self._current_locked("delivered")
                 and not self._busy
                 and self._workers_drained
                 and not self._cleanup_uncertain

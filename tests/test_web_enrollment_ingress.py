@@ -2,7 +2,15 @@
 
 import base64
 import json
+import os
 import socket
+import unittest
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
+from importlib.util import find_spec
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from threading import Event
 from time import monotonic
 from unittest.mock import Mock, patch
 
@@ -20,6 +28,7 @@ from test_web_enrollment import (
     RECORD,
     REQUEST,
     RESPONSE,
+    REVIEW,
     EnrollmentFixture,
     token,
 )
@@ -42,9 +51,12 @@ def wire(value):
 class EnrollmentIngressTests(EnrollmentFixture):
     def setUp(self):
         super().setUp()
+        self.bind()
+
+    def bind(self, **edits):
         self.bootstrap, self.binding, claim = self.claim()
         self.addCleanup(self.bootstrap.close)
-        self.reviewed = self.approval(claim=claim)
+        self.reviewed = self.approval(claim=claim, **edits)
         self.dispatch = ingress.EnrollmentIngress(
             origins=ORIGINS, approval=self.reviewed
         )
@@ -113,13 +125,18 @@ class EnrollmentIngressTests(EnrollmentFixture):
 
     def test_final_wire_delivery_leaves_result_for_the_host_not_the_browser(self):
         challenge = self.prepared()
-        final = self.send(FINISH, self.proof_finish(challenge))
         writer, reader = socket.socketpair()
         with (
             writer,
             reader,
             patch.object(web_accounts, "commit_registration") as commit,
         ):
+            final = self.send(FINISH, self.proof_finish(challenge), stream=writer)
+            self.accepted(final)
+            self.assertIsNone(self.reviewed.take_for_host())
+            self.assertIsNone(self.reviewed.take_for_fixture())
+            # A repeated browser finish can't burn the one pending delivery.
+            self.refused(self.send(FINISH, self.proof_finish(challenge), stream=writer))
             self.assertEqual(
                 ingress.write_enrollment_reply(
                     writer, final, monotonic() + 2, check=lambda: None
@@ -134,11 +151,15 @@ class EnrollmentIngressTests(EnrollmentFixture):
             self.assertEqual(body, b'{"verified":true}')
             result = self.reviewed.take_for_host()
             self.assertEqual(result.registration, RECORD)
+            self.assertIs(result.review, REVIEW)
+            self.assertTrue(result.current())
+            self.assertIsNone(self.reviewed.take_for_host())
+            self.retire(self.bootstrap, self.binding)
+            self.assertFalse(result.current())
             commit.assert_not_called()
 
     def test_partial_final_wire_delivery_cancels_tentative_host_result(self):
         challenge = self.prepared()
-        final = self.send(FINISH, self.proof_finish(challenge))
 
         def disconnect(writer, response, deadline, *, check):
             check()
@@ -153,14 +174,270 @@ class EnrollmentIngressTests(EnrollmentFixture):
                 web_named_transport, "_write_response", side_effect=disconnect
             ) as write,
         ):
+            final = self.send(FINISH, self.proof_finish(challenge), stream=writer)
+            self.assertIsNone(self.reviewed.take_for_host())
             with self.assertRaises(web_named_headers.NamedRequestError):
                 ingress.write_enrollment_reply(
                     writer, final, monotonic() + 2, check=lambda: None
                 )
             write.assert_called_once()
             self.assertEqual(reader.recv(128), b"HTTP/1.1 200")
+            with self.assertRaises(web_named_headers.NamedRequestError):
+                ingress.write_enrollment_reply(
+                    writer, final, monotonic() + 2, check=lambda: None
+                )
+            write.assert_called_once()
         self.assertIsNone(self.reviewed.take_for_host())
         self.refused(self.send(FINISH, self.proof_finish(challenge)))
+
+    def test_exact_reply_only_and_successful_writer_cannot_be_replayed(self):
+        challenge = self.prepared()
+        writer, reader = socket.socketpair()
+        with writer, reader:
+            final = self.send(FINISH, self.proof_finish(challenge), stream=writer)
+            for other in (replace(final), replace(final, _final=None)):
+                with self.assertRaises(web_named_headers.NamedRequestError):
+                    ingress.write_enrollment_reply(
+                        writer, other, monotonic() + 2, check=lambda: None
+                    )
+            replace(final).abort_write()  # A copy is not authority to abort either.
+            with patch.object(
+                web_named_transport,
+                "_write_response",
+                wraps=web_named_transport._write_response,
+            ) as write:
+                self.assertEqual(
+                    ingress.write_enrollment_reply(
+                        writer, final, monotonic() + 2, check=lambda: None
+                    ),
+                    200,
+                )
+                with self.assertRaises(web_named_headers.NamedRequestError):
+                    ingress.write_enrollment_reply(
+                        writer, final, monotonic() + 2, check=lambda: None
+                    )
+                write.assert_called_once()
+            self.assertIsNotNone(self.reviewed.take_for_host())
+            self.assertIsNone(self.reviewed.take_for_host())
+
+    def test_unbound_or_substituted_socket_cannot_be_rebound_after_proof(self):
+        for transport_free in (True, False):
+            with self.subTest(transport_free=transport_free):
+                self.bind()
+                challenge = self.prepared()
+                writer, reader = socket.socketpair()
+                other, peer = socket.socketpair()
+                with writer, reader, other, peer:
+                    final = self.send(
+                        FINISH,
+                        self.proof_finish(challenge),
+                        stream=None if transport_free else writer,
+                    )
+                    self.accepted(final)
+                    for stream in (other, writer):
+                        with self.assertRaises(web_named_headers.NamedRequestError):
+                            ingress.write_enrollment_reply(
+                                stream, final, monotonic() + 2, check=lambda: None
+                            )
+                    for socket_reader in (reader, peer):
+                        socket_reader.setblocking(False)
+                        with self.assertRaises(BlockingIOError):
+                            socket_reader.recv(1)
+                    self.assertIsNone(self.reviewed.take_for_host())
+                    self.assertTrue(self.reviewed.drained())
+
+    def test_complete_wire_bytes_without_postcheck_do_not_release_result(self):
+        challenge = self.prepared()
+        allowed = True
+        checked_write = web_named_transport._write_response
+
+        def lose_after_write(*args, **kwargs):
+            nonlocal allowed
+            checked_write(*args, **kwargs)
+            allowed = False
+
+        writer, reader = socket.socketpair()
+        with (
+            writer,
+            reader,
+            patch.object(web_named_transport, "_write_response", lose_after_write),
+        ):
+            final = self.send(FINISH, self.proof_finish(challenge), stream=writer)
+            with self.assertRaises(web_named_headers.NamedRequestError):
+                ingress.write_enrollment_reply(
+                    writer, final, monotonic() + 2, check=lambda: allowed
+                )
+            writer.shutdown(socket.SHUT_WR)
+            with reader.makefile("rb") as stream:
+                self.assertTrue(
+                    stream.read(4096).endswith(b'\r\n\r\n{"verified":true}')
+                )
+        self.assertIsNone(self.reviewed.take_for_host())
+        self.assertTrue(self.reviewed.drained())
+
+    def test_interrupted_writer_and_retired_delivered_result_cannot_be_taken(self):
+        for interrupted in (True, False):
+            with self.subTest(interrupted=interrupted):
+                self.bind()
+                challenge = self.prepared()
+                writer, reader = socket.socketpair()
+                with writer, reader:
+                    final = self.send(
+                        FINISH, self.proof_finish(challenge), stream=writer
+                    )
+                    if interrupted:
+                        with (
+                            patch.object(
+                                web_named_transport,
+                                "_write_response",
+                                side_effect=KeyboardInterrupt,
+                            ),
+                            self.assertRaises(KeyboardInterrupt),
+                        ):
+                            ingress.write_enrollment_reply(
+                                writer, final, monotonic() + 2, check=lambda: None
+                            )
+                    else:
+                        self.assertEqual(
+                            ingress.write_enrollment_reply(
+                                writer, final, monotonic() + 2, check=lambda: None
+                            ),
+                            200,
+                        )
+                        self.retire(self.bootstrap, self.binding)
+                    self.assertIsNone(self.reviewed.take_for_host())
+                    self.assertTrue(self.reviewed.drained())
+
+    def test_bound_request_deadline_cannot_be_extended_by_writer(self):
+        challenge = self.prepared()
+        writer, reader = socket.socketpair()
+        with (
+            writer,
+            reader,
+            patch.object(web_enrollment, "monotonic", return_value=10) as clock,
+            patch.object(web_named_transport, "monotonic", return_value=10),
+            patch.object(web_named_transport, "_write_response") as write,
+        ):
+            final = self.send(
+                FINISH, self.proof_finish(challenge), stream=writer, deadline=11
+            )
+            self.accepted(final)
+            clock.return_value = 11
+            with self.assertRaises(web_named_headers.NamedRequestError):
+                ingress.write_enrollment_reply(writer, final, 20, check=lambda: None)
+            write.assert_not_called()
+            self.assertIsNone(self.reviewed.take_for_host())
+
+    def test_running_writer_excludes_replay_and_races_cancellation_atomically(self):
+        for cancel in (False, True):
+            with self.subTest(cancel=cancel):
+                self.bind()
+                challenge = self.prepared()
+                entered, proceed = Event(), Event()
+                end = web_enrollment.EnrollmentApproval._end_final_write
+
+                def pause_ack(approval, http, writer, *, deadline=None):
+                    if deadline is not None:
+                        entered.set()
+                        if not proceed.wait(5):
+                            raise TimeoutError
+                    return end(approval, http, writer, deadline=deadline)
+
+                writer, reader = socket.socketpair()
+                with (
+                    writer,
+                    reader,
+                    patch.object(
+                        web_enrollment.EnrollmentApproval, "_end_final_write", pause_ack
+                    ),
+                    ThreadPoolExecutor(max_workers=1) as pool,
+                ):
+                    final = self.send(
+                        FINISH, self.proof_finish(challenge), stream=writer
+                    )
+
+                    def write():
+                        return ingress.write_enrollment_reply(
+                            writer, final, monotonic() + 10, check=lambda: None
+                        )
+
+                    result = pool.submit(write)
+                    try:
+                        self.assertTrue(entered.wait(5))
+                        self.assertIsNone(self.reviewed.take_for_host())
+                        self.assertFalse(self.reviewed.drained())
+                        self.refused(self.send(FINISH, self.proof_finish(challenge)))
+                        with self.assertRaises(web_named_headers.NamedRequestError):
+                            write()
+                        if cancel:
+                            self.assertFalse(self.reviewed.close())
+                            self.assertIsNone(self.reviewed.take_for_host())
+                    finally:
+                        proceed.set()
+                    if cancel:
+                        with self.assertRaises(web_named_headers.NamedRequestError):
+                            result.result(5)
+                        self.assertIsNone(self.reviewed.take_for_host())
+                    else:
+                        self.assertEqual(result.result(5), 200)
+                        self.assertIsNotNone(self.reviewed.take_for_host())
+                    self.assertTrue(self.reviewed.drained())
+                    writer.shutdown(socket.SHUT_WR)
+                    with reader.makefile("rb") as stream:
+                        self.assertEqual(stream.read(4096).count(b"HTTP/1.1 200"), 1)
+
+    @unittest.skipUnless(
+        find_spec("cryptography"), "optional cryptography not installed"
+    )
+    def test_http_delivered_result_preserves_the_original_store_cas(self):
+        phrase = "synthetic enrollment store passphrase"
+        with (
+            patch.dict(os.environ, {"OC_BOX_CONTAINER": "0"}),
+            TemporaryDirectory() as directory,
+        ):
+            path = Path(directory) / "accounts"
+            web_accounts.initialize(path, phrase, setup=REVIEW.setup)
+            review = web_accounts.review_registration(
+                path, phrase, REVIEW.username, workspace_ids=REVIEW.workspace_ids
+            )
+            previous = path.read_bytes()
+            self.bind(review=review)
+            challenge = self.prepared()
+            writer, reader = socket.socketpair()
+            with writer, reader:
+                final = self.send(FINISH, self.proof_finish(challenge), stream=writer)
+                self.assertIsNone(self.reviewed.take_for_host())
+                self.assertEqual(path.read_bytes(), previous)
+                self.assertEqual(
+                    ingress.write_enrollment_reply(
+                        writer, final, monotonic() + 2, check=lambda: None
+                    ),
+                    200,
+                )
+            self.assertEqual(path.read_bytes(), previous)
+            result = self.reviewed.take_for_host()
+            self.assertIs(result.review, review)
+
+            web_accounts.add_account(
+                path,
+                phrase,
+                "other-synthetic",
+                workspace_ids=REVIEW.workspace_ids,
+                registration=b"synthetic other record",
+            )
+            replaced = path.read_bytes()
+            self.assertTrue(result.current())  # Store review is stale, claim is live.
+            with self.assertRaisesRegex(
+                web_accounts.WebAccountsError, "no longer current"
+            ):
+                web_accounts.commit_registration(
+                    path,
+                    phrase,
+                    result.review,
+                    registration=result.registration,
+                    current=result.current,
+                )
+            self.assertEqual(path.read_bytes(), replaced)
 
     def test_exact_three_rounds_disclose_only_protocol_and_proof_boolean(self):
         with patch.object(web_accounts, "commit_registration") as commit:
@@ -181,9 +458,9 @@ class EnrollmentIngressTests(EnrollmentFixture):
             verdict = self.send(FINISH, self.proof_finish(challenge))
             self.assertEqual(self.accepted(verdict), {"verified": True})
             self.assertEqual(verdict.body, b'{"verified":true}')
-            # Only the trusted host may take this after its successful write.
-            self.assertIsNotNone(self.reviewed.take_for_host())
+            # Transport-free research can prove KE3 but cannot issue a result.
             self.assertIsNone(self.reviewed.take_for_host())
+            self.assertIsNone(self.reviewed.take_for_fixture())
             self.refused(self.send(FINISH, self.proof_finish(challenge)))
             commit.assert_not_called()
         self.exchange.finish.assert_called_once_with(KE3)
@@ -373,12 +650,26 @@ class EnrollmentIngressTests(EnrollmentFixture):
 
     def test_each_connection_has_a_deadline_without_shortening_proof_lifetime(self):
         challenge = self.accepted(self.send())["challenge"]
-        with patch.object(web_enrollment, "monotonic", return_value=10) as clock:
+        writer, reader = socket.socketpair()
+        with (
+            writer,
+            reader,
+            patch.object(web_enrollment, "monotonic", return_value=10) as clock,
+            patch.object(web_named_transport, "monotonic", return_value=12),
+        ):
             self.accepted(self.send(PROVE, self.proof_start(challenge), deadline=11))
             clock.return_value = (
                 12  # The first connection's cutoff is not the next one's.
             )
-            self.accepted(self.send(FINISH, self.proof_finish(challenge), deadline=13))
+            final = self.send(
+                FINISH, self.proof_finish(challenge), deadline=13, stream=writer
+            )
+            self.accepted(final)
+            self.assertIsNone(self.reviewed.take_for_host())
+            self.assertEqual(
+                ingress.write_enrollment_reply(writer, final, 13, check=lambda: None),
+                200,
+            )
         self.assertGreater(self.verifier.start.call_args.kwargs["deadline"], 11)
         self.assertIsNotNone(self.reviewed.take_for_host())
 
@@ -402,12 +693,12 @@ class EnrollmentIngressTests(EnrollmentFixture):
     def test_final_reply_check_can_fence_after_coordinator_completion(self):
         challenge = self.prepared()
 
-        def fail_when_ready():
-            if self.reviewed._phase == "ready":
+        def fail_when_finished():
+            if self.reviewed.drained():
                 raise RuntimeError("private transport diagnosis")
 
         response = self.send(
-            FINISH, self.proof_finish(challenge), check=fail_when_ready
+            FINISH, self.proof_finish(challenge), check=fail_when_finished
         )
         self.refused(response)
         self.assertIsNone(self.reviewed.take_for_host())
@@ -470,3 +761,26 @@ class EnrollmentIngressTests(EnrollmentFixture):
             )
         with self.assertRaises(ValueError):
             ingress.EnrollmentIngress(origins=ORIGINS, approval=object())
+
+    def test_binding_is_one_way_and_blocks_direct_rounds_or_late_rebinding(self):
+        with self.assertRaises(ValueError):
+            ingress.EnrollmentIngress(origins=ORIGINS, approval=self.reviewed)
+        self.assertIsNone(self.start(self.reviewed))
+        challenge = self.accepted(self.send())["challenge"]
+        reply = web_enrollment.RegistrationResponse(challenge, RESPONSE)
+        self.assertIsNone(self.prepare(self.reviewed, reply))
+        self.accepted(self.send(PROVE, self.proof_start(challenge)))
+        self.assertFalse(self.finish(self.reviewed, reply))
+        self.exchange.finish.assert_not_called()
+        self.accepted(self.send(FINISH, self.proof_finish(challenge)))
+
+        direct = self.approval()
+        reply = self.start(direct)
+        with self.assertRaises(ValueError):
+            ingress.EnrollmentIngress(origins=ORIGINS, approval=direct)
+        self.assertIsNotNone(self.prepare(direct, reply))
+        self.assertTrue(self.finish(direct, reply))
+        with self.assertRaises(ValueError):
+            ingress.EnrollmentIngress(origins=ORIGINS, approval=direct)
+        self.assertIsNone(direct.take_for_host())
+        self.assertEqual(direct.take_for_fixture(), RECORD)
