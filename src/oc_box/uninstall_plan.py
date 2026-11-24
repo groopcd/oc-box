@@ -94,6 +94,14 @@ def prepare_review(request, runtime, *, home=None, workspace_review=None):
             blockers.append(
                 "No verified automatic removal for this package installation."
             )
+            if type(captured) is install_ownership.PackageInstallReview:
+                guidance = {
+                    "pipx": "Use pipx uninstall oc-box from the owning pipx installation.",
+                    "uv": "Use uv tool uninstall oc-box from the owning uv installation.",
+                    "pip": "Use pip in the verified environment; do not remove the whole environment.",
+                }.get(captured.manager)
+                if guidance:
+                    blockers.append(guidance)
     if request.full:
         if request.dry_run:
             blockers.append(

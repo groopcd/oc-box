@@ -72,6 +72,7 @@ File: oc-box.info,  Node: Synopsis,  Next: Description,  Prev: Name,  Up: Top
      oc-box tui [--project PATH | --workspace ID] [--read-only] [--demo]
      oc-box upgrade [--check] [--stable | --devel] [--vault] [--tui]
      oc-box upgrade --auto-update on|off
+     oc-box --uninstall [--dry-run]
      oc-box secrets init|passwd [--min-passphrase-length N]
      oc-box secrets list
      oc-box secrets set|remove NAME
@@ -2004,7 +2005,31 @@ for a reviewed alternate deployment.  Updates inside a container are
 refused because its private HOME is not the host installation.  Git is
 required for public updates; build tools are not.
 
-4.20 secrets
+4.20 uninstall
+==============
+
+Run ‘oc-box --uninstall’ as the regular host user from the verified
+active GitHub-installed launcher.  Review the selected release and
+installed files on the controlling terminal, then type ‘UNINSTALL
+OC-BOX’.  ‘--dry-run’ prints the launcher-only review without prompting
+or deleting anything.  Use ‘oc-box --uninstall --help’ for the dedicated
+help.
+
+This removes only the reviewed launcher, selected installed release, and
+its verified links, manuals and completion.  It keeps older releases and
+all workspace containers, home volumes, project files and markers,
+registry, vault, settings, logs, backups and host OpenCode history.  It
+does not contact Podman or OpenCode.  A missing or changed [installation
+receipt](installation.md#installation-ownership-receipt), an in-use
+launcher or an unverified installation refuses.  Use the owning package
+manager for a Python-package installation; oc-box will not invoke that
+manager or delete its environment.
+
+Full cleanup is not enabled in this candidate.  ‘--full’ refuses rather
+than falling back to launcher-only removal.  Neither mode may remove
+host OpenCode history.
+
+4.21 secrets
 ============
 
 Manage an optional encrypted credential vault on the host.  This command
@@ -2169,7 +2194,7 @@ This is not a general redaction filter for OpenCode, provider logs, tool
 output, or session archives: an agent can still print, save, or transmit
 a credential it has received.
 
-4.21 credentials
+4.22 credentials
 ================
 
 View or change **names-only** forwarding policy for an existing
@@ -2262,7 +2287,7 @@ container data.  Selection is reduced forwarding, not an isolation
 boundary from secrets already inside the container.  Delivered keys
 remain readable by the agent/tools with normal container permissions.
 
-4.22 backup
+4.23 backup
 ===========
 
 Create one encrypted ‘.ocbox’ file for an existing workspace (available
@@ -2342,7 +2367,7 @@ file may remain: inspect it with ‘backup-info’ before retrying.  The
 source remains stopped, not reset/deleted.  The temporary capture image
 is removed by its unique tag; shared base images remain.
 
-4.23 Include host settings for migration
+4.24 Include host settings for migration
 ========================================
 
 On supporting stable and development releases, ‘backup --host --output
@@ -2381,7 +2406,7 @@ Treat this archive and its age identity/passphrase as sensitive.  The
 vault remains separately encrypted with its original passphrase.  This
 is neither a whole-machine backup nor a credential revocation mechanism.
 
-4.24 backup-info
+4.25 backup-info
 ================
 
 Decrypt/verify a backup's manifest and ciphertext checksums without
@@ -2411,7 +2436,7 @@ authentication chunk.  Wrong keys, corruption, missing/extra components,
 unsupported versions, or unsafe outer envelope paths are rejected before
 restore activation.
 
-4.25 restore
+4.26 restore
 ============
 
 Streaming failures identify the producer/consumer exit code and a fixed
@@ -2512,7 +2537,7 @@ incomplete restores), and retry to a new destination.  Orphan staging
 directories may need manual host removal after inspection; the launcher
 never deletes a caller-supplied tree on marker alone.
 
-4.26 Restore host settings on a new machine
+4.27 Restore host settings on a new machine
 ===========================================
 
 Install oc-box, age and the required OpenCode version on the destination
@@ -5186,22 +5211,22 @@ Tag Table:
 Node: Top210
 Node: Name769
 Node: Synopsis930
-Node: Description5132
-Node: Commands10952
-Node: Options144572
-Node: Lifecycle and persistence207637
-Node: Distribution images209937
-Node: Sessions and recovery215014
-Node: Devices and host permissions221599
-Node: Resource reports223945
-Node: Configuration and environment226056
-Node: Files237437
-Node: Exit status248347
-Node: Examples249755
-Node: Troubleshooting251894
-Node: Installation and manuals264386
-Node: Authors and license274576
-Node: See also275183
+Node: Description5168
+Node: Commands10988
+Node: Options145782
+Node: Lifecycle and persistence208847
+Node: Distribution images211147
+Node: Sessions and recovery216224
+Node: Devices and host permissions222809
+Node: Resource reports225155
+Node: Configuration and environment227266
+Node: Files238647
+Node: Exit status249557
+Node: Examples250965
+Node: Troubleshooting253104
+Node: Installation and manuals265596
+Node: Authors and license275786
+Node: See also276393
 
 End Tag Table
 

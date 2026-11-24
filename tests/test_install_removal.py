@@ -14,7 +14,7 @@ from unittest.mock import patch
 
 from oc_box import host_file_open_policy as layout
 from oc_box import install_ownership as ownership, install_removal as removal
-from oc_box import installation, updater
+from oc_box import installation, oc_box, uninstall_tty, updater
 
 import test_install_ownership as fixtures
 
@@ -171,6 +171,41 @@ class FlatRemovalTests(unittest.TestCase):
                 _, error = child.communicate(input=b"", timeout=5)
                 self.assertEqual((child.returncode, error), (0, b""))
         self.assertEqual(self.review(current), plan)
+
+    def test_cli_executes_exact_review_under_the_launchers_own_lease(self):
+        kept_release = self.install()
+        active = self.install()
+        native_history = self.home / ".local/share/opencode/opencode.db"
+        native_history.parent.mkdir(parents=True)
+        native_history.write_bytes(b"synthetic native history")
+        vault = self.target / "credentials/vault.json"
+        vault.parent.mkdir()
+        vault.write_bytes(b"synthetic encrypted vault")
+        expected = self.review(active)
+        approved = []
+
+        def confirm(snapshot):
+            approved.append(snapshot.installation)
+            self.assertTrue(self.launcher.is_file())
+            return True
+
+        with (
+            ownership.installed_runtime_use(active),
+            contextlib.redirect_stdout(io.StringIO()) as output,
+            patch.object(oc_box, "PACKAGE", active),
+            patch.object(sys, "argv", ["oc-box", "--uninstall"]),
+            patch.object(oc_box, "podman", side_effect=AssertionError),
+            patch.object(uninstall_tty, "confirm", side_effect=confirm),
+        ):
+            self.assertEqual(oc_box.entrypoint(), 0)
+        self.assertEqual(approved, [expected])
+        self.assertIn("Verified oc-box launcher removed", output.getvalue())
+        self.assertFalse(self.launcher.exists())
+        self.assertFalse(active.exists())
+        self.assertTrue(kept_release.is_dir())
+        self.assertEqual(native_history.read_bytes(), b"synthetic native history")
+        self.assertEqual(vault.read_bytes(), b"synthetic encrypted vault")
+        self.assertFalse(self.stages())
 
     def test_exact_removal_preserves_older_release_and_never_opens_data(self):
         old = self.install()

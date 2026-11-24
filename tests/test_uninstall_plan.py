@@ -14,13 +14,15 @@ from oc_box import (
 RELEASE = Path("/synthetic/share/oc-box/releases/synthetic")
 LAUNCHER = Path("/synthetic/bin/oc-box")
 INSTALLATION = install_ownership.FlatInstallPlan(
-    RELEASE,
-    (
+    release=RELEASE,
+    artifacts=(
         install_ownership.InstallArtifact(RELEASE / "oc_box.py", (), ()),
         install_ownership.InstallArtifact(LAUNCHER, (), ()),
         install_ownership.InstallArtifact(Path("/synthetic/man/man1/oc-box.1"), (), ()),
     ),
-    (),
+    anchors=(),
+    upgrade_lock=(),
+    use_lock=(),
 )
 
 
@@ -86,6 +88,7 @@ class PrepareReviewTests(unittest.TestCase):
         )
         verified = workspace_uninstall.WorkspacePlan(
             state_root="/synthetic/state",
+            protected_paths=(),
             registry_chain=(),
             registry_present=True,
             engine=None,

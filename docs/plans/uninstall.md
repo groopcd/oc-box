@@ -1,7 +1,9 @@
 # Host uninstall plan
 
-These are proposed commands; the review parser is not an installed uninstall
-executor yet.
+The private candidate wires the launcher-only executor and its dry run.
+`--full` is still a proposed destructive scope and refuses without both the
+verified workspace and removable-state executors. No fallback to launcher-only
+removal is permitted for a full request.
 
 ```sh
 oc-box --uninstall

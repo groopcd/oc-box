@@ -4813,6 +4813,12 @@ def _has_launcher_logging_flag(arguments):
 
 def main(argv=None):
     arguments = list(sys.argv[1:] if argv is None else argv)
+    if arguments and arguments[0] == "--uninstall":
+        if __package__:
+            from .uninstall_cli import cli
+        else:
+            from uninstall_cli import cli
+        return cli(PACKAGE, arguments)
     if arguments and arguments[0] == "logs":
         if __package__:
             from .logs_cli import cli
@@ -5633,6 +5639,9 @@ def _help_requested(arguments):
 
 def entrypoint():
     arguments = sys.argv[1:]
+    if arguments and arguments[0] == "--uninstall":
+        # Uninstall never resolves a workspace or touches the activity journal.
+        return main(arguments)
     informational = _help_requested(arguments) or any(
         arg in arguments for arg in ("--version", "--about", "--status", "--demo")
     )
