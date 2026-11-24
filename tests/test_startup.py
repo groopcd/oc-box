@@ -13,7 +13,7 @@ import threading
 import time
 import unittest
 from unittest import mock
-from oc_box import lifecycle_output
+from oc_box import lifecycle_output, startup_output, workspace_preferences
 from oc_box import opencode_v2_io as v2
 from oc_box import oc_box as box, sync_config as sync, terminal_ui as ui
 
@@ -974,30 +974,122 @@ class StartupProgressTests(unittest.TestCase):
             ),
         ):
             with self.subTest(overrides=overrides):
-                with mock.patch.object(ui.os, "ttyname") as ttyname:
-                    self.assertIsNone(ui._graphics_mark(0, 1, supported | overrides))
-                    ttyname.assert_not_called()
-        with mock.patch.object(
-            ui.os, "ttyname", side_effect=["/dev/pts/1", "/dev/pts/2"]
-        ):
-            self.assertIsNone(ui._graphics_mark(0, 1, supported))
+                self.assertIsNone(
+                    startup_output._graphics_profile(supported | overrides)
+                )
         with (
-            mock.patch.object(ui.os, "ttyname", return_value="/dev/pts/1"),
-            mock.patch.object(ui.Path, "open", side_effect=FileNotFoundError),
+            mock.patch.object(
+                startup_output.os, "ttyname", side_effect=lambda fd: f"/dev/pts/{fd}"
+            ),
+            mock.patch.dict(os.environ, supported, clear=True),
         ):
-            self.assertIsNone(ui._graphics_mark(0, 1, supported))
+            self.assertEqual(startup_output.relay_badge(0, 1, "graphics").cells, 0)
+        with (
+            mock.patch.object(startup_output.os, "ttyname", return_value="/dev/pts/1"),
+            mock.patch.object(
+                startup_output.Path, "open", side_effect=FileNotFoundError
+            ),
+            mock.patch.dict(os.environ, supported, clear=True),
+        ):
+            self.assertEqual(startup_output.relay_badge(0, 1, "graphics").wire, "[/] ")
         for version in ("220399", "261303", "2608.03", "abc", "2608030"):
             self.assertIsNone(
-                ui._graphics_profile(
+                startup_output._graphics_profile(
                     {"TERM": "xterm-256color", "KONSOLE_VERSION": version}
                 )
             )
         self.assertEqual(
-            ui._graphics_profile(
+            startup_output._graphics_profile(
                 {"TERM": "xterm-256color", "KONSOLE_VERSION": "220400"}
             ),
             "konsole",
         )
+
+    @unittest.skipUnless(sys.platform == "linux", "Linux PTY/termios integration")
+    def test_saved_inline_badges_precede_backend_status_and_do_not_decorate_pipes(self):
+        import fcntl
+        import pty
+        import select
+        import struct
+        import termios
+
+        with tempfile.TemporaryDirectory() as name:
+            project = Path(name) / "project"
+            project.mkdir()
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "OC_BOX_STATE_HOME": str(Path(name) / "registry"),
+                    "OC_BOX_CONTAINER": "1",
+                    "KONSOLE_VERSION": "260803",
+                    "TERM": "xterm-256color",
+                },
+                clear=True,
+            ):
+                path, data = box.create_workspace(project, "debian")
+                for style, arguments in (
+                    ("graphics", ["--project", str(project)]),
+                    ("ascii", ["reset", "--workspace", data["id"]]),
+                ):
+                    with self.subTest(style=style):
+                        workspace_preferences.set_preferences(
+                            path, data["id"], startup_logo=style
+                        )
+                        master, slave = pty.openpty()
+                        try:
+                            fcntl.ioctl(
+                                slave,
+                                termios.TIOCSWINSZ,
+                                struct.pack("HHHH", 24, 80, 0, 0),
+                            )
+
+                            def backend(**_):
+                                startup_output.line(
+                                    "first launcher line\nsecond launcher line",
+                                    file=sys.stderr,
+                                    flush=True,
+                                )
+                                startup_output.line("redirected launcher line")
+                                os.write(slave, b"unmodified tool output\n")
+                                raise box.BoxError("synthetic backend stopped")
+
+                            with (
+                                os.fdopen(os.dup(slave), "r") as stdin,
+                                os.fdopen(os.dup(slave), "w") as stderr,
+                                mock.patch.object(sys, "stdin", stdin),
+                                contextlib.redirect_stderr(stderr),
+                                contextlib.redirect_stdout(io.StringIO()) as pipe,
+                                mock.patch.object(
+                                    box, "check_backend", side_effect=backend
+                                ),
+                                self.assertRaisesRegex(
+                                    box.BoxError, "synthetic backend"
+                                ),
+                            ):
+                                box.main(arguments)
+                            self.assertEqual(
+                                pipe.getvalue(), "redirected launcher line\n"
+                            )
+                            output = bytearray()
+                            while select.select([master], [], [], 0)[0]:
+                                output.extend(os.read(master, 8192))
+                        finally:
+                            os.close(master)
+                            os.close(slave)
+                        prefix = b"\x1b\\\x1b[2C" if style == "graphics" else b"[/] "
+                        for message in (
+                            b"oc-box:",
+                            b"first launcher line",
+                            b"second launcher line",
+                        ):
+                            self.assertIn(prefix + message, output)
+                        self.assertIn(b"\r\nunmodified tool output\r\n", output)
+                        if style == "graphics":
+                            self.assertIn(b"q=2,c=1,r=1,C=1;", output)
+                            self.assertRegex(output, rb"a=d,d=i,i=0,p=[1-9][0-9]*,q=2;")
+                            self.assertEqual(output.count(b"a=T,t=d,f=100,q=2,"), 3)
+                        else:
+                            self.assertNotIn(b"\x1b_G", output)
 
     def _check_tui_handoff(self, mode):
         import fcntl
@@ -1012,7 +1104,8 @@ class StartupProgressTests(unittest.TestCase):
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 100, 0, 0))
         fixture = (
             "import os,sys,time,tty; assert os.environ['OC_BOX_RELAY_CHECK']=='present'; tty.setraw(0); "
-            "os.write(1,b'\\x1b[?1049h\\x1b[2J\\x1b]0;Boot'); "
+            "os.write(1,b'\\x1b[?1049h\\x1b[2J'); assert os.read(0,1)==b'g'; "
+            "os.write(1,b'\\x1b]0;Boot'); "
             "time.sleep(0.2); os.write(1,b'ing\\x07UI_READY'); "
             "key=os.read(0,1); size=os.get_terminal_size(0); "
             "os.write(1,b'KEY='+key+(' SIZE=%dx%d'%(size.columns,size.lines)).encode()); "
@@ -1023,11 +1116,11 @@ class StartupProgressTests(unittest.TestCase):
             "from oc_box.terminal_ui import run_tui; "
             "sys.exit(run_tui([sys.executable,'-c',sys.argv[2]],"
             "env={**os.environ,'OC_BOX_RELAY_CHECK':'present'},refresh=0.03,"
-            "**({'startup_logo':sys.argv[3]} if len(sys.argv)>3 else {})))"
+            "startup_logo=sys.argv[3]))"
         )
-        style = ["ascii"] if mode == "ascii" else []
+        style = "ascii" if mode == "ascii" else "graphics"
         process = subprocess.Popen(
-            [sys.executable, "-B", "-c", relay, str(APP), fixture, *style],
+            [sys.executable, "-B", "-c", relay, str(APP), fixture, style],
             stdin=slave,
             stdout=slave,
             stderr=slave,
@@ -1035,7 +1128,7 @@ class StartupProgressTests(unittest.TestCase):
                 **{
                     key: value
                     for key, value in os.environ.items()
-                    if key not in ui._GRAPHICS_BLOCKERS
+                    if key not in startup_output._GRAPHICS_BLOCKERS
                 },
                 "TERM": {
                     "ascii": "xterm-kitty",
@@ -1049,13 +1142,18 @@ class StartupProgressTests(unittest.TestCase):
             },
         )
         output = bytearray()
-        sent = False
+        resumed_fixture = sent = False
         try:
             deadline = time.monotonic() + 5
             while time.monotonic() < deadline:
                 ready, _, _ = select.select([master], [], [], 0.1)
                 if ready:
                     output.extend(os.read(master, 65536))
+                if not resumed_fixture and b"\x1b[?1049h" in output:
+                    following = output.split(b"\x1b[?1049h", 1)[1]
+                    if mode == "dumb" or b"Loading OpenCode" in following:
+                        os.write(master, b"g")
+                        resumed_fixture = True
                 if b"UI_READY" in output and not sent:
                     fcntl.ioctl(
                         slave, termios.TIOCSWINSZ, struct.pack("HHHH", 32, 120, 0, 0)
@@ -1075,26 +1173,30 @@ class StartupProgressTests(unittest.TestCase):
                 self.assertNotIn(b"Loading OpenCode", output)
             else:
                 self.assertIn(b"Loading OpenCode, plugins and MCPs", output)
-                clear = b"\x1b7\x1b[24;1H\x1b[0m\x1b[2K\x1b8"
+                clear = b"\x1b[24;1H\x1b[2K\x1b8"
                 self.assertLess(output.index(clear), output.index(b"\x1b[?1049h"))
             if mode in ("kitty", "konsole"):
                 upload = b"I=" if mode == "kitty" else b"i=0,p="
                 delete = b"d=N,I=" if mode == "kitty" else b"d=i,i=0,p="
-                match = re.search(
+                pattern = re.compile(
                     rb"\x1b_Ga=T,t=d,f=100,"
                     + upload
-                    + rb"([1-9][0-9]*),q=2,c=2,r=1,C=1;([A-Za-z0-9+/=]+)\x1b\\",
-                    output,
+                    + rb"([1-9][0-9]*),q=2,c=1,r=1,C=1;([A-Za-z0-9+/=]+)\x1b\\\x1b\[2C"
                 )
-                self.assertIsNotNone(match, bytes(output))
-                self.assertEqual(
-                    base64.b64decode(match[2], validate=True),
-                    Path(ui.__file__).with_name("oc-box-mark.png").read_bytes(),
-                )
-                deletion = b"\x1b_Ga=d," + delete + match[1] + b",q=2;\x1b\\"
-                self.assertEqual(output.count(b"\x1b_G"), 2)
-                self.assertLess(match.end(), output.index(deletion))
+                matches = list(pattern.finditer(output))
+                self.assertGreaterEqual(len(matches), 2)
+                self.assertEqual({match[1] for match in matches}, {matches[0][1]})
+                for match in matches:
+                    self.assertEqual(
+                        base64.b64decode(match[2], validate=True),
+                        Path(ui.__file__).with_name("oc-box-mark.png").read_bytes(),
+                    )
+                deletion = b"\x1b_Ga=d," + delete + matches[0][1] + b",q=2;\x1b\\"
+                self.assertEqual(output.count(deletion), len(matches))
+                self.assertLess(matches[0].end(), output.index(deletion))
                 self.assertLess(output.index(deletion), output.index(b"\x1b[?1049h"))
+                self.assertGreater(matches[-1].start(), output.index(b"\x1b[?1049h"))
+                self.assertLess(output.rindex(deletion), output.index(b"\x1b]0;Boot"))
             else:
                 self.assertNotIn(b"\x1b_G", output)
             first_frame = output.split(b"\x1b[?1049h", 1)[0]

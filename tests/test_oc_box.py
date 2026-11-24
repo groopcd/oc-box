@@ -404,16 +404,6 @@ class WorkspaceTests(unittest.TestCase):
             "synthetic-relay-credential", " ".join(relay.call_args.args[0])
         )
 
-    def test_native_tui_passes_explicit_ascii_to_the_relay(self):
-        command = box.exec_command(self.data, ["opencode"])
-        with patch("oc_box.terminal_ui.run_tui", return_value=0) as relay:
-            self.assertEqual(
-                box.run_native_tui(self.data, command, None, startup_logo="ascii"), 0
-            )
-        relay.assert_called_once_with(
-            command, env=command.environment, startup_logo="ascii"
-        )
-
     def test_sync_replaces_only_namespaced_archive_and_keeps_source_id(self):
         source = {"info": {"id": "ses_source", "title": "Work"}, "messages": []}
         old = box.archive_id(self.data["id"], "ses_source", "ses")

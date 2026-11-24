@@ -10,9 +10,10 @@ import os
 import sys
 
 if __package__:
-    from . import opencode_compat, vault
+    from . import opencode_compat, startup_output, vault
 else:
     import opencode_compat
+    import startup_output
     import vault
 
 # Reserve exec-environment headroom for runtime settings, config and argv.
@@ -177,7 +178,7 @@ def _setup_guidance(*, initialized):
     else:
         status = "Global vault is not initialized; using env-file forwarding for this launch."
         commands = "oc-box doctor --feature vault; oc-box secrets init; oc-box secrets set NAME"
-    print(status + "\nRecommended setup: " + commands, file=sys.stderr)
+    startup_output.line(status + "\nRecommended setup: " + commands, file=sys.stderr)
 
 
 def effective_policy(data, *, version=None):

@@ -3115,18 +3115,20 @@ on.  Neither flag is saved or changes another client.
 5.46 -startup-logo ascii|graphics
 =================================
 
-For ‘preferences’ only.  Save the startup display for future native
-‘start’ and ‘reset’ clients of a registered workspace.  ‘ascii’ always
-uses the ‘[/]’ mark on the loading line.  ‘graphics’ (the default)
-requests a one-row PNG in direct Kitty or Konsole 22.04+ (including
-Yakuake using that Konsole part).  It falls back to ASCII when the
-terminal is unsupported or the launcher detects conflicting markers, SSH
-or a multiplexer.  The PNG disappears before native output begins; the
-option does not affect web, the manager, or terminal shell clients.
-Terminal detection uses compatibility hints, not proof of the emulator.
-From a source checkout, ‘python3 tools/demo_startup_logo.py ascii’ and
-‘python3 tools/demo_startup_logo.py graphics’ preview the loading line
-without launching a workspace or saving preferences.
+For ‘preferences’ only.  Save the inline badge for launcher progress and
+status lines in future native ‘start’ and ‘reset’ clients of a
+registered workspace.  ‘ascii’ uses ‘[/]’; ‘graphics’ (the default)
+requests a one-cell PNG in direct Kitty or Konsole 22.04+ (including
+Yakuake using that Konsole part).  Unsupported or ambiguous terminals,
+SSH and multiplexers use ASCII; pipes and ‘TERM=dumb’ receive neither
+badge nor padding.  Detection uses compatibility hints, not proof of the
+emulator.  Completed launcher lines keep their badge; temporary progress
+clears at handoff.  Badges are not added to native OpenCode's UI or
+output, passthrough subprocess output, masked input prompts, web, the
+manager, or terminal shell clients.  From a source checkout, ‘python3
+tools/demo_startup_logo.py ascii’ and ‘python3
+tools/demo_startup_logo.py graphics’ preview the badge with synthetic
+output, without launching a workspace or saving preferences.
 
 5.47 Experimental Ctrl-click host file opening
 ==============================================
@@ -5179,19 +5181,19 @@ Node: Synopsis930
 Node: Description5132
 Node: Commands10952
 Node: Options144131
-Node: Lifecycle and persistence206910
-Node: Distribution images209210
-Node: Sessions and recovery214287
-Node: Devices and host permissions220872
-Node: Resource reports223218
-Node: Configuration and environment225329
-Node: Files236710
-Node: Exit status247620
-Node: Examples249028
-Node: Troubleshooting251167
-Node: Installation and manuals263659
-Node: Authors and license273849
-Node: See also274456
+Node: Lifecycle and persistence207040
+Node: Distribution images209340
+Node: Sessions and recovery214417
+Node: Devices and host permissions221002
+Node: Resource reports223348
+Node: Configuration and environment225459
+Node: Files236840
+Node: Exit status247750
+Node: Examples249158
+Node: Troubleshooting251297
+Node: Installation and manuals263789
+Node: Authors and license273979
+Node: See also274586
 
 End Tag Table
 
