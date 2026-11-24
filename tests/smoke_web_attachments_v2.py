@@ -81,8 +81,8 @@ def exercise(binary, root):
     project.mkdir()
     release = opencode_compat.version(bounded([binary, "--version"], env, project))
     require(
-        release in web_attachments.SUPPORTED,
-        "Only native 2.2.6/2.3.0 are source-bound.",
+        web_attachments.supports_release(release),
+        web_attachments.UNVERIFIED_RELEASE,
     )
     previous = Path.cwd()
     os.chdir(project)

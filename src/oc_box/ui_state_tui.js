@@ -12,13 +12,24 @@ export default Plugin.define({
     }
     let stopped = false
     let stopPreview
+    const report = status => { process.stdout.write(`\x1b]778;oc-box-open:v1:${status}\x07`) }
     void import("./file_preview_tui.tsx").then(({ install }) => {
-      if (!stopped) stopPreview = install(context)
+      if (stopped) return
+      stopPreview = install(context)
+      report("ready")
     }).catch(() => {
-      if (!stopped) context.ui.toast.show({
-        message: "Host file opening is off: this client does not provide a compatible native TUI hook.",
-        variant: "warning",
-      })
+      if (stopped) return
+      stopPreview?.()
+      stopPreview = undefined
+      try {
+        context.ui.toast.show({
+          message: "Host file opening is off: this client does not provide a compatible native TUI hook.",
+          variant: "warning",
+        })
+        report("unavailable-notified")
+      } catch {
+        // The launcher reports an unconfirmed hook after restoring the TTY.
+      }
     })
     return async () => {
       stopped = true

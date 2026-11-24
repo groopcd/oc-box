@@ -5,9 +5,11 @@ The native document drop contract is source-checked at:
   2.3.0 a6b15d33daf6ab7d35569f6d711fdb630b9f04e7
 packages/app/src/composer/attachments/{attachments,destination}.ts,
 composer/request.ts and runtime/persistence/drafts.ts are identical there.
-packages/app/vite.pwa.ts excludes /auth/ navigations from its cached app shell.
-This is standard DOM forwarding in an explicitly enabled common-shell addon, not a
-native public composer RPC, plugin/widget hook or an accepted host-browser run.
+The exact versions below additionally passed Chromium chooser/drop, two
+isolated native drafts and no automatic Send; see smoke_web_attachments_browser.py.
+Native's service worker excludes /auth/ from cached app-shell navigations.
+This is standard DOM forwarding, not a native public composer RPC, plugin/widget
+hook or external-host acceptance. Native API/DOM capability alone is not proof.
 """
 
 import os
@@ -17,12 +19,21 @@ import select
 import time
 from urllib.parse import urlsplit
 
-SUPPORTED = frozenset(("2.2.6", "2.3.0"))
+SUPPORTED = frozenset(("2.2.6", "2.2.7", "2.3.0", "2.3.2", "2.4.1"))
+UNVERIFIED_RELEASE = (
+    "The browser attachment adapter is not verified for this native OpenCode release. "
+    "Use 'oc-box web' without --attachments, or Ctrl+Y in the oc-box TUI with "
+    "--host-clipboard where supported."
+)
 # Stay inside native's existing service-worker navigation exclusion. Do not
 # modify/unregister that worker or intercept ordinary native asset requests.
 SCRIPT = "/auth/oc-box-attachments.js"
 MAX_HEADERS = 16384
 MAX_REPLY_HEADERS = 65536
+
+
+def supports_release(version):
+    return isinstance(version, str) and version in SUPPORTED
 
 
 def matches(raw):

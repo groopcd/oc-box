@@ -2174,6 +2174,32 @@ class WorkspaceServiceTests(unittest.TestCase):
 
 
 class GatewayHTTPTests(unittest.TestCase):
+    def test_disconnect_with_buffered_input_releases_gateway_slot(self):
+        gateway = service.Gateway(box, {}, {"url": "http://127.0.0.1:12345"})
+        child = Mock()
+        child.poll.return_value = 0
+        child.stdin.close.side_effect = BrokenPipeError
+        stream, peer = socket.socketpair()
+        self.addCleanup(stream.close)
+        with (
+            peer,
+            patch.object(
+                service,
+                "relay_command",
+                return_value=box.ContainerCommand(["native"], {}),
+            ),
+            patch.object(service.subprocess, "Popen", return_value=child),
+        ):
+            peer.shutdown(socket.SHUT_WR)
+            self.assertTrue(gateway.capacity.acquire(blocking=False))
+            gateway.forward(stream)
+        child.stdout.close.assert_called_once()
+        self.assertFalse(gateway.children)
+        self.assertTrue(
+            all(gateway.capacity.acquire(blocking=False) for _ in range(32))
+        )
+        self.assertFalse(gateway.capacity.acquire(blocking=False))
+
     @contextlib.contextmanager
     def relay(self, handler):
         upstream = ThreadingHTTPServer(("127.0.0.1", 0), handler)

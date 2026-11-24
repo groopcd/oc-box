@@ -2069,7 +2069,11 @@ class Gateway:
                             child.wait(timeout=3)
                     for pipe in (child.stdin, child.stdout):
                         if pipe:
-                            pipe.close()
+                            # A peer can close during browser navigation while
+                            # stdin still holds buffered bytes. A failed flush
+                            # on close must not leak a connection slot.
+                            with contextlib.suppress(BrokenPipeError):
+                                pipe.close()
                     with self.lock:
                         self.children.discard(child)
                 self.capacity.release()
@@ -2131,10 +2135,8 @@ def web_session(box, data, connection, args):
         else:
             import web_attachments
         version = connection.get("version")
-        if version not in web_attachments.SUPPORTED:
-            raise box.BoxError(
-                "The browser attachment adapter requires native OpenCode 2.2.6 or 2.3.0."
-            )
+        if not web_attachments.supports_release(version):
+            raise box.BoxError(web_attachments.UNVERIFIED_RELEASE)
         info = api(box, data, connection, "GET", "/api/info")
         if not isinstance(info, dict) or info.get("version") != version:
             raise box.BoxError(
@@ -2259,7 +2261,7 @@ def web_parser():
     result.add_argument(
         "--attachments",
         action="store_true",
-        help="opt in to the visible browser File-drop adapter (native 2.2.6/2.3.0 only; no automatic Send)",
+        help="opt in to browser File attachments on tested native releases only; no automatic Send",
     )
     # Keep scripts using the previous explicit opt-in working. There is only
     # one public browser shell now; this compatibility flag selects nothing.

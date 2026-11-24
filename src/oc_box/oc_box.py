@@ -122,6 +122,10 @@ class BoxError(Exception):
     pass
 
 
+class HostImportUnavailable(BoxError):
+    """Fixed preflight guidance from the host terminal or clipboard helper."""
+
+
 class HistoryPending(BoxError):
     """A session's history is not settled right now; others may still sync."""
 
@@ -480,7 +484,20 @@ def validate_host_drop(version=None):
     try:
         return host_drop.preflight(version)
     except host_drop.DropError as error:
-        raise BoxError(str(error)) from None
+        raise HostImportUnavailable(str(error)) from None
+
+
+def report_host_import_refusal(feature, error):
+    reason = (
+        str(error)
+        if isinstance(error, HostImportUnavailable)
+        else "Native OpenCode or terminal compatibility could not be verified."
+    )
+    startup_output.line(
+        f"oc-box: {feature} is off for this client. {reason} "
+        "The workspace preference is unchanged.",
+        flush=True,
+    )
 
 
 def workspace_ui_preferences(path, data):
@@ -541,15 +558,11 @@ def configure_host_drop(path, data, args, version, *, saved=None):
                     args._opencode_release = version
                 validate_host_drop(version)
                 enabled = True
-            except BoxError:
+            except BoxError as error:
                 if requested is True:
                     raise
                 if sys.stdin.isatty() and sys.stdout.isatty():
-                    startup_output.line(
-                        "oc-box: Host importing is unavailable for this client; "
-                        "the workspace preference is unchanged.",
-                        flush=True,
-                    )
+                    report_host_import_refusal("Host file importing", error)
         if requested is not None:
             workspace_preferences.set_host_drop(path, data["id"], requested)
             startup_output.line(
@@ -636,7 +649,7 @@ def configure_host_clipboard(args, version=None):
         try:
             args._host_clipboard_reader = host_clipboard.preflight()
         except host_clipboard.ClipboardError as error:
-            raise BoxError(str(error)) from None
+            raise HostImportUnavailable(str(error)) from None
     return args._host_clipboard_reader
 
 
@@ -698,16 +711,11 @@ def configure_host_clipboard_preferences(path, data, args, version):
                 )
                 args._opencode_release = version
             configure_host_clipboard(args, version)
-        except BoxError:
+        except BoxError as error:
             args._host_clipboard_enabled = False
             if requested is True or symlinks is not None:
                 raise
-            if sys.stdin.isatty() and sys.stdout.isatty():
-                startup_output.line(
-                    "oc-box: Host clipboard importing is unavailable for this client; "
-                    "the workspace preference is unchanged.",
-                    flush=True,
-                )
+            report_host_import_refusal("Host clipboard importing", error)
         if requested is not None or symlinks is not None:
             workspace_preferences.set_preferences(
                 path,
@@ -741,13 +749,10 @@ def run_native_tui(
     required = host_drop_required or host_clipboard_reader is not None
     try:
         profile = validate_host_drop(str(data.get("opencode_version", "")))
-    except BoxError:
+    except BoxError as error:
         if required:
             raise
-        startup_output.line(
-            "oc-box: Host importing is unavailable; opening the ordinary native TUI.",
-            flush=True,
-        )
+        report_host_import_refusal("Host file importing", error)
         return run_tui(command)
     if connection is None:
         raise BoxError("Host file drops require an existing private V2 connection.")
@@ -793,7 +798,17 @@ def run_native_tui(
                     )
                     startup_output.line("oc-box: " + policy, flush=True)
             return run_tui(command, file_drops=drops)
-    except host_drop.DropError:
+    except host_drop.DropError as error:
+        if (
+            isinstance(error, host_drop.TransferStartError)
+            and not error.cleanup_verified
+        ):
+            startup_output.line(
+                "oc-box: Temporary import cleanup could not be verified; "
+                "container files may remain. No workspace was restarted for cleanup.",
+                file=sys.stderr,
+                flush=True,
+            )
         if not client_started and not required:
             startup_output.line(
                 "oc-box: Host importing could not start; opening the ordinary native TUI. "
@@ -801,8 +816,12 @@ def run_native_tui(
                 flush=True,
             )
             return run_tui(command)
+        if not client_started:
+            raise BoxError(
+                "Private host importing could not start; no workspace restart was attempted."
+            ) from None
         raise BoxError(
-            "Host file-drop transfer failed; no automatic retry or workspace restart was attempted."
+            "Host importing failed after launch; no automatic retry or workspace restart was attempted."
         ) from None
 
 
@@ -5068,13 +5087,11 @@ def _validate_web_release(args, version):
         )
     if getattr(args, "attachments", False):
         if __package__:
-            from .web_attachments import SUPPORTED
+            from . import web_attachments
         else:
-            from web_attachments import SUPPORTED
-        if version not in SUPPORTED:
-            raise BoxError(
-                "The browser attachment adapter requires native OpenCode 2.2.6 or 2.3.0."
-            )
+            import web_attachments
+        if not web_attachments.supports_release(version):
+            raise BoxError(web_attachments.UNVERIFIED_RELEASE)
 
 
 def _stop_selected(path, data):
@@ -5648,7 +5665,10 @@ def _main_command(args, argv):
                     "An active V2 workspace accepts additional TUI clients with selectors/--resume only; change session/configuration after the owner exits."
                 )
             validate_host_file_open(args, data.get("opencode_version"), data)
-            configure_host_drop(path, data, args, data.get("opencode_version"))
+            saved = workspace_ui_preferences(path, data)
+            configure_host_drop(
+                path, data, args, data.get("opencode_version"), saved=saved
+            )
             configure_host_clipboard_preferences(
                 path, data, args, data.get("opencode_version")
             )
@@ -5656,6 +5676,15 @@ def _main_command(args, argv):
             with workspace_service.attach(
                 sys.modules[__name__], path, data
             ) as connection:
+                if (
+                    saved.get("image_preview") is True
+                    and connection.get("image_preview", False) is False
+                ):
+                    startup_output.line(
+                        "oc-box: Image preview override is off for the running owner. "
+                        "The saved preference applies on the next owning launch.",
+                        flush=True,
+                    )
                 command = workspace_service.client_command(
                     sys.modules[__name__],
                     data,
@@ -5768,7 +5797,7 @@ def _locked_workspace_command(path, data, args, launch_context, image_preview_sn
         saved = workspace_ui_preferences(path, data)
         if args.image_preview is None and saved.get("image_preview") is True:
             # Saved policy applies only to a new owner. V1 keeps ordinary
-            # behavior; invalid V2 CLI settings fail before any preference
+            # behavior with a notice; invalid V2 CLI settings fail before any preference
             # writes, credential unlock or reset.
             version = getattr(args, "_opencode_release", None)
             if version is None:
@@ -5778,6 +5807,12 @@ def _locked_workspace_command(path, data, args, launch_context, image_preview_sn
             if opencode_compat.major(version) == 2:
                 image_preview_snapshot = validate_image_preview(version)
                 args._image_preview_enabled = True
+            else:
+                startup_output.line(
+                    "oc-box: Image preview override is off: native OpenCode 2.x "
+                    "is required. The saved preference is unchanged.",
+                    flush=True,
+                )
         configure_host_drop(
             path, data, args, getattr(args, "_opencode_release", None), saved=saved
         )

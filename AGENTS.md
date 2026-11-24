@@ -278,8 +278,12 @@ their checkout ownership distinct from unrelated source and flat installations.
   pre-consent descriptor pinning, response backpressure and no automatic regrant.
   Keep the native TUI/container boundary unchanged; there is no public transparent
   host-drop interceptor. Native queued input is not a composer draft or an
-  inactivity guarantee. Refuse observed staged reverts and document the residual
-  native check/admission race; no host acceptance follows from offline probes.
+  inactivity guarantee. The broker admits eligible stable V2 only after a
+  verified ClientMCP handshake on the existing authenticated private owner.
+  Keep direct queue admission limited to tested scheduler semantics; API
+  declarations alone do not prove `resume: false` behavior. Refuse observed
+  staged reverts and document the residual native check/admission race;
+  no host acceptance follows from offline probes.
 - `host_drop.py` / `host_drop_input.py` / `host_drop_io.py`: native TUI input
   bridge, enabled by default per workspace on supported clients.
   `workspace_preferences.py` stores private host-only future-client policy beside
@@ -352,7 +356,10 @@ their checkout ownership distinct from unrelated source and flat installations.
   takes precedence over that default, but not the current launch flag.
   Saving or restoring data never changes a live client. Require a fresh
   matched Ctrl-click from host terminal input and native assistant link
-  hit-testing. Child output must not independently grant file opens. Validate
+  hit-testing at press and release. A hook startup acknowledgement is
+  compatibility evidence only. A drag-state refusal may warn on a verified
+  release, never substitute it for a matching native press.
+  Child output must not independently grant file opens. Validate
   mount/descriptor boundaries, bound each read and transfer, and open only
   verified private PNG/text/Markdown/static HTML copies. Avoid clipboard
   coupling, active HTML, arbitrary protocol dispatch, and mainline patches.
@@ -380,11 +387,13 @@ their checkout ownership distinct from unrelated source and flat installations.
   focus, guesses a path/session, or substitutes history. Refusals retain the
   existing unavailable/index behavior and native Home option. Keep the exact
   automatic owner startup/default-session allowlist and the separate history,
-  recovery, browser attachment, sharing and authentication guards unchanged.
+  recovery, sharing and authentication guards independent.
   Public SDK and private layout compatibility are not established for all 2.x.
   Browser attachments remain explicitly enabled, trusted File-only and manually
-  sent. Recheck exact live URL, document, original target and selection generation
-  after asynchronous reads, including explicit away/back changes. Silent SPA
+  sent. Admit only native releases with tested real-browser draft scoping and
+  no-automatic-Send semantics; authenticated version or a DOM feature check alone
+  is not proof. Recheck exact live URL, document, original target and selection
+  generation after asynchronous reads, including explicit away/back changes. Silent SPA
   excursions between public observations remain a documented residual race.
 - `tools/test_sharing_podman.py` and its provider/archive helpers are a separate
   source-pinned host harness, not a change to an already frozen release candidate.
@@ -467,6 +476,21 @@ pushes of reviewed commits to an explicitly configured upstream, provided the
 hosting service permits this AI-assisted project. Do not create a remote or
 push to a service with incompatible policies. Do not store credentials in Git
 URLs, config, source files, or command-line arguments.
+
+For maintainer pushes, install the versioned `tools/check_push_identity.py` in the
+clone's shared Git hooks directory. It compares raw author and committer emails
+on outgoing commits against the clone-local `ocbox.pushIdentityEmail` allowlist,
+independently of `user.email` or per-command Git identity overrides. On a
+clone using the default hook path and with no existing pre-push hook:
+
+```bash
+git config --local --add ocbox.pushIdentityEmail 'maintainer@example.invalid'
+install -m 755 tools/check_push_identity.py "$(git rev-parse --git-path hooks/pre-push)"
+```
+
+Replace the example with the approved GitHub-linked address. Preserve and
+integrate any existing hook instead of overwriting it. Do not bypass identity
+refusals; approve legitimate contributor addresses explicitly before pushing.
 
 The public upstream is `https://github.com/groopcd/oc-box.git`. Use only the
 explicit `PERSONAL_GITHUB_TOKEN` for publication. Inherited `GITHUB_TOKEN` and
