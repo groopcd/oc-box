@@ -502,11 +502,22 @@ def _workspace_manager(name):
 </section>"""
 
 
-def _workspace_layout_body(state, conversation, fallback, attachments, workspace_name):
+def _workspace_layout_body(
+    state, conversation, fallback, attachments, workspace_name, *, first_party_studio
+):
     """Port the final Studio chrome; data and native UI stay behind their existing boundaries."""
     name = escape(workspace_name)
     title = escape((state["selection"] or {}).get("title") or "Native conversation")
     addon_hidden = "" if attachments else " hidden"
+    studio = (
+        """
+    <div id="workspace-studio-center" hidden>
+      <div id="workspace-studio-transcript"></div>
+      <div id="workspace-studio-composer" hidden></div>
+    </div>"""
+        if first_party_studio
+        else ""
+    )
     return f"""{_ICONS}
 <header id="workspace-masthead">
   <div id="workspace-toolbar">
@@ -584,7 +595,7 @@ def _workspace_layout_body(state, conversation, fallback, attachments, workspace
       <details><summary>Browser attachments</summary><div id="session-controls"></div></details>
       <p id="addon-status" role="status"{addon_hidden}></p>
     </div>
-    {conversation}
+    {conversation}{studio}
   </section>
   <div id="workspace-divider-right" class="workspace-divider" tabindex="0" role="separator" aria-orientation="vertical"
     aria-label="Resize workspace inspector" aria-controls="workspace-overview"
@@ -618,6 +629,7 @@ def document(
     addon_scripts=(),
     *,
     workspace_name="Private workspace",
+    first_party_studio=False,
 ):
     if (
         not isinstance(addon_scripts, tuple)
@@ -625,6 +637,10 @@ def document(
         or any(script != "/auth/oc-box-attachments.js" for script in addon_scripts)
     ):
         raise ValueError("Invalid trusted shell addon.")
+    # Internal renderer opt-in only. Callers must supply the reviewed assets
+    # and a preauthorized controller separately. No ordinary route enables it.
+    if type(first_party_studio) is not bool or (first_party_studio and addon_scripts):
+        raise ValueError("Invalid first-party Studio composition.")
     state = state or {
         **catalog(url, sessions, status),
         "selection": None,
@@ -685,7 +701,12 @@ def document(
     return (
         start
         + _workspace_layout_body(
-            state, conversation, fallback, bool(addon_scripts), workspace_name
+            state,
+            conversation,
+            fallback,
+            bool(addon_scripts),
+            workspace_name,
+            first_party_studio=first_party_studio,
         )
     ).encode("utf-8", errors="replace")
 
