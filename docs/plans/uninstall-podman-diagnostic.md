@@ -1,9 +1,10 @@
 # Podman 5.8.1 uninstall evidence — source audit and guest diagnostic
 
-This is a recipe for a later, independently approved disposable KVM probe,
-**not** an acceptance report or a runnable uninstall. No VM or Podman was run
-to produce this audit. The old 5.8.1 guest's unrelated runtime results do not
-validate inventory or cleanup.
+This is the contract for the source-only guest fixture
+[`tools/podman_uninstall_guest.py`](../../tools/podman_uninstall_guest.py),
+**not** an acceptance report or an uninstall entry point. No VM or Podman was
+run to produce this audit. The old 5.8.1 guest's unrelated runtime results do
+not validate inventory or cleanup.
 
 ## What the pinned source establishes
 
@@ -21,133 +22,97 @@ source without patches.
 | External storage and plugin effects | [`VolumeList`](https://github.com/podman-container-tools/podman/blob/c6077f645788743258a1a749f8005b4fb3cbe533/pkg/domain/infra/abi/volumes.go) calls `Volume.Inspect` before formatting, and `Volume.Inspect` can query a plugin socket. The adapter rejects configured plugins before either list or inspect. The built-in `configFile` slot comes from [vendored storage defaults](https://github.com/podman-container-tools/podman/blob/c6077f645788743258a1a749f8005b4fb3cbe533/vendor/go.podman.io/storage/types/options_linux.go); merely seeing that string does not prove which file exists. |
 | Storage and bind aliases | [Vendored overlay metadata](https://github.com/podman-container-tools/podman/blob/c6077f645788743258a1a749f8005b4fb3cbe533/vendor/go.podman.io/storage/drivers/overlay/overlay.go) provides the layer's `UpperDir`; the stage pins it and local volume `_data` without following links and checks the mount IDs. `GetMounts` copies bind `Source` from the spec; it does not bind that string to a VFS object, prove canonical ancestry, or inventory all implicit/runtime/host mounts. Absence of lexical overlap is not absence of an alias. |
 
-## Reproducible, read-only guest probe
+## Run contract for the disposable guest
 
-Use an **already provisioned disposable KVM guest and synthetic store** only.
-Do not run this on a normal host or an existing user's store. Use a fresh
-per-run guest disk, no host shares, no credentials, no remote connection,
-and a dedicated non-root `ocbox-probe` login. Its default rootless overlay
-graph/run/volume directories must already exist. Supply the reviewed checkout
-and known 5.8.1 executable via the guest fixture image. Do not remove or edit
-distribution configuration just to make a preflight pass; record a fixed
-refusal if the fixture does not match the no-override profile.
+The outer harness owns VM isolation, source pinning, guest bootstrap and
+disposal. Use a new writable guest disk, no NIC, no host shares or forwarded
+sockets, no real projects/credentials, and no existing user's Podman store.
+Do not pass through other writable disks. The guest must already have Fedora
+44, Python 3, a root-owned native Podman 5.8.1 at `/usr/bin/podman`, and
+working rootless overlay prerequisites (including subordinate UID/GID ranges
+and their helpers). Do not install dependencies or change host/guest engine
+policy to turn a refusal into a pass.
 
-Prepare test states separately before freezing the diagnostic inputs. Use
-only images/data generated for this disposable fixture. One starting state
-should have a stopped canonical owner, local private named home, and a
-second **stopped** container referencing that home by name/subpath and the
-owner by a Libpod dependency. Use the synthetic workspace ID `aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa`.
-For separate fixture states, retain a preexisting mounted working container,
-an external storage container, and a known bind alias to the synthetic
-volume at `/home/ocbox-probe/.uninstall-probe/volume-alias`. Include negative
-controls with a distinct directory at that same path and an unsupported
-external volume. Do not create, start, stop, mount, unmount, or delete
-anything during this diagnostic. Any provisioning or eventual guest teardown
-belongs to the separate fixture owner.
+1. Copy the hash-verified clean archive into the guest at the exact
+   `/opt/oc-box-uninstall-probe/source` path. Its hierarchy and the relevant
+   source files must be root-owned, non-symlinked and not writable by the
+   probe UID. The guest does not infer checkout ownership from an arbitrary
+   environment variable or writable share.
+2. Provision a fresh account `ocbox-probe`, not the console user `ocboxvm`.
+   It needs its **empty**, owned, mode-0700 `/home/ocbox-probe` on a guest
+   btrfs/ext4/XFS filesystem and no supplementary groups other than its
+   primary group. Do not copy skeleton dotfiles or run a login shell which
+   populates the home. No normal runtime directory or auth files are needed.
+3. Guest root publishes `/run/oc-box-uninstall-probe/permit.json` under
+   root-owned, non-writable-to-others, non-symlinked ancestors.
+   The permit is a root-owned, single-link, mode-0444 regular file, at most
+   2048 bytes, with **exactly** these fields:
 
-Run from the root of the guest's reviewed checkout as that login:
+   | Field | Value |
+   | --- | --- |
+   | `version` | integer `1` |
+   | `purpose` | `oc-box-uninstall-podman-581` |
+   | `nonce` | fresh lowercase 32-hex run identifier, also the sole CLI argument |
+   | `uid` | numeric `ocbox-probe` UID |
+   | `boot_id` | this guest's lowercase kernel boot UUID |
+   | `fixture_sha256` | lowercase SHA-256 of `tools/podman_uninstall_guest.py` from the pinned archive |
+   | `podman_sha256` | verified lowercase SHA-256 of the selected guest `/usr/bin/podman` ELF |
+
+The fixture checks the permit, executable and source ownership, real and
+effective UID, Fedora release, QEMU DMI, initial user namespace, loopback-only
+network interfaces and known share filesystems before provisioning. These
+are guest-side checks, not hypervisor attestation or a substitute for the
+outer no-share/no-network policy. From a pre-provisioned `ocboxvm` console,
+run without preserving groups or a login shell:
 
 ```bash
-python3 -B -I - "$PWD" <<'PY'
-from contextlib import ExitStack
-import json
-import os
-from pathlib import Path
-import sys
-
-if Path.home() != Path("/home/ocbox-probe") or os.geteuid() == 0:
-    print('{"result":"INCOMPLETE","reason":"not-dedicated-probe-user"}')
-    raise SystemExit(1)
-
-sys.path.insert(0, str(Path(sys.argv[1]) / "src"))
-from oc_box.workspace_podman import InventoryError, _path_fd, local_inventory
-from oc_box.workspace_uninstall import _mount_id
-
-
-def alias_facts(home):
-    unavailable = (False, None, None)
-    if home is None:
-        return unavailable
-    try:
-        with ExitStack() as stack:
-            paths = (home.mountpoint.path, "/home/ocbox-probe/.uninstall-probe/volume-alias")
-            entries = [
-                stack.enter_context(_path_fd(path, os.geteuid(), directory=True))
-                for path in paths
-            ]
-            (left, a), (right, b) = entries
-            return (
-                True,
-                (a.st_dev, a.st_ino) == (b.st_dev, b.st_ino),
-                _mount_id(left) != _mount_id(right),
-            )
-    except (OSError, ValueError):
-        return unavailable
-
-ident = "a" * 32
-names = ("oc-box-" + ident, "oc-box-home-" + ident)
-try:
-    with local_inventory("/usr/bin/podman") as reader:
-        snapshot = reader.scan((names,))
-        owners = [row for row in snapshot.containers if row.name == names[0]]
-        homes = [row for row in snapshot.volumes if row.name == names[1]]
-        owner = owners[0] if len(owners) == 1 else None
-        home = homes[0] if len(homes) == 1 else None
-        others = [row for row in snapshot.containers if row is not owner]
-        stopped = [row for row in others if row.status in ("created", "exited", "stopped")]
-        alias_available, alias_same_directory, alias_mount_differs = alias_facts(home)
-        print(json.dumps({
-            "result": "INCOMPLETE",
-            "rootless_581_profile": snapshot.profile.scope.rootless and snapshot.profile.version == "5.8.1",
-            "owned_container_observed": bool(owner and owner.managed and owner.workspace_label == ident),
-            "owned_home_observed": bool(home and home.workspace_label == ident),
-            "owner_writable_directory_pinned": bool(owner and owner.writable),
-            "mounted_catalog_available": bool(owner and owner.mounted is not None),
-            "owner_observed_mounted": bool(owner and owner.mounted is True),
-            "stopped_named_volume_consumer": any(
-                name == names[1] for row in stopped for name, _ in row.volume_refs
-            ),
-            "stopped_subpath_consumer": any(
-                name == names[1] and nested
-                for row in stopped for name, nested in row.volume_refs
-            ),
-            "stopped_dependency_observed": bool(owner and any(
-                owner.ident in row.dependencies for row in stopped
-            )),
-            "home_mount_count_zero": bool(home and home.mount_count == 0),
-            "lexical_store_overlap_observed": any(
-                row.lexical_store_overlap for row in snapshot.containers
-            ),
-            "bind_alias_descriptors_available": alias_available,
-            "bind_alias_same_synthetic_directory": alias_same_directory,
-            "bind_alias_mount_ids_differ": alias_mount_differs,
-            "inventory_populated": bool(snapshot.containers or snapshot.volumes),
-            "adapter_complete": snapshot.complete,
-        }, sort_keys=True))
-except InventoryError as exc:
-    print(json.dumps({"result": "INCOMPLETE", "reason": exc.reason}))
-    raise SystemExit(1)
-except Exception:
-    print('{"result":"INCOMPLETE","reason":"diagnostic-unverified"}')
-    raise SystemExit(1)
-PY
+sudo -H -u ocbox-probe -- /usr/bin/python3 -B -I -S \
+  /opt/oc-box-uninstall-probe/source/tools/podman_uninstall_guest.py "$probe_nonce"
 ```
 
-The bind-alias comparison uses only the known synthetic home and fixture
-alias, with no-follow directory opens, device/inode and kernel mount IDs
-(not `realpath` or device alone). A symlink refusal is **unverified**, not
-“no alias”; unavailable descriptor comparisons emit `null`. A nested
-subpath/ancestor alias needs its own ancestry proof; a matching inode test
-of just the named roots cannot cover it.
+The fixture reserves `fixture-<nonce>` once under that empty home. It pins a
+fresh overlay graph/run/volume store and private HOME, XDG runtime/config,
+mounts, hooks, registry, empty auth and temp paths. It checks the observed
+local engine against the synthetic store before creating anything. Its only
+native writes import a tiny locally generated tar (three empty directories),
+create one labeled local home volume, and create two containers without
+starting either. Both use `--pull=never`, the same full local image ID and
+`--network=none`. The owner binds a synthetic project; the stopped foreign
+consumer references the home subpath and the owner through `--requires`.
+The fixture creates the empty subpath only below the freshly verified volume
+descriptor. Uncertain or nonzero results stop provisioning without a retry.
 
-If the mount catalog is unavailable, the next native experiment has to
-verify that a separately provisioned rootless namespace is the same engine
-and store before the exact operand-free JSON list. No automatic `unshare`
-fallback is part of this recipe or adapter. Use bounded private pipe
-capture and only emit fixed shape/identity booleans; never print `info`,
-`inspect`, environment, mount paths, engine errors, or logs. `info` and
-other read-only Podman queries can update native runtime bookkeeping;
-the recipe does not promise byte-for-byte unchanged store metadata.
+After those exact operations, only read-only queries are admitted. The probe
+uses the native adapter's projection with the separately bound **synthetic**
+configuration path, not production admission of arbitrary storage overrides.
+It evaluates the empty mount list when available and compares an independent,
+distinct synthetic directory against the home volume by no-follow descriptor
+identity. Positive mounted and same-device bind-alias controls are deliberately
+**not provisioned**: the fixture does not enter another namespace or mount a
+container or directory to compensate for missing evidence. There is no
+start/stop, engine reset, removal, or directory cleanup. Everything is left
+on the disposable disk for the outer harness.
+
+## Result and interpretation
+
+Stdout is one bounded JSON line with fixed keys and only booleans or enum
+values. Raw ID/path/inspect data, native stderr, environments and logs are
+never emitted.
+
+| `result` | Exit | Meaning |
+| --- | ---: | --- |
+| `complete_diagnostic` | 0 | All intended **synthetic baseline** observations, including the two unmounted rows and distinct-descriptor negative control, agreed. Not uninstall acceptance or positive alias/mount proof. |
+| `descriptor_incomplete` | 1 | The named reference and dependency scan agreed, but mounted state or the negative descriptor comparison could not be established. |
+| `adapter_incomplete` | 1 | The populated inventory projection or a required fixture observation failed; populated planner admission must stay false. |
+| `provision_incomplete` | 1 | Setup or one checked synthetic step refused; optional `stage` is one of `store_setup`, `verify_empty`, `synthetic_image`, `local_home`, `volume_subpath`, `stopped_owner`, `stopped_consumer`, `freeze`. Retain the disk evidence. |
+| `guard_refused` | 2 | Guest, owner, boot, source, executable, empty-home or invocation proof failed before provisioning. |
+
+When direct rootless overlay mount listing is unavailable, report it as
+unknown; no automatic `unshare` fallback is attempted. A future positive alias
+control must prove ancestry and identity in the actual mount namespace, not
+just compare the named root's inode. Podman read-only commands can update
+private runtime bookkeeping, so the freeze does not claim store metadata is
+byte-for-byte unchanged.
 
 ## Completeness still missing
 
