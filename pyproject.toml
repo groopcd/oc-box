@@ -62,6 +62,7 @@ oc_box = [
   "web_named_login_slot.mjs",
   "web_named_handoff_client.mjs",
   "web_pake_client.mjs",
+  "web_named_studio_client.mjs",
   "oc-box-mark.png",
   "ui_state_server.js",
   "ui_state_tui.js",

@@ -39,6 +39,7 @@ RUNTIME_FILES = (
     "web_studio_read.py",
     "web_studio_selection.py",
     "web_studio_send.py",
+    "web_named_studio_client.mjs",
     "web_tls.py",
     "web_local_origins.py",
     "web_handoff.py",
