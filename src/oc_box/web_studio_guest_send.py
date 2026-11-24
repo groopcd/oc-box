@@ -6,6 +6,7 @@ if __package__:
     from . import (
         web_guest_duplex_exec,
         web_guest_duplex_worker,
+        web_named_native_profile,
         web_studio_guest,
         web_studio_guest_binding,
         web_studio_guest_selection,
@@ -14,6 +15,7 @@ if __package__:
 else:
     import web_guest_duplex_exec
     import web_guest_duplex_worker
+    import web_named_native_profile
     import web_studio_guest
     import web_studio_guest_binding
     import web_studio_guest_selection
@@ -27,7 +29,9 @@ def _refuse():
 class _Peer:
     """Bounded HTTP exchange on one already owned OGD pipe pair."""
 
-    def __init__(self, tunnel, binding, cookie, deadline, *, check, current):
+    def __init__(
+        self, tunnel, binding, cookie, deadline, *, check, current, identity=None
+    ):
         if web_studio_guest._native_headers(binding, cookie) is None:
             _refuse()
         self.tunnel = tunnel
@@ -36,6 +40,7 @@ class _Peer:
         self._deadline = deadline
         self._check = check
         self._current = current
+        self._identity = identity
         self._pending = None
         self.post_attempted = False
 
@@ -67,11 +72,20 @@ class _Peer:
             self.tunnel.consumed()
         return result
 
-    def query(self, path, *, body=None):
+    def query(
+        self,
+        path,
+        *,
+        body=None,
+        closing=False,
+        limit=web_studio_send._MAX_REPLY,
+        raw=False,
+    ):
         if self._pending or self.post_attempted:
             _refuse()
         self._current()
         post = body is not None
+        closing = closing or post
         fields = [
             f"{'POST' if post else 'GET'} {path} HTTP/1.1",
             "Host: " + self._binding.authority,
@@ -79,7 +93,7 @@ class _Peer:
             "Cookie: " + self._cookie,
             "Accept: application/json",
             "Accept-Encoding: identity",
-            "Connection: " + ("close" if post else "keep-alive"),
+            "Connection: " + ("close" if closing else "keep-alive"),
         ]
         if post:
             fields += ["Content-Type: application/json", f"Content-Length: {len(body)}"]
@@ -97,10 +111,23 @@ class _Peer:
             # The next poll can put bytes on the native socket. From here,
             # uncertainty is not grounds for retry or replay.
             self.post_attempted = True
-        response = web_studio_send._read_reply(self._recv, closing=post)
+        response = web_studio_send._read_reply(
+            self._recv, closing=closing, limit=limit, raw=raw
+        )
         if self._pending:
             _refuse()
         self._current()
+        if path == "/api/info" and self._identity is not None:
+            ident = self._identity
+            info = web_named_native_profile.named_native_info(
+                web_named_native_profile.named_native_json(response)
+                if raw
+                else response,
+                ident.version,
+                ident.endpoint,
+            )
+            if info["pid"] != ident.native_pid:
+                _refuse()
         return response
 
 
@@ -186,6 +213,7 @@ def send(
             deadline,
             check=check,
             current=current,
+            identity=ident,
         )
         peer.open()
         route = web_studio_send._preflight(peer.query, scope)
@@ -204,7 +232,12 @@ def send(
             except Exception:
                 retired = False
     if verified and retired:
-        return web_studio_send.SendResult.QUEUED, True
+        try:
+            current()
+        except Exception:
+            pass
+        else:
+            return web_studio_send.SendResult.QUEUED, True
     return (
         unconfirmed if peer is not None and peer.post_attempted else refused
     ), retired
