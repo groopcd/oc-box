@@ -2,10 +2,12 @@
 
 This checkout-only candidate connects the existing Python `PakeWorker` and
 `LocalPakeProfile` to the real `opaque-ke` library over private pipes. The
-optional matching browser WASM slot is login-only. Neither half is installed,
-selected by the launcher or usable as a web sign-in command. They do not
-provision TLS, read an account store, listen or require OpenCode/Podman.
-Neither the Python artifacts nor the flat installer use this directory.
+optional matching browser WASM slot is login-only; a separate helper
+implements technical registration primitives. None of these targets is
+installed, selected by the launcher or usable as a web sign-in command.
+They do not provision TLS, read an account store, listen or require
+OpenCode/Podman. Neither the Python artifacts nor the flat installer use
+this directory.
 
 ## What this worker does
 
@@ -39,6 +41,88 @@ challenge bytes. The browser nonce, account snapshot and workspace owner
 generation are separate host-side authorization bindings. This worker does
 not check them or claim timing indistinguishability, runtime isolation,
 protection against a same-user debugger or erasure of all memory copies.
+
+## Optional OCOR registration helper
+
+`registration.rs` builds a separate `ocor-registration` executable. It
+shares the pinned suite, but neither extends the login worker's ABI nor
+uses its lifetime. One process accepts one operation via stdin, requires
+EOF **before** cryptographic work or any reply, and exits. No arguments,
+environment settings, allocation lengths from the wire, or password are
+part of this contract. The largest request is 230 bytes and the largest
+reply is 231 bytes.
+
+The 38-byte header is `b"OCOR\x01" || opcode[1] || profile[32]`.
+`profile` is SHA-256 of the literal ASCII
+`oc-box.named.local/OPAQUE-25519-SHA512-v1` (no trailing newline or length
+prefix): `f71544a382ec1b3d1280e8a13ba9413d705e8dd62b68724cecd6e008f74f122c`.
+This is a fixed protocol marker, not a credential ID or an attestation of
+the bytes' source. Successful replies echo the header, then status `0`
+and the exact result; a same-header status `1` with no body is a semantic
+refusal. Both use a clean exit and EOF. Wrong magic/version/profile,
+unknown opcode, truncation, surplus input or unexpected args exit nonzero
+without a reply. All failures are refusals; the helper does not emit
+diagnostics.
+
+| Opcode | Fixed request body | Successful response body |
+|---|---|---|
+| `1` — SETUP | Empty | `ServerSetup` (128 bytes) |
+| `2` — RESPOND | Setup (128 bytes), credential ID (32), blinded `RegistrationRequest` (32) | `RegistrationResponse` (64 bytes) |
+| `3` — VALIDATE | `RegistrationUpload` (192 bytes) | Canonical `ServerRegistration` record (192 bytes) |
+
+SETUP uses the library and system entropy to generate fresh OPRF seed,
+server static key and dummy public key. Its serialization is **private
+host material**, not a browser response or a value to log. RESPOND imports
+that exact setup and uses the same credential ID as login: SHA-256 of the
+length-prefixed profile label, `credential` domain label and canonical
+ASCII username (`uint16` big-endian byte lengths). A trusted host derives
+that ID from the selected account. The browser independently uses its
+`client` and `verifier` IDs when constructing the upload; they are not
+OCOR fields. `verifier` is derived from the exact trusted account origin.
+
+VALIDATE uses the library to parse the public key, masking key and envelope
+and reserialize the record. It rejects noncanonical bytes; an accepted
+upload is already the record at this pin. It cannot authenticate the
+envelope, prove a successful login, or relate an upload to a particular
+credential ID, origin, setup or prior response. Wrong-ID/setup and modified
+envelope fixtures demonstrate that structurally accepted bytes can still
+fail the real OCOP login. The operation is deliberately stateless, not a
+replay or account replacement check.
+
+### Inactive Python adapter
+
+`src/oc_box/web_registration_worker.py` provides:
+
+```python
+RegistrationWorker(executable_fd: int, *, expected_sha256: bytes, io_timeout: float = 2)
+generate_setup(*, deadline: float | None = None) -> bytes
+respond(*, setup: bytes, credential_identifier: bytes, registration_request: bytes,
+        deadline: float | None = None) -> bytes
+validate_upload(upload: bytes, *, deadline: float | None = None) -> bytes
+close() -> bool
+```
+
+The constructor borrows a fully sealed executable FD and pins its own
+duplicate to the caller's single reviewed digest (32 raw bytes). There is
+no artifact discovery or fallback. Each call reserves one live slot and
+sends one request, then closes stdin. Bytes are returned only after the
+exact echoed header, status and fixed payload, strict stdout EOF, and a
+confirmed zero exit from `waitpid`. The optional absolute monotonic deadline
+can only shorten the configured per-call limit. Linux process pipes and
+pidfds reuse the existing login worker's supervision primitives, without
+changing that worker; the child gets an empty environment, no extra
+descriptors, no captured stderr, and no core dumps. This does not sandbox a
+helper or bound all OS process-creation delays. The caller owns aggregate
+admission limits and must never expose an arbitrary OPRF service.
+
+`RegistrationError` is a fixed refusal. `RegistrationCleanupError` also
+permanently fences the worker; a false `close()` means reaping is still
+unconfirmed and the caller must keep its teardown fence. Another `close()`
+can check only the same child, with no reset, retry, or replacement. The
+adapter neither selects an account nor establishes possession or account
+scope. Host approval, a separate OCOP possession proof before persistence,
+scope verification, and the generation-checked store write remain separate
+responsibilities. No listener or runtime caller uses this adapter.
 
 ## Optional browser login slot
 
@@ -108,6 +192,28 @@ Pass `--with-browser` to each build to include `ocop-browser.wasm` under
 `target/wasm32-unknown-unknown/release/`. That target uses the pinned
 `wasm32-unknown-unknown` Rust standard-library archive and records its separate
 feature graph in `wasm-tree.txt`. It does not enable `rand/sys_rng`.
+
+Pass `--with-registration` to include `target/release/ocor-registration`.
+Also passing `--with-fixture` adds a **separate** `ocor-fixture` synthetic
+client. With the verified artifact digests, exercise OCOR and real OCOP
+login using an ephemeral in-memory registration:
+
+```sh
+env -i PATH=/usr/bin:/bin /usr/bin/python3 -I -B "$research/check-registration" "$work/first" \
+  --worker-sha256 "$worker_digest" --registration-sha256 "$registration_digest" \
+  --fixture-sha256 "$registration_fixture_digest"
+```
+
+Only the separate client fixture generates a synthetic password, and it
+never leaves that process. The check runs the real helper using the Python
+adapter on a sealed FD, then logs in through the existing OCOP worker. It
+also tests raw wrong-profile/oversize frames, malformed cryptographic
+inputs, and failed login with mismatched registration data. It does not run
+a browser workflow, live host enrollment, store or listener.
+
+Two fresh local `--with-registration` builds, one without any fixture
+target, yielded identical bytes. The separately built OCOP worker stayed
+byte-identical to the previous native build.
 
 The script prints artifact digests and keeps the resolved feature graph in
 each private output directory. With the verified digests from the build:
@@ -183,20 +289,17 @@ or release evidence.
 
 ## Not ready to enable
 
-1. **Initialization, enrollment and reset are missing.** Design a separate
-   versioned native helper contract for setup generation (128 bytes, stored
-   only in encrypted host state), blinded registration request/response
-   (32/64 bytes) and validation/canonicalization of a 192-byte registration
-   upload. The fixture's client-internal setup and registration is not this
-   service. The browser must use the exact same immutable account IDs,
-   verifier origin, suite and KSF as login. Upload validity alone is not
-   authorization. Require a host-authorized, short-lived one-use enrollment
-   or reset bound to the browser, exact account, verified workspace scope
-   and expected setup/record generations. Atomically recheck on write, close
-   or fence stale admissions/native grants, and explicitly design setup
-   retirement/re-enrollment and rollback handling. Do not silently migrate
-   incompatible registration bytes; loss of both setup and records can
-   enable offline guessing.
+1. **Host initialization, durable enrollment and reset are missing.** OCOR
+   only implements the native primitives. Store generated setup and canonical
+   registrations in encrypted host state. The browser must use the same
+   immutable account IDs, verifier origin, suite and KSF as login. Upload
+   validity is not authorization. Require a host-authorized, short-lived
+   one-use enrollment or reset bound to the browser, exact account, verified
+   workspace scope and expected setup/record generations. Compare and swap
+   after validation, close or fence stale admissions/native grants, and
+   explicitly design setup retirement/re-enrollment and rollback handling.
+   Do not silently migrate incompatible registration bytes; exposure of
+   both setup and records can enable offline guessing.
 2. **The prerelease is an experiment, not a dependency decision.** The
    preserved upstream 4.0.1 lock uses `crypto-bigint 0.5.5` (the
    [RustSec advisory](https://rustsec.org/advisories/RUSTSEC-2026-0387.html)

@@ -1,0 +1,203 @@
+#!/usr/bin/python3 -I
+# SPDX-License-Identifier: GPL-3.0-or-later
+"""Verify synthetic registration through the experimental OCOR/OCOP helpers."""
+
+import argparse
+import base64
+import hashlib
+import os
+import runpy
+import subprocess
+from contextlib import ExitStack, contextmanager
+from pathlib import Path
+from select import select
+
+CHECK = runpy.run_path(str(Path(__file__).with_name("check")))
+from oc_box import web_registration_worker  # noqa: E402
+
+require = CHECK["require"]
+read_exact = CHECK["read_exact"]
+process = CHECK["process"]
+schema = hashlib.sha256(CHECK["PROFILE"]).digest()
+
+SETUP, RESPOND, VALIDATE = 1, 2, 3
+
+
+def header(operation):
+    return b"OCOR\x01" + bytes([operation]) + schema
+
+
+def run(helper, data, *args):
+    try:
+        result = subprocess.run(
+            (helper, *args), input=data, capture_output=True, timeout=5, cwd="/", env={},
+        )
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("OCOR helper did not exit") from None
+    require(not result.stderr, "OCOR helper emitted diagnostics")
+    return result.returncode, result.stdout
+
+
+def refused(call, *args, **kwargs):
+    try:
+        call(*args, **kwargs)
+    except web_registration_worker.RegistrationError as error:
+        require(type(error) is web_registration_worker.RegistrationError, "OCOR cleanup uncertain")
+    else:
+        raise RuntimeError("OCOR accepted malformed inputs")
+
+
+def framing(helper, setup):
+    tag = header(SETUP)
+    malformed = (
+        ("bad magic", b"OCOP" + tag[4:]),
+        ("bad version", tag[:4] + b"\x02" + tag[5:]),
+        ("unknown op", header(4)),
+        ("wrong profile", tag[:-1] + bytes([tag[-1] ^ 1])),
+        ("short header", tag[:-1]),
+        ("extra setup byte", tag + b"\0"),
+        ("two operations", tag + tag),
+        ("short request", header(RESPOND) + setup + bytes(63)),
+        ("oversized request", header(RESPOND) + setup + bytes(65)),
+        ("short upload", header(VALIDATE) + bytes(191)),
+        ("oversized upload", header(VALIDATE) + bytes(8192)),
+    )
+    for label, frame in malformed:
+        require(run(helper, frame) == (1, b""), f"OCOR framing refusal failed: {label}")
+    require(run(helper, tag, "--probe") == (1, b""), "OCOR must not accept arguments")
+    with process(helper) as child:
+        child.stdin.write(tag)
+        readable, _, _ = select((child.stdout,), (), (), 0.1)
+        require(not readable, "OCOR replied before EOF")
+        child.stdin.close()
+        response = read_exact(child.stdout, len(tag) + 1 + 128)
+        require(response.startswith(tag + b"\0"), "invalid setup response after EOF")
+        require(child.wait(timeout=5) == 0 and not child.stdout.read(1), "OCOR did not drain")
+    print("PASS strict OCOR framing, version/profile refusal, and EOF")
+
+
+def registration_and_login(registrar, fixture, profile, origins, setup, *, case, other_setup):
+    accounts, admission = CHECK["web_accounts"], CHECK["web_admission"]
+    pake = CHECK["web_pake_flow"]
+    name = CHECK["NAME"]
+    workspace, browser = CHECK["WORKSPACE"], CHECK["BROWSER"]
+    credential, client, verifier = CHECK["binding_bytes"](name)
+    if case == "different credential":
+        credential = CHECK["binding_bytes"]("synthetic-other")[0]
+    if case == "different client":
+        client = CHECK["binding_bytes"]("synthetic-other")[1]
+    if case == "different verifier":
+        verifier = CHECK["digest"](b"verifier", b"https://accounts.ocbox.test:9445")
+    responding_setup = other_setup if case == "different setup" else setup
+    binding = admission.WebBinding(workspace, "synthetic-owner", origins.workspace.value)
+    with process(fixture) as child:
+        child.stdin.write(client + verifier)
+        blinded = read_exact(child.stdout, 32)
+        if case == "valid":
+            # Well-framed inputs still need real parsing. Opaque digit/element
+            # widths alone cannot establish setup, request or record validity.
+            for server_setup, request in (
+                (b"\xff" * 128, blinded), (setup, b"\xff" * 32), (setup, bytes(32)),
+            ):
+                refused(registrar.respond, setup=server_setup,
+                        credential_identifier=credential, registration_request=request)
+            refused(registrar.validate_upload, b"\xff" * 192)
+            refused(registrar.validate_upload, bytes(192))
+            print("PASS malformed setup, blinded elements, and upload")
+        response = registrar.respond(
+            setup=responding_setup, credential_identifier=credential, registration_request=blinded,
+        )
+        child.stdin.write(response)
+        upload_and_ke1 = read_exact(child.stdout, 192 + 96)
+        upload, ke1 = upload_and_ke1[:192], upload_and_ke1[192:]
+        if case == "changed envelope":
+            upload = upload[:-1] + bytes([upload[-1] ^ 1])
+        record = registrar.validate_upload(upload)
+        require(record == upload, "accepted upload did not serialize canonically")
+        if case == "valid":
+            require(registrar.validate_upload(record) == record, "validation must be stateless")
+
+        # In-memory fixture record only, not a proof of authorized persistence.
+        snapshot = accounts.AccountStore(setup, (accounts.Account(name, (workspace,), record),))
+        flow = pake.PakeFlow(
+            binding, store=snapshot, backend=profile, sizes=profile.sizes,
+            auth_origin=origins.account.value,
+        )
+        try:
+            challenge = flow.start(binding, browser_nonce=browser, username=name, ke1=CHECK["b64"](ke1))
+            require(challenge is not None, "validation produced no usable record framing")
+            context = base64.b64decode(challenge.context, validate=True)
+            ke2 = base64.b64decode(challenge.ke2, validate=True)
+            require(
+                context == CHECK["digest"](CHECK["AUTH_ORIGIN"], CHECK["APP_ORIGIN"],
+                                            challenge.challenge_id.encode("ascii"))
+                and len(ke2) == 320, "wrong login binding",
+            )
+            child.stdin.write(context + ke2)
+            child.stdin.close()
+            status = read_exact(child.stdout, 1)
+            expected = case == "valid"
+            require(status == bytes([not expected]), "unexpected client proof status")
+            proof = read_exact(child.stdout, 64) if expected else bytes(64)
+            require(child.wait(timeout=5) == 0 and not child.stdout.read(1), "client did not drain")
+            params = dict(browser_nonce=browser, challenge_id=challenge.challenge_id, ke3=CHECK["b64"](proof))
+            require(flow.finish(binding, **params) == (name if expected else None), "wrong login result")
+            require(flow.finish(binding, **params) is None, "KE3 replay was not refused")
+        finally:
+            flow.close()
+            require(not flow.cleanup_failed, "unconfirmed verifier cleanup")
+    print(f"PASS registration then login: {case}")
+
+
+@contextmanager
+def sealed_elf(data):
+    fd = os.memfd_create("oc-box-ocor-research", os.MFD_CLOEXEC | os.MFD_ALLOW_SEALING)
+    try:
+        os.fchmod(fd, 0o500)
+        with os.fdopen(os.dup(fd), "wb") as stream:
+            stream.write(data)
+        CHECK["private_memory"].seal(fd)
+        yield fd
+    finally:
+        os.close(fd)
+
+
+def close(worker, category):
+    require(worker.close(), category)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("build_dir", type=Path)
+    parser.add_argument("--worker-sha256", required=True)
+    parser.add_argument("--registration-sha256", required=True)
+    parser.add_argument("--fixture-sha256", required=True)
+    args = parser.parse_args()
+    path = args.build_dir.resolve(strict=True) / "target/release"
+    worker = CHECK["pinned_bytes"](path / "ocop-worker", args.worker_sha256)
+    registration_path, fixture = path / "ocor-registration", path / "ocor-fixture"
+    registrar_bytes = CHECK["pinned_bytes"](registration_path, args.registration_sha256)
+    CHECK["pinned_bytes"](fixture, args.fixture_sha256)
+    origins = CHECK["web_local_origins"].LocalOrigins()
+    with ExitStack() as cleanup:
+        with sealed_elf(worker) as fd:
+            profile = CHECK["web_pake_profile"].LocalPakeProfile(
+                fd, expected_sha256=bytes.fromhex(args.worker_sha256), origins=origins,
+            )
+        cleanup.callback(close, profile, "unconfirmed login worker drain")
+        with sealed_elf(registrar_bytes) as fd:
+            registrar = web_registration_worker.RegistrationWorker(
+                fd, expected_sha256=bytes.fromhex(args.registration_sha256),
+            )
+        cleanup.callback(close, registrar, "unconfirmed OCOR worker drain")
+        setup, other_setup = registrar.generate_setup(), registrar.generate_setup()
+        require(setup != other_setup, "setup generation was not fresh")
+        framing(registration_path, setup)
+        for case in ("valid", "different setup", "different credential", "different client",
+                     "different verifier", "changed envelope"):
+            registration_and_login(registrar, fixture, profile, origins, setup,
+                                   case=case, other_setup=other_setup)
+
+
+if __name__ == "__main__":
+    main()

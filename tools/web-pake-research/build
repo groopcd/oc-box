@@ -106,15 +106,19 @@ def stage(cache, root, with_browser):
     return source, rust
 
 
-def build(cache, root, with_fixture, with_browser):
+def build(cache, root, with_fixture, with_browser, with_registration):
     source, rust = stage(cache, root, with_browser)
     bins = source / "src/bin"
     profile = bins / "ocbox_profile"
     profile.mkdir(parents=True)
     shutil.copyfile(SOURCE / "suite.rs", profile / "mod.rs")
     targets = {"ocop-worker": "worker.rs"}
+    if with_registration:
+        targets["ocor-registration"] = "registration.rs"
     if with_fixture:
         targets["ocop-fixture"] = "client_fixture.rs"
+        if with_registration:
+            targets["ocor-fixture"] = "registration_fixture.rs"
     browser = "ocop-browser"
     manifest = source / "Cargo.toml"
     with manifest.open("a", encoding="utf-8") as stream:
@@ -141,6 +145,7 @@ def build(cache, root, with_fixture, with_browser):
         "CARGO_HOME": str(cargo_home),
         "CARGO_TARGET_DIR": str(root / "target"),
         "CARGO_NET_OFFLINE": "true",
+        "CARGO_BUILD_JOBS": "1",
         "CARGO_ENCODED_RUSTFLAGS": f"--remap-path-prefix={root}=/oc-box-build",
         "ZIG_GLOBAL_CACHE_DIR": str(root / "zig-global"),
         "ZIG_LOCAL_CACHE_DIR": str(root / "zig-local"),
@@ -188,6 +193,9 @@ def main():
     parser.add_argument("output", type=Path, help="new directory outside the checkout")
     parser.add_argument("--with-fixture", action="store_true", help="also build a test-only client")
     parser.add_argument("--with-browser", action="store_true", help="also build the research WASM slot")
+    parser.add_argument(
+        "--with-registration", action="store_true", help="also build the separate research registration helper"
+    )
     args = parser.parse_args()
     if sys.platform != "linux" or platform.machine() != "x86_64":
         parser.error("this research build targets x86_64 Linux only")
@@ -196,7 +204,7 @@ def main():
         parser.error("output must be outside the cache and checkout")
     os.umask(0o077)
     output.mkdir()
-    build(cache, output, args.with_fixture, args.with_browser)
+    build(cache, output, args.with_fixture, args.with_browser, args.with_registration)
 
 
 if __name__ == "__main__":
