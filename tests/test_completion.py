@@ -124,6 +124,7 @@ fi
         self.assertTrue("--project" in self.complete("--verbose", "stop", "--"))
         self.assertEqual(self.complete("logs", "--verbose", "=", "w"), ["warn"])
         self.assertEqual(self.complete("logs", "--limit", ""), [])
+        self.assertEqual(self.complete("logs", "--tail", "-f"), ["-f"])
         self.assertEqual(self.complete("sync", "--fo"), [])
         controls = {
             "--journald",

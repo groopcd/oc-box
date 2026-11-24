@@ -25,7 +25,7 @@ oc-box completion bash
 oc-box web [--project PATH | --workspace ID] [--session ID] [--port N] [--no-open] [--no-vault] [--attachments] [--workspace-layout] [LIFECYCLE-LOG-OPTIONS]
 oc-box --status [--project PATH | --workspace ID] [--json | --table]
 oc-box status [--project PATH | --workspace ID] [--json | --table]
-oc-box logs [--journald | --log-dir PATH] [--project PATH | --workspace ID] [--level LEVEL | --verbose[=LEVEL]] [--limit N] [--tail] [--follow] [--json | --table]
+oc-box logs [--journald | --log-dir PATH] [--project PATH | --workspace ID] [--level LEVEL | --verbose[=LEVEL]] [--limit N] [--tail] [-f | --follow] [--json | --table]
 oc-box logs [--log-dir PATH] --path
 oc-box tui [--project PATH | --workspace ID] [--read-only] [--demo]
 oc-box upgrade [--check] [--stable | --devel] [--vault] [--tui]
@@ -107,9 +107,9 @@ confirmation or credential prompts remain visible. Native OpenCode output and
 the native terminal and browser UIs are not changed. During a cold start or
 reset, image fetching and package installation show one short line for each
 task instead of printing the installers' output. Use `oc-box logs --tail`
-to see which tasks started, their results, and how long they took, or add
-`--follow` to watch from another terminal. If you used a one-time `--log-dir`,
-use that same directory when reading the log. Native host drops and
+to see which tasks started, their results, and how long they took, or use
+`oc-box logs --tail -f` to watch from another terminal. If you used a one-time
+`--log-dir`, use that same directory when reading the log. Native host drops and
 clipboard importing print one short line each when enabled. Use
 `oc-box start --verbose` for the full behavior, limits and clipboard symlink policy.
 
@@ -1622,9 +1622,10 @@ history. It does not read Podman output or native OpenCode logfiles.
 Use `oc-box logs --tail` for the preparation view: container creation and
 image pulls, baseline packages, runtime tools, the matching OpenCode CLI, and
 plugin dependencies. It shows task starts and results, with elapsed time and
-exit status on failure. These are written while preparation runs, so you can
-watch them with `--tail --follow`. The view defaults to all preparation levels;
-explicit severity, workspace, limit, and output-format options still apply.
+exit status on failure, then exits. These records are written while preparation
+runs, so you can keep watching with `--tail -f` (or `--tail --follow`). The view
+defaults to all preparation levels; explicit severity, workspace, limit, and
+output-format options still apply.
 Raw installer output is not saved: package managers, registries and plugin
 scripts can emit sensitive data. Preparation records are stored separately
 in `preparation/activity.jsonl` under the selected private log directory,
@@ -1641,9 +1642,9 @@ By default, show the latest 100 retained entries at `info` or above.
 data or reads a different source. `--project PATH` and `--workspace ID` are
 mutually exclusive filters and require a valid workspace registration. With
 neither, show entries across workspaces, including entries with no workspace.
-Severity and workspace filters apply before the limit. Use `--follow` to keep
-watching after the initial output, and Ctrl-C to stop. Use `--json` for one
-validated event per line (JSON Lines), including when following. With no
+Severity and workspace filters apply before the limit. Use `-f` (or `--follow`)
+to keep watching after the initial output, and Ctrl-C to stop. Use `--json` for
+one validated event per line (JSON Lines), including when following. With no
 matches, JSON Lines output is empty, not `[]` or a placeholder. The default
 reader treats missing or unsafe private journal data as empty.
 Use `--table` for timestamp, severity and activity columns; when following,
@@ -1671,7 +1672,7 @@ under [Dashboard state and activity journal](#dashboard-state-and-activity-journ
 oc-box logs
 oc-box logs --verbose=ALL
 oc-box logs --tail
-oc-box logs --tail --follow
+oc-box logs --tail -f
 oc-box logs --path
 oc-box logs --log-dir ~/.local/state/oc-box-diagnostics --path
 oc-box logs --project ~/devel/demo --level debug --limit 50
@@ -2499,7 +2500,7 @@ For `logs`, set the maximum number of matching retained entries in the initial
 output, from 1 to 10,000. Default: 100, or 10,000 with `--verbose=ALL`.
 Rotation may leave fewer entries available.
 
-### --follow
+### -f, --follow
 
 For `logs`, keep displaying newly retained matching entries after the initial
 output. Follow is best-effort: entries rotated out before they are read cannot
@@ -2508,10 +2509,9 @@ be recovered. Stop following with Ctrl-C.
 ### --tail
 
 Show recent environment preparation tasks and their results instead of general
-activity. Add `--follow` to watch new preparation records live. This is
-read-only, uses a separate ring under the same private log directory (including
-any `--log-dir` override), and
-does not show raw installer streams.
+activity, then exit. Add `-f` (or `--follow`) to watch new preparation records
+live. This is read-only, uses a separate ring under the same private log directory
+(including any `--log-dir` override), and does not show raw installer streams.
 
 ### --journald
 
@@ -2575,7 +2575,7 @@ It never changes the verbosity of an owning launcher; put `--verbose` on
 
 For `logs`, display the effective private `activity.jsonl` pathname without
 reading or creating the journal. Use `oc-box logs --path` alone or with
-`--log-dir PATH`, not with `--journald`, workspace filters, `--follow`,
+`--log-dir PATH`, not with `--journald`, workspace filters, `-f`/`--follow`,
 `--tail`, `--verbose`, `--json`, or `--table`. `--level` and `--limit` have no effect
 when showing a path.
 
@@ -4222,7 +4222,7 @@ oc-box start --project ~/devel/demo --verbose=ALL
 oc-box sync --project ~/devel/demo --verbose=warn
 ```
 
-Use `oc-box logs --tail --follow` in a second terminal to watch preparation
+Use `oc-box logs --tail -f` in a second terminal to watch preparation
 tasks and their outcomes. The launch form `--verbose=ALL` also shows live
 installer streams; the `logs` form does not change a running launcher.
 From a source checkout, run `python3 tools/demo_preparation_logs.py` to see

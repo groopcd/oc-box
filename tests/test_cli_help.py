@@ -282,7 +282,10 @@ class CliHelpTests(unittest.TestCase):
         logs = self.help("logs", "--help", command="logs")
         self.assert_options(
             logs,
-            show=f"{_SELECTORS} --journald --log-dir --path --level --verbose --limit --follow --json --table",
+            show=(
+                f"{_SELECTORS} --journald --log-dir --path --level --verbose "
+                "--limit -f --follow --json --table"
+            ),
             hide="--no-journald --lifecycle-diagnostics --port --no-open",
         )
         self.assertRegex(logs, r"(?im)^[ \t]+--journald\b\s+[^\n]*\bread\b")
@@ -291,7 +294,7 @@ class CliHelpTests(unittest.TestCase):
         self.assert_options(
             web,
             show=f"{_SELECTORS} {_LAUNCH_LOGGING} --port --no-open --session --no-vault",
-            hide="--path --level --limit --follow --json --new",
+            hide="--path --level --limit -f --follow --json --new",
         )
         self.assertRegex(web, r"(?im)^[ \t]+--journald\b\s+[^\n]*\bmirror\b")
 

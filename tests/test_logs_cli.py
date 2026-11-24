@@ -2,7 +2,12 @@ import contextlib
 import io
 import json
 import os
+import select
+import signal
+import subprocess
+import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -150,6 +155,87 @@ class LogsCliTests(unittest.TestCase):
             ["preparation.started", "preparation.finished"],
         )
 
+    def test_tail_short_follow_streams_preparation_rows_until_interrupt(self):
+        def append(event, stage, **fields):
+            self.assertTrue(
+                logs_cli.activity_log.record_event(
+                    event, command="start", stage=stage, **fields
+                )
+            )
+
+        outcome = {"outcome": "success", "exit_code": 0}
+        append("preparation.started", "baseline-packages")
+        append("preparation.finished", "baseline-packages", **outcome)
+        output = bytearray()
+        with subprocess.Popen(
+            [
+                sys.executable,
+                "-B",
+                "-m",
+                "oc_box",
+                "logs",
+                "--tail",
+                "-f",
+                "--json",
+                "--limit",
+                "1",
+            ],
+            cwd=self.base,
+            env={
+                **os.environ,
+                "PATH": str(self.base / "no-executables"),
+                "PYTHONPATH": str(Path(logs_cli.__file__).resolve().parents[1]),
+            },
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        ) as process:
+            stdout = process.stdout
+            assert stdout is not None
+
+            def wait_for_rows(count):
+                deadline = time.monotonic() + 10
+                while output.count(b"\n") < count:
+                    remaining = deadline - time.monotonic()
+                    self.assertTrue(
+                        remaining > 0 and select.select([stdout], [], [], remaining)[0],
+                        "timed out waiting for preparation rows",
+                    )
+                    chunk = os.read(stdout.fileno(), 65536)
+                    self.assertTrue(
+                        chunk, "logs exited before printing preparation rows"
+                    )
+                    output.extend(chunk)
+
+            try:
+                # The initial row confirms the follower is reading before appending.
+                wait_for_rows(1)
+                self.assertTrue(
+                    logs_cli.activity_log.record_event(
+                        "command.finished", command="stop"
+                    )
+                )
+                append("preparation.started", "native-cli-install")
+                append("preparation.finished", "native-cli-install", **outcome)
+                wait_for_rows(3)
+                process.send_signal(signal.SIGINT)
+                rest, stderr = process.communicate(timeout=10)
+            finally:
+                if process.poll() is None:
+                    process.kill()
+
+        self.assertEqual(process.returncode, 130, stderr.decode())
+        self.assertEqual(stderr, b"")
+        records = [json.loads(line) for line in (output + rest).splitlines()]
+        self.assertEqual(
+            [(record["event"], record.get("stage")) for record in records],
+            [
+                ("preparation.finished", "baseline-packages"),
+                ("preparation.started", "native-cli-install"),
+                ("preparation.finished", "native-cli-install"),
+            ],
+        )
+
     def test_path_reports_default_configured_and_invocation_override_without_writes(
         self,
     ):
@@ -186,6 +272,7 @@ class LogsCliTests(unittest.TestCase):
             for args in (
                 ("--project", "."),
                 ("--workspace", _ID),
+                ("-f",),
                 ("--follow",),
                 ("--json",),
                 ("--table",),

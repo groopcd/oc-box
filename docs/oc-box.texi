@@ -62,7 +62,7 @@ oc-box completion bash
 oc-box web [--project PATH | --workspace ID] [--session ID] [--port N] [--no-open] [--no-vault] [--attachments] [--workspace-layout] [LIFECYCLE-LOG-OPTIONS]
 oc-box --status [--project PATH | --workspace ID] [--json | --table]
 oc-box status [--project PATH | --workspace ID] [--json | --table]
-oc-box logs [--journald | --log-dir PATH] [--project PATH | --workspace ID] [--level LEVEL | --verbose[=LEVEL]] [--limit N] [--tail] [--follow] [--json | --table]
+oc-box logs [--journald | --log-dir PATH] [--project PATH | --workspace ID] [--level LEVEL | --verbose[=LEVEL]] [--limit N] [--tail] [-f | --follow] [--json | --table]
 oc-box logs [--log-dir PATH] --path
 oc-box tui [--project PATH | --workspace ID] [--read-only] [--demo]
 oc-box upgrade [--check] [--stable | --devel] [--vault] [--tui]
@@ -101,7 +101,7 @@ The default resource limits are 4 CPU cores, 8 GiB RAM, and 2048 processes. Thes
 
 @section Lifecycle output
 
-Startup and shutdown are quiet by default. On an interactive terminal, oc-box shows transient stage progress on one line and clears it instead of leaving a transcript of each step. Noninteractive output, including pipes and @code{TERM=dumb}, does not get routine stage start/done lines. Actionable warnings, errors and confirmation or credential prompts remain visible. Native OpenCode output and the native terminal and browser UIs are not changed. During a cold start or reset, image fetching and package installation show one short line for each task instead of printing the installers' output. Use @code{oc-box logs --tail} to see which tasks started, their results, and how long they took, or add @code{--follow} to watch from another terminal. If you used a one-time @code{--log-dir}, use that same directory when reading the log. Native host drops and clipboard importing print one short line each when enabled. Use @code{oc-box start --verbose} for the full behavior, limits and clipboard symlink policy.
+Startup and shutdown are quiet by default. On an interactive terminal, oc-box shows transient stage progress on one line and clears it instead of leaving a transcript of each step. Noninteractive output, including pipes and @code{TERM=dumb}, does not get routine stage start/done lines. Actionable warnings, errors and confirmation or credential prompts remain visible. Native OpenCode output and the native terminal and browser UIs are not changed. During a cold start or reset, image fetching and package installation show one short line for each task instead of printing the installers' output. Use @code{oc-box logs --tail} to see which tasks started, their results, and how long they took, or use @code{oc-box logs --tail -f} to watch from another terminal. If you used a one-time @code{--log-dir}, use that same directory when reading the log. Native host drops and clipboard importing print one short line each when enabled. Use @code{oc-box start --verbose} for the full behavior, limits and clipboard symlink policy.
 
 After a history sync or recovery attempt, oc-box reports one final history result: saved normally, recovered after stop, partial, failed, empty, or cleanup unverified. The recovery result itself carries the interruption and unconfirmed-background-completion caution; archived history does not prove work finished. Incomplete results retain guidance for retrying @code{oc-box sync} when appropriate. The presentation does not change lifecycle steps, recovery eligibility, history verification or exit codes.
 
@@ -592,9 +592,9 @@ oc-box status --project ~/devel/demo --table
 
 Read the [oc-box activity journal](#dashboard-state-and-activity-journal) on the host. The default private-file reader uses only the Python standard library; no systemd, dashboard extras, Podman, native OpenCode, vault unlock or running workspace is needed. The command does not create, trim or rotate logs, start a container, or modify the workspace registry, project files or session history. It does not read Podman output or native OpenCode logfiles.
 
-Use @code{oc-box logs --tail} for the preparation view: container creation and image pulls, baseline packages, runtime tools, the matching OpenCode CLI, and plugin dependencies. It shows task starts and results, with elapsed time and exit status on failure. These are written while preparation runs, so you can watch them with @code{--tail --follow}. The view defaults to all preparation levels; explicit severity, workspace, limit, and output-format options still apply. Raw installer output is not saved: package managers, registries and plugin scripts can emit sensitive data. Preparation records are stored separately in @code{preparation/activity.jsonl} under the selected private log directory, with the same retention settings applied to that ring independently. This keeps the ordinary activity log compatible with older launchers. Preparation records are not mirrored to the system journal. @code{--tail} cannot be combined with @code{--journald} or @code{--path}.
+Use @code{oc-box logs --tail} for the preparation view: container creation and image pulls, baseline packages, runtime tools, the matching OpenCode CLI, and plugin dependencies. It shows task starts and results, with elapsed time and exit status on failure, then exits. These records are written while preparation runs, so you can keep watching with @code{--tail -f} (or @code{--tail --follow}). The view defaults to all preparation levels; explicit severity, workspace, limit, and output-format options still apply. Raw installer output is not saved: package managers, registries and plugin scripts can emit sensitive data. Preparation records are stored separately in @code{preparation/activity.jsonl} under the selected private log directory, with the same retention settings applied to that ring independently. This keeps the ordinary activity log compatible with older launchers. Preparation records are not mirrored to the system journal. @code{--tail} cannot be combined with @code{--journald} or @code{--path}.
 
-By default, show the latest 100 retained entries at @code{info} or above. @code{--level debug} includes lower-severity stage detail; @code{--level warn} or @code{--level error} narrows the output. Alternatively use @code{--verbose=LEVEL}. Bare @code{--verbose} or @code{--verbose=ALL} displays all validated retained levels, up to 10,000 matching entries unless you supply @code{--limit}. It never reveals unlogged data or reads a different source. @code{--project PATH} and @code{--workspace ID} are mutually exclusive filters and require a valid workspace registration. With neither, show entries across workspaces, including entries with no workspace. Severity and workspace filters apply before the limit. Use @code{--follow} to keep watching after the initial output, and Ctrl-C to stop. Use @code{--json} for one validated event per line (JSON Lines), including when following. With no matches, JSON Lines output is empty, not @code{[]} or a placeholder. The default reader treats missing or unsafe private journal data as empty. Use @code{--table} for timestamp, severity and activity columns; when following, the heading appears once on the first match. No matches still produce no output. Lifecycle detail can appear after the invocation finishes: history and shutdown diagnostics are queued so journal writes do not run inside verification deadlines or while a client lease is held.
+By default, show the latest 100 retained entries at @code{info} or above. @code{--level debug} includes lower-severity stage detail; @code{--level warn} or @code{--level error} narrows the output. Alternatively use @code{--verbose=LEVEL}. Bare @code{--verbose} or @code{--verbose=ALL} displays all validated retained levels, up to 10,000 matching entries unless you supply @code{--limit}. It never reveals unlogged data or reads a different source. @code{--project PATH} and @code{--workspace ID} are mutually exclusive filters and require a valid workspace registration. With neither, show entries across workspaces, including entries with no workspace. Severity and workspace filters apply before the limit. Use @code{-f} (or @code{--follow}) to keep watching after the initial output, and Ctrl-C to stop. Use @code{--json} for one validated event per line (JSON Lines), including when following. With no matches, JSON Lines output is empty, not @code{[]} or a placeholder. The default reader treats missing or unsafe private journal data as empty. Use @code{--table} for timestamp, severity and activity columns; when following, the heading appears once on the first match. No matches still produce no output. Lifecycle detail can appear after the invocation finishes: history and shutdown diagnostics are queued so journal writes do not run inside verification deadlines or while a client lease is held.
 
 Use @code{--log-dir PATH} to read a different private journal for this invocation. It works with the private event filters or with @code{--path} to print the resulting pathname without opening the journal. It does not create the directory or change the saved policy.
 
@@ -604,7 +604,7 @@ Use @code{--journald} to explicitly read this user's mirrored oc-box activity ev
 oc-box logs
 oc-box logs --verbose=ALL
 oc-box logs --tail
-oc-box logs --tail --follow
+oc-box logs --tail -f
 oc-box logs --path
 oc-box logs --log-dir ~/.local/state/oc-box-diagnostics --path
 oc-box logs --project ~/devel/demo --level debug --limit 50
@@ -944,13 +944,13 @@ For @code{logs}, set the minimum severity displayed, from @code{debug} (all leve
 
 For @code{logs}, set the maximum number of matching retained entries in the initial output, from 1 to 10,000. Default: 100, or 10,000 with @code{--verbose=ALL}. Rotation may leave fewer entries available.
 
-@section --follow
+@section -f, --follow
 
 For @code{logs}, keep displaying newly retained matching entries after the initial output. Follow is best-effort: entries rotated out before they are read cannot be recovered. Stop following with Ctrl-C.
 
 @section --tail
 
-Show recent environment preparation tasks and their results instead of general activity. Add @code{--follow} to watch new preparation records live. This is read-only, uses a separate ring under the same private log directory (including any @code{--log-dir} override), and does not show raw installer streams.
+Show recent environment preparation tasks and their results instead of general activity, then exit. Add @code{-f} (or @code{--follow}) to watch new preparation records live. This is read-only, uses a separate ring under the same private log directory (including any @code{--log-dir} override), and does not show raw installer streams.
 
 @section --journald
 
@@ -978,7 +978,7 @@ For @code{logs}, this is a read filter rather than a launcher setting. Use it in
 
 @section --path
 
-For @code{logs}, display the effective private @code{activity.jsonl} pathname without reading or creating the journal. Use @code{oc-box logs --path} alone or with @code{--log-dir PATH}, not with @code{--journald}, workspace filters, @code{--follow}, @code{--tail}, @code{--verbose}, @code{--json}, or @code{--table}. @code{--level} and @code{--limit} have no effect when showing a path.
+For @code{logs}, display the effective private @code{activity.jsonl} pathname without reading or creating the journal. Use @code{oc-box logs --path} alone or with @code{--log-dir PATH}, not with @code{--journald}, workspace filters, @code{-f}/@code{--follow}, @code{--tail}, @code{--verbose}, @code{--json}, or @code{--table}. @code{--level} and @code{--limit} have no effect when showing a path.
 
 @section --about
 
@@ -1735,7 +1735,7 @@ oc-box start --project ~/devel/demo --verbose=ALL
 oc-box sync --project ~/devel/demo --verbose=warn
 @end example
 
-Use @code{oc-box logs --tail --follow} in a second terminal to watch preparation tasks and their outcomes. The launch form @code{--verbose=ALL} also shows live installer streams; the @code{logs} form does not change a running launcher. From a source checkout, run @code{python3 tools/demo_preparation_logs.py} to see both modes with synthetic subprocesses and a disposable private journal, with no Podman, real workspaces or OpenCode sessions involved.
+Use @code{oc-box logs --tail -f} in a second terminal to watch preparation tasks and their outcomes. The launch form @code{--verbose=ALL} also shows live installer streams; the @code{logs} form does not change a running launcher. From a source checkout, run @code{python3 tools/demo_preparation_logs.py} to see both modes with synthetic subprocesses and a disposable private journal, with no Podman, real workspaces or OpenCode sessions involved.
 
 Scripts that consume older verbose lifecycle messages should continue using @code{--lifecycle-diagnostics} for routine start/done lines in a pipe. Neither flag enables native debug logging, adds raw child output to the journal or changes lifecycle behavior. Native output and interactive prompts remain separate.
 
