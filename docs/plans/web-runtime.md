@@ -351,15 +351,76 @@ guest fallback. Expiry/replay or a different browser cannot redeem a ticket
 even if a document was already issued. A failure is not proof that a
 pairing already in progress was undone.
 
+### Unserved account assets and deployment contract
+
+[`web_named_account_assets.py`](../../src/oc_box/web_named_account_assets.py)
+projects the bounded account card from the approved [Studio sign-in markup
+at `21e966c`](https://github.com/groopcd/oc-box/blob/21e966c/docs/mockups/web-manager.html).
+It keeps the masthead, card, credential layout, Show/Hide control and footer,
+without demo users, preview controls, a guest link or a vault prompt. The
+workspace label is bounded, escaped display text from trusted host configuration;
+it never selects an origin, workspace or credential. Both origins come from
+the trusted `LocalOrigins` profile, not a request, query parameter or redirect.
+
+- **Prepare before serving.** A trusted host caller supplies `origins`, absolute
+  paths `wasm_file` and `verifier_file`, and a separate `ReviewedArtifactPin`
+  (`size`, raw 32-byte `sha256`) for each to `prepare_account_assets(...)`.
+  The pins must come from an independent review of a matching OCOP build, not
+  from the paths, a request or a manifest next to the files. There are no
+  compiled default pins. Stage only independently approved local bytes as
+  regular, single-link files owned by the operator or root, without writable
+  group/other bits, special permissions, or symlinks in any path component.
+  Direct Cargo build outputs can be hardlinked; those paths are refused.
+- **Keep the verified snapshots.** Source HTML/CSS/JS have fixed sizes and
+  digests for this source revision; the loader also checks file identity,
+  size and SHA-256 for both compiled inputs. It holds the WASM as immutable
+  bytes (at most 1 MiB) and copies the verified ELF into a private, close-on-exec
+  executable memfd with all required seals. Linux `/proc`, no-follow file pinning
+  and existing worker fd-exec/pidfd support are prerequisites; capability
+  refusals have no filesystem or subprocess fallback. The context yields
+  `bundle`, `verifier_fd` and `verifier_sha256`. Prepare the worker/service
+  that duplicates the descriptor inside the context. Never send or serve the
+  ELF, choose a path with request data, or reopen a verified source for traffic.
+- **Project only fixed responses.** Call `bundle.document(entry)` only with the
+  verified `AccountEntry` from the exact bootstrap POST. It emits the unchanged
+  bootstrap cookie and the isolated no-store document. `ACCOUNT_ASSET_PATHS`
+  is the exact six-path allowlist, not a directory mapping. Call `bundle.asset`
+  with the bounded raw request and a trusted `translate_nonce` that checks the
+  same owner's current account bootstrap. It admits only a matching same-origin
+  subresource GET with the right Fetch Metadata, not download/navigation,
+  partial, conditional, alias or query requests. `web_named_transport`/serving
+  still owns TLS/SNI and role, absolute deadlines, length framing, owner rechecks
+  before writes, worker drain and the distinct workspace/guest routes. Send the
+  exact lengths and types without transforming, compressing or redirecting the
+  assets; do not log opaque request/response data.
+- **Keep input local.** The account CSP permits only the fixed scripts and
+  stylesheet, the WASM/PAKE requests and the exact cross-site handoff form.
+  Chromium verifies the bounded WASM length and SHA-256 again before enabling
+  controls. Credentials have no form names; the credential form has no submit
+  button or action. Only a trusted user click or Enter starts the local reader.
+  It rejects malformed Unicode and inputs that do not fit in 1,024 UTF-8 bytes
+  without trimming or normalization, and clears/remasks the field on submission
+  and page exit. These checks do not protect compromised account code, browser
+  memory, or a malicious controlling service worker; deployment must keep the
+  account origin dedicated and free of service workers or unrelated content.
+
+The host neither downloads nor bundles compiled artifacts, and no package
+manifest, CLI or listener uses this helper yet. Distribution requires independent security, provenance,
+license and applicable IPR review of the exact paired binaries, followed by
+separate activation, owner/relay, host-authorized enrollment and publication
+checks. The internal review pins and synthetic conformance are not approval.
+
 ### Synthetic two-site browser composition
 
 [`smoke_named_pake_browser.py`](../../tests/smoke_named_pake_browser.py) composes
 the exact bootstrap handlers, `AccountIngress`, `LocalNamedSignIn`, and the
-Python worker with the pinned Rust verifier and real browser WASM. It serves a
-test-only account card adapted from the [Studio sign-in markup](../mockups/web-manager.html).
-Only the local byte reader handles the masked input, and the field is cleared
-on submission and page exit. The page uses the real transfer helper, not the
-mockup's demo authentication. It has no guest, raw-password or vault-unlock fallback.
+Python worker with the pinned Rust verifier and real browser WASM. It now serves
+the unserved account bundle above using a synthetic workspace label. The positive
+path is not intercepted. A separate negative case substitutes a same-size,
+still-compilable WASM module and checks that the account stays disabled. A
+script-triggered submit, click or key event also cannot start PAKE or serialize
+the populated credential controls. Trusted mouse and keyboard paths and the
+approved Show/Hide card are exercised.
 
 The fixture starts two disposable IPv4 loopback HTTPS endpoints in a private
 network namespace. A fresh untrusted Chromium profile refuses both sites;

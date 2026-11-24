@@ -35,20 +35,21 @@ class NativeFixture:
     def __init__(self, request):
         self.request = request
         self.endpoint = request.endpoint["url"]
+        self.version = "2.3.2"
         self.pairs = 0
         self.identity = request("GET", "/api/info", deadline=monotonic() + 4)
         require(
-            self.identity.get("version") == "2.3.2"
+            self.identity.get("version") == self.version
             and request("GET", "/api/credential", deadline=monotonic() + 4)
             == {"data": []},
             "The native fixture was not the pinned empty service.",
         )
 
     def bind(self, binding, origin):
-        data = {"id": binding.workspace_id, "opencode_version": "2.3.2"}
+        data = {"id": binding.workspace_id, "opencode_version": self.version}
         connection = self.request.endpoint | {
             "workspace": binding.workspace_id,
-            "version": "2.3.2",
+            "version": self.version,
         }
         authority = origin.value.removeprefix("https://")
 
@@ -62,8 +63,11 @@ class NativeFixture:
                 or actual_connection is not connection
                 or not current(binding)
                 or argv[:5] != ["python3", "-I", "-S", "-B", "-c"]
-                or argv[5] != Path(web_native_pair.__file__).read_text(encoding="utf-8")
-                or argv[6:] != [self.endpoint, authority]
+                or argv[5]
+                != web_native_pair.named_native_worker_source(
+                    Path(web_native_pair.__file__).read_text(encoding="utf-8")
+                )
+                or argv[6:] != [self.endpoint, authority, self.version]
             ):
                 raise FixtureBridgeError(
                     "Unexpected synthetic loopback pairing bridge."

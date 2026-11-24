@@ -128,7 +128,8 @@ responsibilities. No listener or runtime caller uses this adapter.
 
 `browser_login.rs` shares the pinned suite with the verifier. It has no
 fixture password, identity, network code, form, or enrollment entry point.
-`browser_slot.mjs` supplies the exact synchronous `openAttempt` contract of
+[`web_named_login_slot.mjs`](../../src/oc_box/web_named_login_slot.mjs) supplies
+the exact synchronous `openAttempt` contract of
 `web_pake_client.mjs` at `f1d4055`. The trusted controller provides
 `openAttempt: () => openLoginAttempt(verifiedModule)`; opening a handle does not
 access a password or start WASM. `start(readPassword)` preflights the module and

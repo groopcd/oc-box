@@ -397,7 +397,7 @@ def main():
         "/fixture": ("text/html", PAGE),
         "/fixture.mjs": ("text/javascript", (HERE / "browser_fixture.mjs").read_bytes()),
         "/adapter.mjs": ("text/javascript", adapter),
-        "/slot.mjs": ("text/javascript", (HERE / "browser_slot.mjs").read_bytes()),
+        "/slot.mjs": ("text/javascript", (ROOT / "src/oc_box/web_named_login_slot.mjs").read_bytes()),
         "/client.wasm": ("application/wasm", wasm),
         "/favicon.ico": ("text/plain", b""),
     }
