@@ -2757,9 +2757,10 @@ for future owning native V2 start/reset launches. It is off when not saved.
 owning launch without changing it. Saving unrelated native UI settings during
 an enabled generation does not persist the forced image values. Additional
 full TUI clients inherit the actual running owner's override and cannot supply
-either flag while it is running. API/history clients and session-shell terminals
-receive no overlay. An owning V1 launch reports that a saved enable cannot
-apply and leaves the preference unchanged. Web,
+either flag while it is running. If the saved enable is not active on the
+running owner, an additional native TUI explains the deferral. API/history
+clients and session-shell terminals receive no overlay. An owning V1 launch
+reports that a saved enable cannot apply and leaves the preference unchanged. Web,
 terminal/maintenance, informational commands and history sync ignore the
 saved choice and reject the flags. Only the boolean request is saved in host
 workspace preferences; no CLI snapshot is kept there.

@@ -5462,7 +5462,10 @@ def _main_command(args, argv):
                     "An active V2 workspace accepts additional TUI clients with selectors/--resume only; change session/configuration after the owner exits."
                 )
             validate_host_file_open(args, data.get("opencode_version"), data)
-            configure_host_drop(path, data, args, data.get("opencode_version"))
+            saved = workspace_ui_preferences(path, data)
+            configure_host_drop(
+                path, data, args, data.get("opencode_version"), saved=saved
+            )
             configure_host_clipboard_preferences(
                 path, data, args, data.get("opencode_version")
             )
@@ -5470,6 +5473,15 @@ def _main_command(args, argv):
             with workspace_service.attach(
                 sys.modules[__name__], path, data
             ) as connection:
+                if (
+                    saved.get("image_preview") is True
+                    and connection.get("image_preview", False) is False
+                ):
+                    startup_output.line(
+                        "oc-box: Image preview override is off for the running owner. "
+                        "The saved preference applies on the next owning launch.",
+                        flush=True,
+                    )
                 command = workspace_service.client_command(
                     sys.modules[__name__],
                     data,

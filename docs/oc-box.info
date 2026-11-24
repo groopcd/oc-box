@@ -3079,12 +3079,13 @@ saved choice for one owning launch without changing it.  Saving
 unrelated native UI settings during an enabled generation does not
 persist the forced image values.  Additional full TUI clients inherit
 the actual running owner's override and cannot supply either flag while
-it is running.  API/history clients and session-shell terminals receive
-no overlay.  An owning V1 launch reports that a saved enable cannot
-apply and leaves the preference unchanged.  Web, terminal/maintenance,
-informational commands and history sync ignore the saved choice and
-reject the flags.  Only the boolean request is saved in host workspace
-preferences; no CLI snapshot is kept there.
+it is running.  If the saved enable is not active on the running owner,
+an additional native TUI explains the deferral.  API/history clients and
+session-shell terminals receive no overlay.  An owning V1 launch reports
+that a saved enable cannot apply and leaves the preference unchanged.
+Web, terminal/maintenance, informational commands and history sync
+ignore the saved choice and reject the flags.  Only the boolean request
+is saved in host workspace preferences; no CLI snapshot is kept there.
 
      oc-box preferences --project ~/devel/demo --image-preview on
      oc-box --project ~/devel/demo --image-preview
@@ -5191,19 +5192,19 @@ Node: Synopsis930
 Node: Description5132
 Node: Commands10952
 Node: Options144396
-Node: Lifecycle and persistence207819
-Node: Distribution images210119
-Node: Sessions and recovery215196
-Node: Devices and host permissions221781
-Node: Resource reports224127
-Node: Configuration and environment226238
-Node: Files237619
-Node: Exit status248529
-Node: Examples249937
-Node: Troubleshooting252076
-Node: Installation and manuals264568
-Node: Authors and license274758
-Node: See also275365
+Node: Lifecycle and persistence207923
+Node: Distribution images210223
+Node: Sessions and recovery215300
+Node: Devices and host permissions221885
+Node: Resource reports224231
+Node: Configuration and environment226342
+Node: Files237723
+Node: Exit status248633
+Node: Examples250041
+Node: Troubleshooting252180
+Node: Installation and manuals264672
+Node: Authors and license274862
+Node: See also275469
 
 End Tag Table
 
