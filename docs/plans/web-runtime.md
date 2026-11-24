@@ -110,6 +110,57 @@ concurrency, owner/expiry sweeps, browser compatibility, and drain before lease
 release. There is no native asset or arbitrary API routing, SSE, WebSocket,
 listener, CLI or installation integration in this slice.
 
+### Private owner lease boundary
+
+The unserved [`web_named_owner.py`](../../src/oc_box/web_named_owner.py)
+consumer binds sign-in, `NativeCookie` and the metadata relay to the same
+explicit `VerifiedOwnerLease`. The handle is an internal trust contract, not
+proof that its producer verified anything. It pins the workspace ID, a
+per-owner generation, the full immutable container ID, the native version
+(exactly **2.3.2**) and the validated private `127.0.0.1` endpoint. A
+read-only, bounded observation must still confirm that exact owner and
+container run. The consumer also polls the original held same-user Unix attach
+stream without reading its contents: EOF, error, unexpected data or loss of
+the descriptor fences the binding permanently. A connected socket by itself
+does not attest native readiness. Pairing targets the full container ID; the
+only secret it passes to the existing isolated worker is the native service's
+ephemeral control credential. No account password or vault value is passed
+through this boundary. The cookie goes upstream only. No credential refresh,
+replacement attach, host OpenCode, host-loopback upstream dial or guest
+fallback is attempted.
+
+The runtime remains unchanged:
+
+- [`workspace_service.Owner`](../../src/oc_box/workspace_service.py) starts its
+  private native service via the container `opencode_v2_io.py lease` worker.
+  `Owner.handle()` checks same-user Unix peer credentials, workspace ID,
+  readiness and the close fence. It counts `attach` clients until that stream
+  closes or the owner ends; `wait_clients()` uses that count before shutdown.
+- `workspace_service.attach()` checks the registered project/directory and
+  the owned running container mount, then uses the private runtime
+  `socket_path()` and verifies the peer and endpoint. The original connected
+  `stream` inside `attach()` is the retained control handle; the yielded
+  connection dictionary is not that handle. `controller_running()` only
+  probes the path and does not attest a ready owner or retain a lease.
+- `inspect_owned()` can return the full Podman `Id`, but the current owner
+  reply does not bind that immutable ID and running instance to the stream.
+  An optional UI-reporting generation is not a mandatory owner generation.
+  The existing guest `relay_command()` opens an exec pipe, not the registered
+  cancellable socket required by the named connector.
+
+Before enabling named mode, a reviewed runtime producer must bind the native
+owner's exact generation and running container identity to the held stream,
+including stop/close and native liveness checks. It must reserve one named
+lifetime per owner, avoid rewrapping a failed lease, supply a confined and
+cancellable connector to that exact container, and prove that guest admission
+cannot bypass named policy on that owner. The listener must stop admission,
+run owner/expiry sweeps, cancel and drain workers, then release the attach.
+Checks are not atomic with native execution and cannot recall already
+transmitted bytes. Synthetic owner observations and Unix socket pairs check
+the consumer contract only; they do not establish this producer, connector,
+full Studio capability, or live cleanup. Public one-use link behavior remains
+unchanged.
+
 A later LAN instance can use distinct existing sites and certificates under
 operator control. Isolated guest LAN tests can establish transport behavior
 using a synthetic private CA, without touching public DNS or requesting a
