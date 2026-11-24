@@ -67,6 +67,10 @@ does not mint a cookie, register a browser grant, or expose a protected API.
 Two reservations cannot both claim the same original owner generation,
 including after the first reservation is retired.
 
+The [private managed Gateway](web-studio-managed-gateway.md) additionally
+exercises the original owning handoff on a controlled live listener, with
+no Studio routes and no owner-shutdown caller.
+
 `tests/smoke_web_studio_guest_owner.py` uses the exact unmodified 2.4.1 ELF
 with a synthetic project and substituted Podman inspect/exec. It tests the
 original native child, the unserved listener binding, revocation on a real

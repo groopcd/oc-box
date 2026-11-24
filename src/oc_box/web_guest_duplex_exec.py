@@ -1,4 +1,4 @@
-"""Providerless exec admission for an already registered, unserved Studio relay."""
+"""Providerless exec admission for an already registered Studio relay."""
 
 import math
 from pathlib import Path
@@ -67,14 +67,22 @@ class GuestDuplexExec:
 
     The private caller owns the original owner/gateway and must close this
     activity before leaving its worker. Retain the same object on uncertainty.
-    No installed Gateway caller is enabled here.
+    Never force local termination or replace a missing transport receipt.
     """
 
     def __init__(self, binding, workers, use):
         if (
-            type(binding) is not web_studio_guest_binding._UnservedBinding
+            type(binding)
+            not in (
+                web_studio_guest_binding._UnservedBinding,
+                web_studio_guest_binding._ManagedBinding,
+            )
             or type(workers) is not web_guest_worker_drain.AcceptedWorkers
             or type(use) is not web_guest_worker_drain.AcceptedWorker
+            or (
+                type(binding) is web_studio_guest_binding._ManagedBinding
+                and not binding.accepts_registry(workers)
+            )
         ):
             raise GuestExecError()
         self._binding = binding
@@ -156,9 +164,6 @@ class GuestDuplexExec:
             eligible = not self._attempted or (
                 self._tunnel is not None and self._tunnel.close() is True
             )
-            if not eligible and self._tunnel is not None:
-                # Best effort for local descriptors only, never a proof.
-                self._tunnel.abandon()
         except BaseException:
             self._workers.complete(self._use, self._activity, confirmed=False)
             raise
