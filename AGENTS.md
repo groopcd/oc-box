@@ -531,6 +531,16 @@ Update `docs/cli.md` when command-line behavior changes, then regenerate with
 `python3 tools/build_docs.py` (requires GNU makeinfo). Prebuilt manuals ship in
 the repository; installing oc-box must not require documentation build tools.
 
+## Disposable VM cleanup
+
+Use a private per-run directory and a fresh writable disk for any disposable
+test VM. On success, failure, timeout, or cancellation, stop and reap the
+guest process before removing that run's disks, overlays, seed/transfer media,
+and other VM storage. Verify that the guest is gone and the exact temporary
+storage is absent; report any cleanup that could not be verified. Retain
+sanitized reports separately. Never delete shared base images, existing VMs,
+or unrelated workspaces and storage.
+
 ## Checks
 
 `docs/testing.md` owns the suite audit/strategy. Prefer behavior-focused tests,
