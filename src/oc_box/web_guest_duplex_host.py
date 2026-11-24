@@ -89,6 +89,7 @@ class DuplexHost:
         self._header = None
         self._open_queued = self._opened = self.ready = self.ended = False
         self._queued_data = self._rx_data = self._rx_credit = None
+        self._expected_ack = None
         self._send_serial = self._receive_serial = 0
         self._closing = self._cancel_sent = self._input_closed = False
         self._receipt = self._eof = self._failed = self._verified = False
@@ -157,8 +158,10 @@ class DuplexHost:
         serial = self._send_serial + 1
         if serial >= 2**64:
             raise DuplexHostError()
-        self._append(wire.Op.DATA, serial.to_bytes(8, "big") + data)
+        credit = serial.to_bytes(8, "big") + secrets.token_bytes(wire.TAG_SIZE)
+        self._append(wire.Op.DATA, credit + data)
         self._queued_data = serial
+        self._expected_ack = credit
         return True
 
     def receive(self):
@@ -171,7 +174,7 @@ class DuplexHost:
         self._usable()
         if self._rx_data is None:
             raise DuplexHostError()
-        self._append(wire.Op.ACK, self._receive_serial.to_bytes(8, "big"))
+        self._append(wire.Op.ACK, self._rx_credit)
         self._rx_data = None
 
     def _check_pipes(self):
@@ -272,17 +275,17 @@ class DuplexHost:
                 raise DuplexHostError()
             self.ready = True
         elif op == wire.Op.DATA and self.ready and not self.ended:
-            serial = int.from_bytes(payload[:8], "big")
+            serial = int.from_bytes(payload[: wire._SERIAL.size], "big")
             if self._rx_credit is not None or serial != self._receive_serial + 1:
                 raise DuplexHostError()
-            self._receive_serial = self._rx_credit = serial
+            self._receive_serial = serial
+            self._rx_credit = payload[: wire._CREDIT_SIZE]
             if not self._closing:
-                self._rx_data = payload[8:]
+                self._rx_data = payload[wire._CREDIT_SIZE :]
         elif op == wire.Op.ACK and self.ready and not self.ended:
-            serial = int.from_bytes(payload, "big")
-            if not serial or serial != self._queued_data or serial != self._send_serial:
+            if self._queued_data != self._send_serial or payload != self._expected_ack:
                 raise DuplexHostError()
-            self._queued_data = None
+            self._queued_data = self._expected_ack = None
         elif (
             op == wire.Op.END
             and self.ready

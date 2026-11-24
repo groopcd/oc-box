@@ -6,6 +6,7 @@ from enum import IntEnum
 import errno
 import math
 import os
+import secrets
 import select
 import socket
 import stat
@@ -16,9 +17,10 @@ from time import monotonic
 
 MAX_DATA = 16 * 1024
 TAG_SIZE = 16
-_VERSION = b"OGD\x02"
+_VERSION = b"OGD\x03"
 _HEADER = struct.Struct("!4sBH")
 _SERIAL = struct.Struct("!Q")
+_CREDIT_SIZE = _SERIAL.size + TAG_SIZE
 _START_SECONDS = 6
 _FRAME_SECONDS = 15
 _CLOSE_SECONDS = 5
@@ -46,9 +48,9 @@ class DuplexError(ValueError):
 
 def _check_size(op, size):
     if op == Op.DATA:
-        valid = _SERIAL.size < size <= _SERIAL.size + MAX_DATA
+        valid = _CREDIT_SIZE < size <= _CREDIT_SIZE + MAX_DATA
     elif op == Op.ACK:
-        valid = size == _SERIAL.size
+        valid = size == _CREDIT_SIZE
     elif op == Op.END:
         valid = size == 0
     elif op in (Op.CANCEL, Op.CLOSED):
@@ -163,14 +165,15 @@ class _Worker:
             serial = _SERIAL.unpack_from(payload)[0]
             if self.owe_ack is not None or serial != self.input_serial + 1:
                 raise DuplexError()
-            self.input_serial = self.owe_ack = serial
+            self.input_serial = serial
+            self.owe_ack = payload[:_CREDIT_SIZE]
             # At most one DATA can cross an observed native EOF before its
             # END reaches the host. Do not send or credit that DATA.
             if not self.ended:
-                self.to_native = memoryview(payload)[_SERIAL.size :]
+                self.to_native = memoryview(payload)[_CREDIT_SIZE:]
                 self.write_deadline = monotonic() + _FRAME_SECONDS
         elif self.ready and op == Op.ACK:
-            if not self.data_emitted or _SERIAL.unpack(payload)[0] != self.await_ack:
+            if not self.data_emitted or payload != self.await_ack:
                 raise DuplexError()
             self.await_ack = self.credit_deadline = None
             self.data_emitted = False
@@ -267,9 +270,11 @@ class _Worker:
                 self.output_serial += 1
                 if self.output_serial >= 2**64:
                     raise DuplexError()
-                self.await_ack = self.output_serial
+                self.await_ack = _SERIAL.pack(self.output_serial) + secrets.token_bytes(
+                    TAG_SIZE
+                )
                 self.credit_deadline = monotonic() + _FRAME_SECONDS
-                self._send(Op.DATA, _SERIAL.pack(self.output_serial) + data)
+                self._send(Op.DATA, self.await_ack + data)
         if self.to_native is not None and events & (select.POLLOUT | select.POLLHUP):
             try:
                 count = self.native.send(self.to_native)
@@ -280,7 +285,7 @@ class _Worker:
             self.to_native = self.to_native[count:]
             if not self.to_native:
                 self.to_native = self.write_deadline = None
-                self._send(Op.ACK, _SERIAL.pack(self.owe_ack))
+                self._send(Op.ACK, self.owe_ack)
 
     def _deadline(self):
         if self.cancelled:

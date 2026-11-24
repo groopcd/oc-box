@@ -22,12 +22,14 @@ import os, sys, time
 inp = sys.stdin.buffer
 mode = sys.argv[1]
 def frame(op, payload):
-    return b"OGD\\x02" + bytes([op]) + len(payload).to_bytes(2, "big") + payload
-if mode in ("early-receipt", "early-credit"):
+    return b"OGD\\x03" + bytes([op]) + len(payload).to_bytes(2, "big") + payload
+if mode in ("early-receipt", "early-credit", "queued-credit"):
     opened = inp.read(23)
     tag = opened[7:]
     os.write(1, frame(2, tag))
-    early = frame(7, tag + b"X" * 16 + b"\\1") if mode == "early-receipt" else frame(4, bytes(7) + b"\\1")
+    early = frame(7, tag + b"X" * 16 + b"\\1") if mode == "early-receipt" else frame(4, bytes(7) + b"\\1" + b"A" * 16)
+    if mode == "queued-credit":
+        os.write(1, frame(3, bytes(7) + b"\\1" + b"B" * 16 + b"native-data"))
     os.write(1, early)
     inp.read()
     sys.exit(0)
@@ -210,6 +212,22 @@ class DuplexHostTests(unittest.TestCase):
             self.advance_until(tunnel, lambda: tunnel.ready)
             with self.assertRaises(host.DuplexHostError):
                 self.advance_until(tunnel, lambda: False)
+            self.assertFalse(tunnel.close())
+
+    def test_premature_credit_buffered_behind_native_data_cannot_ack_later_send(self):
+        with self.child(["-c", _FAKE, "queued-credit"]) as (_, tunnel):
+            tunnel.open()
+            self.advance_until(tunnel, lambda: tunnel.receive() is not None)
+            # Even if the pending DATA is fully emitted, the prior ACK
+            # cannot know the new per-DATA challenge.
+            with patch.object(host.secrets, "token_bytes", return_value=b"C" * 16):
+                self.assertTrue(tunnel.send(b"outgoing"))
+            tunnel._write()  # This single tiny record fits in one pipe write.
+            self.assertFalse(tunnel._out)
+            self.assertEqual(tunnel._send_serial, 1)
+            with self.assertRaises(host.DuplexHostError):
+                self.advance_until(tunnel, lambda: False)
+            self.assertEqual(tunnel._queued_data, 1)
             self.assertFalse(tunnel.close())
 
     def test_blocking_mode_drift_refuses_before_sending_cancel(self):
