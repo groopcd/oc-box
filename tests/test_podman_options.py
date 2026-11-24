@@ -62,6 +62,16 @@ class PodmanOptionsTests(unittest.TestCase):
             self.assertLess(command.index(value), command.index(self.data["image"]))
         self.assertIn("--name", command)
         self.assertIn("--label", command)
+        self.assertEqual(
+            command[command.index("--entrypoint") :],
+            (
+                "--entrypoint",
+                "/bin/sh",
+                self.data["image"],
+                "-c",
+                "exec /bin/sleep infinity",
+            ),
+        )
 
     def test_saved_settings_append_deduplicate_and_survive_plain_launches(self):
         args = box.parser().parse_args(

@@ -372,7 +372,15 @@ def _inspect(box, path, data, *, running):
         TypeError,
         ValueError,
         box.BoxError,
-    ):
+    ) as exc:
+        if (
+            isinstance(exc, history_recovery.RecoveryError)
+            and exc.reason == "startup-path-unverified"
+        ):
+            raise box.BoxError(
+                "Guarded startup refused this older container's PATH-dependent entrypoint. "
+                "The existing container and data are retained; do not reset or downgrade to bypass the safeguard."
+            ) from None
         mode = "running" if running else "stopped"
         raise box.BoxError(
             f"Cannot verify the same {mode} workspace and private home for the runtime safeguard."
@@ -467,7 +475,7 @@ class Admission:
                     [
                         "/bin/sh",
                         "-c",
-                        'test -r "$1" && test -w "$1" && ls -A "$1" >/dev/null',
+                        'test -r "$1" && test -w "$1" && /bin/ls -A "$1" >/dev/null',
                         "oc-box",
                         box.container_project(data),
                     ],

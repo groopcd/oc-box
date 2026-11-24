@@ -43,7 +43,7 @@ class HistoryRecoveryTests(unittest.TestCase):
             "Config": {
                 "Labels": {box.LABEL: self.data["id"]},
                 "Entrypoint": ["/bin/sh"],
-                "Cmd": ["-c", "exec sleep infinity"],
+                "Cmd": ["-c", "exec /bin/sleep infinity"],
                 "Env": [
                     "PATH=" + recovery.history_reader.PATH,
                     "HOME=" + self.data["home"],
@@ -133,6 +133,35 @@ class HistoryRecoveryTests(unittest.TestCase):
         ):
             result = recovery.recover(box, self.path, self.data, self.source)
         return result, lease, synchronize
+
+    def test_relative_sleep_never_admits_guarded_or_post_stop_startup(self):
+        self.info["Config"]["Cmd"] = ["-c", "exec sleep infinity"]
+        refusals = []
+        self.assertIsNone(
+            recovery.capture(
+                box, self.data, self.info, self.token, refusal=refusals.append
+            )
+        )
+        self.assertEqual(refusals, ["startup-path-unverified"])
+        # Covers a stopped inspection at guarded admission independently
+        # of Reader capture; no engine probe, preparation or start follows.
+        stopped = {**self.info, "State": {"Running": False, "Status": "exited"}}
+        with (
+            patch.object(box, "inspect_owned", return_value=stopped),
+            patch.object(box, "podman") as podman,
+            self.assertRaisesRegex(box.BoxError, "PATH-dependent entrypoint"),
+        ):
+            box.runtime_safeguard._inspect(box, self.path, self.data, running=False)
+        podman.assert_not_called()
+        # If an earlier captured inspection was absolute, the live recheck
+        # must still refuse a different entrypoint before any transition.
+        result, lease, sync = self.recover()
+        self.assertFalse(result)
+        self.assertEqual(self.calls, ["inspect-running"])
+        self.assertTrue(self.running)
+        lease.assert_not_called()
+        sync.assert_not_called()
+        self.assertIn("startup-path-unverified", self.output.getvalue())
 
     def test_guarded_24_snapshot_retains_the_exact_captured_digest_on_refusal(self):
         digest = "d" * 64

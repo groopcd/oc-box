@@ -402,6 +402,14 @@ unavailable on guarded workspaces.  An existing private owner still
 serves additional clients without starting a preflight or refreshing its
 credentials.
 
+New containers use an absolute ‘/bin/sleep’ path for their passive
+entrypoint.  The safeguard refuses older containers whose stored
+entrypoint would look up ‘sleep’ on the workspace ‘PATH’.  It does not
+modify or replace those containers, or fall back from guarded to
+unguarded startup.  Ordinary unguarded startup of existing containers is
+unchanged.  Preserve existing workspace data; do not reset or downgrade
+to bypass a refusal.
+
 Before normal preparation can write state, oc-box durably records the
 admitted version.  An interruption, late startup failure or missing
 readiness does not permit an older version to reopen that state.  The
@@ -1230,7 +1238,10 @@ optimization for native 2.3.0.
 
 This conservative path requires a passive container entrypoint, no
 custom Podman arguments or automatic health/restart/shell-loader hooks,
-and validated identity/home mounts.  It also refuses native scheduler
+and validated identity/home mounts.  An older entrypoint that looks up
+‘sleep’ on ‘PATH’ cannot be used for automatic post-stop recovery.
+oc-box does not attempt a restart for that snapshot or replace the
+container to change its entrypoint.  It also refuses native scheduler
 rows (including paused/completed rows), unknown scheduler schemas,
 unsafe stores and nonempty system OpenCode configuration.  Read-only
 executable-version probes must match the captured supported release on
@@ -5322,20 +5333,20 @@ Node: Name769
 Node: Synopsis930
 Node: Description5202
 Node: Commands11022
-Node: Options151526
-Node: Lifecycle and persistence215001
-Node: Distribution images217301
-Node: Sessions and recovery222378
-Node: Devices and host permissions228963
-Node: Resource reports231309
-Node: Configuration and environment233420
-Node: Files244801
-Node: Exit status255711
-Node: Examples257119
-Node: Troubleshooting259258
-Node: Installation and manuals271750
-Node: Authors and license281940
-Node: See also282547
+Node: Options152186
+Node: Lifecycle and persistence215661
+Node: Distribution images217961
+Node: Sessions and recovery223038
+Node: Devices and host permissions229623
+Node: Resource reports231969
+Node: Configuration and environment234080
+Node: Files245461
+Node: Exit status256371
+Node: Examples257779
+Node: Troubleshooting259918
+Node: Installation and manuals272410
+Node: Authors and license282600
+Node: See also283207
 
 End Tag Table
 

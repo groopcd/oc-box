@@ -38,6 +38,8 @@ DEADLINE = contextvars.ContextVar("oc_box_history_recovery_deadline", default=No
 FENCE = contextvars.ContextVar("oc_box_history_snapshot_commands", default=None)
 ADMITTED = contextvars.ContextVar("oc_box_history_snapshot_admitted", default=None)
 REPORT = contextvars.ContextVar("oc_box_history_report", default=None)
+PASSIVE_ENTRYPOINT = "/bin/sh"
+PASSIVE_COMMAND = "exec /bin/sleep infinity"
 TRANSITION_BUDGET = 35
 SNAPSHOT_BUDGET = 180
 CLEANUP_BUDGET = 30
@@ -51,6 +53,7 @@ CAPTURE_REFUSALS = frozenset(
         "invalid-container",
         "ownership",
         "nonpassive-container",
+        "startup-path-unverified",
         "automatic-container-work",
         "shared-pid-namespace",
         "mounts",
@@ -271,7 +274,13 @@ def _signature(box, data, info):
     entrypoint = config.get("Entrypoint")
     if isinstance(entrypoint, str):
         entrypoint = [entrypoint]
-    if entrypoint != ["/bin/sh"] or config.get("Cmd") != ["-c", "exec sleep infinity"]:
+    command = config.get("Cmd")
+    if entrypoint == [PASSIVE_ENTRYPOINT] and command == ["-c", "exec sleep infinity"]:
+        # Podman start cannot override the stored argv. In a legacy rootfs
+        # the runtime prefix is searched first and can shadow this command
+        # before any executable verification or Reader helper runs.
+        raise RecoveryError("startup-path-unverified")
+    if entrypoint != [PASSIVE_ENTRYPOINT] or command != ["-c", PASSIVE_COMMAND]:
         raise RecoveryError("nonpassive-container")
     environment = config.get("Env")
     if not isinstance(environment, list) or not all(
