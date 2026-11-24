@@ -7,6 +7,9 @@ import os
 from pathlib import Path
 import re
 import stat
+import subprocess
+import sys
+from time import monotonic
 
 if __package__:
     from . import (
@@ -15,6 +18,7 @@ if __package__:
         web_named_account_assets,
         web_named_foreground,
         web_named_listeners,
+        web_named_site_lifecycle,
         web_tls,
     )
 else:
@@ -23,11 +27,20 @@ else:
     import web_named_account_assets
     import web_named_foreground
     import web_named_listeners
+    import web_named_site_lifecycle
     import web_tls
 
 
 class NamedLaunchError(ValueError):
     """Fixed refusal; don't expose the operator's paths, secrets or worker errors."""
+
+
+class NamedClientUndrained(NamedLaunchError):
+    def __init__(self):
+        super().__init__(
+            "Named Studio shutdown was not verified. Do not release its owner or "
+            "treat this as a normal history-sync or stop result."
+        )
 
 
 @dataclass(frozen=True, slots=True, repr=False)
@@ -315,3 +328,77 @@ def prepare_named_launch(inputs, *, workspace_label="Private workspace"):
         finally:
             del phrase
         return PreparedNamedLaunch(cleanup.pop_all(), profile, account, assets)
+
+
+def _activate_browser(box, url):
+    env = box.maintenance_host_env()
+    for key in (
+        "DISPLAY",
+        "WAYLAND_DISPLAY",
+        "XAUTHORITY",
+        "XDG_SESSION_TYPE",
+        "XDG_CURRENT_DESKTOP",
+    ):
+        if key in os.environ:
+            env[key] = os.environ[key]
+    try:
+        subprocess.run(
+            [
+                sys.executable,
+                "-I",
+                "-B",
+                "-c",
+                "import sys,webbrowser; webbrowser.open(sys.stdin.read())",
+            ],
+            input=url,
+            text=True,
+            env=env,
+            check=False,
+            timeout=15,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.SubprocessError):
+        # The printed fixed URL remains available; no retry or guest fallback.
+        pass
+
+
+def run_named_client(box, owner, prepared, *, no_open):
+    """Run the actual scoped Studio client loop, not an ordinary owner exit.
+
+    The calling lifecycle owns the controlling terminal and verified owner,
+    and must retain them and ``prepared`` on NamedClientUndrained. Do not call
+    this through an ordinary fallback cleanup/finally that releases the owner
+    without confirmed drain. Nothing here opens or refreshes the provider
+    vault, mutates native history, starts a workspace, or falls back to pairing.
+    """
+    if type(prepared) is not PreparedNamedLaunch or type(no_open) is not bool:
+        raise NamedLaunchError("Invalid prepared named Studio client.")
+    try:
+        url = prepared.start(owner, expires_at=monotonic() + 8 * 60 * 60, studio=True)
+        expected = prepared._profile.origins.workspace.value + "/auth/oc-box-entry"
+        if url != expected:
+            raise NamedLaunchError(
+                "Named Studio did not produce the verified workspace entry URL."
+            )
+        print(
+            "oc-box: Named workspace Studio\n"
+            + url
+            + "\nKeep this host command open. Browser login never asks for your host vault.",
+            flush=True,
+        )
+        if not no_open:
+            _activate_browser(box, url)
+        if (
+            prepared.wait_stopped() is not True
+            or prepared.stop_reason is not web_named_site_lifecycle.StopReason.REQUESTED
+        ):
+            raise NamedLaunchError(
+                "The named Studio site stopped; reopen it from the host."
+            )
+        return 0
+    except KeyboardInterrupt:
+        return 130
+    finally:
+        if prepared.close() is not True:
+            raise NamedClientUndrained() from None
