@@ -3,11 +3,16 @@
 from concurrent.futures import ThreadPoolExecutor
 from threading import Event
 from time import monotonic
+from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from oc_box import web_studio_guest as guest
+from oc_box import web_studio_guest_binding as guest_binding
+from oc_box import web_studio_guest_native as native
 from oc_box import web_studio_guest_selection as selection
+from oc_box import web_studio_guest_send as guest_send
+from oc_box import web_studio_send
 
 
 _COOKIE = "synthetic-direct-native=page-selection-test"
@@ -151,3 +156,131 @@ class GuestSelectionTests(unittest.TestCase):
                 deadline=monotonic() + 8,
             )
         )
+
+    def test_guest_send_uses_the_same_fresh_cookie_and_retains_uncertain_post(self):
+        for transport_ok in (True, False):
+            with self.subTest(transport_ok=transport_ok):
+                page = self.page()
+                old_use = self.use(page)
+                self.pages.change(
+                    old_use, sequence=1, session_id="ses_exact", verify=self.verify
+                )
+                use = self.use(page, authorize=False)
+                endpoint = "http://127.0.0.1:48232"
+                identity = SimpleNamespace(
+                    workspace_id=self.binding.workspace_id,
+                    generation=self.binding.owner_generation,
+                    container_id=self.binding.container_id,
+                    endpoint=endpoint,
+                    version="2.4.1",
+                )
+                owner = SimpleNamespace(
+                    owner=SimpleNamespace(
+                        box=SimpleNamespace(container_project=lambda data: "/fixture")
+                    ),
+                    data={},
+                )
+                scope = guest_binding._UnservedBinding(
+                    None,
+                    None,
+                    owner,
+                    identity,
+                    native.GuestNativeScope(self.binding, endpoint, 1, "2.4.1"),
+                    Event(),
+                )
+                registry = Mock()
+                registered_use = object()
+                peer = Mock()
+                peer.post_attempted = True
+                peer.query.return_value = {
+                    "data": {
+                        "id": "msg_persisted",
+                        "sessionID": "ses_exact",
+                        "time": {"created": 1},
+                        "type": "user",
+                        "payload": {"text": "synthetic input"},
+                        "delivery": "queue",
+                    }
+                }
+                relay = Mock()
+                relay.retire.return_value = transport_ok
+                with (
+                    patch.object(
+                        guest_send.web_guest_duplex_exec,
+                        "GuestDuplexExec",
+                        return_value=relay,
+                    ),
+                    patch.object(guest_send, "_Peer", return_value=peer) as endpoints,
+                    patch.object(
+                        web_studio_send,
+                        "_preflight",
+                        return_value="/api/session/ses_exact/prompt",
+                    ),
+                ):
+                    result = guest_send.send(
+                        scope,
+                        registry,
+                        registered_use,
+                        self.gate,
+                        use,
+                        page.grant,
+                        self.pages,
+                        session_id="ses_exact",
+                        generation=1,
+                        text="synthetic input",
+                        cookie=_COOKIE,
+                    )
+                self.assertEqual(
+                    result,
+                    (
+                        web_studio_send.SendResult.QUEUED
+                        if transport_ok
+                        else web_studio_send.SendResult.UNCONFIRMED,
+                        transport_ok,
+                    ),
+                )
+                self.assertEqual(endpoints.call_args.args[2], _COOKIE)
+                self.assertTrue(self.gate.native_current(use))
+                relay.retire.assert_called_once_with()
+                peer.query.assert_called_once_with(
+                    "/api/session/ses_exact/prompt",
+                    body=b'{"text":"synthetic input","delivery":"queue","resume":true}',
+                )
+
+    def test_private_post_wire_uses_native_cookie_not_privileged_auth(self):
+        reply = b'{"ok":true}'
+        wire = (
+            b"HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Type: application/json\r\n"
+            + f"Content-Length: {len(reply)}\r\n\r\n".encode("ascii")
+            + reply
+        )
+        tunnel = Mock()
+        tunnel.ready = True
+        tunnel.ended = False
+        tunnel._queued_data = None
+
+        def receive():
+            if not tunnel.consumed.call_count:
+                return wire
+            tunnel.ended = True
+            return None
+
+        tunnel.receive.side_effect = receive
+        peer = guest_send._Peer(
+            tunnel,
+            self.binding,
+            _COOKIE,
+            monotonic() + 1,
+            check=lambda: None,
+            current=lambda: None,
+        )
+        self.assertEqual(
+            peer.query("/api/session/ses_exact/prompt", body=b"{}"), {"ok": True}
+        )
+        sent = tunnel.send.call_args.args[0]
+        self.assertIn(b"Cookie: " + _COOKIE.encode("ascii") + b"\r\n", sent)
+        self.assertNotIn(b"Authorization:", sent)
+        self.assertTrue(peer.post_attempted)
+        with self.assertRaises(web_studio_send.SendError):
+            peer.query("/api/session/ses_exact/prompt", body=b"{}")
+        tunnel.send.assert_called_once()
