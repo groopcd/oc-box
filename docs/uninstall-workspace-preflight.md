@@ -73,6 +73,61 @@ the engine.
   pods, extra mounts, and ordinary host packages are never targets. The
   projection may report names of workspace-labeled networks as retained.
 
+## Local Podman profile and inventory stage
+
+`workspace_podman.local_inventory()` is a read-only source-level adapter. It
+selects one explicit absolute, no-link, root-owned `podman` ELF executable and
+runs it through the pinned executable descriptor. It accepts a non-root host
+UID, an explicit `/run/user/UID` runtime directory and standard HOME-relative
+XDG locations. Container markers, remote/routing environment selectors (even
+empty ones), site/user Podman configuration, storage overrides, modules,
+drop-ins and saved connections are refused. A root-owned, bounded vendor
+`containers.conf`, if present, must parse with the standard TOML parser and
+must not select a remote connection or alternate engine directory. Python
+3.10 therefore refuses this variant if that vendor file exists. This initial
+profile does not accommodate many distribution or custom-store configurations;
+it never silently changes their selection to a different store.
+
+The adapter pins existing HOME/runtime, graph, run and volume directories
+without reading their contents. It rechecks descriptor and path identities
+and configuration boundaries around each command, retaining a single sanitized
+environment and explicit `--remote=false`. The only supported scope in this
+stage is a standard persistent `overlay` store: `<HOME>/.local/share/containers/storage`,
+`/run/user/UID/containers`, and `<graph-root>/volumes` on the graph mount.
+`podman info` can still update native runtime metadata; read-only here means
+the adapter dispatches no storage or lifecycle mutation command.
+
+The exact accepted evidence shapes are:
+
+| Query | Required evidence |
+| --- | --- |
+| `info --format json` | JSON objects `host`, `store`, `version`; `host.security.rootless: true`, `host.serviceIsRemote: false`, `store.graphDriverName: "overlay"`, `store.transientStore: false`, exact `graphRoot`, `runRoot`, `volumePath`, and `version.Version` exactly `6.1.4` or `6.2.0`, with the known omission of `store.configFile`. The same profile must hold before and after a scan. |
+| `ps --all --quiet --no-trunc`, with and without `--external` | Identical unique full lowercase 64-hex ID catalogs. Any observed extra external object blocks the profile. |
+| Volume and workspace-labeled network lists | Unique canonical resource names, one per line. Both catalogs must match a second read. |
+| `container inspect` | A JSON array bound to the exact listed IDs, with canonical `Name`, explicit `Config.Labels`, a bounded `Mounts` array, known `State.Status`, boolean `Running`/`Paused`/`Restarting`, and integer `Pid`/`ConmonPid`. This is a state observation and count of mount entries, **not** a mounted-container or dependency proof. |
+| `volume inspect` | A JSON array bound to the listed names. Require explicit `Name`, `Labels`, `Driver`, `Scope`, `Anonymous`, `Options`, `StorageID`, `CreatedAt`, `Mountpoint` and `MountCount`. Only unconfigured, non-anonymous local volumes with a pinned canonical mountpoint and verified nonnegative count are observed. Omitted fields or other storage refuse; they are not defaulted to safe values. |
+| Exact-name container/volume `exists` | Exit 0 or 1 must agree with the catalog, including absent names from the caller's review. Other codes and disagreements refuse. |
+
+Two matching catalogs are not an atomic snapshot. A bound reader permits no
+overlapping queries; it uses serial batches of at most eight, at most 128
+entries per catalog, a 45-second scan budget and at most eight seconds per
+command. Output is capped at 64 KiB for small queries and 2 MiB per inspect
+batch. The subprocess adapter sends no stdin, discards stderr, caps the stdout
+pipe, and reaps its own direct child on failure; errors and timeouts never
+become absence. Raw inspect data stays in process memory and is neither
+returned nor logged. Only selected closed metadata leaves the adapter; it
+does not open project paths, native history, or volume contents.
+
+`scan()` can return projected evidence for a populated store, but it is
+explicitly incomplete. `inspect()` supplies a complete `EngineSnapshot`
+only when both container catalogs and the volume catalog are empty and all
+requested names independently agree. It refuses to pass populated inventories
+to the removal planner. The repository has offline evidence of portions of
+these shapes, **not** native acceptance of the full schema or flags, including
+version-specific field omissions. No filesystem alias traversal or mounted
+container/dependency proof is fabricated. This adapter exposes no mutation
+transport; neither it nor the actor is a partial-release basis.
+
 ## Engine actor and outcome contract
 
 The caller owns confirmation and retains the original in-process `WorkspacePlan`.
@@ -120,10 +175,9 @@ actor has no persistent replay or recreation fence.
 
 ## Before any destructive release
 
-1. Implement and independently test the real read-only inspection projection
-   and transport for the command adapter, using one pinned host executable and
-   audited local selector/environment for every operation. Confirm the command
-   mapping and absence status contract against the supported native versions.
+1. Complete and independently test the populated-store inspection projection
+   and add the pinned transport for the actor's exact command adapter. Confirm
+   command and absence status contracts against supported native versions.
    Never silently drop a remote/custom selector and treat a different empty
    store as the intended one. Establish callback completeness from real
    supported engine contracts, including configured/stopped and mounted
