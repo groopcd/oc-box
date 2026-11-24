@@ -70,12 +70,12 @@ def parser():
         help=f"maximum initial records, 1..{_MAX_LIMIT} (default: {_DEFAULT_LIMIT}, or {_MAX_LIMIT} with --verbose=all)",
     )
     result.add_argument(
-        "--follow", action="store_true", help="keep printing new retained records"
+        "-f", "--follow", action="store_true", help="keep printing new retained records"
     )
     result.add_argument(
         "--tail",
         action="store_true",
-        help="show recent environment preparation tasks and results (use --follow to watch live)",
+        help="show recent environment preparation tasks and results (add -f to watch live)",
     )
     formats = result.add_mutually_exclusive_group()
     formats.add_argument(
