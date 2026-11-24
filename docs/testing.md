@@ -835,11 +835,14 @@ unrelated files; do not add background or restart cleanup.
 
 **Native offline regression, including PDF.** The focused
 `tests/smoke_host_drop_v2.py` fixture must use unmodified native binaries with
-private synthetic configuration, history, image and PDF bytes:
+private synthetic configuration, history, image and PDF bytes. Keep the older
+regressions and check the current stable V2 release in CI without a fixture
+minor-version allowlist:
 
 ```sh
 python3 -B tests/smoke_host_drop_v2.py --opencode /path/to/opencode-2.2.6
 python3 -B tests/smoke_host_drop_v2.py --opencode /path/to/opencode-2.3.0
+python3 -B tests/smoke_host_drop_v2.py --opencode /path/to/current-stable-opencode-2
 ```
 
 Verify actual native attachment admission/serialization of PDF as

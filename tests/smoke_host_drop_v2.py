@@ -4,7 +4,7 @@ Run from the checkout root after freezing the production runtime:
 TMPDIR=/tmp/opencode python3 -B tests/smoke_host_drop_v2.py
 --opencode /path/to/unmodified-opencode
 
-Supports native 2.2.6, 2.2.7 and 2.3.0, one executable per invocation. Fresh
+Exercises native OpenCode 2.x, one executable per invocation. Fresh
 synthetic HOME/XDG directories, a stdio-owned server, a canned loopback provider
 and the existing native-preferences PTY observer are used. Production run_tui,
 Relay, Export, Transfer and the executable host_drop_io protocol remain real.
@@ -59,7 +59,6 @@ from smoke_native_preferences_v2 import Client as PreferencesClient
 from smoke_session_sync_v2 import bounded, private_environment
 from smoke_sharing_v2 import Failure, PNG, nodes, require
 
-SUPPORTED = frozenset(("2.2.6", "2.2.7", "2.3.0"))
 MARKER = "SYNTHETIC_HOST_DROP_USER_ENTER"
 MAX_HTTP = 2 * 1024 * 1024
 SOURCES = (
@@ -907,7 +906,7 @@ def exercise(binary, root):
     env = private_environment(root / "native")
     env.update({"TERM": "xterm-256color", "COLORTERM": "truecolor"})
     release = opencode_compat.version(bounded([binary, "--version"], env, project))
-    require(release in SUPPORTED, "native-version")
+    require(opencode_compat.major(release) == 2, "native-version")
     print("NATIVE version=" + release, flush=True)
     config_directory = Path(env["XDG_CONFIG_HOME"]) / "opencode"
     config_directory.mkdir(exist_ok=True)
