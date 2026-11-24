@@ -4,6 +4,7 @@
   "use strict";
   const root = document.getElementById("web-shell");
   if (!root) return;
+  const namedPage = root.dataset.namedStudio === "";
   const byId = id => document.getElementById("workspace-" + id);
   const tabs = document.getElementById("session-tabs");
   const groups = {
@@ -37,34 +38,61 @@
   let membershipRefreshFailed = false;
   let workspace = null;
   let ready = false;
+  let named = null;
+  let namedCatalogRead = null;
+  let namedVerification = null;
+  let namedOpenFailed = false;
+  const conversationLabel = namedPage ? "Workspace conversation" : "Native conversation";
 
   function row(value) {
     if (!value || typeof value.id !== "string" || !idPattern.test(value.id) || typeof value.title !== "string" ||
-        typeof value.route !== "string" ||
-        !/^\/server\/[A-Za-z0-9_-]+\/session\/ses[A-Za-z0-9_-]+$/.test(value.route) ||
-        !value.route.endsWith("/session/" + value.id) ||
-         (nativePrefix && value.route !== nativePrefix + value.id) ||
+        (namedPage ? Object.hasOwn(value, "route") :
+          typeof value.route !== "string" ||
+          !/^\/server\/[A-Za-z0-9_-]+\/session\/ses[A-Za-z0-9_-]+$/.test(value.route) ||
+          !value.route.endsWith("/session/" + value.id) ||
+          (nativePrefix && value.route !== nativePrefix + value.id)) ||
          (value.activeRoot != null && (typeof value.activeRoot !== "string" ||
-           !idPattern.test(value.activeRoot)))) throw new Error("catalog");
-    return { id: value.id, title: value.title.slice(0, 256), route: value.route,
+            !idPattern.test(value.activeRoot)))) throw new Error("catalog");
+    return { id: value.id, title: value.title.slice(0, 256), ...(namedPage ? {} : { route: value.route }),
       activeRoot: value.activeRoot ?? null };
+  }
+  function memberRows(data) {
+    if (!Array.isArray(data.sessions) || (namedPage && (
+        data.sessions.length > 512 || !["valid", "missing", "unavailable"].includes(data.status) ||
+        (data.status !== "valid" && data.sessions.length)))) throw new Error("catalog");
+    const next = data.sessions.map(row);
+    if (new Set(next.map(item => item.id)).size !== next.length) throw new Error("catalog");
+    return next;
   }
   function selection() {
     if (!selected || awaitingLoad || workspace.manager()) return null;
-    try {
-      const url = new URL(frame.contentWindow.location.href);
-      if (url.origin !== window.location.origin || url.pathname !== selected.route) return null;
-    } catch { return null; }
-    return Object.freeze({ sessionID: selected.id, nativeRoute: selected.route,
+    if (!namedPage) {
+      try {
+        const url = new URL(frame.contentWindow.location.href);
+        if (url.origin !== window.location.origin || url.pathname !== selected.route) return null;
+      } catch { return null; }
+    }
+    return Object.freeze({ sessionID: selected.id, ...(namedPage ? {} : { nativeRoute: selected.route }),
       activeRoot: membershipKnown && members.some(item => item.id === selected.activeRoot) ? selected.activeRoot : null,
       member: selected.member, origin: selected.origin });
   }
   function changed() {
+    if (namedPage) return;
     // Attachment add-ons may mount controls in #session-controls and use this
     // exact iframe. No nested shell, second strip or native-store mutation.
     window.dispatchEvent(new CustomEvent("oc-box:selection-changed", {
       detail: selection()
     }));
+  }
+  function clearNamedSelection() {
+    navigation += 1;
+    namedVerification?.abort();
+    selected = null;
+    namedOpenFailed = false;
+    render();
+    try { named.selectionChanged(null); }
+    catch { return false; }
+    return true;
   }
   function rowIcon(name) {
     const namespace = "http://www.w3.org/2000/svg";
@@ -82,7 +110,9 @@
     button.title = item.id;
     button.dataset.sessionId = item.id;
     button.dataset.sessionSource = source;
-    button.addEventListener("click", () => workspace.open(item));
+    button.addEventListener("click", event => {
+      if (!namedPage || (event.isTrusted && workspace.source() === source)) void workspace.open(item);
+    });
     return button;
   }
   function renderRail(rows, activeId, currentId, openIds) {
@@ -101,7 +131,7 @@
       const title = item.title || item.id;
       if (isTabs) {
         button.setAttribute("role", "tab");
-        button.setAttribute("aria-controls", "native");
+        button.setAttribute("aria-controls", namedPage ? "workspace-chat" : "native");
         button.setAttribute("aria-label", title);
         button.setAttribute("aria-selected", String(activeId === item.id));
       }
@@ -134,7 +164,7 @@
       const title = item.title || item.id;
       const button = sessionButton(item, source);
       button.className = "workspace-manager-text-action";
-      button.setAttribute("aria-label", "Open in native chat: " + title);
+      button.setAttribute("aria-label", (namedPage ? "Open in Studio: " : "Open in native chat: ") + title);
       button.setAttribute("dir", "auto");
       button.textContent = title;
       if (selected?.id === item.id) {
@@ -167,8 +197,13 @@
     if (!workspace.manager()) renderRail(workspace.visibleRows(), activeId, currentId, openIds);
     else if (workspace.managerSessions()) renderManagerRows(workspace.visibleRows(), openIds);
     retained.replaceChildren();
-    conversationTitle.textContent = selected?.title || "Native conversation";
-    conversationSource.textContent = "OpenCode / Native conversation";
+    conversationTitle.textContent = selected?.title || conversationLabel;
+    conversationSource.textContent = "OpenCode / " + conversationLabel;
+    if (namedPage) empty.firstElementChild.textContent = namedVerification && !namedVerification.signal.aborted && !selected
+      ? "Verifying the selected session…" : selected
+        ? "Studio transcript is not displayed. Choose the session again or use the host terminal."
+        : namedOpenFailed ? "Session selection could not be verified. Choose a session to try again."
+          : "Choose a verified session from this workspace.";
     currentSession.textContent = selected ? (selected.title || selected.id) + " · " + selected.id :
       "No conversation selected.";
     if (selected) {
@@ -188,9 +223,12 @@
           "Retained browser selection (not counted as TUI-open): ") + selected.title + " · " + selected.id;
         retained.append(label);
       }
-    } else notice.textContent = "No native conversation is currently verified. Choose a tab or use native Home.";
+    } else notice.textContent = namedPage
+      ? "No workspace conversation is currently selected."
+      : "No native conversation is currently verified. Choose a tab or use native Home.";
     status.textContent = membershipRefreshFailed ?
-      "TUI membership could not be refreshed. Conversation retained; retry or open native Home." :
+      (namedPage ? "TUI membership could not be refreshed." :
+        "TUI membership could not be refreshed. Conversation retained; retry or open native Home.") :
       (membershipKnown ? members.length + " verified open TUI tab(s). " :
       "TUI membership unavailable; open count unknown. ") +
       "Refresh does not reload the selected conversation or verify native focus.";
@@ -300,28 +338,35 @@
     });
   }
   async function refreshTabs() {
-    if (busy) return;
+    if (busy || (namedPage && !named.readCatalog)) return;
     busy = true;
     workspace.updateRefresh();
+    const controller = namedPage ? new AbortController() : null;
+    namedCatalogRead = controller;
     try {
-      const response = await fetch(endpoint, { credentials: "same-origin", headers: { Accept: "application/json" } });
-      if (!response.ok) throw new Error("catalog");
-      const data = await response.json();
-      if (!Array.isArray(data.sessions)) throw new Error("catalog");
-      const next = data.sessions.map(row);
-      if (new Set(next.map(item => item.id)).size !== next.length) throw new Error("catalog");
-      members = next;
+      let data;
+      if (namedPage) {
+        data = await named.readCatalog({ signal: controller.signal });
+        if (controller.signal.aborted) return;
+      } else {
+        const response = await fetch(endpoint, { credentials: "same-origin", headers: { Accept: "application/json" } });
+        if (!response.ok) throw new Error("catalog");
+        data = await response.json();
+      }
+      members = memberRows(data);
       membershipKnown = data.status === "valid";
       membershipRefreshFailed = false;
       render(); // Deliberately never select/reload a frame on metadata refresh.
       changed();
     } catch {
+      if (controller?.signal.aborted) return;
       membershipKnown = false;
       membershipRefreshFailed = true;
       members = []; // A failed refresh cannot leave a stale count or action.
       render();
       changed();
     } finally {
+      namedCatalogRead = null;
       busy = false;
       workspace.updateRefresh();
     }
@@ -468,8 +513,10 @@
     const listStatus = () => byId(managerSessions() ? "manager-session-count" : "search-status");
     const refreshSource = () => historySource() ? loadHistory() : refreshTabs();
     function updateRefresh() {
-      statusRefresh.disabled = busy;
-      refresh.disabled = sessionRefresh.disabled = historySource() ? historyState === "loading" : busy;
+      statusRefresh.disabled = busy || (namedPage && !named.readCatalog);
+      refresh.disabled = sessionRefresh.disabled = historySource()
+        ? historyState === "loading" || (namedPage && !named.readHistory)
+        : busy || (namedPage && !named.readCatalog);
     }
 
     async function loadHistory() {
@@ -480,18 +527,24 @@
       historyRows = [];
       render();
       try {
-        const response = await fetch(historyEndpoint, {
-          credentials: "same-origin", headers: { Accept: "application/json" },
-          signal: controller.signal,
-        });
-        if (!response.ok) throw new Error("history");
-        const values = await response.json();
+        let values;
+        if (namedPage) {
+          if (!named.readHistory) throw new Error("history");
+          values = await named.readHistory({ signal: controller.signal });
+        } else {
+          const response = await fetch(historyEndpoint, {
+            credentials: "same-origin", headers: { Accept: "application/json" },
+            signal: controller.signal,
+          });
+          if (!response.ok) throw new Error("history");
+          values = await response.json();
+        }
         if (!Array.isArray(values) || values.length > 1000) throw new Error("history");
         const received = values.map(value => {
           if (!value || typeof value.id !== "string" || !idPattern.test(value.id) ||
               typeof value.title !== "string" || typeof value.isChild !== "boolean" ||
               !value.time || typeof value.time !== "object") throw new Error("history");
-          return { ...row({ id:value.id, title:value.title, route:nativePrefix + value.id }),
+          return { ...row(namedPage ? value : { id:value.id, title:value.title, route:nativePrefix + value.id }),
             archived:value.time.archived !== undefined, child:value.isChild };
         });
         if (new Set(received.map(item => item.id)).size !== received.length) throw new Error("history");
@@ -510,7 +563,10 @@
     }
     function setSource(value) {
       if (!Object.hasOwn(sources, value)) return;
-      if (source !== value) navigation += 1; // An away/back source change invalidates pending opens.
+      if (source !== value) {
+        navigation += 1; // An away/back source change invalidates pending opens.
+        namedVerification?.abort();
+      }
       source = value;
       for (const [kind, button] of Object.entries(sources)) {
         button.setAttribute("aria-pressed", String(value === kind));
@@ -570,10 +626,12 @@
       inspectorReturn = null;
       apply();
       navigation += 1; // Invalidate outstanding native route checks as well.
+      namedVerification?.abort();
       render();
       changed(); // Invalidate File reads even for a round trip to the same selection.
+      if (namedPage && manager()) clearNamedSelection();
       if (manager()) sections.find(entry => entry.name === section).tab.focus();
-      else void observeNativeRoute();
+      else if (!namedPage) void observeNativeRoute();
     }
     function showSection(next, focus = false) {
       if (!manager()) return;
@@ -719,7 +777,9 @@
           !query || item.title.toLowerCase().includes(query) || item.id.toLowerCase().includes(query));
         listStatus().textContent = history ?
           historyState === "loading" ? "Loading workspace history…" :
-          historyState !== "valid" ? "Workspace history unavailable. Refresh to retry." :
+          historyState !== "valid" ? (namedPage && !named.readHistory
+            ? "Workspace history is not available in this browser."
+            : "Workspace history unavailable. Refresh to retry.") :
           list.length === 0 ? (source === "archived" ? "No archived sessions in this workspace project." :
             excludeArchives ? "No non-archived sessions in this workspace project." : "No sessions in this workspace project.") :
           visible.length === 0 ? "No workspace history matches this search." :
@@ -732,6 +792,46 @@
       },
       async open(item) {
         if (!ready || (manager() && !managerSessions())) return;
+        if (namedPage) {
+          const history = historySource();
+          const snapshot = history ? historyRows : members;
+          if (namedVerification || document.hidden || !snapshot.includes(item) ||
+              (history ? historyState !== "valid" : !membershipKnown)) return;
+          if (manager()) {
+            show(lastChat);
+            views.find(button => button.dataset.view === view).focus();
+          } else if (panel === "sessions") toggleSessions();
+          if (!clearNamedSelection()) return;
+          const verification = new AbortController();
+          namedVerification = verification;
+          const before = navigation;
+          render();
+          try {
+            const verified = await named.verifySelection(item.id, { signal: verification.signal });
+            if (verification.signal.aborted || before !== navigation || document.hidden || manager() ||
+                snapshot !== (history ? historyRows : members)) return;
+            if (verified !== true) { namedOpenFailed = true; return; }
+            selected = {
+              ...item,
+              origin: history ? "Explicit workspace history selection" : "Explicit TUI-tab click",
+              historyKind: history ? (item.archived ? "archived" : "history") : null,
+              activeRoot: item.activeRoot ?? (members.some(value => value.id === item.id) ? item.id : null),
+            };
+            render();
+            named.selectionChanged(selection());
+          } catch {
+            selected = null;
+            namedOpenFailed = !verification.signal.aborted && before === navigation;
+          } finally {
+            namedVerification = null;
+            // A refused or superseded verifier may still have resolved a scope.
+            if (!selected) {
+              try { named.selectionChanged(null); } catch { /* No display or authority. */ }
+            }
+            render();
+          }
+          return;
+        }
         if (historySource()) {
           if (verifyingHistory || historyState !== "valid" || !historyRows.includes(item)) return;
           verifyingHistory = true;
@@ -765,14 +865,27 @@
       },
     };
   }
-  try {
+  function initialize(adapter) {
     const data = JSON.parse(root.dataset.bootstrap);
-    if (typeof data.nativePrefix !== "string" ||
-        !/^\/server\/[A-Za-z0-9_-]+\/session\/$/.test(data.nativePrefix)) throw new Error("prefix");
-    nativePrefix = data.nativePrefix;
+    if (namedPage) {
+      if (!root.isConnected || root.querySelector("iframe") || Object.hasOwn(data, "nativePrefix") ||
+          data.selection !== null || typeof adapter?.verifySelection !== "function" ||
+          typeof adapter.selectionChanged !== "function" ||
+          (adapter.readCatalog !== undefined && typeof adapter.readCatalog !== "function") ||
+          (adapter.readHistory !== undefined && typeof adapter.readHistory !== "function")) return null;
+      named = Object.freeze({
+        verifySelection: adapter.verifySelection.bind(adapter),
+        selectionChanged: adapter.selectionChanged.bind(adapter),
+        readCatalog: adapter.readCatalog?.bind(adapter),
+        readHistory: adapter.readHistory?.bind(adapter),
+      });
+    } else {
+      if (typeof data.nativePrefix !== "string" ||
+          !/^\/server\/[A-Za-z0-9_-]+\/session\/$/.test(data.nativePrefix)) throw new Error("prefix");
+      nativePrefix = data.nativePrefix;
+    }
     membershipKnown = data.status === "valid";
-    members = data.sessions.map(row);
-    if (new Set(members.map(item => item.id)).size !== members.length) throw new Error("catalog");
+    members = memberRows(data);
     if (data.selection) {
       selected = { ...row(data.selection), origin: data.selection.origin,
         member: members.some(item => item.id === data.selection.id) };
@@ -780,8 +893,20 @@
     workspace = workspaceLayout();
     notice.textContent = data.selectionNotice;
     render();
-    if (selected) select(selected, selected.origin); // Existing src is not reassigned.
+    if (!namedPage && selected) select(selected, selected.origin); // Existing src is not reassigned.
     refresh.addEventListener("click", () => { if (ready) workspace.refresh(); });
+    if (namedPage) {
+      function suspend() {
+        namedCatalogRead?.abort();
+        workspace.cancel();
+        clearNamedSelection();
+      }
+      window.addEventListener("pagehide", suspend);
+      document.addEventListener("visibilitychange", () => { if (document.hidden) suspend(); });
+      window.ocBoxNamedStudioChrome = Object.freeze({ version: 1, selection, refresh: refreshTabs });
+      ready = true;
+      return window.ocBoxNamedStudioChrome;
+    }
     frame.addEventListener("load", () => { if (ready) { sawFrameLoad = true; frameReady(); } });
     window.addEventListener("load", () => { if (ready && !sawFrameLoad) frameReady(); }, { once: true });
     const startObserver = () => {
@@ -801,18 +926,39 @@
       status: document.getElementById("addon-status"), selection, refresh: refreshTabs
     });
     ready = true;
-  } catch {
-    if (timer !== null) { window.clearInterval(timer); timer = null; }
-    // On a narrow viewport the script may already have hidden the library.
-    // Fall back to the stacked layout so the verified links are reachable.
-    delete root.dataset.workspaceSessionsDrawer;
-    delete root.dataset.workspaceInspectorDrawer;
-    delete root.dataset.workspaceInspector;
-    document.getElementById("workspace-library").hidden = false;
-    document.getElementById("workspace-library").inert = false;
-    document.getElementById("workspace-overview").hidden = false;
-    document.getElementById("workspace-chat").inert = false;
-    document.getElementById("fallback-links").hidden = false;
-    status.textContent = "The shell could not initialize. Use explicit fallback links or native Home.";
+  }
+  function mount(adapter) {
+    try { return initialize(adapter); }
+    catch {
+      if (timer !== null) { window.clearInterval(timer); timer = null; }
+      // On a narrow viewport the script may already have hidden the library.
+      // Fall back to the stacked layout so the verified links are reachable.
+      delete root.dataset.workspaceSessionsDrawer;
+      delete root.dataset.workspaceInspectorDrawer;
+      delete root.dataset.workspaceInspector;
+      byId("library").hidden = false;
+      byId("library").inert = false;
+      byId("overview").hidden = false;
+      byId("chat").inert = false;
+      if (namedPage) empty.firstElementChild.textContent = "Studio controls could not initialize. Use the host terminal.";
+      else {
+        document.getElementById("fallback-links").hidden = false;
+        status.textContent = "The shell could not initialize. Use explicit fallback links or native Home.";
+      }
+      return null;
+    }
+  }
+  if (namedPage) {
+    // The separately reviewed named entry supplies these callbacks, not a
+    // URL or ambient authority. verifySelection(id, {signal}) resolves true
+    // only for that exact, currently admitted scope. selectionChanged(null)
+    // synchronously clears the view and revokes/cancels the local controller
+    // scope; non-null is a display cross-check after verification, not a grant.
+    // Optional readCatalog({signal}) returns {status, sessions:[{id, title}]};
+    // readHistory({signal}) returns workspace-only {id, title, isChild, time}
+    // rows. Neither callback is ever invoked to guess or grant selection.
+    window.ocBoxMountNamedStudioChrome = adapter => !named ? mount(adapter) : null;
+  } else {
+    mount();
   }
 })();

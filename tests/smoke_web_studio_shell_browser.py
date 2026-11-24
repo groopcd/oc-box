@@ -87,6 +87,59 @@ window.fixture = {
   },
 };
 """
+NAMED_MODULE = """
+import { createStudioShellView } from "/oc-box/studio/web_studio_shell.mjs";
+const root = document.getElementById("web-shell");
+const verifies = [], reads = [], sends = [], catalogs = [], cancelled = [];
+let verifyReply, readReply, chrome, view, showing, scope = null, generation = 0;
+const controller = {
+  readSelection: () => scope,
+  readTranscript: ticket => {
+    reads.push(ticket);
+    return new Promise(resolve => { readReply = resolve; });
+  },
+  send: action => { sends.push(action); return "refused"; },
+};
+const adapter = {
+  verifySelection: (id, {signal}) => {
+    verifies.push(id);
+    signal.addEventListener("abort", () => cancelled.push(id), {once:true});
+    return new Promise(resolve => { verifyReply = resolve; });
+  },
+  selectionChanged: selected => {
+    if (selected === null) {
+      scope = null;
+      view?.invalidate();
+    } else showing = view.present();
+  },
+  readCatalog: ({signal}) => {
+    catalogs.push(signal.aborted);
+    return {status:"valid", sessions:[
+      {id:"ses_alpha", title:"Synthetic <alpha>"},
+      {id:"ses_beta", title:"Synthetic Beta"},
+    ]};
+  },
+};
+window.namedFixture = {
+  attach: () => {
+    chrome = window.ocBoxMountNamedStudioChrome(adapter);
+    view = createStudioShellView(root, controller);
+    return !!view;
+  },
+  bareMount: () => createStudioShellView(root, controller) === null,
+  noUntrustedMount: () => window.ocBoxMountNamedStudioChrome({}) === null,
+  verify: (accepted, sessionID, writable) => {
+    scope = accepted ? {sessionID, generation:++generation, writable} : null;
+    verifyReply(accepted);
+  },
+  deliver: id => readReply({
+    sessionID: id, title: "Synthetic approved projection", hasEarlier: false,
+    messages: [{ id:"msg_named", role:"user", text:"Named fixture text", truncated:false }],
+  }),
+  status: () => ({verifies, reads, sends, catalogs, cancelled, selected:chrome?.selection()}),
+  presented: () => showing,
+};
+"""
 
 GEOMETRY = """ids => {
   const [chat, ...panes] = ids.map(id => document.querySelector(id));
@@ -130,12 +183,167 @@ def assets():
             for ext, mime in (("mjs", js), ("css", css))
         },
     }
+    prefix = web_sessions.NAMED_STUDIO_ASSET_PREFIX
+    named_script = (
+        b'<script type="module" src="/fixture/named-controller.mjs"></script>'
+    )
+    named = fixture_document(named_studio=True)
+    result.update(
+        {
+            "/named": (html, named.replace(b"</head>", named_script + b"</head>", 1)),
+            "/named-inert": (html, named),
+            "/fixture/named-controller.mjs": (js, NAMED_MODULE.encode()),
+            prefix + "web_sessions.js": result[web_sessions.SCRIPT],
+            prefix + "web_sessions.css": result[web_sessions.STYLE],
+            **{
+                prefix + name.rsplit("/", 1)[-1]: value
+                for name, value in result.items()
+                if name.startswith("/fixture/web_studio_")
+            },
+        }
+    )
     for session in state["sessions"]:
         result[web_sessions.native_session_route(URL, session["id"])] = (
             html,
             b'<!doctype html><title>Fixture frame</title><textarea id="draft">Native fixture draft</textarea>',
         )
     return result
+
+
+NAMED_PANES = [
+    "#workspace-chat",
+    "#workspace-library",
+    "#workspace-divider-left",
+    "#workspace-divider-right",
+    "#workspace-overview",
+]
+
+
+def exercise_named(open_page, expect, approved, requests):
+    start = len(requests)
+    inert = open_page("/named-inert")
+    expect(inert.locator("#no-selection")).to_have_text(
+        "Studio controls are not connected."
+    )
+    expect(inert.locator("iframe, a, #session-controls")).to_have_count(0)
+    expect(inert.locator(CENTER)).to_be_hidden()
+    inert.get_by_role("button", name="Workspace manager").click()
+    expect(inert.locator("#workspace-manager")).to_be_hidden()
+    inert.close()
+
+    page = open_page("/named")
+    page.wait_for_function("typeof namedFixture !== 'undefined'")
+    expect(page.locator("iframe, a, #session-controls")).to_have_count(0)
+    expect(page.locator("#workspace-host-terminal")).to_be_visible()
+    assert page.evaluate("namedFixture.bareMount() && namedFixture.noUntrustedMount()")
+    page.evaluate("history.replaceState(null, '', '/named?session=ses_beta')")
+    assert page.evaluate("namedFixture.attach()")
+    assert page.evaluate("typeof ocBoxWebShell === 'undefined'")
+    center = page.locator(CENTER)
+    expect(center).to_be_hidden()
+    assert page.evaluate("namedFixture.status().selected") is None
+    assert page.evaluate("namedFixture.status().reads") == []
+    initial_requests = len(requests)
+
+    alpha = page.get_by_role("tab", name="Synthetic <alpha>")
+    beta = page.get_by_role("tab", name="Synthetic Beta")
+    alpha.evaluate("el => el.click()")
+    assert page.evaluate("namedFixture.status().verifies") == []
+    alpha.click()
+    expect(center).to_be_hidden()
+    page.evaluate("namedFixture.verify(true, 'ses_beta', true)")
+    assert not page.evaluate("namedFixture.presented()")
+    assert page.evaluate("namedFixture.status().reads") == []
+
+    alpha.click()
+    page.evaluate("namedFixture.verify(true, 'ses_alpha', true)")
+    expect(center).to_be_hidden()
+    page.evaluate("namedFixture.deliver('ses_alpha')")
+    assert page.evaluate("namedFixture.presented()")
+    expect(center.get_by_text("Named fixture text")).to_be_visible()
+    expect(
+        page.locator("#workspace-chat").get_by_role("heading", level=2)
+    ).to_have_count(1)
+    assert page.evaluate(GEOMETRY, NAMED_PANES) == approved
+    expect(alpha).to_have_attribute("aria-selected", "true")
+    field = center.get_by_role("textbox", name="Message", exact=True)
+    send = center.get_by_role("button", name="Send", exact=True)
+    field.fill("A named synthetic draft")
+
+    page.get_by_role("button", name="Dashboard", exact=True).click()
+    expect(page.locator("#workspace-overview")).to_be_visible()
+    expect(field).to_have_value("A named synthetic draft")
+    page.get_by_role("button", name="Chat focus").click()
+    expect(page.locator("#workspace-library")).to_be_hidden()
+    expect(field).to_have_value("A named synthetic draft")
+    page.get_by_role("button", name="Studio", exact=True).click()
+    page.set_viewport_size({"width": 390, "height": 760})
+    assert center.evaluate("""el => {
+      const box = el.getBoundingClientRect();
+      const compose = el.querySelector(".compose").getBoundingClientRect();
+      return box.width === 390 && compose.width === 364 && compose.left === 13;
+    }""")
+    expect(page.locator("#workspace-host-terminal")).to_be_visible()
+    page.locator("#workspace-sessions-toggle").click()
+    assert page.locator("#workspace-chat").evaluate("el => el.inert")
+    send.evaluate("el => el.click()")
+    assert page.evaluate("namedFixture.status().sends") == []
+    page.locator("#workspace-sessions-close").click()
+    expect(field).to_have_value("A named synthetic draft")
+    send.click()
+    assert page.evaluate("namedFixture.status().sends") == [
+        {"sessionID": "ses_alpha", "generation": 2, "text": "A named synthetic draft"},
+    ]
+
+    page.set_viewport_size(VIEWPORT)
+    beta.click()
+    expect(center).to_be_hidden()
+    manager = page.get_by_role("button", name="Workspace manager")
+    manager.click()
+    expect(page.locator("#workspace-manager")).to_be_visible()
+    assert page.evaluate("namedFixture.status().cancelled") == ["ses_beta"]
+    page.evaluate("namedFixture.verify(true, 'ses_beta', true)")
+    expect(center).to_be_hidden()
+    expect(page.get_by_role("tab", name="Status")).to_be_focused()
+    page.get_by_role("tab", name="Sessions").click()
+    page.get_by_role("button", name="Refresh TUI tabs").click()
+    rows = page.get_by_role("table", name="Workspace session results")
+    expect(rows.get_by_role("row")).to_have_count(3)
+    rows.get_by_role("button", name="Open in Studio: Synthetic Beta").click()
+    expect(page.locator("#workspace-manager")).to_be_hidden()
+    page.evaluate("namedFixture.verify(true, 'ses_beta', false)")
+    page.evaluate("namedFixture.deliver('ses_beta')")
+    assert page.evaluate("namedFixture.presented()")
+    expect(center.get_by_text("Named fixture text")).to_be_visible()
+    expect(send).to_have_count(0)
+    expect(page.get_by_role("heading", name="Synthetic Beta")).to_be_visible()
+    page.get_by_role("button", name="Workspace history").click()
+    expect(page.locator("#workspace-search-status")).to_have_text(
+        "Workspace history is not available in this browser."
+    )
+    page.get_by_role("button", name="TUI tabs").click()
+    alpha.click()
+    page.evaluate("namedFixture.verify(true, 'ses_alpha', true)")
+    page.evaluate("window.dispatchEvent(new PageTransitionEvent('pagehide'))")
+    page.evaluate("namedFixture.deliver('ses_alpha')")
+    assert not page.evaluate("namedFixture.presented()")
+    expect(center).to_be_hidden()
+    expect(page.locator("iframe, a, #session-controls")).to_have_count(0)
+    assert page.evaluate("namedFixture.status().verifies") == [
+        "ses_alpha",
+        "ses_alpha",
+        "ses_beta",
+        "ses_beta",
+        "ses_alpha",
+    ]
+    assert page.evaluate("namedFixture.status().catalogs") == [False]
+    assert page.evaluate("namedFixture.status().selected") is None
+    assert len(requests) == initial_requests
+    assert all(
+        path in ("/named", "/named-inert", "/fixture/named-controller.mjs")
+        or path.startswith(web_sessions.NAMED_STUDIO_ASSET_PREFIX)
+        for path in requests[start:]
+    )
 
 
 def exercise(browser, expect):
@@ -376,6 +584,7 @@ def exercise(browser, expect):
         assert requests[original_reqs:] == [
             web_sessions.native_session_route(URL, "ses_beta")
         ]
+        exercise_named(open_page, expect, approved, requests)
         assert not unexpected and not errors
         return measured["relative"]
     finally:
@@ -425,6 +634,9 @@ def main():
     )
     print(
         "PASS 390px drawers, explicit handoff, bounded stale results, and unchanged native fallback."
+    )
+    print(
+        "PASS iframe-free named Studio geometry at 2269x1398 and 390px, layouts, and trusted handoff; no native requests."
     )
 
 
