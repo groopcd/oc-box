@@ -1343,9 +1343,10 @@ class Reader:
                 or self.box.CONTAINER_OPENCODE not in arguments
             ):
                 raise Refusal("runtime-executable-unverified")
-            command = runtime_safeguard.bound_command(
-                command, self._runtime_digest, no_site=True
-            )
+            # The command action may itself invoke a second launcher-authored
+            # Python bridge. Pin both levels, not just the first interpreter.
+            command[-len(arguments) :] = runtime_safeguard.private_python(arguments)
+            command = runtime_safeguard.bound_command(command, self._runtime_digest)
         return self._container_command(command)
 
     def _startup_category(self):
@@ -1366,6 +1367,18 @@ class Reader:
             else "startup-failed",
         )
 
+    def _closed_startup(self, deadline):
+        # A guard can refuse before the Reader consumes its startup payload.
+        # EOF and EPIPE can both precede the observable terminal status.
+        timeout = min(_budget(self.remaining, 1), deadline - time.monotonic())
+        if timeout <= 0:
+            raise Refusal("startup-timeout")
+        try:
+            self.child.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            raise Refusal("startup-failed") from None
+        raise Refusal(self._startup_category()) from None
+
     def _write_payload(self, payload, deadline):
         descriptor = self.child.stdin.fileno()
         os.set_blocking(descriptor, False)
@@ -1378,6 +1391,8 @@ class Reader:
                 continue
             try:
                 written = os.write(descriptor, payload[offset : offset + 4096])
+            except BrokenPipeError:
+                self._closed_startup(deadline)
             except BlockingIOError:
                 continue
             if written <= 0:
@@ -1442,12 +1457,7 @@ class Reader:
                         self.child.stdout.fileno(), MAX_CONTROL + 1 - len(output)
                     )
                     if not chunk:
-                        # EOF can precede waitpid's visible exit status. Reap
-                        # boundedly before reading the fixed guard marker, never
-                        # replace a source schedule refusal with a race-dependent
-                        # generic startup error.
-                        self.child.wait(timeout=min(1, budget))
-                        raise Refusal(self._startup_category())
+                        self._closed_startup(deadline)
                     output.extend(chunk)
                 if len(output) > MAX_CONTROL:
                     raise Refusal("startup-response")

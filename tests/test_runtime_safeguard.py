@@ -436,26 +436,51 @@ class RuntimeSafeguardTests(unittest.TestCase):
         alias.symlink_to("../lib/node_modules/@opencode/cli/bin/opencode.exe")
         proof = hashlib.sha256(target.read_bytes()).hexdigest()
         bridge = "import subprocess,sys; print(subprocess.check_output([sys.argv[1], '--version'], text=True).strip())"
-        command = [
-            sys.executable,
-            "-I",
-            "-c",
-            native_preflight.EXEC_SOURCE,
-            str(prefix),
-            proof,
-            sys.executable,
-            "-I",
-            "-c",
-            bridge,
-            str(alias),
-        ]
-        result = subprocess.run(command, capture_output=True, text=True, timeout=15)
+        marker = self.root / "shadow-executed"
+        shadow = alias.with_name("python3")
+        shadow.write_text(f"#!/bin/sh\n: > '{marker}'\nexit 41\n")
+        shadow.chmod(0o700)
+        environment = {"PATH": str(alias.parent) + ":/usr/bin:/bin"}
+        arguments = ["python3", "-c", bridge, str(alias)]
+        with patch.object(guard, "PREFIX", str(prefix)):
+            command = guard.bound_command(arguments, proof)
+            wrong = guard.bound_command(arguments, "0" * 64)
+        self.assertNotIn("python3", command)
+        result = subprocess.run(
+            command, env=environment, capture_output=True, text=True, timeout=15
+        )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("Python ", result.stdout)
-        command[5] = "0" * 64
-        blocked = subprocess.run(command, capture_output=True, text=True, timeout=15)
+        blocked = subprocess.run(
+            wrong, env=environment, capture_output=True, text=True, timeout=15
+        )
         self.assertEqual(blocked.returncode, 126)
         self.assertEqual(blocked.stdout, "")
+        self.assertFalse(marker.exists())
+
+    def test_existing_guarded_owner_binds_noninteractive_native_helpers(self):
+        digest = "d" * 64
+        connection = {
+            "url": "http://127.0.0.1:48231",
+            "password": "fixture",
+            "_runtime_container": "a" * 64,
+            "_runtime_digest": digest,
+        }
+        source = (box.PACKAGE / "opencode_v2_io.py").read_text()
+        command = box.workspace_service.client_command(
+            box,
+            self.data,
+            connection,
+            ["python3", "-c", source, "sessions", box.CONTAINER_OPENCODE],
+        )
+        self.assertNotIn("python3", command)
+        self.assertEqual(command.count("/usr/bin/python3"), 3)
+        self.assertIn(digest, command)
+        self.assertTrue(
+            any(
+                "PATH" in item and "/opt/oc-box/runtime/bin" in item for item in command
+            )
+        )
 
     def test_live_install_is_scriptless_and_does_not_read_workspace_npm_config(self):
         prefix = str(self.root / "install-prefix")
@@ -474,5 +499,6 @@ class RuntimeSafeguardTests(unittest.TestCase):
         options = run.call_args.kwargs
         self.assertEqual(options["cwd"], "/")
         self.assertEqual(set(options["env"]), {"HOME", "PATH", "LANG"})
+        self.assertEqual(options["env"]["PATH"], "/usr/bin:/bin")
         self.assertIn("--userconfig=" + options["env"]["HOME"] + "/user.npmrc", command)
         self.assertIn("--globalconfig=/dev/null", command)

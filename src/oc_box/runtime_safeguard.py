@@ -39,6 +39,7 @@ _ACTIVE = ContextVar("oc_box_runtime_safeguard", default=None)
 _RELEASE = re.compile(r"2\.(0|[1-9][0-9]{0,5})\.(0|[1-9][0-9]{0,5})\Z")
 _HASH = re.compile(r"[0-9a-f]{64}\Z")
 PREFIX = "/opt/oc-box/runtime"
+SYSTEM_HELPER = ("/usr/bin/python3", "-I", "-S", "-B")
 _HOST_PROBE_PATH = "/usr/local/bin:/usr/bin:/bin"
 _MAX_BINARY = 512 * 1024 * 1024
 _ISSUE_URL = "https://github.com/groopcd/oc-box/issues/new"
@@ -52,7 +53,7 @@ _INCOMPATIBLE = {
 _INSTALL_SOURCE = """
 import os, subprocess, sys, tempfile
 with tempfile.TemporaryDirectory(prefix="oc-box-native-install-") as home:
-    env = {"HOME": home, "PATH": "/opt/oc-box/runtime/bin:/usr/local/bin:/usr/bin:/bin", "LANG": "C.UTF-8"}
+    env = {"HOME": home, "PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"}
     options = [
         "npm", "install", "--global", "--force", "--ignore-scripts", "--prefix", sys.argv[1],
         "--no-audit", "--no-fund", "--userconfig=" + home + "/user.npmrc",
@@ -503,13 +504,24 @@ def current():
     return _ACTIVE.get()
 
 
-def bound_command(arguments, digest, *, no_site=False):
+def private_python(arguments):
+    """Pin launcher-authored Python snippets without changing native tool PATH."""
+    if not arguments or arguments[0] != "python3":
+        return arguments
+    index = 1
+    while index < len(arguments) and arguments[index] in ("-I", "-S", "-B"):
+        index += 1
+    if index < len(arguments) and arguments[index] == "-c":
+        return [*SYSTEM_HELPER, *arguments[index:]]
+    return arguments
+
+
+def bound_command(arguments, digest):
+    arguments = private_python(arguments)
     if PREFIX + "/bin/opencode" not in arguments:
         return arguments
     return [
-        "python3",
-        "-I",
-        *(["-S"] if no_site else []),
+        *SYSTEM_HELPER,
         "-c",
         native_preflight.EXEC_SOURCE,
         PREFIX,
@@ -660,8 +672,7 @@ def container_digest(box, data, *, materialize=False):
             "--workdir",
             "/",
             scope.record.container,
-            "python3",
-            "-I",
+            *SYSTEM_HELPER,
             "-c",
             native_preflight.FINGERPRINT_SOURCE,
             PREFIX,
@@ -697,8 +708,7 @@ def install_container(box, data):
             "--workdir",
             "/",
             scope.record.container,
-            "python3",
-            "-I",
+            *SYSTEM_HELPER,
             "-c",
             _INSTALL_SOURCE,
             PREFIX,
