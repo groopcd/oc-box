@@ -121,18 +121,35 @@ have drained. Keep the outer teardown fence when it returns `False`.
 the latter is sticky. A subsequent explicit `close()` may verify cleanup of
 the **same** workers without reopening approval or replaying a round.
 
-### Browser registration seam still missing
+### Checkout-only browser enrollment binding
 
-The existing pinned browser artifact exposes login only. There is no
-reviewed browser registration API to call here. A later trusted account-page
-binding needs matching client registration request/response/upload
-operations plus a fresh, separate login proof using the same locally
-held password and approved account identity. Independently derive the
-context and identifiers, use same-origin JSON fetches on these exact
-routes, and discard both client attempts on cancellation without password,
-session/export-key, plaintext, or grant transport. Password preparation,
-the account-page UI and any new combined WASM artifact need their own
-review; this change adds none and does not approve any compiled PAKE artifact.
+The existing pinned browser login artifact is unchanged. The separate
+[enrollment research sources](../../tools/web-pake-research/README.md#optional-browser-enrollment-slot)
+take `accountOrigin`, `workspaceOrigin`, `approvedUsername` and
+`openAttempt` from trusted host-approved page configuration. Neither the
+URL, the server's protocol replies nor the browser's enrollment input
+chooses the account or an identifier. The source does not load an artifact
+or provide a page, input form, or account chooser.
+
+`createLocalEnrollmentClient(config).enroll({readPassword, signal})` accepts
+a synchronous, one-shot local reader, not a password value or named form
+field. The reader transfers an owned mutable view with 1–1024 UTF-8 bytes
+to `openEnrollmentAttempt(verifiedModule)`. The enrollment slot keeps those
+bytes in bounded WASM state while the original OCOR registration and a
+fresh OCOP possession exchange run. It uses the same client/verifier IDs
+for both operations. The transport derives those IDs and the exact context
+independently, and sends only the canonical three JSON requests. It erases
+accessible mutable buffers where possible and requires confirmed local
+discard before sending KE3; a trap is not confirmed cleanup or guaranteed
+erasure of all copies.
+
+The result is only `true` for the fixed verified proof reply. Refusal,
+timeout, page loss, cancellation or uncertain cleanup does not retry, call
+ordinary sign-in, or receive a ticket. Aborting a browser fetch cannot
+undo a POST already processed on the host. A trusted HTTP writer still
+owns the guarded delivery boundary above; the browser never writes the
+store. This research source and its local build do not authorize any asset
+distribution, trusted UI or launcher activation, or a compiled PAKE pin.
 
 ## Host account snapshot for named-site preparation
 
@@ -161,5 +178,7 @@ the existing pinned OCOR/OCOP binaries through this unserved dispatcher.
 It passes synthetic proof, altered KE3, wrong context or verifier, wrong
 browser, replay, and bootstrap retirement tests without a listener, actual
 TLS, or account store. Separate Python tests exercise the encrypted store's
-stale-review refusal. These are not live HTTPS or host-enrollment acceptance,
+stale-review refusal. `check_browser_enrollment` also exercises the source
+binding with Chromium and those real helpers via a CDP pipe in a disconnected
+network namespace. These are not live HTTPS or host-enrollment acceptance,
 nor do they close the artifact, dependency, license, or IPR review gates.
