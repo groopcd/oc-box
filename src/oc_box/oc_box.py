@@ -1729,8 +1729,7 @@ def private_host_env(path, data):
         )
     reader = history_reader.current()
     if reader is not None:
-        env = history_reader.fence_environment(env)
-        history_reader.assert_host_safe(
+        env = history_reader.assert_host_safe(
             sys.modules[__name__], path, data, env, reader.remaining
         )
     return env
@@ -2704,6 +2703,7 @@ def prepare_runtime(
 
 def run_v2_history(data, action, **settings):
     """Use the owning service when present; never elect a host shared service."""
+    source_is_live = False
 
     def failed(result, fallback):
         message = opencode_v2_io.fixed_message(result.stderr)
@@ -2714,6 +2714,8 @@ def run_v2_history(data, action, **settings):
             error.history_contract_refusal = True
         else:
             error.history_retryable = True
+        if message == opencode_v2_io.NOT_READY and source_is_live:
+            error.history_source_read_failed = True
         raise error
 
     stream = history_reader.EXPORTS.get()
@@ -2729,6 +2731,7 @@ def run_v2_history(data, action, **settings):
         else None
     )
     reader = history_reader.current()
+    source_is_live = bool(endpoint) and reader is None
     arguments = [
         "python3",
         "-c",
@@ -2742,16 +2745,21 @@ def run_v2_history(data, action, **settings):
         command = reader.command(arguments)
     else:
         command = exec_command(data, arguments)
-    result = run(
-        command,
-        input=json.dumps(
-            {"directory": container_project(data), "endpoint": endpoint, **settings}
-        ),
-        capture=True,
-        check=False,
-        private=True,
-        timeout=180,
-    )
+    try:
+        result = run(
+            command,
+            input=json.dumps(
+                {"directory": container_project(data), "endpoint": endpoint, **settings}
+            ),
+            capture=True,
+            check=False,
+            private=True,
+            timeout=180,
+        )
+    except BoxError as error:
+        if source_is_live and isinstance(error.__cause__, subprocess.TimeoutExpired):
+            error.history_source_read_failed = True
+        raise
     if result.returncode:
         # Only a whitelisted constant explanation is ever shown; native errors
         # and private output stay hidden behind the generic exit status.
@@ -3478,6 +3486,10 @@ _HISTORY_FAILURE_DETAILS = {
     "sync-failed": "verification did not finish",
     "timeout": "OpenCode activity did not settle",
     "unsupported-version": "this OpenCode version is not supported for post-stop recovery",
+    "video-state": "the OpenCode store contains durable video state",
+    "machine-state": "the OpenCode store contains paired-machine state",
+    "blob-state": "the OpenCode blob store could not be shown safe from native cleanup",
+    "host-service-state": "a host OpenCode service registration is present or could not be ruled out",
 }
 
 
@@ -4057,6 +4069,7 @@ def launch_client(path, data, args, version, exported, owner=None):
             owner.wait_clients()
     if owner:
         owner._client_exit_code = code
+    source_ready = False
     try:
         if owner:
             with loading_stage(
@@ -4065,6 +4078,7 @@ def launch_client(path, data, args, version, exported, owner=None):
                 workspace_service.wait_history(
                     sys.modules[__name__], data, owner.connection
                 )
+            source_ready = True
         with loading_stage("Syncing session history", stage="history-sync"):
             sync_sessions(path, data)
     except (BoxError, ValueError, KeyError) as exc:
@@ -4079,6 +4093,11 @@ def launch_client(path, data, args, version, exported, owner=None):
         if (
             owner
             and getattr(owner, "_history_source", None) is not None
+            and (
+                history_reader.snapshot_profile(version) != history_reader.SNAPSHOT_24
+                or source_ready
+                or isinstance(exc, HistoryWaitTimeout)
+            )
             and history_recovery.exit_retry_eligible(sys.modules[__name__], data, exc)
         ):
             owner._history_failure = exc

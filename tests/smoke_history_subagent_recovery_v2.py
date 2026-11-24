@@ -1,4 +1,4 @@
-"""Native 2.3.x retained-subagent Reader checks, not host/Podman acceptance.
+"""Native 2.3.x/2.4.x retained-subagent Reader checks, not Podman acceptance.
 
 Run with python3 -B tests/smoke_history_subagent_recovery_v2.py
 --opencode /path/to/opencode --temp-dir /short/private/temporary/directory.
@@ -394,8 +394,9 @@ def exercise(binary, root, children=10, *, foreground=False, producer_close="gra
     host_env.pop("OPENCODE_DB")
     release = compat.version(bounded([binary, "--version"], source_env, project))
     require(
-        history_reader.snapshot_profile(release) == "2.3",
-        "This fixture requires an unmodified stable native 2.3.x release.",
+        history_reader.snapshot_profile(release)
+        in history_reader.SUBAGENT_SNAPSHOT_PROFILES,
+        "This fixture requires unmodified stable native 2.3.x or 2.4.x.",
     )
     native_digest = file_digest(binary)
     bounded(["git", "init", "--quiet"], source_env, project)
@@ -796,6 +797,9 @@ def exercise(binary, root, children=10, *, foreground=False, producer_close="gra
         # export, so a premature resume cannot be hidden by a late baseline.
         destination_exports = {}
         history_reader._check_database(host_db, version=release)
+        destination_fence = history_reader.fence_environment(
+            destination_env, version=release
+        )
         for ident in destination_ids:
             # Native's own export may omit an unfinished foreground tail. This
             # is a destination preservation sentinel, not checked archival of
@@ -803,7 +807,7 @@ def exercise(binary, root, children=10, *, foreground=False, producer_close="gra
             destination_exports[ident] = json.loads(
                 bounded(
                     compat.command(release, binary, ("--pure", "export", ident)),
-                    history_reader.fence_environment(destination_env),
+                    destination_fence,
                     path.parent / "controller",
                 )
             )
@@ -817,7 +821,7 @@ def exercise(binary, root, children=10, *, foreground=False, producer_close="gra
         box.atomic_json(previous_target, previous_archive)
         bounded(
             compat.command(release, binary, ("--pure", "import", str(previous_target))),
-            history_reader.fence_environment(destination_env),
+            destination_fence,
             path.parent / "controller",
         )
         previous_digest = hashlib.sha256(previous_target.read_bytes()).hexdigest()
@@ -842,7 +846,7 @@ def exercise(binary, root, children=10, *, foreground=False, producer_close="gra
                 compat.command(
                     release, binary, ("--pure", "import", str(foreground_target))
                 ),
-                history_reader.fence_environment(destination_env),
+                destination_fence,
                 path.parent / "controller",
             )
             prior_state = box.session_state(path)
@@ -1214,12 +1218,12 @@ def main(
             )
             require(
                 result["recovery_hint"] is True,
-                "Native 2.3 retained subagents lacked the post-stop routing hint.",
+                "Native retained subagents lacked the post-stop routing hint.",
             )
             if foreground:
                 require(
                     result["foreground_recovery_hint"] is True,
-                    "Native 2.3 live foreground lacked the separate post-stop routing hint.",
+                    "Native live foreground lacked the separate post-stop routing hint.",
                 )
     except FixtureFailure:
         raise

@@ -126,6 +126,10 @@ REASONS = frozenset(
         "client-failed",
         "source-unavailable",
         "stop-requested",
+        "video-state",
+        "machine-state",
+        "blob-state",
+        "host-service-state",
     }
 )
 METRICS = frozenset(
@@ -144,6 +148,8 @@ METRICS = frozenset(
         "shell",
         "subagent",
         "image",
+        "video",
+        "codemode",
         "complete_pairs",
         "foreground_queries",
         "background_queries",

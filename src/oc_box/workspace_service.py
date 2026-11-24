@@ -741,8 +741,8 @@ def wait_history(box, data, connection, *, timeout=30, interval=0.2):
     counts and aggregate timings of existing queries, never native identifiers,
     commands, responses or errors. Timings include native CLI transport overhead;
     they do not distinguish live jobs from retained native records.
-    Stable native 2.3.x may route retained shell/subagent jobs to a guarded
-    unregistered post-stop reader; older/unknown versions retain shell-only hints.
+    Audited native subagent profiles may route retained shell/subagent jobs to
+    a guarded unregistered reader; older/unknown versions retain shell-only hints.
     """
     if __package__:
         from . import history_reader
@@ -755,6 +755,10 @@ def wait_history(box, data, connection, *, timeout=30, interval=0.2):
     last_counts = {}
     profile = history_reader.snapshot_profile(data.get("opencode_version"))
     kinds = history_reader.SNAPSHOT_JOB_KINDS.get(profile, frozenset(("shell",)))
+    recognized_kinds = ("shell", "subagent", "image")
+    if profile == history_reader.SNAPSHOT_24:
+        # Native recognizes these, but the history reader must not resume them.
+        recognized_kinds += ("video", "codemode")
     insufficient = (
         "insufficient-job-observations"
         if "subagent" in kinds
@@ -914,7 +918,7 @@ def wait_history(box, data, connection, *, timeout=30, interval=0.2):
             or not isinstance(job.get("id"), str)
             or not job["id"]
             or not box.valid_session_id(job.get("sessionID"))
-            or job.get("kind") not in ("shell", "subagent", "image")
+            or job.get("kind") not in recognized_kinds
             or job.get("status") not in ("running", "completed", "error", "cancelled")
             for job in value
         ):
@@ -1025,8 +1029,7 @@ def wait_history(box, data, connection, *, timeout=30, interval=0.2):
             for name, value in counts.items()
         )
         kind_counts = {
-            kind: sum(job["kind"] == kind for job in jobs)
-            for kind in ("shell", "subagent", "image")
+            kind: sum(job["kind"] == kind for job in jobs) for kind in recognized_kinds
         }
         kind_observation = ", ".join(
             f"{kind}={count if count < 10000 else '9999+'}"
@@ -1049,7 +1052,9 @@ def wait_history(box, data, connection, *, timeout=30, interval=0.2):
         )
         foreground_pairs = (
             foreground_pairs + 1
-            if profile == "2.3" and active and all(job["kind"] in kinds for job in jobs)
+            if profile in history_reader.SUBAGENT_SNAPSHOT_PROFILES
+            and active
+            and all(job["kind"] in kinds for job in jobs)
             else 0
         )
         if job_pairs:

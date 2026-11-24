@@ -926,10 +926,21 @@ post-stop persisted-history snapshot** automatically:
 * Stable native **2.3.x** also permits retained subagent jobs, including mixtures
   of shell and subagent jobs. Image jobs remain outside this guarded profile.
   Canonical releases such as `2.3.0`, `2.3.1` and `2.3.2` share this contract;
-  prereleases, build suffixes, malformed versions and other minor series do not.
+  prereleases, build suffixes, malformed versions and other minor series do not
+  inherit it.
   Series membership selects the metadata checks, never bypasses them or certifies
   untested future native behavior. Incompatible schemas and recovery forms refuse.
-  Other native integrations retain their independently documented version limits.
+* Stable native **2.4.x** selects the same shell/subagent recovery, with additional
+  checks before native history processing on either store. It requires the
+  audited empty `automation` layout and refuses paired-machine or durable video
+  state, even if the native job list is empty. It also refuses an unverifiable
+  blob store or any blob close enough to expiry that the native startup sweep
+  could remove it during recovery. Video, image, Code Mode and unknown job
+  kinds remain unsupported for this path. The profile is not a per-patch
+  allowlist, but a later patch must still pass every live, storage and archive
+  check; unknown minor series do not inherit the 2.4 contract.
+
+Other native integrations retain their independently documented version limits.
 
 The 2.3.x contract recognizes exactly one known scheduler column layout:
 2.3.0's `schedule` table or the `automation` replacement in 2.3.1/2.3.2.
@@ -945,7 +956,7 @@ foreground/background pairs with no foreground activity and at least one job,
 all allowed by that storage profile. Native 2.2.6/2.2.7 keeps this rule: foreground
 activity still refuses its automatic snapshot route.
 
-On supported 2.3.x, two consecutive complete validated pairs with nonempty
+On supported 2.3.x and 2.4.x, two consecutive complete validated pairs with nonempty
 foreground activity and only supported shell/subagent jobs can instead request
 post-stop archival, including when there are no jobs. A later empty foreground
 response resets this foreground-interruption hint; malformed responses or
@@ -956,7 +967,10 @@ or establishes that work finished.**
 
 Supported 2.3.x can also route positively classified transport or unsettled-history
 failures during live wait/sync through this same one-shot reader when a safe source
-was captured. Unclassified failures do not enable a retry. Explicit
+was captured. The 2.4 profile additionally retries unsettled history or
+positively identified source read failures once the quiet check has passed,
+not timeouts during host archive writes or verification. Unclassified failures
+do not enable a retry. Explicit
 compatibility or Reader refusals and failed/uncertain source cleanup are not
 retried automatically; unexpected programming/data-shape errors do not enable
 this route. It does not broaden legacy or unsupported-version recovery.
@@ -968,7 +982,7 @@ normal owning launch. There is no runtime/configuration/auth refresh, vault unlo
 credential forwarding, controller publication or requested model/tool execution.
 This uses the normal checked archival implementation through the fenced reader;
 it does **not** recursively invoke ordinary `oc-box sync`, prepare the workspace
-again or refresh credentials. Native 2.3.x job metadata is checked before source
+again or refresh credentials. On the supported subagent profiles, job metadata is checked before source
 or destination native history processing: image/unknown jobs, unknown recovery
 forms, legacy background state and incompatible schemas refuse rather than
 starting managed job recovery. Retained jobs, execution claims and queued input
@@ -1001,7 +1015,7 @@ scheduler schemas, unsafe stores and nonempty system OpenCode configuration.
 Read-only executable-version probes must match the captured supported release
 on both sides; a binary changed during the session does not inherit that proof.
 The host and container must match the captured exact patch version, not merely
-belong to the same 2.3 series. Unsupported versions are warned about before the
+belong to the same minor series. Unsupported versions are warned about before the
 owning client opens; they retain normal live sync and manual-sync retry guidance,
 not an unsafe recovery fallback.
 The existing runtime checks validate the selected contract on each attempt:
@@ -1017,9 +1031,16 @@ primary-key membership and generated-column flags, but do not fingerprint
 defaults, triggers, indexes or foreign keys. They cannot detect every
 schema-preserving behavioral change.
 Source and destination helpers use isolated configuration, execution denials and
-disabled scheduling/warming; disabling scheduling alone is insufficient because
-native restart notification handling can still wake work. Other failures retain
-the normal pending-history/manual-sync behavior.
+disabled scheduling/warming. On stable 2.4.x they also disable machines and
+background FTS indexing. Flags alone are insufficient: native
+automation rewake and the video/blob startup paths can still act on stored data.
+Other failures retain the normal pending-history/manual-sync behavior.
+The workspace lock does not coordinate independent OpenCode processes on the
+host. The 2.4 profile refuses a host service registration (even a stale marker)
+or an indeterminate registration check before each standalone archive operation.
+It does not read the registration, join or stop a host service. Keep other
+OpenCode processes stopped during recovery; the bounded metadata checks cannot
+exclude an unmanaged process, another state root, or a later concurrent launch.
 
 Snapshots retain the existing complete-inventory, checked-export, pending-session
 and verified-host-import safeguards. Pending sessions do not prevent checked

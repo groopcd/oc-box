@@ -412,7 +412,9 @@ class HistoryWaitTests(unittest.TestCase):
             ("2.3.47", {"shell", "subagent"}),
             ("2.3.9999", {"shell", "subagent"}),
             ("2.2.8", {"shell"}),
-            ("2.4.0", {"shell"}),
+            ("2.4.0", {"shell", "subagent"}),
+            ("2.4.2", {"shell", "subagent"}),
+            ("2.5.0", {"shell"}),
             ("2.3.01", {"shell"}),
             ("2.3.٢", {"shell"}),
             ("2.3.0+unknown", {"shell"}),
@@ -904,13 +906,61 @@ class HistoryWaitTests(unittest.TestCase):
         self.assertEqual(self.api.call_count, 8)
         self.assertEqual(self.now, 101)
 
-    def test_foreground_snapshot_hint_needs_consecutive_validated_23_pairs(self):
+    def test_241_mixed_retained_jobs_only_authorize_a_post_stop_snapshot(self):
+        jobs = {
+            "data": [
+                {**self.job, "id": str(index), "kind": kind, "status": "running"}
+                for index, kind in enumerate(("shell",) * 6 + ("subagent",) * 14)
+            ],
+        }
+        for release, eligible, replacement in (
+            ("2.4.1", True, None),
+            ("2.4.0", True, None),
+            ("2.4.2", True, None),
+            ("2.5.0", False, None),
+            ("2.4.1", False, "video"),
+            ("2.4.1", False, "codemode"),
+            ("2.4.1", False, "image"),
+        ):
+            with self.subTest(release=release, replacement=replacement):
+                self.now = 100.0
+                self.api.reset_mock()
+                final = (
+                    {
+                        "data": [
+                            *jobs["data"][:-1],
+                            {**jobs["data"][-1], "kind": replacement},
+                        ]
+                    }
+                    if replacement
+                    else jobs
+                )
+                self.api.side_effect = [self.idle, jobs, self.idle, final]
+                with self.assertRaises(box.HistoryWaitTimeout) as raised:
+                    service.wait_history(
+                        box,
+                        {**self.data, "opencode_version": release},
+                        self.connection,
+                        timeout=0.5,
+                        interval=0.25,
+                    )
+                self.assertEqual(raised.exception.recovery_eligible, eligible)
+                self.assertFalse(raised.exception.interrupted_foreground)
+                self.assertIn(
+                    "foreground=0, jobs-running=20", raised.exception.diagnostic
+                )
+                self.assertEqual(self.api.call_count, 4)
+
+    def test_foreground_snapshot_hint_needs_consecutive_validated_subagent_pairs(self):
         jobs = {"data": [{**self.job, "kind": "subagent", "status": "running"}]}
         cases = (
             ("2.3.2", [self.busy, jobs] * 2, True),
             ("2.3.0", [self.busy, self.no_jobs] * 2, True),
             ("2.2.7", [self.busy, {"data": [self.job]}] * 2, False),
-            ("2.4.0", [self.busy, jobs] * 2, False),
+            ("2.4.0", [self.busy, jobs] * 2, True),
+            ("2.4.1", [self.busy, jobs] * 2, True),
+            ("2.4.2", [self.busy, jobs] * 2, True),
+            ("2.5.0", [self.busy, jobs] * 2, False),
             ("2.3.2", [self.idle, jobs, self.busy, jobs], False),
             ("2.3.2", [self.busy, jobs, self.idle, jobs], False),
             (
@@ -1742,8 +1792,15 @@ class WorkspaceServiceTests(unittest.TestCase):
         args = box.parser().parse_args(["start"])
         retryable = box.BoxError("fixed-live-error")
         retryable.history_retryable = True
+        source_read = box.BoxError("fixed-source-read-error")
+        source_read.history_retryable = True
+        source_read.history_source_read_failed = True
+        destination_timeout = box.BoxError("fixed-destination-timeout")
+        destination_timeout.__cause__ = subprocess.TimeoutExpired("synthetic", 1)
         cases = [
             (retryable, True),
+            (source_read, True),
+            (destination_timeout, True),
             (box.BoxError("unclassified-error"), False),
             (box.HistoryPending("fixed-pending-error"), True),
             (box.HistoryWaitTimeout("count-only"), False),
@@ -1760,7 +1817,7 @@ class WorkspaceServiceTests(unittest.TestCase):
             error.history_retryable = True
             setattr(error, attribute, True)
             cases.append((error, False))
-        for release in ("2.2.7", "2.3.2", "2.4.0"):
+        for release in ("2.2.7", "2.3.2", "2.4.0", "2.4.1", "2.4.2", "2.5.0"):
             for available in (False, True):
                 for stage in ("wait", "sync"):
                     for error, eligible in cases:
@@ -1805,7 +1862,17 @@ class WorkspaceServiceTests(unittest.TestCase):
                                     owner,
                                 )
                             self.assertEqual(result, 7)
-                            deferred = eligible and available and release == "2.3.2"
+                            deferred = available and (
+                                (eligible and release == "2.3.2")
+                                or (
+                                    release in ("2.4.0", "2.4.1", "2.4.2")
+                                    and stage == "sync"
+                                    and (
+                                        error is source_read
+                                        or isinstance(error, box.HistoryPending)
+                                    )
+                                )
+                            )
                             self.assertEqual(
                                 getattr(owner, "_history_failure", None) is error,
                                 deferred,
