@@ -78,7 +78,7 @@ async function settle() {
   await new Promise(resolve => setImmediate(resolve));
   for (let i = 0; i < 12; i++) await Promise.resolve();
 }
-async function fixture(version = "2.2.6") {
+async function fixture(version = "2.2.6", infoStatus = 200) {
   const ids = ["web-shell", "session-tabs", "native", "retained-selection", "selection-status",
     "catalog-status", "no-selection", "refresh-tabs", "session-controls", "addon-status"];
   const elements = Object.fromEntries(ids.map(id => [id, new Element(id)]));
@@ -116,7 +116,10 @@ async function fixture(version = "2.2.6") {
     calls.push(url);
     assert.equal(options.body, undefined);
     assert.equal(options.method, undefined); // GET only; no prompt API.
-    if (url === "/api/info") return { ok: true, json: async () => ({ version }) };
+    if (url === "/api/info") {
+      assert.equal(options.signal.aborted, false);
+      return { status: infoStatus, ok: infoStatus === 200, json: async () => ({ version }) };
+    }
     if (url.includes("/selection?")) {
       const id = new URL(url, origin).searchParams.get("session");
       const item = [...rows, child].find(row => row.id === id);
@@ -221,9 +224,18 @@ for (const mode of ["same-id-event", "metadata", "spa-away-back", "document-load
   assert.equal(g.received.length, 2);
 }
 const refused = await fixture("2.2.7");
+assert.match(refused.elements["addon-status"].textContent, /composer contract is not verified/);
 refused.fileDrop(image()); await settle();
 assert.equal(refused.received.length, 0);
 assert.equal(refused.input.disabled, true);
+for (const [status, message] of [
+  [401, /authentication failed/],
+  [503, /private native service could not be verified/],
+]) {
+  const unavailable = await fixture("2.2.6", status);
+  assert.equal(unavailable.input.disabled, true);
+  assert.match(unavailable.elements["addon-status"].textContent, message);
+}
 {
   const g = await fixture();
   g.realm.location = new URL(child.route, origin); await g.tick();

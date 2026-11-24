@@ -1596,7 +1596,11 @@ class Gateway:
                             child.wait(timeout=3)
                     for pipe in (child.stdin, child.stdout):
                         if pipe:
-                            pipe.close()
+                            # A peer can close during browser navigation while
+                            # stdin still holds buffered bytes. A failed flush
+                            # on close must not leak a connection slot.
+                            with contextlib.suppress(BrokenPipeError):
+                                pipe.close()
                     with self.lock:
                         self.children.discard(child)
                 self.capacity.release()

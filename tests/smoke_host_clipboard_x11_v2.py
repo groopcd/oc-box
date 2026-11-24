@@ -104,18 +104,22 @@ def relay(arguments):
         [binary, project, "--server", url, "--session", session], env
     )
     write_all = terminal_ui.write_all
-    ready = ("SYNTHETIC_" + session).encode()
+    markers = {"ready": ("SYNTHETIC_" + session).encode()}
+    if mode == "strict":
+        markers["refusal"] = b"source-guard"
+    tail_limit = max(map(len, markers.values())) - 1
     tail = b""
 
     def observe_output(fd, data):
         nonlocal tail
         write_all(fd, data)
-        if fd == 1 and not (observed / "ready").exists():
-            if ready in (tail + data):
-                (observed / "ready").touch()
-                tail = b""
-            else:
-                tail = (tail + data)[1 - len(ready) :]
+        if fd == 1 and markers:
+            window = tail + data
+            for name in tuple(markers):
+                if markers[name] in window:
+                    (observed / name).touch()
+                    del markers[name]
+            tail = window[-tail_limit:] if markers else b""
 
     with (
         patch.object(host_drop, "Relay", Observed),
@@ -247,6 +251,11 @@ def run_case(
             if mode != "strict":
                 wait(
                     (root / "stage").is_file, "Ctrl+Y did not stage the selected image."
+                )
+            else:
+                wait(
+                    (root / "refusal").is_file,
+                    "The native composer did not show the fixed clipboard refusal.",
                 )
             # The transport acknowledgement precedes composer processing.
             # Keep the draft unsent for a separate, bounded observation period.

@@ -6,6 +6,7 @@
   const MAX_FILE = 20 * 1024 * 1024;
   const MAX_TOTAL = 40 * 1024 * 1024;
   const MAX_FILES = 8;
+  const NATIVE_CHECK_MS = 5000;
 
   function mime(bytes) {
     const text = String.fromCharCode(...bytes);
@@ -224,11 +225,19 @@
       void current.add(selected);
     });
     notice("Checking native attachment version…");
+    const check = new AbortController();
+    const timeout = setTimeout(() => check.abort(), NATIVE_CHECK_MS);
+    let refusal = "the private native service could not be verified";
     try {
       const reply = await request("/api/info", {
-        credentials: "same-origin", cache: "no-store", redirect: "error",
+        credentials: "same-origin", cache: "no-store", redirect: "error", signal: check.signal,
       });
-      if (!reply.ok || !SUPPORTED.has((await reply.json()).version)) {
+      if (reply.status === 401 || reply.status === 403) {
+        refusal = "native browser authentication failed; open a fresh oc-box web link";
+      }
+      if (!reply.ok) throw new Error("unavailable");
+      if (!SUPPORTED.has((await reply.json()).version)) {
+        refusal = "the native browser composer contract is not verified for this release";
         throw new Error("unsupported");
       }
       active = true;
@@ -236,7 +245,9 @@
       stateChanged();
     } catch (_error) {
       current.setEnabled(false);
-      notice("Adapter refused: authenticated native OpenCode 2.2.6 or 2.3.0 is required. Native shell navigation remains available.");
+      notice(`Attachment adapter refused: ${refusal}. Native shell navigation remains available.`);
+    } finally {
+      clearTimeout(timeout);
     }
   }
 
