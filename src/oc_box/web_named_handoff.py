@@ -225,8 +225,8 @@ class NamedHandoffIngress:
             ),
         )
 
-    def confirm(self, *, method, target, headers, actual_tls, body):
-        """Require the exact same-origin fetch, then let app admission own redemption."""
+    def confirm_admission(self, *, method, target, headers, actual_tls, body):
+        """Return the opaque app token to the trusted, tracked response writer."""
         if (
             type(method) is not str
             or method != "POST"
@@ -258,6 +258,17 @@ class NamedHandoffIngress:
             raise web_named_headers.NamedRequestError() from None
         if not web_bootstrap._valid(token):
             raise web_named_headers.NamedRequestError()
+        return token
+
+    def confirm(self, *, method, target, headers, actual_tls, body):
+        """Fixed confirmation for direct fixtures; live delivery must track admission."""
+        token = self.confirm_admission(
+            method=method,
+            target=target,
+            headers=headers,
+            actual_tls=actual_tls,
+            body=body,
+        )
         return HandoffReply(
             204,
             b"",

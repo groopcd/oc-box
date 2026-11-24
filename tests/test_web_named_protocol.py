@@ -15,19 +15,26 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from test_web_native_pair import native_info
+import test_web_pake_flow as pake_fixtures
 
 from oc_box import (
     oc_box as box,
     opencode_v2_io as worker,
     ui_state,
+    web_account_ingress,
     web_accounts,
+    web_app_ingress,
     web_local_origins,
     web_named_bootstrap,
+    web_named_handoff,
     web_named_headers,
+    web_named_http,
     web_named_listeners,
     web_named_owner,
     web_named_protocol as protocol,
     web_named_services,
+    web_named_transport,
+    web_native_pair,
     web_pake_flow,
     web_pake_profile,
     workspace_control,
@@ -272,6 +279,135 @@ class OwnerProtocolTests(unittest.TestCase):
                         )
             backend.assert_not_called()
             approval.assert_not_called()
+
+    def test_first_party_dispatch_keeps_native_cookie_off_wire_and_refuses_confirm_replay(
+        self,
+    ):
+        profile = self.named_profile()
+        reader = web_named_transport.NamedHTTPSReader.from_reservation(profile)
+        store = web_accounts.AccountStore(
+            b"s" * 128,
+            (
+                web_accounts.Account(
+                    "synthetic-account", (self.data["id"],), b"r" * 192
+                ),
+            ),
+        )
+        backend = pake_fixtures.SyntheticBackend()
+        backend.sizes = pake_fixtures.SIZES
+        backend.close = lambda: True
+        native_cookie = "K" * 10 + "." + "s" * 43
+        with (
+            self.owner() as owner,
+            self.lease(owner) as lease,
+            patch.object(web_pake_profile, "LocalPakeProfile", return_value=backend),
+            patch.object(
+                web_native_pair, "_read_bridge", return_value=native_cookie
+            ) as mint,
+        ):
+            services = web_named_services.prepare_services(
+                box,
+                profile=profile,
+                lease=lease,
+                store=store,
+                account_current=lambda: True,
+                verifier_fd=7,
+                expected_sha256="a" * 64,
+            )
+            http = web_named_http.NamedHTTPApplication(
+                reader=reader,
+                services=services,
+                login_document=b"<h1>Local sign in</h1>",
+            )
+
+            def dispatch(role, path, body=b"", *, cookie, content_type=None):
+                local = getattr(profile.origins, role).value
+                headers = (
+                    ("Host", local.removeprefix("https://")),
+                    ("Origin", local),
+                    ("Content-Length", str(len(body))),
+                    ("Sec-Fetch-Site", "same-origin"),
+                    ("Sec-Fetch-Mode", "same-origin"),
+                    ("Sec-Fetch-Dest", "empty"),
+                    ("Cookie", cookie),
+                )
+                if content_type:
+                    headers += (("Content-Type", content_type),)
+                request = web_named_transport.NamedRequest(
+                    role, "POST", path, headers, body
+                )
+                writer, peer = socket.socketpair()
+                with writer, peer:
+                    http._dispatch(writer, request, time.monotonic() + 3)
+                    writer.shutdown(socket.SHUT_WR)
+                    with peer.makefile("rb") as response:
+                        return response.read(64 * 1024).split(b"\r\n\r\n", 1)
+
+            seed = services._bootstrap.issue(services._flow._binding)
+            account_nonce = services._bootstrap.accept(
+                services._flow._binding,
+                auth_origin=profile.origins.account.value,
+                ticket=seed.value,
+            )
+            account_cookie = "__Host-ocbox-account=" + account_nonce
+            start_head, start_payload = dispatch(
+                "account",
+                web_account_ingress.START_PATH,
+                json.dumps(
+                    {"username": "synthetic-account", "ke1": pake_fixtures.KE1}
+                ).encode("ascii"),
+                cookie=account_cookie,
+                content_type="application/json",
+            )
+            self.assertTrue(start_head.startswith(b"HTTP/1.1 200"))
+            challenge = json.loads(start_payload)["challenge_id"]
+            _, finish_payload = dispatch(
+                "account",
+                web_account_ingress.FINISH_PATH,
+                json.dumps(
+                    {"challenge_id": challenge, "ke3": pake_fixtures.PROOF}
+                ).encode("ascii"),
+                cookie=account_cookie,
+                content_type="application/json",
+            )
+            ticket = json.loads(finish_payload)["ticket"].encode("ascii")
+            mint.assert_not_called()
+
+            cookie_headers, content = dispatch(
+                "workspace",
+                web_named_handoff.CONFIRM_PATH,
+                ticket,
+                cookie="__Host-ocbox-bootstrap=" + seed.app_nonce,
+                content_type="text/plain",
+            )
+            self.assertTrue(cookie_headers.startswith(b"HTTP/1.1 204"))
+            self.assertNotIn(b"Content-Length", cookie_headers)
+            self.assertEqual(content, b"")
+            self.assertNotIn(native_cookie.encode("ascii"), cookie_headers)
+            self.assertNotIn(ticket, cookie_headers)
+            app_cookie = next(
+                line.removeprefix(b"Set-Cookie: ").split(b";", 1)[0].decode("ascii")
+                for line in cookie_headers.split(b"\r\n")
+                if line.startswith(b"Set-Cookie: __Host-ocbox-app=")
+            )
+            mint.assert_called_once()
+
+            replay, _ = dispatch(
+                "workspace",
+                web_named_handoff.CONFIRM_PATH,
+                ticket,
+                cookie="__Host-ocbox-bootstrap=" + seed.app_nonce,
+                content_type="text/plain",
+            )
+            self.assertTrue(replay.startswith(b"HTTP/1.1 403"))
+            self.assertNotIn(b"Set-Cookie", replay)
+            mint.assert_called_once()
+            logout, _ = dispatch(
+                "workspace", web_app_ingress.LOGOUT_PATH, cookie=app_cookie
+            )
+            self.assertIn(b"Max-Age=0", logout)
+            self.assertTrue(services.close())
+            self.assertGreaterEqual(lease.control.fileno(), 0)
 
     def wire(self, owner, send):
         with socket.socket(socket.AF_UNIX) as stream:

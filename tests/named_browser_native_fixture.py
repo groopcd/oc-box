@@ -62,8 +62,11 @@ class NativeFixture:
                 or actual_connection is not connection
                 or not current(binding)
                 or argv[:5] != ["python3", "-I", "-S", "-B", "-c"]
-                or argv[5] != Path(web_native_pair.__file__).read_text(encoding="utf-8")
-                or argv[6:] != [self.endpoint, authority]
+                or argv[5]
+                != web_native_pair.named_native_worker_source(
+                    Path(web_native_pair.__file__).read_text(encoding="utf-8")
+                )
+                or argv[6:] != [self.endpoint, authority, self.identity["version"]]
             ):
                 raise FixtureBridgeError(
                     "Unexpected synthetic loopback pairing bridge."

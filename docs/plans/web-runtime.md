@@ -93,6 +93,14 @@ replay refusal without certificate bypass or changes to the operator's trust.
 It does not establish durable enrollment, named workspace admission, or
 external-host acceptance.
 
+The internal named dispatcher now routes the two entry documents, account
+proof, browser handoff, same-origin confirmation, logout, and the bounded
+native metadata requests through one validated TLS request. Confirmation
+registers delivery under the newly issued browser admission and returns an
+empty 204 with only the opaque app cookie. Failed delivery revokes that
+admission; logout acknowledges only checked drain. This is not yet a
+launcher entry point and does not serve Studio or the login assets.
+
 The unserved named HTTPS transport takes ownership of one accepted connection,
 selects a validated TLS context and role by the actual IPv4 loopback endpoint,
 then checks that role's exact HTTP/1.1 method, route and origin. Before reading
@@ -100,7 +108,9 @@ the remaining body, it requires nonempty `application/json` for account POSTs,
 exactly 54 bytes for confirmation, and no bytes for logout or metadata. It
 closes after a read-only probe or, in the fixed-response exchange, after using
 one explicit role handler to produce one bounded, fixed-length JSON envelope.
-The response writer cannot set cookies, redirect, upgrade or relay a stream.
+The general response writer cannot forward upstream cookies, redirects,
+upgrades or streams. Only fixed named confirmation and logout code can
+issue or clear the opaque app cookie.
 The transport refuses surplus it sees while framing or during one immediate
 probe; it cannot detect every byte still in flight and never parses or forwards
 a second request. It does not use EOF to delimit the request.
@@ -388,9 +398,11 @@ on a Linux host with user/network namespaces and `ip`:
 ```sh
 unshare --user --map-root-user --net sh -c '
   ip link set lo up || exit
+  fixture_home=$1; shift
   exec unshare --user --map-user=1000 --map-group=1000 \
-    env -i PATH=/usr/bin:/bin PYTHONPATH=src "$@"
-' sh /path/to/offline-playwright-python -B tests/smoke_named_pake_browser.py \
+    env -i HOME="$fixture_home" PATH=/usr/bin:/bin PYTHONPATH=src "$@"
+' sh /path/to/empty-private-test-home /path/to/offline-playwright-python \
+  -B tests/smoke_named_pake_browser.py \
   --chromium /path/to/pinned/chrome-headless-shell \
   --build-dir /path/to/verified-first-build \
   --opencode /path/to/pinned/opencode-2.3.2

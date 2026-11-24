@@ -41,6 +41,7 @@ class NamedBrowserHandoffTests(unittest.TestCase):
                 ENDPOINT,
                 self.authority,
                 NATIVE,
+                version="2.3.2",
                 owner_current=self.owner,
             )
         )
@@ -72,6 +73,7 @@ class NamedBrowserHandoffTests(unittest.TestCase):
         self.app = web_app_ingress.NamedAppIngress(
             self.sign_in,
             endpoint=ENDPOINT,
+            version="2.3.2",
             claim_bootstrap=lambda nonce: self.bootstrap.claim_app(self.binding, nonce),
         )
         self.addCleanup(self.app.close)

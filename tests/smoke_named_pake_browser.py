@@ -227,6 +227,7 @@ class Composition:
         self.app = web_app_ingress.NamedAppIngress(
             sign_in,
             endpoint=native.endpoint,
+            version=native.identity["version"],
             claim_bootstrap=lambda nonce: bootstrap.claim_app(binding, nonce),
         )
         self.handoff = web_named_handoff.NamedHandoffIngress(
@@ -589,6 +590,7 @@ def check_native_boundary(fixture, token, confirmed):
         binding=fixture.binding,
         endpoint=native.endpoint,
         origin=origin,
+        version=native.identity["version"],
     )
     header = confirmed.header_value("set-cookie")
     require(
