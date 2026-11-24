@@ -133,6 +133,7 @@ export function createStudioTranscriptView(mount, readSelection) {
   mounted.add(mount);
   const document = mount.ownerDocument;
   let pending = null;
+  let shown = null;
 
   function current() {
     try {
@@ -144,44 +145,61 @@ export function createStudioTranscriptView(mount, readSelection) {
   }
 
   function clear() {
-    pending = null;
+    pending = shown = null;
     mount.replaceChildren();
+  }
+
+  function start(selection, keep) {
+    const ticket = Object.freeze(selection);
+    pending = { ticket, keep };
+    return ticket;
   }
 
   function begin() {
     clear();
     const selection = current();
-    if (selection === null) return null;
-    pending = Object.freeze(selection);
-    return pending;
+    return selection === null ? null : start(selection, false);
+  }
+
+  function beginRefresh() {
+    const selection = current();
+    if (shown === null || selection?.sessionID !== shown.sessionID ||
+        selection.generation !== shown.generation) {
+      clear();
+      return null;
+    }
+    return start(selection, true);
   }
 
   function stillCurrent(ticket) {
     const live = current();
-    return pending === ticket && live?.sessionID === ticket.sessionID &&
+    return pending?.ticket === ticket && live?.sessionID === ticket.sessionID &&
       live.generation === ticket.generation;
   }
 
   function commit(ticket, value) {
     // Object identity also separates two reads of an unchanged selection.
-    if (ticket === null || pending !== ticket) return false;
+    if (ticket === null || pending?.ticket !== ticket) return false;
     if (!stillCurrent(ticket)) {
-      if (pending === ticket) clear();
+      if (pending?.ticket === ticket) clear();
       return false;
     }
+    const keep = pending.keep;
     let checked = null;
     try { checked = checkedProjection(value, ticket.sessionID); }
     catch { /* Never display a raw failure or a partial projection. */ }
-    const content = transcript(document, checked);
+    const content = checked === null && keep ? null : transcript(document, checked);
     // Validate the same generation again, before the one DOM insertion.
     if (!stillCurrent(ticket)) {
-      if (pending === ticket) clear();
+      if (pending?.ticket === ticket) clear();
       return false;
     }
     pending = null;
+    if (content === null) return false;
+    shown = checked === null ? null : ticket;
     mount.replaceChildren(content);
     return checked !== null;
   }
 
-  return Object.freeze({ begin, commit, clear });
+  return Object.freeze({ begin, beginRefresh, commit, clear });
 }

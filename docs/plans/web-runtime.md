@@ -283,6 +283,8 @@ account store, ask for a browser password or provider vault, select compiled
 artifacts, or inspect/create/launch a workspace. The caller still owns
 normal vault and workspace preparation. Its retained handle starts only one
 exact owner's sites with a scope present in the authenticated account store.
+The host can require that scope before any provider-vault or workspace
+preparation; launch checks it again before attempting the owner attachment.
 Once an owner attach exists, a false close retains every path-bound resource;
 do not treat that as a normal client exit. No CLI calls this internal API yet.
 
@@ -299,8 +301,10 @@ choose artifacts, update profile files or authorize distribution.
 client. It opens only the fixed, token-free workspace entry in a sanitized
 browser subprocess, or prints it for explicit opening. A caller must handle
 `NamedClientUndrained` with the original handle and owner held: routing this
-through ordinary cleanup that releases the owner would be unsafe. The
-launcher integration and its real host cancellation tests remain gated.
+through ordinary cleanup that releases the owner would be unsafe. An interrupt
+or error during `close()` is also an unconfirmed drain, even if a prior
+interrupt already ended the client loop. The launcher integration and its real
+host cancellation tests remain gated.
 
 A later LAN instance can use distinct existing sites and certificates under
 operator control. Isolated guest LAN tests can establish transport behavior

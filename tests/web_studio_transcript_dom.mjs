@@ -157,6 +157,46 @@ test("late results cannot overwrite another generation, selection or same-select
   assert.equal(view.begin(), null);
 });
 
+test("refresh preserves a verified projection until the current replacement is valid", () => {
+  const { view, mount } = fixture();
+  assert.equal(view.beginRefresh(), null);
+  assert(view.commit(view.begin(), projection()));
+  const original = mount.children[0];
+  for (const bad of [null, projection("ses_other"), projection("ses_example", [user, user])]) {
+    const refresh = view.beginRefresh();
+    assert.equal(mount.children[0], original);
+    assert(!view.commit(refresh, bad));
+    assert.equal(mount.children[0], original);
+    assert(!view.commit(refresh, projection())); // A failed ticket is also spent.
+  }
+  const superseded = view.beginRefresh();
+  const refresh = view.beginRefresh();
+  assert(!view.commit(superseded, projection()));
+  assert.equal(mount.children[0], original);
+  assert(view.commit(refresh, { ...projection(), title: "Current refreshed title" }));
+  assert.notEqual(mount.children[0], original);
+  assert.match(mount.textContent, /Current refreshed title/);
+});
+
+test("preserving refresh never keeps old content on observed invalidation or overwrites a newer scope", () => {
+  const { view, mount, select } = fixture();
+  assert(view.commit(view.begin(), projection()));
+  const stale = view.beginRefresh();
+  select({ sessionID: "ses_example", generation: 2 });
+  assert(!view.commit(stale, projection()));
+  assert(!mount.hasChildNodes());
+
+  assert(view.commit(view.begin(), projection()));
+  const departed = view.beginRefresh();
+  select({ sessionID: "ses_other", generation: 3 });
+  assert.equal(view.beginRefresh(), null);
+  assert(!mount.hasChildNodes());
+  select({ sessionID: "ses_example", generation: 4 });
+  assert(view.commit(view.begin(), { ...projection(), title: "Same ID, new generation" }));
+  assert(!view.commit(departed, null));
+  assert.match(mount.textContent, /Same ID, new generation/);
+});
+
 test("selection invalidated while the detached nodes are being prepared is rechecked", () => {
   const { select, document, mount, view } = fixture();
   const ticket = view.begin();
