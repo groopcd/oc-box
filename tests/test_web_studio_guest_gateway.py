@@ -16,6 +16,7 @@ from weakref import ref
 from oc_box import web_guest_duplex_exec as guest_exec
 from oc_box import web_guest_duplex_host as transport
 from oc_box import web_guest_worker_drain as worker_drain
+from oc_box import web_studio_guest
 from oc_box import web_studio_guest_binding as binding
 from oc_box import web_studio_guest_gateway as gateway
 from oc_box import web_studio_guest_owner as guest_owner
@@ -35,10 +36,10 @@ _UPGRADE = (
 
 
 class ManagedGatewayTests(GuestOwnerFixture, unittest.TestCase):
-    def start_gateway(self, stack, *, proof=None):
+    def start_gateway(self, stack, *, proof=None, studio=False):
         if proof is None:
             proof = self.seal(stack)
-        relay = gateway._ManagedGateway(proof)
+        relay = gateway._ManagedGateway(proof, studio=studio)
         stack.callback(relay.drain)
         self.assertTrue(relay.start())
         return relay
@@ -55,6 +56,65 @@ class ManagedGatewayTests(GuestOwnerFixture, unittest.TestCase):
             self.assertTrue(part, "unexpected synthetic peer EOF")
             result.extend(part)
         return bytes(result)
+
+    def test_opt_in_serves_only_pinned_first_party_assets_and_ends_the_exchange(self):
+        with ExitStack() as stack:
+            relay = self.start_gateway(stack, studio=True)
+            authority = relay.binding.native.binding.authority
+            start = stack.enter_context(patch.object(guest_exec, "_command"))
+
+            def read(target, *, site, mode, dest, extra=b""):
+                with socket.create_connection(
+                    relay.binding.listener._address, timeout=5
+                ) as peer:
+                    wire = (
+                        f"GET {target} HTTP/1.1\r\nHost: {authority}\r\n"
+                        f"Sec-Fetch-Site: {site}\r\nSec-Fetch-Mode: {mode}\r\n"
+                        f"Sec-Fetch-Dest: {dest}\r\n"
+                    ).encode("ascii")
+                    peer.sendall(wire + extra + b"\r\n")
+                    output = bytearray()
+                    while chunk := peer.recv(4096):
+                        output.extend(chunk)
+                        self.assertLess(len(output), 65536)
+                    return bytes(output)
+
+            page = read(
+                web_studio_guest.PAGE_PATH,
+                site="none",
+                mode="navigate",
+                dest="document",
+                extra=b"Sec-Fetch-User: ?1\r\n",
+            )
+            self.assertTrue(page.startswith(b"HTTP/1.1 200 OK\r\n"))
+            self.assertIn(b"Connection: close\r\n", page)
+            self.assertIn(b"Content-Security-Policy: ", page)
+            self.assertIn(b"data-studio-challenge=", page)
+            self.assertNotIn(b"<iframe", page)
+            asset = read(
+                "/oc-box/studio/web_named_studio_entry.mjs",
+                site="same-origin",
+                mode="cors",
+                dest="script",
+            )
+            self.assertTrue(asset.startswith(b"HTTP/1.1 200 OK\r\n"))
+            self.assertNotIn(b"data-studio-challenge=", asset)
+            for path, site, mode, dest in (
+                (web_studio_guest.PAGE_PATH, "cross-site", "navigate", "document"),
+                ("/oc-box/studio/not-pinned.js", "same-origin", "cors", "script"),
+                (
+                    "/oc-box/studio/web_studio_shell.css",
+                    "same-origin",
+                    "cors",
+                    "script",
+                ),
+                ("/oc-box/studio/catalog", "same-origin", "same-origin", "empty"),
+            ):
+                with self.subTest(path=path):
+                    self.assertEqual(read(path, site=site, mode=mode, dest=dest), b"")
+            start.assert_not_called()
+            self.assertTrue(relay.drain())
+            self.assertFalse(self.owner.closing)
 
     def backend(self, stack, *, nonzero=False):
         listener = stack.enter_context(socket.socket())
