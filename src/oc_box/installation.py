@@ -42,6 +42,7 @@ RUNTIME_FILES = (
     "web_studio_read.py",
     "web_studio_selection.py",
     "web_studio_send.py",
+    "web_guest_worker_drain.py",
     "web_studio_guest.py",
     "web_studio_guest_binding.py",
     "web_studio_guest_native.py",
