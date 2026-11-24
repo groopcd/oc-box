@@ -1,6 +1,7 @@
 """Unserved accounting for accepted browser workers and their exact helpers."""
 
 from dataclasses import dataclass, field
+from enum import Enum
 import errno
 import os
 import socket
@@ -12,6 +13,12 @@ from time import monotonic
 class WorkerDrainError(ValueError):
     def __init__(self):
         super().__init__("The browser worker lifetime could not be verified.")
+
+
+class DrainReview(Enum):
+    VERIFIED = "verified"
+    WAITING = "waiting"
+    UNCONFIRMED = "unconfirmed"
 
 
 def _stamp(stream):
@@ -401,6 +408,10 @@ class AcceptedWorkers:
 
     def close(self, *, timeout=5.0):
         """Fence and bounded-join; a timeout can recheck only this same drain."""
+        return self.close_review(timeout=timeout) is DrainReview.VERIFIED
+
+    def close_review(self, *, timeout=5.0):
+        """Distinguish a known in-flight join from lost lifetime evidence."""
         if type(timeout) not in (int, float) or not 0 <= timeout <= 30:
             raise WorkerDrainError()
         deadline = monotonic() + timeout
@@ -410,16 +421,25 @@ class AcceptedWorkers:
         for row in workers:
             worker = row.thread
             if worker is current_thread():
-                return False
+                return DrainReview.UNCONFIRMED
             if not row.start_done.wait(max(0.0, deadline - monotonic())):
-                return False
+                with self._lock:
+                    return (
+                        DrainReview.UNCONFIRMED if self._failed else DrainReview.WAITING
+                    )
             if worker.ident is not None:
                 try:
                     worker.join(max(0.0, deadline - monotonic()))
                 except RuntimeError:  # A start exception can leave a partial thread.
                     with self._lock:
                         self._failed = True
-                    return False
+                    return DrainReview.UNCONFIRMED
         with self._lock:
             self._reap()
-            return not self._failed and not self._workers and not self._notifications
+            if self._failed:
+                return DrainReview.UNCONFIRMED
+            if self._notifications or any(
+                row.thread.is_alive() for row in self._workers.values()
+            ):
+                return DrainReview.WAITING
+            return DrainReview.UNCONFIRMED if self._workers else DrainReview.VERIFIED

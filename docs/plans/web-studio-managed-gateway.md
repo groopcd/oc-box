@@ -97,6 +97,13 @@ owner. Outer container inspect and exec are substituted. The native
 fixture owner's clean exit is not `oc-box stop`, a managed history pass,
 or an external Podman acceptance.
 
+The private foreground result holder separates a raw client exit (including
+an explicit unknown or a signal status) from transport drain. Only an
+observably pending join allows another check of the same handle. An
+interruption or unverified outcome is sticky for that result. The holder
+does not exit the owning context, convert a status to success, clear
+durable state, sync history, or stop the native owner.
+
 The private caller must keep the original handle and owner/lock scope on
 `False` or interruption. A join timeout permits only another observation of
 the **same** drain; there is no replacement. Do not raise a false verdict

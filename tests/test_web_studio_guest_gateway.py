@@ -229,7 +229,7 @@ class ManagedGatewayTests(GuestOwnerFixture, unittest.TestCase):
                 left.close()
                 self.fail("Synthetic worker was not registered.")
             reference = result.result(timeout=5)
-            self.assertFalse(relay.drain())
+            self.assertIs(relay.drain_review(), worker_drain.DrainReview.UNCONFIRMED)
             self.assertIsNotNone(
                 reference(), "uncertain exec lost its exact tracked handle"
             )
@@ -278,21 +278,51 @@ class ManagedGatewayTests(GuestOwnerFixture, unittest.TestCase):
             stack.enter_context(patch.object(relay, "_dispatch", side_effect=hold))
             launch = stack.enter_context(patch.object(guest_exec, "_command"))
             peer = self.client(stack, relay)
+            retained = gateway._RetainedRunResult(relay)
+            with self.assertRaises(binding.GuestBindingError):
+                gateway._RetainedRunResult(relay)
+            with self.assertRaises(binding.GuestBindingError):
+                retained.capture(True)
+            retained.capture(-15)
             try:
                 self.assertTrue(pending.wait(5))
                 original_accept = relay._pending_accept
                 exact_lock = service.LIFECYCLE_LOCK.get()
-                self.assertFalse(relay.drain(join_timeout=0.01))
+                self.assertIs(
+                    retained.observe(join_timeout=0.01),
+                    worker_drain.DrainReview.WAITING,
+                )
                 self.assertTrue(relay._acceptor.is_alive())
                 self.assertIs(relay._pending_accept, original_accept)
                 self.assertIs(service.LIFECYCLE_LOCK.get(), exact_lock)
                 self.assertFalse(self.owner.closing)
             finally:
                 resume.set()
-            self.assertTrue(relay.drain())
+            self.assertIs(retained.observe(), worker_drain.DrainReview.VERIFIED)
+            self.assertEqual(retained.raw, -15)
+            with self.assertRaises(binding.GuestBindingError):
+                retained.capture(0)
             self.assertEqual(original_accept.fileno(), -1)
             self.assertEqual(peer.recv(1), b"")
             launch.assert_not_called()
+
+    def test_retained_drain_interruption_is_not_a_retry_or_a_client_success(self):
+        with ExitStack() as stack:
+            relay = self.start_gateway(stack)
+            retained = gateway._RetainedRunResult(relay)
+            with self.assertRaises(binding.GuestBindingError):
+                retained.observe()
+            retained.capture(None)
+            exact = service.LIFECYCLE_LOCK.get()
+            with patch.object(
+                relay, "drain_review", side_effect=KeyboardInterrupt
+            ) as drain:
+                self.assertIs(retained.observe(), worker_drain.DrainReview.UNCONFIRMED)
+                self.assertIs(retained.observe(), worker_drain.DrainReview.UNCONFIRMED)
+                drain.assert_called_once_with(join_timeout=5.0)
+            self.assertIsNone(retained.raw)
+            self.assertIs(service.LIFECYCLE_LOCK.get(), exact)
+            self.assertFalse(self.owner.closing)
 
     def test_ambiguous_acceptor_start_never_dispatches_or_reports_drain(self):
         with ExitStack() as stack:
