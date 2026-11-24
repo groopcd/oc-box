@@ -55,6 +55,7 @@ _WEB_RUNTIME_FILES = (
     "web_studio_selection.py",
     "web_studio_send.py",
     "web_studio_guest.py",
+    "web_studio_guest_owner.py",
     "web_history.py",
     "web_tls.py",
     "web_local_origins.py",

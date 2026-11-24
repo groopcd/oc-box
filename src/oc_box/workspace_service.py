@@ -1112,6 +1112,7 @@ class Owner:
         image_preview=False,
         ui_bridge=False,
         named_stop_token=None,
+        guest_stop_token=None,
     ):
         if type(image_preview) is not bool:
             raise box.BoxError("Invalid private workspace image-preview setting.")
@@ -1129,12 +1130,15 @@ class Owner:
         self.bound = False
         self._named_stop_token = named_stop_token
         self._named_control = None
+        self._guest_stop_token = guest_stop_token
+        self._guest_proof = None
 
     def __enter__(self):
         box = self.box
         # The caller owns the lifecycle lock. A refused connection is stale;
         # a live controller must never be replaced by a new server.
         named = self._named_stop_token is not None
+        guest = self._guest_stop_token is not None
         safeguard = getattr(box, "runtime_safeguard", None)
         guarded = safeguard.current() if safeguard else None
         if named and guarded:
@@ -1143,7 +1147,17 @@ class Owner:
             raise box.BoxError(
                 "Named HTTPS cannot use the guarded workspace owner contract yet."
             )
+        if guest and (named or guarded or self._guest_proof is not None):
+            raise box.BoxError("This workspace owner cannot supply Studio guest proof.")
         live = live_connection()
+        if guest and (
+            self.address.exists()
+            or self.address.is_symlink()
+            or (live is not None and live.get("workspace") == self.data["id"])
+        ):
+            raise box.BoxError(
+                "Studio guest proof cannot replace a workspace controller."
+            )
         if (named and (self.address.exists() or self.address.is_symlink())) or (
             live is not None
             and live.get("workspace") == self.data["id"]
@@ -1198,11 +1212,46 @@ class Owner:
                 raise box.BoxError(
                     "Named workspace owner could not be verified."
                 ) from None
+        if guest:
+            if __package__:
+                from . import web_studio_guest_owner, workspace_control
+            else:
+                import web_studio_guest_owner
+                import workspace_control
+            try:
+                self._guest_proof = web_studio_guest_owner.GuestOwnerProof(
+                    self, self._guest_stop_token
+                )
+                execution_data = self._guest_proof.pinned_data()
+                worker = self._guest_proof.worker_arguments(
+                    script, box.CONTAINER_OPENCODE
+                )
+            except (
+                box.BoxError,
+                OSError,
+                ValueError,
+                KeyError,
+                TypeError,
+                AttributeError,
+                subprocess.SubprocessError,
+                RecursionError,
+            ):
+                raise box.BoxError(
+                    "Studio guest original workspace owner could not be verified."
+                ) from None
         command = box.exec_command(execution_data, worker)
         self.errors = box.captured_output(private=True)
         self.error_file = self.errors.__enter__()
         try:
-            with guarded.spawn(box) if guarded else contextlib.nullcontext():
+            with (
+                workspace_control.admission(self.path)
+                if guest
+                else guarded.spawn(box)
+                if guarded
+                else contextlib.nullcontext()
+            ):
+                if guest:
+                    self._guest_proof.before_spawn()
                 self.child = subprocess.Popen(
                     command,
                     env=command.environment,
@@ -1220,8 +1269,13 @@ class Owner:
                         "Private workspace service failed to start; private output was not logged."
                     )
                 if select.select([self.child.stdout], [], [], 0.1)[0]:
-                    output.extend(os.read(self.child.stdout.fileno(), 4096))
-                if len(output) > MAX_CONTROL:
+                    chunk = os.read(self.child.stdout.fileno(), 4096)
+                    if guest and not chunk:
+                        raise box.BoxError(
+                            "Studio guest original workspace owner could not be verified."
+                        )
+                    output.extend(chunk)
+                if len(output) > (4096 if guest else MAX_CONTROL):
                     raise box.BoxError(
                         "Invalid private workspace service readiness response."
                     )
@@ -1245,6 +1299,26 @@ class Owner:
                         "Named workspace owner could not be verified."
                     ) from None
                 self.connection["web_mode"] = _NAMED_ONLY
+            elif guest:
+                try:
+                    if time.monotonic() >= deadline:
+                        raise web_studio_guest_owner.GuestOwnerError()
+                    self.connection = self._guest_proof.seal(bytes(output))
+                    if time.monotonic() >= deadline:
+                        raise web_studio_guest_owner.GuestOwnerError()
+                except (
+                    box.BoxError,
+                    OSError,
+                    ValueError,
+                    KeyError,
+                    TypeError,
+                    AttributeError,
+                    subprocess.SubprocessError,
+                    RecursionError,
+                ):
+                    raise box.BoxError(
+                        "Studio guest original workspace owner could not be verified."
+                    ) from None
             else:
                 self.connection = validate_endpoint(
                     json.loads(output.split(b"\n", 1)[0])
@@ -1291,6 +1365,22 @@ class Owner:
             raise self.box.BoxError("Invalid live workspace session ID.")
         safeguard = getattr(self.box, "runtime_safeguard", None)
         guarded = safeguard.current() if safeguard else None
+        if self._guest_proof is not None:
+            try:
+                self._guest_proof.before_publish()
+            except (
+                self.box.BoxError,
+                OSError,
+                ValueError,
+                KeyError,
+                TypeError,
+                AttributeError,
+                subprocess.SubprocessError,
+                RecursionError,
+            ):
+                raise self.box.BoxError(
+                    "Studio guest original workspace owner could not be verified."
+                ) from None
         with (
             guarded.spawn(self.box) if guarded else contextlib.nullcontext(),
             self.condition,
@@ -1443,6 +1533,8 @@ class Owner:
 
     def shutdown(self):
         self.closing = True
+        if self._guest_proof is not None:
+            self._guest_proof.retire()
         if self.listener:
             self.listener.close()
             if hasattr(self, "thread"):
