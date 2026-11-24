@@ -40,6 +40,7 @@ from smoke_session_sync_v2 import seed
 
 _SESSION = "ses_named_studio_fixture"
 _TITLE = "Named Studio browser fixture"
+_NEIGHBOR = "ses_named_studio_send_other"
 
 
 def launcher(native):
@@ -87,7 +88,7 @@ def launcher(native):
     )
 
 
-def exercise(path, chrome, binary, evidence):
+def exercise(path, chrome, binary, evidence, *, prove_send=False):
     research = runpy.run_path(str(RESEARCH / "check_browser"))
     with chrome.open("rb") as stream:
         require(
@@ -101,8 +102,41 @@ def exercise(path, chrome, binary, evidence):
     ca, pairs = material(path, hosts)
     home = browser_home(path, "trusted", ca)
     with ExitStack() as cleanup:
-        native = cleanup.enter_context(native_fixture(path, binary, version="2.4.1"))
-        seed(native.request, _SESSION, native.project, title=_TITLE)
+        configure = proof = after_stop = None
+        if prove_send:
+            from named_browser_send_fixture import Provider, SendProof
+
+            provider = cleanup.enter_context(Provider(_SESSION).serving())
+            proof = SendProof(provider, _SESSION)
+            configure = provider.config
+            after_stop = lambda request: proof.verify_history(request, wait=False)
+        native = cleanup.enter_context(
+            native_fixture(
+                path,
+                binary,
+                version="2.4.1",
+                configure=configure,
+                after_stop=after_stop,
+            )
+        )
+        if proof is None:
+            seed(native.request, _SESSION, native.project, title=_TITLE)
+        else:
+
+            def seed_without_tools(method, target, value):
+                value["info"]["permissions"] = [
+                    {"action": "tool.use", "resource": "*", "effect": "deny"}
+                ]
+                return native.request(method, target, value, deadline=monotonic() + 4)
+
+            seed(seed_without_tools, _SESSION, native.project, title=_TITLE)
+            seed(
+                seed_without_tools, _NEIGHBOR, native.project, title="Untouched fixture"
+            )
+            neighbor_route = "/api/experimental/session/" + _NEIGHBOR + "/export"
+            neighbor_before = native.request(
+                "GET", neighbor_route, deadline=monotonic() + 4
+            )
         profile = cleanup.enter_context(web_named_listeners.reserve_profile(**pairs))
         control, control_peer = map(cleanup.enter_context, socket.socketpair())
         identity = web_named_owner.OwnerIdentity(
@@ -115,6 +149,7 @@ def exercise(path, chrome, binary, evidence):
         box = launcher(native)
         port = str(urlsplit(native.endpoint).port)
         original_start = web_named_relay._WorkspaceChild.start
+        workers = []
 
         def connect(owner, *, track, check, deadline):
             require(owner is identity, "The fixture selected a different native owner.")
@@ -125,6 +160,8 @@ def exercise(path, chrome, binary, evidence):
             check()
 
         def exact_local_exec(child, command, stdio):
+            if proof is not None:
+                workers.append(child)
             if command[0] != "podman":
                 return original_start(child, command, stdio)
             require(
@@ -184,12 +221,17 @@ def exercise(path, chrome, binary, evidence):
             binding = sites.services._owner.binding
             _, pair = native.bind(binding, origin)
             cookie = pair(binding, origin)
-            token = sites.services.application.sign_in.admission.issue(
+            admission = sites.services.application.sign_in.admission
+            token = admission.issue(
                 binding,
                 principal="synthetic",
                 native_cookie=cookie,
             )
             require(token is not None, "Fixture app grant refused.")
+            if proof is not None:
+                session = admission.lookup(binding, token)
+                require(session is not None, "Fixture app grant was not current.")
+                cleanup.enter_context(proof.observe(identity, session))
             web_named_http.start_named_http(
                 sites,
                 profile,
@@ -235,6 +277,8 @@ def exercise(path, chrome, binary, evidence):
                             "/oc-box/studio/web_named_studio_client.mjs": "client-module",
                             "/oc-box/studio/web_studio_shell.css": "shell-css",
                         }
+                        if proof is not None:
+                            routes["/oc-box/studio/send"] = "send"
 
                         def observe(url, outcome):
                             parsed = urlsplit(url)
@@ -279,6 +323,16 @@ def exercise(path, chrome, binary, evidence):
                             ).is_disabled(),
                             "An empty draft enabled Send.",
                         )
+                        if proof is not None:
+                            send_from_composer(page, origin, proof)
+                            proof.verify_history(native.request)
+                            require(
+                                native.request(
+                                    "GET", neighbor_route, deadline=monotonic() + 4
+                                )
+                                == neighbor_before,
+                                "The browser Send changed a different fixture session.",
+                            )
                 finally:
                     browser.close()
         finally:
@@ -290,15 +344,70 @@ def exercise(path, chrome, binary, evidence):
             "The site unexpectedly closed the synthetic owner lease.",
         )
         require(
-            native.request("GET", "/api/session/active") == {"data": {}},
-            "The Studio read fixture ran a native agent.",
+            native.request("GET", "/api/session/active", deadline=monotonic() + 4)
+            == {"data": {}},
+            "The Studio fixture left an active native agent.",
         )
+        if proof is not None:
+            require(
+                workers
+                and all(
+                    child.confirmed
+                    and child._exit == 0
+                    and child._pidfd is None
+                    and child._child.returncode == 0
+                    for child in workers
+                )
+                and provider.requests == provider.completed == 1
+                and provider.rejection is None,
+                "The isolated browser Send left a relay or provider outcome unconfirmed.",
+            )
+
+
+def send_from_composer(page, origin, proof):
+    from named_browser_send_fixture import SEND_TEXT
+
+    url = origin.value + "/oc-box/studio/send"
+    sends = []
+
+    def observe(request):
+        if request.url == url:
+            sends.append(request.method)
+
+    page.on("request", observe)
+    require(proof.provider.requests == 0, "Inference began before the browser Send.")
+    editor = page.get_by_role("textbox", name="Message", exact=True)
+    button = page.get_by_role("button", name="Send", exact=True)
+    editor.click()
+    page.keyboard.insert_text(SEND_TEXT)
+    require(
+        editor.input_value() == SEND_TEXT, "The browser did not enter the fixture text."
+    )
+    with page.expect_response(lambda response: response.url == url) as reply:
+        button.click()
+    require(
+        reply.value.status == 200 and reply.value.body() == b'{"status":"queued"}',
+        "The browser did not receive the exact native queue acknowledgment.",
+    )
+    page.get_by_text(
+        "OpenCode acknowledged the queued message. Execution is not confirmed.",
+        exact=True,
+    ).wait_for()
+    require(
+        editor.input_value() == "" and button.is_disabled() and sends == ["POST"],
+        "The composer did not clear the one acknowledged Send.",
+    )
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--chromium", type=Path, required=True)
     parser.add_argument("--opencode", type=Path, required=True)
+    parser.add_argument(
+        "--prove-send",
+        action="store_true",
+        help="Also prove one explicit browser Send with a fixed local no-tool provider.",
+    )
     args = parser.parse_args()
     loopback_namespace()
     os.umask(0o077)
@@ -310,6 +419,7 @@ def main():
                 args.chromium.resolve(strict=True),
                 args.opencode.resolve(strict=True),
                 evidence,
+                prove_send=args.prove_send,
             )
         except BrowserError as error:
             location = next(
@@ -326,9 +436,19 @@ def main():
     print(
         "PASS Chromium and OpenCode 2.4.1: trusted named Studio landing, catalog, selection, and transcript."
     )
-    print(
-        "Synthetic owner and app grant; no login proof, Send, provider, or Podman acceptance."
-    )
+    if args.prove_send:
+        print(
+            "PASS one authentic browser Send: native resume:true, queued acknowledgment, "
+            "exact synthetic provider turn, text retained after reopen, confirmed cleanup."
+        )
+        print(
+            "Synthetic owner and app grant, local exec substitution and fixed provider; "
+            "no login or Podman acceptance."
+        )
+    else:
+        print(
+            "Synthetic owner and app grant; no login proof, Send, provider, or Podman acceptance."
+        )
 
 
 if __name__ == "__main__":
