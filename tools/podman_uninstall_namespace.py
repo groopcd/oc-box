@@ -43,9 +43,8 @@ class _PreflightReason(Enum):
 
 
 class _PreflightRefused(ProofRefused):
-    def __init__(self, reason, *, fedora_match=False):
+    def __init__(self, reason):
         self.reason = reason
-        self.fedora_match = fedora_match is True
         super().__init__(reason.value)
 
 
@@ -144,12 +143,11 @@ def _pause_executable(engine, stack, name, argv, observed):
     raise ProofRefused
 
 
-def _fedora_helper_matches(
-    engine, marker, pid, proc, pidfd, process_stamp, argv, observed
+def _fedora_pause_executable(
+    engine, stack, marker, pid, proc, pidfd, process_stamp, argv, observed
 ):
-    """Corroborate a refusal only. Never return an executable or a namespace."""
-    if process_stamp[0] != b"catatonit" or argv != _CATATONIT_ARGV:
-        return False
+    """Keep the one canonical Fedora pin for the existing guest anchor checks."""
+    _require(process_stamp[0] == b"catatonit" and argv == _CATATONIT_ARGV)
 
     def unchanged_process():
         engine.check()
@@ -165,24 +163,18 @@ def _fedora_helper_matches(
             _identity(os.stat("exe", dir_fd=proc)) == observed and not _ready(pidfd, 0)
         )
 
-    try:
-        unchanged_process()
-        with ExitStack() as stack:
-            pin = engine.native._pin(
-                stack, _FEDORA_CATATONIT, 0, owner=0, directory=False
-            )
-            _require(
-                pin.stamp[:2] == observed
-                and pin.stamp[4] & 0o111
-                and not pin.stamp[4] & 0o6000
-                and engine.native._read_pin(pin, 4) == b"\x7fELF"
-            )
-            pin.recheck()
-            unchanged_process()
-            pin.recheck()
-    except Exception:
-        return False
-    return True
+    unchanged_process()
+    pin = engine.native._pin(stack, _FEDORA_CATATONIT, 0, owner=0, directory=False)
+    _require(
+        pin.stamp[:2] == observed
+        and pin.stamp[4] & 0o111
+        and not pin.stamp[4] & 0o6000
+        and engine.native._read_pin(pin, 4) == b"\x7fELF"
+    )
+    pin.recheck()
+    unchanged_process()
+    pin.recheck()
+    return pin
 
 
 @dataclass(frozen=True)
@@ -217,6 +209,8 @@ class _Pause:
         _require(
             _identity(os.stat("exe", dir_fd=self.proc)) == self.executable.stamp[:2]
         )
+        if self.executable.path == _FEDORA_CATATONIT:
+            _require(_read_at(self.proc, "cmdline", 64) == _CATATONIT_ARGV)
         _require(_identity(os.stat("root", dir_fd=self.proc)) == self.root)
         for kind, fd in zip(("user", "mnt"), self.namespaces):
             _require(
@@ -280,13 +274,24 @@ def _pause_fence(engine):
             executable = _pause_executable(
                 engine, stack, process_stamp[0], argv, observed
             )
+        except (ProofRefused, engine.native.InventoryError):
+            # The packaged alias remains rejected. Try only the fixed actual
+            # Fedora file, without resolving an alias or relaxing any anchor
+            # or store checks below.
+            with _preflight(_PreflightReason.HELPER_IDENTITY):
+                executable = _fedora_pause_executable(
+                    engine,
+                    stack,
+                    marker,
+                    pid,
+                    proc,
+                    pidfd,
+                    process_stamp,
+                    argv,
+                    observed,
+                )
         except Exception:
-            matches = _fedora_helper_matches(
-                engine, marker, pid, proc, pidfd, process_stamp, argv, observed
-            )
-            raise _PreflightRefused(
-                _PreflightReason.HELPER_IDENTITY, fedora_match=matches
-            ) from None
+            raise _PreflightRefused(_PreflightReason.HELPER_IDENTITY) from None
         with _preflight(_PreflightReason.MAPPING_PROOF):
             ns_dir = keep(os.open("ns", _DIR, dir_fd=proc))
             namespaces = []
@@ -607,7 +612,7 @@ def probe(engine, snapshot, *, fence=_pause_fence, capture=_capture):
         if result["namespace_probe"] == "namespace_unavailable":
             result["namespace_preflight_reason"] = refusal.reason.value
             if refusal.reason is _PreflightReason.HELPER_IDENTITY:
-                result["fedora_helper_inode_matches"] = refusal.fedora_match
+                result["fedora_helper_inode_matches"] = False
     except (Exception, KeyboardInterrupt):
         pass
     return result

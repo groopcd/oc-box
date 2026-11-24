@@ -34,6 +34,17 @@ and socket. Sanitized receipt SHA-256:
 None of these runs validates positive mounted/alias controls, normal-host
 compatibility, or uninstall.
 
+On clean `37487078a19331ec3ca66d97b2573b823d3bec3c`, a fresh Fedora 44/KVM
+run recorded `descriptor_incomplete`, with `namespace_unavailable`,
+`namespace_preflight_reason=helper_identity`, and
+`fedora_helper_inode_matches=true`. It did not establish an unmounted
+verdict, and populated planner admission stayed false. The runner verified
+guest reaping and removal of all disposable guest storage. Sanitized receipt
+SHA-256:
+`1a93ab00d39b8f5396a313583053487751bf1f1a51d80f1e1893d6122096e4e6`.
+The helper match on that source remained a refusal. It is not a native pass
+of the subsequent guest-only admission change.
+
 ## What the pinned source establishes
 
 Upstream tag `v5.8.1` peels to
@@ -143,6 +154,15 @@ ELF or source-listed root-owned `catatonit -P`, the parent UID/GID mappings,
 and typed user/mount namespace descriptors. It neither creates nor signals
 the pause process and does not invoke `podman unshare`.
 
+The guest-only helper check now also admits the exact canonical Fedora
+`/usr/libexec/catatonit/catatonit` file. It opens that fixed path without
+following links and requires a root-owned executable ELF matching the
+observed executable device and inode. The pinned process, UID, start stamp,
+live pidfd, and exact `catatonit -P` arguments must agree before and after
+the pin. The packaged symlink is never used to resolve the target. The
+canonical pin remains part of the existing namespace and store proof; it
+does not bypass any recheck or execute `catatonit`.
+
 Each bounded child joins just those two descriptors before exec of the
 pinned Podman file descriptor. It verifies the entered namespaces, mapped
 IDs, root and no-follow configuration/storage identities. It supplies the
@@ -180,14 +200,13 @@ For new receipts only, `namespace_unavailable` adds exactly one
 | `helper_identity` | The pause executable did not satisfy the existing helper check. |
 | `mapping_proof` | Namespace descriptors, UID/GID mappings or final anchor recheck did not agree. |
 
-Only `helper_identity` adds the boolean `fedora_helper_inode_matches`. A
-`true` means an independent no-follow pin of the fixed root-owned Fedora
-`/usr/libexec/catatonit/catatonit` ELF matched the still-verified pause
-process's executable, with the expected `catatonit -P` arguments. A `false`
-means the check could not establish that match. Either result **still
-refuses**: the Fedora path is not on the admission list, no symlink is
-followed, and no namespace join or additional Podman command occurs. Neither
-new field appears on `baseline_unverified`, `namespace_unverified`, or
+Only `helper_identity` adds the boolean `fedora_helper_inode_matches`.
+On `3748707`, `true` corroborated the canonical Fedora helper's identity
+but did not admit it. With the new guest-only admission check, a verified
+match proceeds to the unchanged namespace and store checks and does not
+emit `helper_identity`. A helper refusal still emits
+`fedora_helper_inode_matches=false` and dispatches no namespace query.
+Neither field appears on `baseline_unverified`, `namespace_unverified`, or
 `namespace_observed`. The recorded `9dc7844` refusal predates this schema
 and is not attributed to any of these reasons.
 
