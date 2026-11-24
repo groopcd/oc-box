@@ -182,6 +182,30 @@ class HostClipboardPreferenceTests(unittest.TestCase):
         self.reader.read_selection.assert_not_called()
         self.assertEqual(policy.stat().st_mtime_ns, before)
 
+    def test_saved_clipboard_refusal_explains_safe_reason_without_native_errors(self):
+        preferences.set_preferences(self.path, self.ident, host_clipboard=True)
+        policy = self.path.parent / preferences.FILE_NAME
+        before = policy.read_bytes()
+        self.discover.side_effect = host_clipboard.missing_helper("xclip")
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            args = self.resolve()
+        self.assertFalse(box.effective_host_clipboard(args))
+        self.assertIn("Host clipboard importing is off", output.getvalue())
+        self.assertIn("Install the 'xclip' package on the host", output.getvalue())
+        with (
+            patch.object(
+                box,
+                "detect_opencode_release",
+                side_effect=box.BoxError("private diagnostic"),
+            ),
+            contextlib.redirect_stdout(io.StringIO()) as output,
+        ):
+            args = self.resolve(version=None)
+        self.assertFalse(box.effective_host_clipboard(args))
+        self.assertIn("compatibility could not be verified", output.getvalue())
+        self.assertNotIn("private diagnostic", output.getvalue())
+        self.assertEqual(policy.read_bytes(), before)
+
     def test_corrupt_or_unsafe_policy_refuses_overrides_before_discovery(self):
         policy = self.path.parent / preferences.FILE_NAME
         for raw, mode in ((b"{invalid", 0o600), (b"{}", 0o644)):

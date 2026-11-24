@@ -115,6 +115,10 @@ class BoxError(Exception):
     pass
 
 
+class HostImportUnavailable(BoxError):
+    """Fixed preflight guidance from the host terminal or clipboard helper."""
+
+
 class HistoryPending(BoxError):
     """A session's history is not settled right now; others may still sync."""
 
@@ -473,7 +477,20 @@ def validate_host_drop(version=None):
     try:
         return host_drop.preflight(version)
     except host_drop.DropError as error:
-        raise BoxError(str(error)) from None
+        raise HostImportUnavailable(str(error)) from None
+
+
+def report_host_import_refusal(feature, error):
+    reason = (
+        str(error)
+        if isinstance(error, HostImportUnavailable)
+        else "Native OpenCode or terminal compatibility could not be verified."
+    )
+    startup_output.line(
+        f"oc-box: {feature} is off for this client. {reason} "
+        "The workspace preference is unchanged.",
+        flush=True,
+    )
 
 
 def workspace_ui_preferences(path, data):
@@ -534,15 +551,11 @@ def configure_host_drop(path, data, args, version, *, saved=None):
                     args._opencode_release = version
                 validate_host_drop(version)
                 enabled = True
-            except BoxError:
+            except BoxError as error:
                 if requested is True:
                     raise
                 if sys.stdin.isatty() and sys.stdout.isatty():
-                    startup_output.line(
-                        "oc-box: Host importing is unavailable for this client; "
-                        "the workspace preference is unchanged.",
-                        flush=True,
-                    )
+                    report_host_import_refusal("Host file importing", error)
         if requested is not None:
             workspace_preferences.set_host_drop(path, data["id"], requested)
             startup_output.line(
@@ -629,7 +642,7 @@ def configure_host_clipboard(args, version=None):
         try:
             args._host_clipboard_reader = host_clipboard.preflight()
         except host_clipboard.ClipboardError as error:
-            raise BoxError(str(error)) from None
+            raise HostImportUnavailable(str(error)) from None
     return args._host_clipboard_reader
 
 
@@ -691,16 +704,11 @@ def configure_host_clipboard_preferences(path, data, args, version):
                 )
                 args._opencode_release = version
             configure_host_clipboard(args, version)
-        except BoxError:
+        except BoxError as error:
             args._host_clipboard_enabled = False
             if requested is True or symlinks is not None:
                 raise
-            if sys.stdin.isatty() and sys.stdout.isatty():
-                startup_output.line(
-                    "oc-box: Host clipboard importing is unavailable for this client; "
-                    "the workspace preference is unchanged.",
-                    flush=True,
-                )
+            report_host_import_refusal("Host clipboard importing", error)
         if requested is not None or symlinks is not None:
             workspace_preferences.set_preferences(
                 path,
@@ -734,13 +742,10 @@ def run_native_tui(
     required = host_drop_required or host_clipboard_reader is not None
     try:
         profile = validate_host_drop(str(data.get("opencode_version", "")))
-    except BoxError:
+    except BoxError as error:
         if required:
             raise
-        startup_output.line(
-            "oc-box: Host importing is unavailable; opening the ordinary native TUI.",
-            flush=True,
-        )
+        report_host_import_refusal("Host file importing", error)
         return run_tui(command)
     if connection is None:
         raise BoxError("Host file drops require an existing private V2 connection.")

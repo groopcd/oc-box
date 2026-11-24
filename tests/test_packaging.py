@@ -203,6 +203,8 @@ class PackagingTests(unittest.TestCase):
                     "tests/test_file_open_formats.py",
                     "tests/test_file_open_relay.py",
                     "tests/smoke_file_preview_v2.py",
+                    "tests/smoke_image_preview_x11_v2.py",
+                    "tests/smoke_host_clipboard_x11_v2.py",
                     "tests/test_ui_state.py",
                     "tests/ui_state_fixture.mjs",
                     "tests/smoke_ui_state_v2.py",
