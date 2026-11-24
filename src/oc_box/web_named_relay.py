@@ -6,23 +6,35 @@ connector (in particular, no host-loopback dial using a container's port).
 """
 
 import json
+import math
+import os
 import re
+import select
+import signal
 import socket
+import subprocess
 from threading import Lock
+from time import monotonic, sleep
 
 if __package__:
     from . import web_app_ingress as app
     from . import web_named_transport as https
     from . import web_native_pair as pair
+    from . import workspace_service
 else:
     import web_app_ingress as app
     import web_named_transport as https
     import web_native_pair as pair
+    import workspace_service
 
 
 _HEAD_LIMIT = 8192
 _LENGTH = re.compile(r"[1-9][0-9]{0,3}")
 _SESSION_ID = re.compile(r"ses[A-Za-z0-9_-]{1,128}")
+_CONTAINER_ID = re.compile(r"[a-f0-9]{64}")
+_WAIT_SLICE = 0.05
+_EOF_GRACE = 1.0
+_REAP_GRACE = 0.5
 _UNSUPPORTED = frozenset(
     (
         "transfer-encoding",
@@ -42,12 +54,99 @@ def _refuse():
     raise app.AppRequestError()
 
 
+class _WorkspaceChild:
+    """Exactly one fixed exec; only its request worker may signal or reap it."""
+
+    def __init__(self):
+        self._attempted = False
+        self._child = self._pidfd = self._exit = None
+        self._forced = False
+
+    def start(self, command, stdio):
+        if (
+            not hasattr(os, "pidfd_open")
+            or not hasattr(signal, "pidfd_send_signal")
+            or signal.getsignal(signal.SIGCHLD) == signal.SIG_IGN
+        ):
+            _refuse()
+        # Latch before entering Popen. A startup exception without a returned
+        # handle is not proof nothing started: even Popen's own descriptor
+        # handling can fail after fork.
+        self._attempted = True
+        self._child = subprocess.Popen(
+            command,
+            env=command.environment,
+            stdin=stdio,
+            stdout=stdio,
+            stderr=subprocess.DEVNULL,
+            close_fds=True,
+            start_new_session=True,
+            cwd="/",
+        )
+        self._pidfd = os.pidfd_open(self._child.pid)
+
+    @property
+    def confirmed(self):
+        return not self._attempted or (self._exit == 0 and not self._forced)
+
+    def _wait(self, deadline, check=None):
+        child = self._child
+        poller = None
+        if self._pidfd is not None and self._exit is None:
+            poller = select.poll()
+            poller.register(self._pidfd, select.POLLIN)
+        while self._exit is None:
+            if check is not None:
+                check()
+            # Popen.wait/poll can synthesize a zero for ECHILD. Only a
+            # terminal status from waitpid on our exact child is evidence.
+            pid, status = os.waitpid(child.pid, os.WNOHANG)
+            if pid == child.pid and (os.WIFEXITED(status) or os.WIFSIGNALED(status)):
+                self._exit = child.returncode = os.waitstatus_to_exitcode(status)
+                break
+            delay = min(_WAIT_SLICE, deadline - monotonic())
+            if delay <= 0:
+                break
+            if poller is None:
+                sleep(delay)
+            else:
+                poller.poll(math.ceil(1000 * delay))
+        return self._exit
+
+    def finish(self, deadline, check):
+        if self._child is None or self._wait(deadline, check) != 0:
+            _refuse()
+        check()
+
+    def close(self):
+        # By now both copies of our socketpair are closed by the host. Give
+        # the exec path a bounded chance to propagate stdin EOF and exit on
+        # its own. Killing only the host Podman process does not prove that
+        # its in-container relay exited.
+        if self._child is None:
+            return
+        try:
+            if self._wait(monotonic() + _EOF_GRACE) is None and self._pidfd is not None:
+                try:
+                    signal.pidfd_send_signal(self._pidfd, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass  # The exact child may have exited at the grace boundary.
+                else:
+                    self._forced = True
+                self._wait(monotonic() + _REAP_GRACE)
+        finally:
+            if self._exit is not None and self._pidfd is not None:
+                os.close(self._pidfd)
+                self._pidfd = None
+
+
 class _RegisteredIO:
-    """Own only this request's sockets, from startup through TLS write."""
+    """Own this request's sockets and optional exec from startup through drain."""
 
     def __init__(self, browser):
         self.browser = browser
         self.upstream = None
+        self._workspace = None
         self._lock = Lock()
         self._cancelled = False
 
@@ -67,6 +166,20 @@ class _RegisteredIO:
             self.upstream = upstream
         return upstream
 
+    def register_workspace(self, child):
+        with self._lock:
+            if self._cancelled or self._workspace is not None or self.upstream is None:
+                _refuse()
+            self._workspace = child
+
+    def finish_workspace(self, deadline, check):
+        if self._workspace is not None:
+            self._workspace.finish(deadline, check)
+
+    @property
+    def cleanup_confirmed(self):
+        return self._workspace is None or self._workspace.confirmed
+
     def cancel(self):
         # Revocation must not wait on I/O or close a borrowed/reused socket.
         # Worker cleanup owns close; shutdown wakes a running read or write.
@@ -82,12 +195,70 @@ class _RegisteredIO:
                         pass  # May not yet be connected, or may already be closed.
 
     def close(self):
-        with self._lock:
-            try:
-                if self.upstream is not None:
-                    self.upstream.close()
-            finally:
-                self.browser.close()
+        try:
+            with self._lock:
+                self._cancelled = True  # Never accept a stale registration hook.
+                try:
+                    if self.upstream is not None:
+                        self.upstream.close()
+                finally:
+                    self.browser.close()
+        finally:
+            if self._workspace is not None:
+                self._workspace.close()
+
+
+class _ConnectorRegistration:
+    """Keep the original direct-socket hook; add only the fixed exec transport."""
+
+    def __init__(self, io, endpoint, check):
+        self._io, self._endpoint, self._check = io, endpoint, check
+
+    def __call__(self, peer):
+        peer = self._io.track(peer)
+        self._check()
+        return peer
+
+    def start_workspace_relay(self, box, *, container_id, endpoint):
+        if (
+            os.environ.get("OC_BOX_CONTAINER") == "1"
+            or type(container_id) is not str
+            or len(container_id) != 64
+            or _CONTAINER_ID.fullmatch(container_id) is None
+            or endpoint != self._endpoint
+        ):
+            _refuse()
+        self._check()
+        port = pair._port(endpoint)
+        command = workspace_service.relay_command(
+            box, {"container": container_id}, port
+        )
+        if command != [
+            "podman",
+            "exec",
+            "-i",
+            container_id,
+            "/usr/bin/env",
+            "-i",
+            "PATH=/usr/bin:/bin",
+            "python3",
+            "-c",
+            workspace_service.PROXY,
+            str(port),
+        ]:
+            _refuse()
+        # Use the same worker but do not load modules from the project
+        # (Podman's configured workdir) or Python site hooks on this path.
+        command[3:3] = ["--workdir", "/"]
+        command[-3:-3] = ["-I", "-S", "-B"]
+        child = _WorkspaceChild()
+        peer, stdio = socket.socketpair()
+        with stdio:
+            self(peer)
+            self._io.register_workspace(child)
+            self._check()
+            child.start(command, stdio)
+        self._check()
 
 
 def _recv(peer, count, deadline, check):
@@ -176,11 +347,13 @@ class NamedNativeRelay:
 
     ``connect_native(endpoint, *, track, check, deadline)`` must synchronously
     establish one plain stream to that verified endpoint in its own namespace.
-    Give the new socket to ``track`` before connecting, call ``check`` before
-    and during startup, and observe the supplied monotonic deadline. It must
-    return None, send no request bytes and leave no independent work running.
-    The relay owns the tracked socket even if startup fails. This contract does
-    not preempt a faulty connector or establish a real owner bridge.
+    A direct connector gives its new socket to ``track`` before connecting and
+    leaves no independent work. The managed connector instead calls
+    ``track.start_workspace_relay`` with the verified full container ID and
+    exact endpoint; only that method starts, transfers and tracks an exec.
+    Either connector must return None, send no request bytes, check admission
+    during startup and observe the monotonic deadline. The relay owns tracked
+    resources even if startup fails; it cannot preempt arbitrary connector code.
     """
 
     def __init__(self, ingress, *, connect_native):
@@ -195,6 +368,10 @@ class NamedNativeRelay:
             with peer:
                 _refuse()
         reader._exchange(peer, handlers=None, native=self._respond)
+
+    def wait_drained(self, timeout=5.0):
+        """After ingress close, require drain before releasing the owner lease."""
+        return self._ingress._admission.wait_drained(timeout)
 
     def _respond(self, stream, request, deadline):
         if (
@@ -234,11 +411,6 @@ class NamedNativeRelay:
                     ingress._require_current()
                     check()
 
-                def track(peer):
-                    peer = io.track(peer)
-                    current()
-                    return peer
-
                 current()
                 if type(session.native_cookie) is not pair.NativeCookie:
                     _refuse()
@@ -253,14 +425,26 @@ class NamedNativeRelay:
                     _refuse()
                 current()
                 outcome = self._connect_native(
-                    ingress._endpoint, track=track, check=current, deadline=deadline
+                    ingress._endpoint,
+                    track=_ConnectorRegistration(io, ingress._endpoint, current),
+                    check=current,
+                    deadline=deadline,
                 )
                 current()
                 if outcome is not None or io.upstream is None:
                     _refuse()
                 self._exchange(io, request.target, deadline, cookie, check, current)
             finally:
-                io.close()  # Drain includes both closes, not just revocation.
+                try:
+                    io.close()
+                finally:
+                    if not io.cleanup_confirmed:
+                        # Do not advertise stdout EOF, host-only kill, or an
+                        # unconfirmed reap as successful drain. Keep the use
+                        # charged even if its browser previously logged out.
+                        use._cleanup_unconfirmed.set()
+                        ingress.close()
+                        _refuse()
 
     def _exchange(self, io, target, deadline, cookie, check, current):
         ingress = self._ingress
@@ -281,6 +465,7 @@ class NamedNativeRelay:
         peer.sendall(wire)
         body = _read_reply(peer, deadline=deadline, check=check)
         _metadata(body, target, ingress._endpoint)
+        io.finish_workspace(deadline, current)
         # Emit host-owned headers only. Never copy native cookies (including
         # rotations), headers, reason phrases or response status to the client.
         https._write_response(

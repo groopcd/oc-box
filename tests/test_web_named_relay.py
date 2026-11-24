@@ -3,24 +3,30 @@
 import os
 import socket
 import ssl
+import subprocess
+import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import replace
+from pathlib import Path
 from threading import Event
-from time import monotonic
+from time import monotonic, sleep
 from unittest.mock import Mock, patch
 
 import test_web_local_origins as certificates
 import test_web_pake_flow as pake
 
 from oc_box import (
+    oc_box as box,
     web_admission,
     web_bootstrap,
     web_local_origins,
     web_named_local,
+    web_named_owner,
     web_named_transport,
     web_native_pair,
+    workspace_service,
 )
 from oc_box import web_app_ingress as app
 from oc_box import web_named_relay as relay
@@ -134,6 +140,83 @@ class NamedNativeRelayTests(unittest.TestCase):
         peer.connect(self.native.getsockname())
         self.upstream_socket = peer
         check()
+
+    @contextmanager
+    def managed(self, *, before=None, launched=None, worker=None, executable=None):
+        """Replace only the Podman invocation, not the socket/process transport."""
+        identity = web_named_owner.OwnerIdentity(
+            self.binding.workspace_id,
+            "b" * 32,
+            "d" * 64,
+            web_native_pair._VERSION,
+            self.endpoint,
+        )
+
+        def connect(endpoint, **request):
+            self.assertEqual(endpoint, identity.endpoint)
+            if before is not None:
+                before()
+            web_named_owner.connect_workspace_native(box, identity, **request)
+
+        self.dial.side_effect = connect
+        children = []
+        popen = subprocess.Popen
+
+        def launch(command, **options):
+            self.assertEqual(
+                command,
+                [
+                    "podman",
+                    "exec",
+                    "-i",
+                    "--workdir",
+                    "/",
+                    identity.container_id,
+                    "/usr/bin/env",
+                    "-i",
+                    "PATH=/usr/bin:/bin",
+                    "python3",
+                    "-I",
+                    "-S",
+                    "-B",
+                    "-c",
+                    workspace_service.PROXY,
+                    str(self.native.getsockname()[1]),
+                ],
+            )
+            self.assertEqual(options["env"], box.maintenance_host_env())
+            self.assertNotIn("SYNTHETIC_PROVIDER_TOKEN", options["env"])
+            self.assertNotIn("OPENCODE_PASSWORD", options["env"])
+            self.assertNotIn("OC_BOX_CONTAINER", options["env"])
+            self.assertEqual(options["stderr"], subprocess.DEVNULL)
+            self.assertTrue(options["close_fds"])
+            self.assertIs(options["stdin"], options["stdout"])
+            local = command[6:]
+            if worker is not None:
+                local[-2] = worker
+            child = popen(local, executable=executable, **options)
+            children.append(child)
+            if launched is not None:
+                launched()
+            return child
+
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "OC_BOX_CONTAINER": "0",
+                    "SYNTHETIC_PROVIDER_TOKEN": "synthetic-not-for-podman",
+                    "OPENCODE_PASSWORD": "synthetic-not-for-relay",
+                },
+            ),
+            patch.object(relay.subprocess, "Popen", side_effect=launch) as start,
+        ):
+            yield start, children
+
+    def assert_reaped(self, child, status=0):
+        self.assertEqual(child.returncode, status)
+        with self.assertRaises(ChildProcessError):
+            os.waitpid(child.pid, os.WNOHANG)
 
     def issue(self, native=None):
         return self.admission.issue(
@@ -638,3 +721,179 @@ class NamedNativeRelayTests(unittest.TestCase):
                 self.assert_refused(*result)
         upstream.result(timeout=_TIMEOUT)
         self.assertTrue(revoked.wait_drained(0))
+
+    def test_managed_relay_waits_for_exact_child_after_complete_upstream_eof(self):
+        # Run the real proxy, but let the subprocess close both of its stdio
+        # descriptors and pause before exiting. EOF alone must not publish.
+        with tempfile.TemporaryDirectory() as root:
+            ready, exit_now = Path(root) / "ready", Path(root) / "exit"
+            worker = f"""
+import os, time
+from pathlib import Path
+try:
+    exec({workspace_service.PROXY!r})
+except SystemExit as result:
+    s.close()
+    os.close(0)
+    os.close(1)
+    Path({str(ready)!r}).touch()
+    deadline = time.monotonic() + 2
+    while not Path({str(exit_now)!r}).exists():
+        if time.monotonic() >= deadline:
+            raise SystemExit(4)
+        time.sleep(0.01)
+    raise
+"""
+            with self.managed(worker=worker) as (start, children):
+                upstream = self.native_response(_reply(self.info()))
+                with self.exchange(token=self.issue()) as (stream, pending):
+                    try:
+                        end = monotonic() + 1.5
+                        while not ready.exists() and monotonic() < end:
+                            sleep(0.01)
+                        self.assertTrue(ready.exists())
+                        stream.settimeout(0.1)
+                        with self.assertRaises(TimeoutError):
+                            stream.recv(1)
+                        self.assertFalse(pending.done())
+                        self.assertIsNone(children[0].returncode)
+                    finally:
+                        exit_now.touch()
+                        stream.settimeout(_TIMEOUT)
+                    self.assertTrue(self.read_response(stream).endswith(self.info()))
+                    pending.result(timeout=_TIMEOUT)
+                start.assert_called_once()
+                self.assert_reaped(children[0])
+                self.assertIn(b"Connection: close\r\n", upstream.result(_TIMEOUT))
+        self.assertFalse(self.relay.wait_drained(0))  # Not yet fenced for shutdown.
+        self.ingress.close()
+        self.assertTrue(self.relay.wait_drained(0))
+
+    def test_managed_logout_before_launch_does_not_start_a_child(self):
+        token = self.issue()
+        session = self.session(token)
+        registered, release = Event(), Event()
+
+        def before():
+            registered.set()
+            self.assertTrue(release.wait(_TIMEOUT))
+
+        with self.managed(before=before) as (start, _):
+            with self.exchange(token=token) as result:
+                try:
+                    self.assertTrue(registered.wait(_TIMEOUT))
+                    revoked = self.admission.begin_revocation(self.binding, session)
+                    self.assertTrue(revoked.revoked)
+                    self.assertFalse(revoked.wait_drained(0))
+                finally:
+                    release.set()
+                self.assert_refused(*result)
+        start.assert_not_called()
+        self.assertTrue(revoked.wait_drained(0))
+        self.assert_no_upstream()
+
+    def test_managed_logout_during_spawn_reaps_without_sending_request_bytes(self):
+        token = self.issue()
+        session = self.session(token)
+        started, return_child = Event(), Event()
+
+        def launched():
+            started.set()
+            self.assertTrue(return_child.wait(_TIMEOUT))
+
+        def observe():
+            peer, _ = self.native.accept()
+            with peer:
+                peer.settimeout(_TIMEOUT)
+                return peer.recv(1)
+
+        upstream = self.upstream.submit(observe)
+        with self.managed(launched=launched) as (start, children):
+            with self.exchange(token=token) as result:
+                try:
+                    self.assertTrue(started.wait(_TIMEOUT))
+                    revoked = self.admission.begin_revocation(self.binding, session)
+                    self.assertTrue(revoked.revoked)
+                    self.assertFalse(revoked.wait_drained(0))
+                    self.assertEqual(upstream.result(_TIMEOUT), b"")
+                finally:
+                    return_child.set()
+                self.assert_refused(*result)
+        start.assert_called_once()
+        self.assert_reaped(children[0])
+        self.assertTrue(revoked.wait_drained(0))
+        self.assertIsNotNone(self.issue())
+
+    def test_managed_deadline_reaps_cooperative_proxy_without_fencing_others(self):
+        requested = Event()
+        token = self.issue()
+        with (
+            patch.object(web_named_transport, "_REQUEST_TIMEOUT", 1.0),
+            self.managed() as (start, children),
+        ):
+            upstream = self.native_response(None, ready=requested)
+            with self.exchange(token=token) as result:
+                self.assertTrue(requested.wait(_TIMEOUT))
+                self.assert_refused(*result)
+            upstream.result(_TIMEOUT)  # Upstream got EOF from real proxy.
+        start.assert_called_once()
+        self.assert_reaped(children[0])
+        self.assertIsNotNone(self.issue())
+
+    def test_managed_nonzero_exit_refuses_a_valid_reply_and_fences_drain(self):
+        worker = f"try:\n    exec({workspace_service.PROXY!r})\nexcept SystemExit:\n    raise SystemExit(7)"
+        with self.managed(worker=worker) as (start, children):
+            upstream = self.native_response(_reply(self.info()))
+            with self.exchange(token=self.issue()) as result:
+                self.assert_refused(*result)
+            upstream.result(_TIMEOUT)
+        start.assert_called_once()
+        self.assert_reaped(children[0], status=7)
+        self.assertIsNone(self.issue())
+        self.assertFalse(self.relay.wait_drained(0))
+
+    def test_managed_spawn_failure_without_handle_cannot_confirm_cleanup(self):
+        with (
+            tempfile.TemporaryDirectory() as root,
+            self.managed(executable=Path(root) / "absent") as (start, children),
+        ):
+            with self.exchange(token=self.issue()) as result:
+                self.assert_refused(*result)
+        start.assert_called_once()
+        self.assertEqual(children, [])
+        self.assertIsNone(self.issue())
+        self.assertFalse(self.relay.wait_drained(0))
+        self.assert_no_upstream()
+
+    def test_managed_forced_host_reap_is_not_confirmed_workspace_drain(self):
+        token, independent = self.issue(), self.issue()
+        session = self.session(token)
+        started = Event()
+        worker = "import time; time.sleep(10)"
+        with self.managed(worker=worker, launched=started.set) as (start, children):
+            with self.exchange(token=token) as result:
+                self.assertTrue(started.wait(_TIMEOUT))
+                revoked = self.admission.begin_revocation(self.binding, session)
+                self.assertTrue(revoked.revoked)
+                self.assertFalse(revoked.wait_drained(0))
+                self.assert_refused(*result)
+            self.assertFalse(revoked.wait_drained(0))
+            self.assertFalse(self.relay.wait_drained(0))
+            with self.exchange(token=independent) as result:
+                self.assert_refused(*result)
+        start.assert_called_once()
+        self.assert_reaped(children[0], status=-9)
+        self.assertIsNone(self.issue())
+
+    def test_managed_supplied_endpoint_must_equal_the_verified_endpoint(self):
+        def mismatch(endpoint, *, track, check, deadline):
+            track.start_workspace_relay(
+                box, container_id="d" * 64, endpoint=endpoint + "/"
+            )
+
+        with self.managed() as (start, _):
+            self.dial.side_effect = mismatch
+            with self.exchange(token=self.issue()) as result:
+                self.assert_refused(*result)
+        start.assert_not_called()
+        self.assert_no_upstream()

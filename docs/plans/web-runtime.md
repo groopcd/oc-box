@@ -112,10 +112,10 @@ workspace Origin even on GET, plus the app cookie, a bound browser grant and
 the current private owner. It registers cancellation before credential
 resolution or connecting, reconstructs the native Host, Origin and private
 Cookie, and keeps the request registered through response writes and socket
-cleanup. Refusals close without sending a native error body or falling back to
-guest admission. Revocation interrupts the tracked sockets. It is not atomic
-with a write already in progress, cannot recall sent bytes, and does not prove
-that native work stopped.
+and process cleanup. Refusals close without sending a native error body or
+falling back to guest admission. Revocation interrupts the tracked sockets. It
+is not atomic with a write already in progress, cannot recall sent bytes, and
+does not prove that native work stopped.
 
 Only complete, fixed-length JSON replies of at most 8 KiB are eligible (8 KiB
 header limit, one response followed by EOF). The narrow 2.3.2 schemas permit
@@ -130,12 +130,13 @@ port must never be treated as a host loopback destination.
 Synthetic HTTPS and private socket tests cover matching handoff, byte-exact
 replies, route/lease refusals, malformed native replies, and cancellation
 before registration, during startup, during native reads and before browser
-write. They do not establish native wire/schema compatibility on a real owner,
-browser deployment, or live cleanup. Before serving anything, a future
-integration must verify the owner-bound bridge, exact native replies, binds,
-concurrency, owner/expiry sweeps, browser compatibility, and drain before lease
-release. There is no native asset or arbitrary API routing, SSE, WebSocket,
-listener, CLI or installation integration in this slice.
+write. Subprocess fixtures replace only the Podman exec invocation: they
+exercise the same registered socket and actual child wait, including valid
+reply EOF before child exit, cancelled spawn, deadline expiry, nonzero exit,
+and forced host-child cleanup. They do not establish Podman stdin/EOF or remote
+worker cleanup behavior, native wire/schema compatibility on a real owner, or
+browser deployment. There is no native asset or arbitrary API routing, SSE,
+WebSocket, listener, CLI or installation integration in this slice.
 
 ### Private owner lease boundary
 
@@ -156,7 +157,7 @@ through this boundary. The cookie goes upstream only. No credential refresh,
 replacement attach, host OpenCode, host-loopback upstream dial or guest
 fallback is attempted.
 
-The runtime remains unchanged:
+The existing owner and guest lifecycles remain unchanged:
 
 - [`workspace_service.Owner`](../../src/oc_box/workspace_service.py) starts its
   private native service via the container `opencode_v2_io.py lease` worker.
@@ -173,21 +174,46 @@ The runtime remains unchanged:
 - `inspect_owned()` can return the full Podman `Id`, but the current owner
   reply does not bind that immutable ID and running instance to the stream.
   An optional UI-reporting generation is not a mandatory owner generation.
-  The existing guest `relay_command()` opens an exec pipe, not the registered
-  cancellable socket required by the named connector.
+  The existing guest Gateway does not use named admission or this connector.
+
+A future verified producer can explicitly bind
+`web_named_owner.connect_workspace_native` to the launcher module in its lease.
+The connector uses the existing `workspace_service.relay_command` worker
+against the full immutable container ID and the exact leased container
+loopback port, never the container name or host loopback. Only the maintenance
+host environment and cleared container environment are used; the native
+cookie travels in the authenticated HTTP request, not in argv or environment.
+The named worker starts from `/` with isolated Python and site hooks disabled.
+The ordinary one-use Gateway is unchanged.
+
+One admitted request reserves its Unix socketpair and child record before
+launch. Admission, owner and monotonic deadline are checked before and after
+the synchronous spawn: cancellation racing spawn may still start the reserved
+child, but the relay will not then send HTTP. Complete response framing is not
+enough to publish metadata: the managed relay requires the exact child to be
+reaped with a natural zero exit before writing to TLS. Closing the socket
+allows a bounded EOF grace. A fallback can signal only that exact host child
+via a Linux PID descriptor, never a process group. No other code may reap
+this child. A forced or nonzero exit, a spawn without a returned handle,
+or an unconfirmed wait does not prove that the container relay exited. The
+named lifetime fences, retains the use rather than releasing capacity or
+claiming drain, and does not retry. After fencing admission for shutdown the
+lease holder must require `relay.wait_drained()` before releasing the attach,
+including uses from previously revoked grants. A false result does not
+authorize replacement, fallback to guest mode, or automatic release.
 
 Before enabling named mode, a reviewed runtime producer must bind the native
 owner's exact generation and running container identity to the held stream,
 including stop/close and native liveness checks. It must reserve one named
-lifetime per owner, avoid rewrapping a failed lease, supply a confined and
-cancellable connector to that exact container, and prove that guest admission
-cannot bypass named policy on that owner. The listener must stop admission,
-run owner/expiry sweeps, cancel and drain workers, then release the attach.
+lifetime per owner, avoid rewrapping a failed lease, and prove that guest
+admission cannot bypass named policy on that owner. The listener must stop
+admission, run owner/expiry sweeps, and drain handlers before releasing the
+attach. Verify actual Podman cancellation and natural-exit semantics, exact
+native replies, binds, concurrency and browser compatibility before serving.
 Checks are not atomic with native execution and cannot recall already
-transmitted bytes. Synthetic owner observations and Unix socket pairs check
-the consumer contract only; they do not establish this producer, connector,
-full Studio capability, or live cleanup. Public one-use link behavior remains
-unchanged.
+transmitted bytes. Synthetic owner and connector tests do not establish this
+producer, full Studio capability, or live cleanup. Public one-use link
+behavior remains unchanged.
 
 A later LAN instance can use distinct existing sites and certificates under
 operator control. Isolated guest LAN tests can establish transport behavior
