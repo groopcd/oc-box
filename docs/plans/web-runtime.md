@@ -529,6 +529,50 @@ empty composer disabled. The fixture replaces only native exec and owner
 provenance at the boundary; no provider/native agent runs. This smoke does
 not verify PAKE login, browser Send, live Podman, or launcher deployment.
 
+#### Opt-in named Studio composer Send
+
+The same smoke's `--prove-send` phase separately exercises one trusted
+Chromium editor input and Send click through the actual reserved workspace
+TLS dispatcher. The default invocation remains provider-free and read-only.
+With the same disposable nonroot loopback-only namespace and already
+available Playwright interpreter described above, run:
+
+```sh
+unshare --user --map-root-user --net sh -c '
+  ip link set lo up || exit
+  fixture_home=$1; shift
+  exec unshare --user --map-user=1000 --map-group=1000 \
+    env -i HOME="$fixture_home" PATH=/usr/bin:/bin PYTHONPATH=src "$@"
+' sh /path/to/empty-private-test-home /path/to/offline-playwright-python \
+  -B tests/smoke_named_studio_https_browser.py \
+  --chromium /path/to/pinned/chrome-headless-shell \
+  --opencode /path/to/pinned/opencode-2.4.1 --prove-send
+```
+
+Only the fixture starts a fixed HTTP provider on `127.0.0.1`. Fresh native
+configuration permits only that provider, denies tool use, and imports
+synthetic history. The provider accepts one bounded request for the fixed
+model and exact selected fixture's two user messages, and returns only a
+canned text stream. Native 2.4.1 can advertise bounded tool definitions
+even with the no-tools settings; the fixture issues no tool call and
+requires a tool-free native transcript.
+
+The proof observes the exact production `resume:true` POST bytes without
+rewriting them, and checks both the browser queue result and the exact
+native-acknowledged message ID. Native export verifies the persisted
+user/assistant text and an unchanged neighboring session. After checked
+site/relay drain and graceful native shutdown, it reopens the same private
+fixture store with provider use disabled, verifies the retained turn
+again, and requires another clean native exit. The provider is reaped
+and the temporary browser and native roots are removed. No real provider
+credential, history, account, or configuration is used.
+
+Chromium, HTTPS dispatch, native queue admission, native execution and
+export are real. Owner provenance, the post-auth grant, PAKE backend and
+outer Podman exec are fixtures; the wire observer delegates to the original
+Studio Send and socket write. This is one scoped synthetic Send proof, not
+PAKE, live Podman, launcher, arbitrary-model, or replay acceptance.
+
 ## Isolated feasibility results
 
 - **Local HTTPS:** Two fresh, sandboxed Chromium 159 lab runs each passed

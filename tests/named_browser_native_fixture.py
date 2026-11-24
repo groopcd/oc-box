@@ -103,7 +103,7 @@ class NativeFixture:
 
 
 @contextmanager
-def native_fixture(root, binary, *, version="2.3.2"):
+def native_fixture(root, binary, *, version="2.3.2", configure=None, after_stop=None):
     expected = _NATIVE_PINS[version]
     with binary.open("rb") as stream:
         require(
@@ -113,6 +113,15 @@ def native_fixture(root, binary, *, version="2.3.2"):
     home, project = root / "native-home", root / "native-project"
     home.mkdir(mode=0o700)
     project.mkdir(mode=0o700)
+    base_config = {
+        "snapshots": False,
+        "formatter": False,
+        "update": "disable",
+        "plugins": [],
+        "policies": [{"action": "plugin.use", "resource": "*", "effect": "deny"}],
+    }
+    # Test-only fixed overlay of this new fixture; no host configuration input.
+    config = base_config if configure is None else configure(base_config)
     env = {
         "PATH": "/usr/bin:/bin",
         "HOME": str(home),
@@ -128,17 +137,7 @@ def native_fixture(root, binary, *, version="2.3.2"):
         "OPENCODE_DISABLE_MODELS_FETCH": "1",
         "OPENCODE_DISABLE_PROJECT_CONFIG": "1",
         "OPENCODE_TEST_HOME": str(home),
-        "OPENCODE_CONFIG_CONTENT": json.dumps(
-            {
-                "snapshots": False,
-                "formatter": False,
-                "update": "disable",
-                "plugins": [],
-                "policies": [
-                    {"action": "plugin.use", "resource": "*", "effect": "deny"}
-                ],
-            }
-        ),
+        "OPENCODE_CONFIG_CONTENT": json.dumps(config),
     }
     exit_info = {}
     with ExitStack() as cleanup:
@@ -167,3 +166,25 @@ def native_fixture(root, binary, *, version="2.3.2"):
         exit_info == {"code": 0, "forced": False},
         "The private native service did not drain.",
     )
+    if after_stop is not None:
+        # Inspect the same disposable database through native reads only.
+        # Remove the provider overlay and deny all provider work on reopen.
+        reopened_config = base_config | {
+            "warming": False,
+            "policies": base_config["policies"]
+            + [
+                {"action": action, "resource": "*", "effect": "deny"}
+                for action in ("provider.use", "tool.use")
+            ],
+        }
+        reopened_env = env | {"OPENCODE_CONFIG_CONTENT": json.dumps(reopened_config)}
+        reopened_exit = {}
+        with patch.dict(os.environ, reopened_env, clear=True), chdir(project):
+            with opencode_v2_io.server(
+                str(binary), startup_deadline=monotonic() + 16, exit_info=reopened_exit
+            ) as request:
+                after_stop(request)
+        require(
+            reopened_exit == {"code": 0, "forced": False},
+            "The reopened native service did not drain.",
+        )
