@@ -74,6 +74,7 @@ File: oc-box.info,  Node: Synopsis,  Next: Description,  Prev: Name,  Up: Top
      oc-box upgrade [--check] [--stable | --devel] [--vault] [--tui]
      oc-box upgrade --auto-update on|off
      oc-box --uninstall [--dry-run]
+     oc-box --uninstall --full [--dry-run]  # reports incomplete cleanup
      oc-box secrets init|passwd [--min-passphrase-length N]
      oc-box secrets list
      oc-box secrets set|remove NAME
@@ -2136,9 +2137,28 @@ launcher or an unverified installation refuses.  Use the owning package
 manager for a Python-package installation; oc-box will not invoke that
 manager or delete its environment.
 
-Full cleanup is not enabled in this candidate.  ‘--full’ refuses rather
-than falling back to launcher-only removal.  Neither mode may remove
-host OpenCode history.
+Full cleanup is not enabled.  Both ‘oc-box --uninstall --full’ and
+‘oc-box --uninstall --full --dry-run’ return ‘1’: Podman cleanup and
+removal of oc-box state were not verified.  Nothing is removed, not even
+the launcher.  There is no confirmation, automatic engine query, stop,
+history sync or prune.  Project files, ‘.oc-box-id’ markers, external
+backups and host OpenCode history are outside uninstall scope.
+
+Keep the launcher installed while reviewing the workspaces you intend to
+clean up.  Use ‘oc-box list’ to see the registrations without querying
+Podman.  If you can identify the original rootless Podman store for your
+user, manually inspect the intended containers and home volumes there
+and compare them with those registrations.  Names and labels alone do
+not verify ownership.  Leave any ambiguous, shared or unrelated
+resources untouched; do not use a prune or engine reset as a substitute
+for review.
+
+If you only intend to remove the launcher, run ‘oc-box --uninstall
+--dry-run’ separately, without ‘--full’, from the verified active GitHub
+installation, then run ‘oc-box --uninstall’ when ready.  The usual
+ownership checks and typed confirmation still apply.  For a
+Python-package installation, use the package manager that owns it
+instead.  Neither option completes Podman cleanup.
 
 4.22 secrets
 ============
@@ -5336,22 +5356,22 @@ Tag Table:
 Node: Top210
 Node: Name769
 Node: Synopsis930
-Node: Description5202
-Node: Commands11022
-Node: Options152273
-Node: Lifecycle and persistence216013
-Node: Distribution images218313
-Node: Sessions and recovery223390
-Node: Devices and host permissions229975
-Node: Resource reports232321
-Node: Configuration and environment234432
-Node: Files245813
-Node: Exit status256723
-Node: Examples258131
-Node: Troubleshooting260270
-Node: Installation and manuals272762
-Node: Authors and license282952
-Node: See also283559
+Node: Description5275
+Node: Commands11095
+Node: Options153514
+Node: Lifecycle and persistence217254
+Node: Distribution images219554
+Node: Sessions and recovery224631
+Node: Devices and host permissions231216
+Node: Resource reports233562
+Node: Configuration and environment235673
+Node: Files247054
+Node: Exit status257964
+Node: Examples259372
+Node: Troubleshooting261511
+Node: Installation and manuals274003
+Node: Authors and license284193
+Node: See also284800
 
 End Tag Table
 

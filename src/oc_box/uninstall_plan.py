@@ -23,6 +23,7 @@ class UninstallSnapshot:
     workspace: workspace_uninstall.WorkspacePlan | None
     items: tuple[uninstall_review.ReviewItem, ...]
     blockers: tuple[str, ...]
+    package_guidance: str | None = None
 
     def render(self):
         return uninstall_review.render(self.request, self.items, blockers=self.blockers)
@@ -80,6 +81,7 @@ def prepare_review(request, runtime, *, home=None, workspace_review=None):
     items = []
     blockers = []
     installation = workspace = None
+    package_guidance = None
     try:
         captured = install_ownership.review_installation(runtime, home=home)
     except install_ownership.OwnershipError:
@@ -95,13 +97,16 @@ def prepare_review(request, runtime, *, home=None, workspace_review=None):
                 "No verified automatic removal for this package installation."
             )
             if type(captured) is install_ownership.PackageInstallReview:
-                guidance = {
+                package_guidance = {
                     "pipx": "Use pipx uninstall oc-box from the owning pipx installation.",
                     "uv": "Use uv tool uninstall oc-box from the owning uv installation.",
                     "pip": "Use pip in the verified environment; do not remove the whole environment.",
-                }.get(captured.manager)
-                if guidance:
-                    blockers.append(guidance)
+                }.get(
+                    captured.manager,
+                    "Use the owning package manager; do not remove the whole environment.",
+                )
+                if not request.full:
+                    blockers.append(package_guidance)
     if request.full:
         if request.dry_run:
             blockers.append(
@@ -122,8 +127,13 @@ def prepare_review(request, runtime, *, home=None, workspace_review=None):
                     blockers.append("No verified full workspace removal scope.")
         elif not blockers:
             blockers.append(
-                "Full workspace review requires a verified local engine scope."
+                "Workspace engine ownership was not queried; full cleanup is unavailable."
             )
     return UninstallSnapshot(
-        request, installation, workspace, tuple(items), tuple(blockers)
+        request,
+        installation,
+        workspace,
+        tuple(items),
+        tuple(blockers),
+        package_guidance,
     )

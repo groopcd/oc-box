@@ -207,6 +207,42 @@ class FlatRemovalTests(unittest.TestCase):
         self.assertEqual(vault.read_bytes(), b"synthetic encrypted vault")
         self.assertFalse(self.stages())
 
+    def test_incomplete_full_leaves_installation_and_data_for_separate_preview(self):
+        release = self.install()
+        expected = self.review(release)
+        retained = {
+            self.home / "project/main.txt",
+            self.home / "project/.oc-box-id",
+            self.home / "external.ocbox",
+            self.home / ".local/share/opencode/opencode.db",
+            self.home / ".local/state/oc-box/workspaces/state",
+        }
+        for path in retained:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"synthetic data")
+
+        with (
+            ownership.installed_runtime_use(release),
+            contextlib.redirect_stdout(io.StringIO()),
+            patch.object(oc_box, "PACKAGE", release),
+            patch.object(oc_box, "podman", side_effect=AssertionError),
+            patch.object(uninstall_tty, "confirm", side_effect=AssertionError),
+        ):
+            for args, code in (
+                (["--full"], 1),
+                (["--full", "--dry-run"], 1),
+                (["--dry-run"], 0),
+            ):
+                with (
+                    self.subTest(args=args),
+                    patch.object(sys, "argv", ["oc-box", "--uninstall", *args]),
+                ):
+                    self.assertEqual(oc_box.entrypoint(), code)
+                    self.assertEqual(self.review(release), expected)
+                    for path in retained:
+                        self.assertEqual(path.read_bytes(), b"synthetic data")
+                    self.assertFalse(self.stages())
+
     def test_exact_removal_preserves_older_release_and_never_opens_data(self):
         old = self.install()
         active = self.install()

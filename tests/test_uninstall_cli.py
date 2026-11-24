@@ -12,6 +12,9 @@ from oc_box import (
     installation,
     oc_box,
     uninstall_cli,
+    uninstall_plan,
+    uninstall_review,
+    workspace_uninstall,
 )
 
 from test_uninstall_plan import INSTALLATION, RELEASE
@@ -51,6 +54,10 @@ class UninstallCLITests(unittest.TestCase):
             self.invoke("--help")
         self.assertEqual(result.exception.code, 0)
         self.assertIn("oc-box --uninstall", self.out.getvalue())
+        self.assertIn(
+            "currently refuses without removing anything",
+            " ".join(self.out.getvalue().split()),
+        )
         self.guard.assert_not_called()
         self.review.assert_not_called()
         self.approve.assert_not_called()
@@ -97,15 +104,102 @@ class UninstallCLITests(unittest.TestCase):
         self.approve.assert_not_called()
         self.remove.assert_not_called()
 
-    def test_incomplete_full_and_package_never_run_a_narrower_deletion(self):
-        self.assertEqual(self.invoke("--full"), 1)
-        self.assertEqual(self.invoke("--full", "--dry-run"), 1)
-        self.assertIn("Workspace engine ownership was not queried", self.out.getvalue())
-        self.review.return_value = install_ownership.PackageInstallReview(
-            "pipx", Path("/synthetic/owned-env"), "1.9.427.dev0"
+    def test_full_refuses_both_modes_and_guides_separate_launcher_only_preview(self):
+        for args in (["--full"], ["--full", "--dry-run"]):
+            with (
+                self.subTest(args=args),
+                redirect_stdout(io.StringIO()) as output,
+                patch.object(oc_box, "PACKAGE", RELEASE),
+                patch.object(oc_box.sys, "argv", ["oc-box", "--uninstall", *args]),
+                patch.object(oc_box, "state_root", side_effect=AssertionError),
+                patch.object(oc_box, "podman", side_effect=AssertionError),
+                patch.object(oc_box, "sync_sessions", side_effect=AssertionError),
+                patch.object(
+                    workspace_uninstall, "plan_workspaces", side_effect=AssertionError
+                ),
+                patch.object(
+                    uninstall_plan.UninstallSnapshot,
+                    "render",
+                    side_effect=AssertionError,
+                ),
+                patch.object(subprocess, "Popen", side_effect=AssertionError),
+            ):
+                self.assertEqual(oc_box.entrypoint(), 1)
+                report = output.getvalue()
+                self.assertIn("Workspace engine ownership was not queried", report)
+                self.assertIn(
+                    "Podman cleanup and oc-box state removal were not verified", report
+                )
+                self.assertIn("Nothing was removed", report)
+                self.assertIn("workspace containers and home volumes", report)
+                self.assertIn(".oc-box-id markers, external backups", report)
+                self.assertIn("host OpenCode history were not touched", report)
+                self.assertIn(
+                    "Leave ambiguous, shared, or unrelated resources untouched",
+                    " ".join(report.split()),
+                )
+                self.assertLess(
+                    report.index("Keep the launcher installed"),
+                    report.index("`oc-box --uninstall --dry-run`"),
+                )
+                self.assertIn("`oc-box list`", report)
+                self.assertIn("`oc-box --uninstall` without `--full`", report)
+                self.assertNotIn("Proposed removal", report)
+                self.assertNotIn("Required confirmation", report)
+        self.approve.assert_not_called()
+        self.remove.assert_not_called()
+
+    def test_full_cannot_confirm_or_remove_even_if_review_returns_no_blockers(self):
+        snapshot = uninstall_plan.UninstallSnapshot(
+            uninstall_review.UninstallRequest(full=True, dry_run=False),
+            INSTALLATION,
+            None,
+            (),
+            (),
         )
-        self.assertEqual(self.invoke(), 1)
-        self.assertIn("No verified automatic removal", self.out.getvalue())
+        with patch.object(uninstall_plan, "prepare_review", return_value=snapshot):
+            self.assertEqual(self.invoke("--full"), 1)
+        self.assertIn("Nothing was removed", self.out.getvalue())
+        self.approve.assert_not_called()
+        self.remove.assert_not_called()
+
+    def test_package_guidance_is_separate_from_full_and_uses_verified_manager(self):
+        for manager, command in (
+            ("pipx", "pipx uninstall oc-box"),
+            ("uv", "uv tool uninstall oc-box"),
+        ):
+            self.review.return_value = install_ownership.PackageInstallReview(
+                manager, Path("/synthetic/owned-env"), "1.9.427.dev0"
+            )
+            for args in ([], ["--full"], ["--full", "--dry-run"]):
+                with (
+                    self.subTest(manager=manager, args=args),
+                    redirect_stdout(io.StringIO()) as output,
+                ):
+                    self.assertEqual(self.invoke(*args), 1)
+                    report = output.getvalue()
+                    self.assertIn("No verified automatic removal", report)
+                    self.assertIn(command, report)
+                    self.assertNotIn("`oc-box --uninstall --dry-run`", report)
+                    self.assertNotIn("Required confirmation", report)
+                    if args:
+                        self.assertIn("Nothing was removed", report)
+                        self.assertLess(
+                            report.index("Keep the launcher installed"),
+                            report.index(command),
+                        )
+        self.approve.assert_not_called()
+        self.remove.assert_not_called()
+
+    def test_full_unverified_installation_does_not_infer_package_manager(self):
+        self.review.side_effect = install_ownership.OwnershipError()
+        self.assertEqual(self.invoke("--full"), 1)
+        report = self.out.getvalue()
+        self.assertIn("could not verify the running installation", report)
+        self.assertIn("Identify your installation first", report)
+        self.assertIn("verified active GitHub installation", report)
+        self.assertNotIn("pipx uninstall", report)
+        self.assertNotIn("uv tool uninstall", report)
         self.approve.assert_not_called()
         self.remove.assert_not_called()
 

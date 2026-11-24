@@ -32,6 +32,7 @@ oc-box tui [--project PATH | --workspace ID] [--read-only] [--demo]
 oc-box upgrade [--check] [--stable | --devel] [--vault] [--tui]
 oc-box upgrade --auto-update on|off
 oc-box --uninstall [--dry-run]
+oc-box --uninstall --full [--dry-run]  # reports incomplete cleanup
 oc-box secrets init|passwd [--min-passphrase-length N]
 oc-box secrets list
 oc-box secrets set|remove NAME
@@ -1905,9 +1906,26 @@ an in-use launcher or an unverified installation refuses. Use the owning
 package manager for a Python-package installation; oc-box will not invoke
 that manager or delete its environment.
 
-Full cleanup is not enabled in this candidate. `--full` refuses rather than
-falling back to launcher-only removal. Neither mode may remove host OpenCode
-history.
+Full cleanup is not enabled. Both `oc-box --uninstall --full` and
+`oc-box --uninstall --full --dry-run` return `1`: Podman cleanup and removal of
+oc-box state were not verified. Nothing is removed, not even the launcher.
+There is no confirmation, automatic engine query, stop, history sync or prune.
+Project files, `.oc-box-id` markers, external backups and host OpenCode history
+are outside uninstall scope.
+
+Keep the launcher installed while reviewing the workspaces you intend to clean
+up. Use `oc-box list` to see the registrations without querying Podman. If you
+can identify the original rootless Podman store for your user, manually inspect
+the intended containers and home volumes there and compare them with those
+registrations. Names and labels alone do not verify ownership. Leave any
+ambiguous, shared or unrelated resources untouched; do not use a prune or
+engine reset as a substitute for review.
+
+If you only intend to remove the launcher, run `oc-box --uninstall --dry-run`
+separately, without `--full`, from the verified active GitHub installation, then
+run `oc-box --uninstall` when ready. The usual ownership checks and typed
+confirmation still apply. For a Python-package installation, use the package
+manager that owns it instead. Neither option completes Podman cleanup.
 
 ### secrets
 
