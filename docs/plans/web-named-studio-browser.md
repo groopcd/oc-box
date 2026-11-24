@@ -68,6 +68,20 @@ expired or stale reply is **unconfirmed**, never permission to retry. An
 acknowledgement confirms queueing only. No automatic replay, alternate
 transport or fallback Send is implemented.
 
+After a verified queue acknowledgement, the named controller schedules only
+the existing read-only conversation GET on that exact page, session and
+generation. There are at most three samples, nominally at 250 ms, 1 s and
+2.5 s; an overlapping read is skipped, and no new sample starts after 3 s.
+A newer verified acknowledgement replaces pending samples, and invalidation
+cancels both pending samples and active exchanges. Refused and unconfirmed
+results schedule nothing. This is not execution tracking, and a result that
+settles after the samples may not appear in the visible snapshot.
+
+The view keeps the last valid transcript until a replacement passes the same
+projection and live-selection checks. A failed read does not blank it.
+Refresh only replaces transcript nodes; it does not change the separate
+composer, newer drafts, focus, selection, or queue receipt.
+
 ## Offline browser scope
 
 ```sh
@@ -79,6 +93,8 @@ Chrome Headless Shell 159.0.8154.6 verified the real first-party modules with
 intercepted synthetic requests and replies in a disposable browser home. It
 checked trusted activation and replay refusal, request mode/options and
 observable headers, strict Send classifications, aborts, an expired reply,
-and native-frame draft preservation. Interception does not expose final
-Fetch Metadata wire headers. No real TLS listener, app grant, native
+and native-frame draft preservation. It also checked the bounded same-scope
+GET burst, no Send replay, non-overlap, abort on away/back, and retention of
+the current draft and caret across a transcript refresh. Interception does
+not expose final Fetch Metadata wire headers. No real TLS listener, app grant, native
 admission, provider, or guest compatibility was exercised.

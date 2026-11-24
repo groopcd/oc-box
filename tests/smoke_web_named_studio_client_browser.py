@@ -16,6 +16,8 @@ import tempfile
 from unittest.mock import patch
 from urllib.parse import urlsplit
 
+from oc_box import web_named_account_assets, web_named_studio_ui, web_sessions
+
 from smoke_web_studio_shell_browser import RUNTIME, assets
 
 
@@ -24,6 +26,7 @@ FOREIGN = "https://accounts.ocbox.test:18444"
 CHANGE = "/oc-box/studio/selection"
 READ = "/oc-box/studio/conversation?session=ses_alpha"
 SEND = "/oc-box/studio/send"
+CATALOG = "/oc-box/studio/catalog"
 PAGE = "A" * 43
 CHAT = "application/json; charset=utf-8"
 MODULE = """
@@ -80,7 +83,7 @@ def snapshot(generation, session="ses_alpha"):
     return compact({"page": PAGE, "generation": generation, "sessionID": session})
 
 
-def projection():
+def projection(*extra_messages):
     return compact(
         {
             "sessionID": "ses_alpha",
@@ -92,7 +95,16 @@ def projection():
                     "role": "user",
                     "text": "Literal <b>fixture</b> 🦉",
                     "truncated": False,
-                }
+                },
+                *(
+                    {
+                        "id": f"msg_refresh_{index}",
+                        "role": "assistant",
+                        "text": text,
+                        "truncated": False,
+                    }
+                    for index, text in enumerate(extra_messages)
+                ),
             ],
         }
     )
@@ -117,6 +129,7 @@ class FixtureWire:
         self.replies = deque()
         self.calls = []
         self.unexpected = []
+        self.held = None
 
     def respond(self, target, status, body, content_type=CHAT, **headers):
         self.replies.append((target, status, body, content_type, headers))
@@ -124,7 +137,10 @@ class FixtureWire:
     def route(self, route):
         request = route.request
         url = urlsplit(request.url)
-        if url.path.startswith("/oc-box/studio/"):
+        if request.method == "GET" and not url.query and url.path in self.static:
+            content_type, body = self.static[url.path]
+            route.fulfill(content_type=content_type, body=body)
+        elif url.path.startswith("/oc-box/studio/"):
             target = url.path + ("?" + url.query if url.query else "")
             self.calls.append(
                 (target, request.method, request.all_headers(), request.post_data)
@@ -139,7 +155,8 @@ class FixtureWire:
                 return
             _, status, body, content_type, headers = self.replies.popleft()
             if status is None:
-                # Held open only until the browser's own abort/timeout.
+                # Held until the fixture replies or the browser aborts.
+                self.held = route
                 return
             if status == 0:
                 route.abort()
@@ -154,17 +171,34 @@ class FixtureWire:
                 },
                 body=body,
             )
-        elif request.method == "GET" and not url.query and url.path in self.static:
-            content_type, body = self.static[url.path]
-            route.fulfill(content_type=content_type, body=body)
         else:
             self.unexpected.append(request.url)
             route.abort()
 
+    def finish_read(self, body):
+        assert self.held is not None and self.held.request.url == ORIGIN + READ
+        route, self.held = self.held, None
+        route.fulfill(
+            status=200,
+            headers={
+                "Content-Type": CHAT,
+                "Content-Length": str(len(body)),
+                "Cache-Control": "no-store",
+            },
+            body=body,
+        )
+
     def check_calls(self):
         for target, method, headers, body in self.calls:
             assert "authorization" not in headers and "referer" not in headers
-            if target == CHANGE:
+            if target == CATALOG:
+                assert (
+                    method == "GET"
+                    and body is None
+                    and headers["accept"] == "application/json"
+                )
+                assert "x-oc-box-studio-page" not in headers
+            elif target == CHANGE:
                 assert method == "POST"
                 assert (
                     headers["origin"] == ORIGIN
@@ -276,13 +310,14 @@ def exercise(browser, expect):
                 expect(native).to_be_visible()
 
         def send_result(code, payload, expected, **headers):
+            before = len(wire.calls)
             field.fill("  One synthetic input 🦉\nline  ")
             send.evaluate("button => button.click()")
             wire.respond(SEND, code, payload, **headers)
             send.click()
             expect(status).to_contain_text(expected)
             assert (
-                json.loads(wire.calls[-1][3])["text"]
+                json.loads(wire.calls[before][3])["text"]
                 == "  One synthetic input 🦉\nline  "
             )
 
@@ -315,11 +350,53 @@ def exercise(browser, expect):
         assert wire.calls[-1][2]["x-oc-box-studio-generation"] == "1"
         send_result(403, b'{"status":"refused"}', "Not sent")
         expect(send).to_be_enabled()
-        send_result(200, b'{"status":"queued"}', "acknowledged")
+        # A refused or unconfirmed attempt starts no refresh burst. Allow
+        # every scheduled offset to pass while this same scope stays visible.
+        before = len(wire.calls)
+        page.evaluate("() => new Promise(resolve => setTimeout(resolve, 2700))")
+        assert len(wire.calls) == before
+        before = len(wire.calls)
+        wire.respond(SEND, 200, b'{"status":"queued"}')
+        wire.respond(READ, None, b"")
+        wire.respond(READ, 200, b'{"not":"a projection"}')
+        wire.respond(
+            READ, 200, projection("First refreshed text", "Later bounded sample")
+        )
+        with page.expect_request(lambda req: req.url == ORIGIN + READ):
+            send.click()
+        expect(status).to_have_text(
+            "OpenCode acknowledged the queued message. Execution is not confirmed."
+        )
         expect(field).to_have_value("")
+        expect(
+            center.get_by_text("Literal <b>fixture</b> 🦉", exact=True)
+        ).to_be_visible()
+        field.fill("Newer draft, kept across transcript refresh")
+        field.evaluate("""node => {
+          window.refreshDraft = node;
+          node.setSelectionRange(2, 7);
+        }""")
+        wire.finish_read(projection("First refreshed text"))
+        expect(center.get_by_text("First refreshed text", exact=True)).to_be_visible()
+        expect(center.get_by_text("Later bounded sample", exact=True)).to_be_visible()
+        expect(field).to_have_value("Newer draft, kept across transcript refresh")
+        assert field.evaluate("""node => node === window.refreshDraft &&
+          document.activeElement === node && node.selectionStart === 2 && node.selectionEnd === 7""")
+        assert [
+            (target, method, headers["x-oc-box-studio-generation"])
+            for target, method, headers, _ in wire.calls[before:]
+        ] == [
+            (SEND, "POST", "1"),
+            (READ, "GET", "1"),
+            (READ, "GET", "1"),
+            (READ, "GET", "1"),
+        ]
         send_result(503, b'{"status":"unconfirmed"}', "may already be queued")
         expect(send).to_be_disabled()
         expect(field).to_have_value("  One synthetic input 🦉\nline  ")
+        before = len(wire.calls)
+        page.evaluate("() => new Promise(resolve => setTimeout(resolve, 2700))")
+        assert len(wire.calls) == before
 
         choose(2, None, home)
         expect(native).to_be_visible()
@@ -400,6 +477,36 @@ def exercise(browser, expect):
         assert not page.evaluate("window.heldSelection")
         assert not page.evaluate("fixture.present()")
         expect(center).to_be_hidden()
+
+        # Hold a post-ack read across the next scheduled sample to prove
+        # non-overlap; then revoke it and reopen the same ID under a new
+        # generation before the last scheduled sample could run.
+        choose(15)
+        show()
+        before = len(wire.calls)
+        wire.respond(SEND, 200, b'{"status":"queued"}')
+        wire.respond(READ, None, b"")
+        field.fill("One Send, then leave while refreshing")
+        with page.expect_request(lambda req: req.url == ORIGIN + READ):
+            send.click()
+        page.evaluate("() => new Promise(resolve => setTimeout(resolve, 1100))")
+        assert [target for target, *_ in wire.calls[before:]] == [SEND, READ]
+        with page.expect_event(
+            "requestfailed", predicate=lambda req: req.url == ORIGIN + READ
+        ):
+            choose(16, None, home)
+        choose(17)
+        show()
+        field.fill("New generation's draft")
+        page.evaluate("() => new Promise(resolve => setTimeout(resolve, 2600))")
+        expect(field).to_have_value("New generation's draft")
+        assert [target for target, *_ in wire.calls[before:]] == [
+            SEND,
+            READ,
+            CHANGE,
+            CHANGE,
+            READ,
+        ]
         assert len(page.evaluate("Object.keys(localStorage)")) == 0
         assert len(page.evaluate("Object.keys(sessionStorage)")) == 0
         # Browser routing does not expose Chromium's final Sec-Fetch-* wire
@@ -407,6 +514,89 @@ def exercise(browser, expect):
         assert page.evaluate("fixture.modes()") == [
             ["same-origin", "same-origin", "error", "no-store", "no-referrer"]
         ] * len(wire.calls)
+        assert not errors
+        wire.check_calls()
+    finally:
+        context.close()
+
+
+def exercise_iframe_free_entry(browser, expect):
+    wire = FixtureWire()
+    prefix = web_sessions.NAMED_STUDIO_ASSET_PREFIX
+    for name, size, digest in web_named_studio_ui._PINNED:
+        mime = "text/css" if name.endswith(".css") else "text/javascript"
+        wire.static[prefix + name] = (
+            mime,
+            web_named_account_assets._source(name, size, digest),
+        )
+    wire.static["/"] = (
+        "text/html",
+        web_sessions.document(
+            None,
+            [],
+            "unavailable",
+            named_studio=True,
+            named_page=json.loads(snapshot(0, None)),
+        ),
+    )
+    wire.respond(
+        CATALOG,
+        200,
+        compact(
+            {
+                "hasEarlier": False,
+                "sessions": [
+                    {
+                        "id": "ses_alpha",
+                        "title": "Synthetic named row",
+                        "archived": False,
+                        "child": False,
+                    }
+                ],
+            }
+        ),
+        "application/json",
+    )
+    context = browser.new_context(service_workers="block")
+    try:
+        context.set_default_timeout(5000)
+        context.route("**/*", wire.route)
+        page = context.new_page()
+        errors = []
+        page.on("pageerror", lambda error: errors.append(error))
+        page.goto(ORIGIN + "/", wait_until="load")
+        center = page.locator("#workspace-studio-center")
+        expect(center).to_be_hidden()
+        expect(page.locator("iframe")).to_have_count(0)
+        wire.respond(CHANGE, 200, snapshot(1), "application/json")
+        wire.respond(READ, 200, projection())
+        page.get_by_role("tab", name="Synthetic named row", exact=True).click()
+        expect(
+            center.get_by_text("Literal <b>fixture</b> 🦉", exact=True)
+        ).to_be_visible()
+        wire.respond(SEND, 200, b'{"status":"queued"}')
+        wire.respond(READ, 200, projection())
+        wire.respond(READ, 200, projection())
+        wire.respond(READ, 200, projection("Refreshed by the real named entry"))
+        center.get_by_role("textbox", name="Message", exact=True).fill(
+            "Exactly one fixture Send"
+        )
+        center.get_by_role("button", name="Send", exact=True).click()
+        expect(
+            center.get_by_text("Refreshed by the real named entry", exact=True)
+        ).to_be_visible()
+        expect(center.get_by_role("status")).to_contain_text(
+            "Execution is not confirmed"
+        )
+        assert [target for target, *_ in wire.calls] == [
+            CATALOG,
+            CHANGE,
+            READ,
+            SEND,
+            READ,
+            READ,
+            READ,
+        ]
         assert not errors
         wire.check_calls()
     finally:
@@ -448,6 +638,7 @@ def main():
             try:
                 version = browser.version
                 exercise(browser, expect)
+                exercise_iframe_free_entry(browser, expect)
             finally:
                 browser.close()
     print(
@@ -455,6 +646,9 @@ def main():
     )
     print(
         "PASS trusted gestures, aborts, strict Send results, no fallback frame mutation or replay."
+    )
+    print(
+        "PASS iframe-free named entry updates the same transcript after one accepted Send."
     )
 
 
