@@ -294,6 +294,9 @@ class _ManagedGateway:
         self._acceptor.join(max(0.0, deadline - monotonic()))
         if self._acceptor.is_alive():
             return verdict.UNCONFIRMED if self._failed.is_set() else verdict.WAITING
+        # A failed acceptor verdict cannot authorize release, but it doesn't
+        # prevent bounded cleanup of the already registered workers.
+        workers = self._workers.close_review(timeout=max(0.0, deadline - monotonic()))
         if not (
             self._accept_finished
             and self._listener_closed
@@ -303,9 +306,8 @@ class _ManagedGateway:
             and not self._failed.is_set()
         ):
             return verdict.UNCONFIRMED
-        workers = self._workers.close_review(timeout=max(0.0, deadline - monotonic()))
         if workers is not verdict.VERIFIED:
-            return verdict.UNCONFIRMED if self._failed.is_set() else workers
+            return workers
         with self._relays_lock:
             relays_drained = not self._relays
         if (

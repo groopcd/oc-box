@@ -324,6 +324,27 @@ class ManagedGatewayTests(GuestOwnerFixture, unittest.TestCase):
             self.assertIs(service.LIFECYCLE_LOCK.get(), exact)
             self.assertFalse(self.owner.closing)
 
+    def test_unconfirmed_acceptor_still_joins_its_registered_worker(self):
+        with ExitStack() as stack:
+            relay = self.start_gateway(stack)
+            entered = Event()
+            original = relay._head
+
+            def wait_for_head(use):
+                entered.set()
+                return original(use)
+
+            stack.enter_context(patch.object(relay, "_head", side_effect=wait_for_head))
+            peer = self.client(stack, relay)
+            self.assertTrue(entered.wait(5))
+            # An independently lost acceptor receipt stays unconfirmed. It
+            # must not suppress the bounded join of already-accounted work.
+            relay._failed.set()
+            self.assertIs(relay.drain_review(), worker_drain.DrainReview.UNCONFIRMED)
+            self.assertFalse(relay._workers._workers)
+            self.assertEqual(peer.recv(1), b"")
+            self.assertFalse(self.owner.closing)
+
     def test_ambiguous_acceptor_start_never_dispatches_or_reports_drain(self):
         with ExitStack() as stack:
             owner_proof = self.seal(stack)
