@@ -1,9 +1,9 @@
 // Minimal Studio controls for tests focused on native routing or attachments.
 // The markup-backed layout test exercises the real toolbars and wide panes.
 export function addStudioControls(elements, create, window) {
-  for (const id of ["layouts", "manager-nav", "search", "library", "sessions-toggle",
+  for (const id of ["layouts", "manager-nav", "search", "library", "sessions-toggle", "inspector-toggle",
     "open-tabs", "history-tabs", "content", "divider-left", "divider-right", "chat",
-    "overview", "unavailable", "unavailable-title", "search-status",
+    "overview", "overview-title", "unavailable", "unavailable-title", "search-status",
     "conversation-title", "current-session"]) {
     elements["workspace-" + id] = create("workspace-" + id);
   }
