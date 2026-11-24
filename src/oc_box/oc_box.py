@@ -210,7 +210,7 @@ def _loading_progress(label, started, interval, stream, concise):
     drawn = False
     badge_erase = ""
     partial_output = False
-    paused = False
+    retired = False
     writable = True
     worker = None
     frames = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
@@ -261,7 +261,11 @@ def _loading_progress(label, started, interval, stream, concise):
             width = max(os.get_terminal_size(fd).columns - 1, 0)
         except (OSError, ValueError):
             width = 0
-        mark = (final_badge if final else badge).fit(width + 1)
+        mark = (
+            startup_output.Badge()
+            if retired
+            else (final_badge if final else badge).fit(width + 1)
+        )
         width -= mark.cells
         spinner = "" if final else frames[frame % len(frames)] + " "
         frame += 1
@@ -274,7 +278,11 @@ def _loading_progress(label, started, interval, stream, concise):
             if len(suffix) < width
             else suffix.lstrip()[:width]
         )
-        output = badge_erase + "\r\x1b[K" + mark.wire + text + ("\n" if final else "")
+        output = (
+            text + "\n"
+            if retired
+            else badge_erase + "\r\x1b[K" + mark.wire + text + ("\n" if final else "")
+        )
         # A flush can be interrupted after the terminal already got the badge.
         # Keep its deletion armed before attempting the output.
         drawn = not final
@@ -319,7 +327,7 @@ def _loading_progress(label, started, interval, stream, concise):
             return False
 
     def redraw():
-        if not paused and not partial_output:
+        if not retired and not partial_output:
             render(f"... ({int(time.monotonic() - started)}s elapsed)")
 
     @contextlib.contextmanager
@@ -338,18 +346,20 @@ def _loading_progress(label, started, interval, stream, concise):
                 finally:
                     label, started = previous
 
-    @contextlib.contextmanager
-    def pause():
-        nonlocal paused
-        previous = paused
-        try:
+    def retire():
+        nonlocal retired
+        with lock:
+            retired = True
+            stopped.set()
+            clear()
+
+        def finish_live_row():
             with lock:
-                paused = True
-                clear()
-            yield
-        finally:
-            with lock:
-                paused = previous
+                # The child may have left a partial line. Start later launcher
+                # output on a separate row without a carriage return or erase.
+                emit("\n")
+
+        return stream, same_terminal, finish_live_row
 
     def heartbeat():
         while not stopped.wait(interval):
@@ -374,7 +384,7 @@ def _loading_progress(label, started, interval, stream, concise):
                     if same_terminal(target):
                         redirects.enter_context(redirect(StageOutput(target)))
                 token = _TTY_PROGRESS.set(
-                    (*progress, (concise, same_terminal, show_stage, pause))
+                    (*progress, (concise, same_terminal, show_stage, retire))
                 )
                 redirects.callback(_TTY_PROGRESS.reset, token)
                 render("... (0s elapsed)")
@@ -415,12 +425,18 @@ def _loading_progress(label, started, interval, stream, concise):
 @contextlib.contextmanager
 def _startup_tool_output():
     """Keep live Podman/installer output on inherited FDs without a redraw."""
-    with contextlib.ExitStack() as pauses:
-        # Diagnostics permit independent nested stages. Pause every active
-        # painter, not just the innermost one.
-        for _, _, _, pause in reversed(_TTY_PROGRESS.get()):
-            pauses.enter_context(pause())
+    terminals = []
+    # Diagnostics permit independent nested stages. Retire every active
+    # painter before handing over the terminal, not just the innermost one.
+    for _, _, _, retire in reversed(_TTY_PROGRESS.get()):
+        stream, matches, separate = retire()
+        if not any(matches(other) for other, _ in terminals):
+            terminals.append((stream, separate))
+    try:
         yield
+    finally:
+        for _, separate in terminals:
+            separate()
 
 
 def run_tui(command, *, file_drops=None):
@@ -482,7 +498,7 @@ def _startup_logo_choice(args):
         path, data = find_workspace(args.project, args.workspace)
         if data is not None:
             return workspace_ui_preferences(path, data).get("startup_logo", default)
-    except (BoxError, OSError, ValueError, KeyError):
+    except (BoxError, OSError, ValueError, KeyError, TypeError):
         # Leave the actual refusal and its ordering to the regular admission.
         return "ascii"
     return default

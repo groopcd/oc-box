@@ -40,9 +40,16 @@ class VisibleOutput:
                     self.state = "csi"
                 elif char in "]P_^X":
                     self.state = "string"
-                elif char in "()*+-./":
-                    self.state = "charset"
+                elif " " <= char <= "/":
+                    self.state = "esc_intermediate"
                 else:
+                    self.state = "text"
+            elif self.state == "esc_intermediate":
+                # ISO-2022 ESC sequences can contain multiple intermediates.
+                # A designation's final byte is not rendered UI text.
+                if char == "\x1b":
+                    self.state = "escape"
+                elif char in "\x18\x1a" or "0" <= char <= "~":
                     self.state = "text"
             elif self.state == "csi":
                 if "@" <= char <= "~":
@@ -54,8 +61,6 @@ class VisibleOutput:
                     self.state = "string_escape"
             elif self.state == "string_escape":
                 self.state = "text" if char == "\\" else "string"
-            else:  # single-byte character-set designation
-                self.state = "text"
         return visible
 
     def safe_to_draw(self):
