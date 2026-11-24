@@ -65,6 +65,28 @@ have drained. Keep the outer teardown fence when it returns `False`.
 the latter is sticky. A subsequent explicit `close()` may verify cleanup of
 the **same** workers without reopening approval or replaying a round.
 
+## Host account snapshot for named-site preparation
+
+Authenticate the existing exact account-store path once with
+`web_accounts.load_snapshot(path, passphrase)`. Pass **that same snapshot's**
+`store=snapshot.store` and `account_current=snapshot.current` to
+`web_named_site_lifecycle.prepare_sites(...)`. Keep the snapshot open through
+confirmed site drain; close it on startup refusal or after drain. A retained
+callback returns `False` after `snapshot.close()`. This is a store-generation
+check, not host approval, so independent owner and admission fences still
+apply.
+
+The callback retains only the original file/directory pins, the exact path,
+metadata and ciphertext digest. It does not retain the passphrase or decrypted
+setup/records, take the account-store flock, or do any key derivation. It
+checks the exact no-follow path before and after bounded hashing of the pinned
+ciphertext, never opens a replacement file for reading, and refuses closed,
+missing, modified or substituted generations permanently. It cannot detect
+every unobserved same-user race or offline rollback. A successful reviewed
+enrollment or reset replaces the store and retires the old snapshot; loading
+another generation is a new explicit authentication, not a fallback or live
+refresh. Neither opening nor checking a snapshot writes account data.
+
 The checkout-only `tools/web-pake-research/check-registration` fixture uses
 the existing pinned OCOR/OCOP binaries. It passes synthetic proof, altered
 KE3, wrong context or verifier, wrong browser, replay, and bootstrap

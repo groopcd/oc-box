@@ -20,10 +20,12 @@ import re
 import secrets
 import stat
 import time
+from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from hashlib import sha256
 from pathlib import Path
+from threading import Lock
 
 MAX_ACCOUNTS = 128
 MAX_WORKSPACES = 32
@@ -37,6 +39,7 @@ _USERNAME = re.compile(r"[a-z0-9][a-z0-9_-]{0,31}", re.ASCII)
 _WORKSPACE_ID = re.compile(r"[0-9a-f]{32}", re.ASCII)
 _DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 _READ_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+_HASH_CHUNK = 64 * 1024
 
 # V1: magic/version, 16-byte salt, 12-byte nonce, then AES-256-GCM ciphertext
 # and tag. The entire prefix is AAD. V1 fixes Scrypt at N=2**17, r=8, p=1;
@@ -71,6 +74,21 @@ class Account:
 class AccountStore:
     setup: bytes = field(repr=False)
     accounts: tuple[Account, ...] = field(repr=False)
+
+
+@dataclass(frozen=True, slots=True, eq=False, repr=False)
+class AccountSnapshot:
+    """Host-only loaded store and independently closable generation check."""
+
+    store: AccountStore
+    current: Callable[[], bool]
+    close: Callable[[], None]
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, _type, _value, _traceback):
+        self.close()
 
 
 @dataclass(frozen=True, slots=True, eq=False)
@@ -385,7 +403,8 @@ def _unchanged(path, directory, expected):
         raise WebAccountsError(_UNSAFE)
 
 
-def _read(path, directory, passphrase, *, with_digest=False):
+@contextmanager
+def _read_ciphertext(path, directory):
     previous = _entry(directory, path.name)
     if previous is None:
         raise WebAccountsError(_MISSING)
@@ -397,7 +416,12 @@ def _read(path, directory, passphrase, *, with_digest=False):
         raw = stream.read(MAX_FILE + 1)
         if len(raw) != previous.st_size or _stamp(os.fstat(fd)) != _stamp(previous):
             raise WebAccountsError(_UNSAFE)
-    store = _open_envelope(raw, passphrase)
+        yield raw, previous, fd
+
+
+def _read(path, directory, passphrase, *, with_digest=False):
+    with _read_ciphertext(path, directory) as (raw, previous, _):
+        store = _open_envelope(raw, passphrase)
     _unchanged(path, directory, previous)
     if with_digest:
         return store, previous, sha256(raw).digest()
@@ -490,6 +514,110 @@ def load(path: Path, passphrase: str) -> AccountStore:
     with _locked(path) as directory:
         store, _ = _read(path, directory, secret)
         return store
+
+
+def _close_fd(fd):
+    if fd is not None:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
+
+class _AccountGeneration:
+    """Pinned file/directory, expected metadata and ciphertext digest only."""
+
+    __slots__ = ("_lock", "_path", "_dir", "_file", "_previous", "_digest", "_refused")
+
+    def __init__(self, path, directory, file, previous, digest):
+        self._lock = Lock()
+        self._path, self._dir, self._file = path, directory, file
+        self._previous, self._digest = previous, digest
+        self._refused = False
+
+    def _checked(self):
+        # Walk only the exact, no-follow parent path. Ciphertext is read only
+        # from the descriptor used to authenticate this snapshot, not by name.
+        path, directory, file = self._path, self._dir, self._file
+        expected = self._previous
+        _unchanged(path, directory, expected)
+        if _stamp(os.fstat(file)) != _stamp(expected):
+            return False
+        digest = sha256()
+        for offset in range(0, expected.st_size, _HASH_CHUNK):
+            size = min(_HASH_CHUNK, expected.st_size - offset)
+            chunk = os.pread(file, size, offset)
+            if len(chunk) != size:
+                return False
+            digest.update(chunk)
+        if (
+            os.pread(file, 1, expected.st_size)
+            or _stamp(os.fstat(file)) != _stamp(expected)
+            or not secrets.compare_digest(digest.digest(), self._digest)
+        ):
+            return False
+        _unchanged(path, directory, expected)
+        return True
+
+    def current(self):
+        """Fast sticky refusal: no flock wait, key derivation, or plaintext."""
+        with self._lock:
+            if self._refused:
+                return False
+            try:
+                current = os.environ.get("OC_BOX_CONTAINER") != "1" and self._checked()
+            except Exception:  # noqa: BLE001 - a check failure never exposes path errors.
+                current = False
+            except BaseException:
+                self._refused = True
+                raise
+            self._refused = not current
+            return current
+
+    def close(self):
+        with self._lock:
+            self._refused = True
+            file, self._file = self._file, None
+            directory, self._dir = self._dir, None
+            _close_fd(file)
+            _close_fd(directory)
+
+
+def load_snapshot(path: Path, passphrase: str) -> AccountSnapshot:
+    """Authenticate one existing store and bind its exact ciphertext lifetime.
+
+    Pass ``snapshot.store`` and ``snapshot.current`` to named-site preparation.
+    Close the snapshot after service drain (or on startup failure). No secret
+    or decrypted record is kept by the generation check. This never grants
+    write authority or initializes or falls back to another store.
+    """
+    secret = _passphrase(passphrase)
+    pinned_dir = pinned_file = generation = None
+    try:
+        with _locked(path) as directory:
+            with _read_ciphertext(path, directory) as (raw, previous, file):
+                store = _open_envelope(raw, secret)
+                _unchanged(path, directory, previous)
+                # A dup of the locked directory would retain its flock. Open
+                # a separate description of the same pinned directory instead.
+                pinned_dir = os.open(".", _DIRECTORY_FLAGS, dir_fd=directory)
+                pinned_file = os.dup(file)
+                generation = _AccountGeneration(
+                    path, pinned_dir, pinned_file, previous, sha256(raw).digest()
+                )
+                pinned_dir = pinned_file = None
+                if not generation.current():
+                    raise WebAccountsError(_UNSAFE)
+                return AccountSnapshot(store, generation.current, generation.close)
+    except BaseException as error:
+        if generation is not None:
+            generation.close()
+        if isinstance(error, Exception) and not isinstance(error, WebAccountsError):
+            raise WebAccountsError(_UNSAFE) from None
+        raise
+    finally:
+        _close_fd(pinned_file)
+        _close_fd(pinned_dir)
 
 
 def _check_enrollment_target(store, username, scope, replacing):
