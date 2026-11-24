@@ -31,6 +31,16 @@ and the distinct-descriptor negative control still passed. The runner
 confirmed guest shutdown, reaping, and removal of the writable disk, ISO
 and socket. Sanitized receipt SHA-256:
 `e4000ba2576207e898807b7a1f0073ade2cb52404ed79f8b3460a699a8f6143c`.
+
+On clean `0b9f99823977df26e2a3934ce205199be2f2f127`, a separate guest
+with the same RPM-pinned Podman observed the verified rootless namespace:
+`namespace_observed`, `namespace_context_verified=true`, and
+`namespace_both_observed_unmounted=true` for the two exact stopped synthetic
+containers. The direct descriptor result remained `descriptor_incomplete`
+and populated planner admission stayed false. Unmount, guest, and QEMU
+exits were zero; the guest was reaped and the disk, ISO, and QMP socket
+removed. Sanitized receipt SHA-256:
+`3e5e90f8a67cb9b42c9c97ac38f0a5c4bcda6406290264eded04abf9a1acc9e0`.
 None of these runs validates positive mounted/alias controls, normal-host
 compatibility, or uninstall.
 
