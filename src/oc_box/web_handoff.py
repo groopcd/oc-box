@@ -192,6 +192,21 @@ class WebHandoff:
         pending = self._take(binding, token, auth_origin, browser_nonce)
         return pending.principal if pending is not None else None
 
+    def available(self, binding, token, *, auth_origin):
+        """Check only whether an opaque token can be transferred, not who may use it."""
+        if (
+            type(binding) is not _WebBinding
+            or binding != self._binding
+            or type(auth_origin) is not str
+            or auth_origin != self._auth_origin
+            or not _valid(token, 54, _TOKEN)
+        ):
+            return False
+        key = _digest(token)
+        with self._lock:
+            self._expire(monotonic())
+            return not self._closed and key in self._pending
+
     def revoke(
         self, binding: _WebBinding, token: str, *, auth_origin: str, browser_nonce: str
     ) -> bool:

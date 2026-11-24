@@ -1,6 +1,7 @@
 """Public HTTPS/Git updates without forwarding provider/publishing credentials."""
 
 import ast
+from contextlib import ExitStack
 import fcntl
 from importlib import metadata
 import json
@@ -13,8 +14,8 @@ import tempfile
 from urllib.parse import unquote, urlparse
 
 if __package__:
-    from . import dependencies
-    from .installation import atomic_file
+    from . import dependencies, install_ownership
+    from .installation import _lock_file, atomic_file
     from .version_info import get_version_info
     from .update_channels import (
         ChannelError,
@@ -28,7 +29,8 @@ if __package__:
     )
 else:
     import dependencies
-    from installation import atomic_file
+    import install_ownership
+    from installation import _lock_file, atomic_file
     from version_info import get_version_info
     from update_channels import (
         ChannelError,
@@ -166,7 +168,7 @@ def upgrade(root, *, check=False, channel=None, with_vault=False, with_tui=False
     managed = package_managed(root)
     if managed and editable_source_root() == Path(root).resolve():
         raise UpdateError(package_upgrade_message(root))
-    if os.geteuid() == 0:
+    if not _regular_user():
         raise UpdateError(
             "Run oc-box upgrade on the host as your regular user, without sudo."
         )
@@ -197,28 +199,54 @@ def upgrade(root, *, check=False, channel=None, with_vault=False, with_tui=False
     target = Path.home() / ".local/share/oc-box"
     if target.is_symlink():
         raise UpdateError("The oc-box installation root must not be a symlink.")
-    target.mkdir(parents=True, exist_ok=True)
-    with (target / ".upgrade.lock").open("a+") as lock:
+    runtime = Path(root)
+    pinned = install_ownership._runtime_home(runtime) is not None
+
+    def require_active():
+        try:
+            install_ownership.verify_active_launcher(Path.home(), runtime)
+        except install_ownership.OwnershipError as exc:
+            raise UpdateError(str(exc)) from None
+
+    if pinned:
+        require_active()  # Never create a missing root/lock from a retired release.
+    else:
+        target.mkdir(parents=True, exist_ok=True)
+    with open(target / install_ownership.UPGRADE_LOCK, "a+", opener=_lock_file) as lock:
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as exc:
             raise UpdateError(
                 "Another oc-box upgrade is in progress; retry later."
             ) from exc
+        if pinned:
+            require_active()
         return _github_upgrade(
             root, channel=channel, with_vault=with_vault, with_tui=with_tui
         )
 
 
 def _github_upgrade(
-    root, *, check=False, channel=None, with_vault=False, with_tui=False
+    root,
+    *,
+    check=False,
+    channel=None,
+    with_vault=False,
+    with_tui=False,
+    expected_active=None,
 ):
     previous_channel = selected_channel()
     chosen = selected_channel(channel)
     # Validate settings before network or installation, including --check.
     requested = channel is not None
     switching = requested and (chosen == "stable" or chosen != previous_channel)
-    current = current_install(root)
+    if expected_active is None:
+        current = current_install(root)
+    else:
+        source_pin = install_ownership.inspect_active_installation(Path.home(), root)
+        if source_pin.token != expected_active:
+            raise install_ownership.OwnershipError("The source activation changed.")
+        current = source_pin.build
     requested_features = {
         name for name, enabled in (("vault", with_vault), ("tui", with_tui)) if enabled
     }
@@ -273,7 +301,11 @@ def _github_upgrade(
             timeout=15,
         )
         commit = resolve_tag(remote, tag_ref)
-        current_root = (Path.home() / ".local/share/oc-box/current").resolve()
+        current_root = (
+            root
+            if expected_active is not None
+            else (Path.home() / ".local/share/oc-box/current").resolve()
+        )
         same_commit = current.get("commit") == commit and not current.get("dirty")
         missing_features = {
             name
@@ -364,6 +396,13 @@ def _github_upgrade(
         features = optional_features(current_root)
         features.update({name: True for name in requested_features})
         supported = installer_options(source)
+        if (
+            expected_active is not None
+            and "--expect-active-installation" not in supported
+        ):
+            raise UpdateError(
+                "The target does not support a verified automatic handoff. Use an explicit upgrade."
+            )
         unavailable = {
             name for name in requested_features if "--with-" + name not in supported
         }
@@ -403,9 +442,14 @@ def _github_upgrade(
             environment["XDG_CONFIG_HOME"] = os.environ["XDG_CONFIG_HOME"]
         else:
             environment.pop("XDG_CONFIG_HOME", None)
+        bound = (
+            ["--expect-active-installation", expected_active]
+            if expected_active is not None
+            else []
+        )
         try:
             subprocess.run(
-                [sys.executable, "-B", str(source / "install.py"), *extra],
+                [sys.executable, "-B", str(source / "install.py"), *extra, *bound],
                 cwd=work,
                 env=environment,
                 check=True,
@@ -416,14 +460,21 @@ def _github_upgrade(
                 "Installing the downloaded version failed; check the retained installation before retrying."
             ) from exc
         target = Path.home() / ".local/share/oc-box"
-        actual = get_version_info(target)
+        if expected_active is None:
+            actual = get_version_info(target)
+        else:
+            installed_root = install_ownership.active_release_path(Path.home())
+            actual = install_ownership.inspect_active_installation(
+                Path.home(), installed_root
+            ).build
         if (
             actual.get("commit") != commit
             or actual.get("dirty")
             or actual["version"].split("+", 1)[0] != desired
         ):
             raise UpdateError("Installed version does not match the downloaded commit.")
-        installed_root = (target / "current").resolve(strict=True)
+        if expected_active is None:
+            installed_root = (target / "current").resolve(strict=True)
         if any(
             not (
                 installed_root / (option.removeprefix("--with-") + "-support.json")
@@ -553,30 +604,102 @@ def update_settings(enabled):
     )
 
 
-def automatic_upgrade(root):
+def _lock_activation(stack, directory, name, mount):
+    owner = install_ownership
+    info = owner._lock_info(directory, name, mount)
+    fd = stack.enter_context(owner._open_lock(directory, name, mount, info))
+    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    if owner._stamp(owner._lock_info(directory, name, mount)) != owner._stamp(info):
+        raise owner.OwnershipError("The activation lock changed.")
+    return owner._stamp(info)
+
+
+def _start_updated(release, arguments, use_stamp):
+    owner = install_ownership
+    with owner.installed_runtime_use(release):
+        lease = owner._runtime_lease
+        if lease is None or lease.release != release or lease.stamp != use_stamp:
+            raise owner.OwnershipError("The updated release use lock changed.")
+        env = {
+            **os.environ,
+            "OC_BOX_UPDATE_CHECKED": "1",
+            owner.HANDOFF_FD: f"{os.getpid()}:{lease.fd}",
+        }
+        # The upgrade and installation lock fds remain CLOEXEC. The target's
+        # shared use fd survives the same exec and is adopted by that process.
+        os.set_inheritable(lease.fd, True)
+        try:
+            os.execve(
+                sys.executable,
+                [sys.executable, "-B", str(release / "oc_box.py"), *arguments],
+                env,
+            )
+        finally:
+            os.set_inheritable(lease.fd, False)
+
+
+def _regular_user():
+    return os.geteuid() != 0
+
+
+def automatic_upgrade(root, *, launch_args=None):
+    owner = install_ownership
+    root = Path(root)
+    home = Path.home()
     if (
-        os.geteuid() == 0
-        or package_managed(root)
+        not _regular_user()
         or os.environ.get("OC_BOX_UPDATE_CHECKED") == "1"
-        or (Path(root) / ".git").exists()
+        or owner._runtime_home(root) != home
+        or package_managed(root)
+        or (root / ".git").exists()
     ):
         return None
-    base = Path(os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config")))
+    base = Path(os.environ.get("XDG_CONFIG_HOME", str(home / ".config")))
     try:
         settings = json.loads((base / "oc-box/config.json").read_text())
     except (OSError, ValueError):
         return None
     if not isinstance(settings, dict) or settings.get("auto_update") is not True:
         return None
-    # Serialize checks/installations but never block an ordinary workspace
-    # launch behind another process downloading an update.
-    target = Path.home() / ".local/share/oc-box"
-    if target.is_symlink():
-        raise UpdateError("The oc-box installation root must not be a symlink.")
-    target.mkdir(parents=True, exist_ok=True)
-    with (target / ".upgrade.lock").open("a+") as lock:
-        try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            return None
-        return _github_upgrade(root)
+    updated = None
+    try:
+        with ExitStack() as stack:
+            directory = stack.enter_context(owner._home(home))
+            mount = owner._mount(directory)
+            for name in owner.layout.INSTALL_PATH.parts:
+                directory = stack.enter_context(
+                    owner._directory(directory, name, mount)
+                )
+            upgrade = _lock_activation(stack, directory, owner.UPGRADE_LOCK, mount)
+            with ExitStack() as install:
+                lock = _lock_activation(
+                    install, directory, owner.layout.INSTALL_LOCK, mount
+                )
+                active = owner.inspect_active_installation(home, root)
+                if (active.upgrade_lock, active.install_lock) != (upgrade, lock):
+                    raise owner.OwnershipError("The active installation locks changed.")
+            # The installer child must check this token under its own install
+            # lock. A direct installer may otherwise switch current during fetch.
+            updated = _github_upgrade(root, expected_active=active.token)
+            if updated is not None and launch_args is not None:
+                lock = _lock_activation(
+                    stack, directory, owner.layout.INSTALL_LOCK, mount
+                )
+                target = owner.inspect_active_installation(home, updated)
+                if (target.upgrade_lock, target.install_lock) != (upgrade, lock):
+                    raise owner.OwnershipError(
+                        "The updated installation locks changed."
+                    )
+                _start_updated(updated, launch_args, target.use_lock)
+    except (FileNotFoundError, BlockingIOError):
+        if updated is not None:
+            raise UpdateError(
+                "The installed update could not be handed off. Restart using the active launcher."
+            ) from None
+        # No missing lock/root is created, and a busy installer is not waited on.
+        return None
+    except owner.OwnershipError:
+        raise UpdateError(
+            "Automatic update could not verify the active installation or handoff. Use the active launcher."
+        ) from None
+    return None

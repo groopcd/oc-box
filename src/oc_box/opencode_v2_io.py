@@ -25,6 +25,22 @@ from urllib.parse import quote, urlparse
 from urllib.error import HTTPError
 from urllib.request import Request, build_opener, ProxyHandler
 
+if __package__:
+    from .web_named_native_profile import (
+        named_native_info,
+        named_native_json,
+        named_native_supports,
+    )
+elif globals().get("__spec__") is not None:
+    # A real flat import has a module spec. The offline safeguard probe
+    # instead embeds this ordinary bridge in an isolated namespace with no
+    # importable checkout. Named workers embed their audited profile directly.
+    from web_named_native_profile import (
+        named_native_info,
+        named_native_json,
+        named_native_supports,
+    )
+
 
 def require_control_pipe():
     """Refuse credential-bearing readiness on a terminal or a disk file."""
@@ -75,6 +91,8 @@ UNSETTLED = "OpenCode 2.x history is unsettled; retry sync after completion."
 CHANGED = "OpenCode 2.x history changed or omitted messages; retry sync."
 WORKER = "OpenCode 2.x history worker failed."
 HISTORY_WORKER_PROTOCOL = "oc-box.history/1"
+GUEST_OWNER_PROTOCOL = "oc-box.studio-guest-owner/1"
+GUEST_OWNER_VERSION = "2.4.1"
 HISTORY_WORKER_CONTROL = 65536
 HISTORY_WORKER_PAYLOAD = 1073741824
 FIXED_MESSAGES = frozenset(
@@ -129,7 +147,7 @@ def _deadline_timeout(deadline, maximum=60):
     return min(maximum, remaining)
 
 
-def _deadline_http(parsed, method, path, data, headers, deadline):
+def _deadline_http(parsed, method, path, data, headers, deadline, *, max_body=None):
     """Public HTTPConnection socket access keeps every I/O within one budget."""
     connection = HTTPConnection(
         parsed.hostname, parsed.port, timeout=_deadline_timeout(deadline)
@@ -141,20 +159,49 @@ def _deadline_http(parsed, method, path, data, headers, deadline):
         connection.request(method, path, body=data, headers=headers)
         stream.settimeout(_deadline_timeout(deadline))
         with connection.getresponse() as response:
+            if max_body is not None:
+                # The bounded mode is the exact named readiness probe, not the
+                # ordinary native JSON API. Never follow redirects or cookies.
+                headers = response.headers
+                if (
+                    response.status != 200
+                    or headers.get_all("Content-Type") != ["application/json"]
+                    or headers.get_all("Content-Encoding", []) not in ([], ["identity"])
+                    or any(
+                        key in headers
+                        for key in (
+                            "Location",
+                            "Set-Cookie",
+                            "Set-Cookie2",
+                            "Transfer-Encoding",
+                        )
+                    )
+                ):
+                    raise FixedError(READINESS)
             if response.status >= 400:
                 raise HTTPError(
                     path, response.status, "Private request failed", {}, None
                 )
-            chunks = []
+            chunks, size = [], 0
             while not response.isclosed():
                 stream.settimeout(_deadline_timeout(deadline))
-                chunk = response.read1(65536)
+                chunk = response.read1(
+                    65536 if max_body is None else max_body + 1 - size
+                )
                 if not chunk:
                     break
+                size += len(chunk)
+                if max_body is not None and size > max_body:
+                    raise FixedError(READINESS)
                 chunks.append(chunk)
             _deadline_timeout(deadline)
             body = b"".join(chunks)
-            value = json.loads(body) if body else None
+            if max_body is not None:
+                if headers.get_all("Content-Length") != [str(len(body))]:
+                    raise FixedError(READINESS)
+                value = named_native_json(body)
+            else:
+                value = json.loads(body) if body else None
             _deadline_timeout(deadline)
             return value
     finally:
@@ -181,11 +228,17 @@ def endpoint_request(endpoint):
     auth = "Basic " + base64.b64encode(("opencode:" + password).encode()).decode()
     opener = build_opener(ProxyHandler({}))
 
-    def request(method, path, data=None, *, deadline=None):
+    def request(method, path, data=None, *, deadline=None, max_body=None):
         headers = {"Authorization": auth, "Content-Type": "application/json"}
         encoded = json.dumps(data).encode() if data is not None else None
         if deadline is not None:
+            if max_body is not None:
+                return _deadline_http(
+                    parsed, method, path, encoded, headers, deadline, max_body=max_body
+                )
             return _deadline_http(parsed, method, path, encoded, headers, deadline)
+        if max_body is not None:
+            raise FixedError(READINESS)
         req = Request(
             address.rstrip("/") + path,
             method=method,
@@ -410,10 +463,27 @@ def checked_export(request, ident):
     return exported
 
 
+def _wait_exact_child(child, timeout):
+    deadline = time.monotonic() + timeout
+    while True:
+        pid, status = os.waitpid(child.pid, os.WNOHANG)
+        if pid == child.pid and (os.WIFEXITED(status) or os.WIFSIGNALED(status)):
+            child.returncode = os.waitstatus_to_exitcode(status)
+            return
+        if pid != 0:
+            raise FixedError(READINESS)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise subprocess.TimeoutExpired("OpenCode", timeout)
+        time.sleep(min(remaining, 0.025))
+
+
 @contextlib.contextmanager
-def server(binary, *, exit_info=None, startup_deadline=None):
+def server(binary, *, exit_info=None, startup_deadline=None, strict_reap=False):
     if startup_deadline is not None:
         _deadline_timeout(startup_deadline)
+    if strict_reap and signal.getsignal(signal.SIGCHLD) != signal.SIG_DFL:
+        raise FixedError(READINESS)
     password = secrets.token_urlsafe(32)
     env = {**os.environ, "OPENCODE_PASSWORD": password}
     descriptor = os.memfd_create("oc-box-v2-errors", os.MFD_CLOEXEC)
@@ -447,6 +517,9 @@ def server(binary, *, exit_info=None, startup_deadline=None):
             address = json.loads(output.split(b"\n", 1)[0])["url"]
             request = endpoint_request({"url": address, "password": password})
             request.alive = lambda: child.poll() is None
+            # Private within this worker; never trust a requested or
+            # independently discovered process as the child just launched.
+            request.child_pid = child.pid
 
             # Migration is asynchronous in upstream. Do not mistake an empty
             # session list for successful completion and lose the resume ID.
@@ -481,14 +554,28 @@ def server(binary, *, exit_info=None, startup_deadline=None):
             forced = False
             if child.stdin:
                 child.stdin.close()
+
+            # For the proof variant, a returncode already cached by poll()
+            # means the server was gone at/ before EOF. The caller cannot
+            # accept it for normal retirement. For a still-live child require
+            # a terminal waitpid status, not a synthetic Popen ECHILD result.
+            def wait():
+                if strict_reap:
+                    if child.returncode is None:
+                        _wait_exact_child(child, 5)
+                else:
+                    child.wait(timeout=5)
+
             try:
-                child.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                forced = True
-                os.killpg(child.pid, signal.SIGKILL)
-                child.wait(timeout=5)
-            if child.stdout:
-                child.stdout.close()
+                try:
+                    wait()
+                except subprocess.TimeoutExpired:
+                    forced = True
+                    os.killpg(child.pid, signal.SIGKILL)
+                    wait()
+            finally:
+                if child.stdout:
+                    child.stdout.close()
             if exit_info is not None:
                 exit_info.update(code=child.returncode, forced=forced)
 
@@ -1046,8 +1133,46 @@ def ready_plugins(request, directory, *, startup_deadline=None):
     raise FixedError(BUILD_PLUGIN_TIMEOUT)
 
 
+def _verify_named_owner(request, deadline, version):
+    """Confirm the actual private native release before granting owner readiness."""
+    info = request(
+        "GET", "/api/info", deadline=min(deadline, time.monotonic() + 2), max_body=8192
+    )
+    if not request.alive():
+        raise FixedError(READINESS)
+    try:
+        return named_native_info(info, version, request.endpoint["url"])
+    except ValueError:
+        raise FixedError(READINESS) from None
+
+
+def _guest_owner_record(request, deadline):
+    info = _verify_named_owner(request, deadline, GUEST_OWNER_VERSION)
+    if (
+        info["pid"] != request.child_pid
+        or time.monotonic() >= deadline
+        or not request.alive()
+    ):
+        # An alternate process or an executable shim that retained its own
+        # PID cannot establish this exact direct-child contract.
+        raise FixedError(READINESS)
+    return {
+        "protocol": GUEST_OWNER_PROTOCOL,
+        "endpoint": request.endpoint,
+        "native": info,
+    }
+
+
 def main(argv):
-    action, binary = argv
+    action, binary, *identity = argv
+    if action == "named-lease":
+        if len(identity) != 1 or not named_native_supports(identity[0]):
+            raise FixedError(READINESS)
+    elif action == "guest-proof-lease":
+        if identity != [GUEST_OWNER_VERSION]:
+            raise FixedError(READINESS)
+    elif identity:
+        raise ValueError("Invalid private OpenCode arguments.")
     if action == "seed":
         seed_database()
     elif action == "auth":
@@ -1076,20 +1201,39 @@ def main(argv):
             endpoint_request(settings["endpoint"]), settings["members"]
         )
         print(json.dumps(value), flush=True)
-    elif action == "lease":
+    elif action in ("lease", "named-lease", "guest-proof-lease"):
         descriptor = require_control_pipe()
         # Leave time for the owner-side control wait and service teardown.
         deadline = time.monotonic() + 165
-        with server(binary, startup_deadline=deadline) as request:
+        guest = action == "guest-proof-lease"
+        exit_info = {}
+        eof = False
+        with server(
+            binary,
+            startup_deadline=deadline,
+            **({"exit_info": exit_info, "strict_reap": True} if guest else {}),
+        ) as request:
             ready_plugins(request, os.getcwd(), startup_deadline=deadline)
+            if action == "named-lease":
+                _verify_named_owner(request, deadline, identity[0])
+            record = (
+                _guest_owner_record(request, deadline) if guest else request.endpoint
+            )
             # Control credentials are returned only through the owner's pipe,
             # kept in memory, and never written to the workspace or service.json.
-            write_control_record(descriptor, request.endpoint)
+            write_control_record(descriptor, record)
             while request.alive():
                 if select.select([sys.stdin], [], [], 0.2)[0] and not os.read(
                     sys.stdin.fileno(), 4096
                 ):
+                    eof = not guest or request.alive()
                     break
+        if guest and (
+            not eof
+            or exit_info.get("forced") is not False
+            or exit_info.get("code") != 0
+        ):
+            raise FixedError(READINESS)
     elif action == "history-source":
         history_source_lease(binary)
     elif action == "history-worker":

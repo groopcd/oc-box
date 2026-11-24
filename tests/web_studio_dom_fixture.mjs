@@ -1,14 +1,22 @@
 // Minimal Studio controls for tests focused on native routing or attachments.
 // The markup-backed layout test exercises the real toolbars and wide panes.
 export function addStudioControls(elements, create, window) {
-  for (const id of ["layouts", "manager-nav", "search", "library", "sessions-toggle", "inspector-toggle",
-    "open-tabs", "history-tabs", "content", "divider-left", "divider-right", "chat",
-    "overview", "overview-title", "unavailable", "unavailable-title", "search-status",
-    "conversation-title", "current-session"]) {
+  for (const id of ["layouts", "layout-name", "layout-description", "manager-nav", "search", "library",
+    "sessions-toggle", "sessions-close", "inspector-toggle", "inspector-close", "inspector-link", "inspector-context",
+    "open-tabs", "history-tabs", "archived-tabs", "open-group", "history-group", "archived-group",
+    "history-list", "archived-list", "content", "divider-left", "divider-right", "chat", "overview",
+    "overview-title", "search-status", "conversation-title", "conversation-source", "current-session",
+    "manager", "manager-status-refresh", "manager-session-refresh", "manager-source", "manager-search",
+    "manager-include-archives", "manager-clear-search", "manager-density", "manager-expand-details",
+    "manager-archive-filter", "manager-tab-count", "manager-selection", "manager-selection-details",
+    "manager-membership-status", "manager-history-status", "manager-session-count", "manager-session-rows",
+    "manager-session-table", "manager-details", "settings-notice", "settings-apply", "settings-defaults",
+    "settings-revert"]) {
     elements["workspace-" + id] = create("workspace-" + id);
   }
   elements["fallback-links"] = create("fallback-links");
   elements["workspace-search"].value = "";
+  elements["workspace-manager-search"].value = "";
   elements["workspace-layouts"].querySelectorAll = () => [];
   elements["workspace-manager-nav"].querySelectorAll = () => [];
   window.matchMedia = () => ({ matches: false, addEventListener() {} });

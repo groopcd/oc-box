@@ -35,6 +35,7 @@ class NamedCompositionTests(unittest.TestCase):
             "http://127.0.0.1:43100",
             origins.workspace.value.removeprefix("https://"),
             "a" * 10 + "." + "b" * 43,
+            version="2.3.2",
             owner_current=current,
         )
         pair = Mock(return_value=native)

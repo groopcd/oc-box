@@ -1495,6 +1495,29 @@ class WorkspaceServiceTests(unittest.TestCase):
         self.assertIn("ses_shared", tui.call_args.args[0])
         prepare.assert_not_called()
 
+    def test_browser_owner_loss_after_initial_observation_never_falls_back_to_start(
+        self,
+    ):
+        with (
+            patch.object(box, "check_backend"),
+            patch.object(
+                service, "controller_running", side_effect=(True, False)
+            ) as observation,
+            patch.object(
+                service, "attach", side_effect=box.BoxError("Synthetic owner exited.")
+            ) as attach,
+            patch.object(box, "detect_opencode_release") as discover,
+            patch.object(box, "_locked_workspace_command") as launch,
+            patch.object(vault, "hidden") as prompt,
+        ):
+            with self.assertRaisesRegex(box.BoxError, "Synthetic owner exited"):
+                box.main(["web", "--workspace", self.data["id"], "--no-open"])
+        observation.assert_called_once()
+        attach.assert_called_once()
+        discover.assert_not_called()
+        launch.assert_not_called()
+        prompt.assert_not_called()
+
     def test_additional_native_clients_choose_host_open_independently_of_owner(self):
         self.data["opencode_version"] = "2.3.2"
         self.connection["version"] = "2.3.2"
@@ -1988,9 +2011,21 @@ class WorkspaceServiceTests(unittest.TestCase):
         ):
             owner.publish("ses_shared")
             self.assertTrue(service.controller_running(box, self.data))
-            with service.attach(box, self.path, self.data) as attached:
-                self.assertEqual(attached["session"], "ses_shared")
+            with service._attach_control(box, self.path, self.data) as held:
+                self.assertEqual(held.connection["session"], "ses_shared")
+                self.assertEqual(held.peer_pid, os.getpid())
+                self.assertEqual(held.stream.family, socket.AF_UNIX)
+                self.assertGreaterEqual(held.stream.fileno(), 0)
+                self.assertNotIn(self.connection["password"], repr(held))
                 self.assertEqual(owner.clients, 1)
+                with service.attach(box, self.path, self.data) as attached:
+                    self.assertIs(type(attached), dict)
+                    self.assertEqual(attached["session"], "ses_shared")
+                    self.assertEqual(owner.clients, 2)
+                with owner.condition:
+                    self.assertTrue(
+                        owner.condition.wait_for(lambda: owner.clients == 1, timeout=1)
+                    )
                 exited = threading.Event()
                 thread = threading.Thread(
                     target=lambda: (owner.wait_clients(), exited.set())
@@ -2001,6 +2036,7 @@ class WorkspaceServiceTests(unittest.TestCase):
                 with self.assertRaises(box.BoxError):
                     with box.workspace_lock(self.path):
                         pass
+            self.assertEqual(held.stream.fileno(), -1)
             thread.join(timeout=2)
             self.assertTrue(exited.is_set())
         self.assertFalse(owner.address.exists())

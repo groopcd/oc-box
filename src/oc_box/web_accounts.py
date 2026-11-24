@@ -20,9 +20,12 @@ import re
 import secrets
 import stat
 import time
+from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from hashlib import sha256
 from pathlib import Path
+from threading import Lock
 
 MAX_ACCOUNTS = 128
 MAX_WORKSPACES = 32
@@ -36,6 +39,7 @@ _USERNAME = re.compile(r"[a-z0-9][a-z0-9_-]{0,31}", re.ASCII)
 _WORKSPACE_ID = re.compile(r"[0-9a-f]{32}", re.ASCII)
 _DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 _READ_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+_HASH_CHUNK = 64 * 1024
 
 # V1: magic/version, 16-byte salt, 12-byte nonce, then AES-256-GCM ciphertext
 # and tag. The entire prefix is AAD. V1 fixes Scrypt at N=2**17, r=8, p=1;
@@ -52,6 +56,7 @@ _INVALID = "Web account store has an invalid or unsupported format."
 _UNVERIFIED = "Web account store save could not be verified; reload before retrying."
 _BAD_PASSPHRASE = "Invalid web account store passphrase length or encoding."
 _BAD_SCOPE = "Web account scope requires distinct, explicit workspace IDs."
+_STALE_REVIEW = "Web account registration review is no longer current."
 
 
 class WebAccountsError(ValueError):
@@ -69,6 +74,35 @@ class Account:
 class AccountStore:
     setup: bytes = field(repr=False)
     accounts: tuple[Account, ...] = field(repr=False)
+
+
+@dataclass(frozen=True, slots=True, eq=False, repr=False)
+class AccountSnapshot:
+    """Host-only loaded store and independently closable generation check."""
+
+    store: AccountStore
+    current: Callable[[], bool]
+    close: Callable[[], None]
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, _type, _value, _traceback):
+        self.close()
+
+
+@dataclass(frozen=True, slots=True, eq=False)
+class RegistrationReview:
+    """Trusted in-process store binding, not browser or host approval."""
+
+    _path: Path = field(repr=False)
+    _directory_identity: tuple[int, int] = field(repr=False)
+    _file_stamp: tuple = field(repr=False)
+    username: str = field(repr=False)
+    workspace_ids: tuple[str, ...] = field(repr=False)
+    setup: bytes = field(repr=False)
+    replacing: bool = field(repr=False)
+    _ciphertext_digest: bytes = field(repr=False)
 
 
 def _passphrase(value, *, new=False):
@@ -369,7 +403,8 @@ def _unchanged(path, directory, expected):
         raise WebAccountsError(_UNSAFE)
 
 
-def _read(path, directory, passphrase):
+@contextmanager
+def _read_ciphertext(path, directory):
     previous = _entry(directory, path.name)
     if previous is None:
         raise WebAccountsError(_MISSING)
@@ -381,8 +416,15 @@ def _read(path, directory, passphrase):
         raw = stream.read(MAX_FILE + 1)
         if len(raw) != previous.st_size or _stamp(os.fstat(fd)) != _stamp(previous):
             raise WebAccountsError(_UNSAFE)
-    store = _open_envelope(raw, passphrase)
+        yield raw, previous, fd
+
+
+def _read(path, directory, passphrase, *, with_digest=False):
+    with _read_ciphertext(path, directory) as (raw, previous, _):
+        store = _open_envelope(raw, passphrase)
     _unchanged(path, directory, previous)
+    if with_digest:
+        return store, previous, sha256(raw).digest()
     return store, previous
 
 
@@ -393,7 +435,7 @@ def _cleanup(directory, name, fd):
         os.unlink(name, dir_fd=directory)
 
 
-def _publish(path, directory, raw, previous):
+def _publish(path, directory, raw, previous, *, current=None):
     name = ".web-accounts-" + secrets.token_hex(16) + ".tmp"
     fd = os.open(
         name,
@@ -418,6 +460,8 @@ def _publish(path, directory, raw, previous):
             staged
         ):
             raise WebAccountsError(_UNSAFE)
+        if current is not None and current() is not True:
+            raise WebAccountsError(_STALE_REVIEW)
         if previous is None:
             # No-clobber creation. A crash between link and unlink leaves an
             # extra cipher-only link; later operations refuse it, not repair it.
@@ -470,6 +514,207 @@ def load(path: Path, passphrase: str) -> AccountStore:
     with _locked(path) as directory:
         store, _ = _read(path, directory, secret)
         return store
+
+
+def _close_fd(fd):
+    if fd is not None:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
+
+class _AccountGeneration:
+    """Pinned file/directory, expected metadata and ciphertext digest only."""
+
+    __slots__ = ("_lock", "_path", "_dir", "_file", "_previous", "_digest", "_refused")
+
+    def __init__(self, path, directory, file, previous, digest):
+        self._lock = Lock()
+        self._path, self._dir, self._file = path, directory, file
+        self._previous, self._digest = previous, digest
+        self._refused = False
+
+    def _checked(self):
+        # Walk only the exact, no-follow parent path. Ciphertext is read only
+        # from the descriptor used to authenticate this snapshot, not by name.
+        path, directory, file = self._path, self._dir, self._file
+        expected = self._previous
+        _unchanged(path, directory, expected)
+        if _stamp(os.fstat(file)) != _stamp(expected):
+            return False
+        digest = sha256()
+        for offset in range(0, expected.st_size, _HASH_CHUNK):
+            size = min(_HASH_CHUNK, expected.st_size - offset)
+            chunk = os.pread(file, size, offset)
+            if len(chunk) != size:
+                return False
+            digest.update(chunk)
+        if (
+            os.pread(file, 1, expected.st_size)
+            or _stamp(os.fstat(file)) != _stamp(expected)
+            or not secrets.compare_digest(digest.digest(), self._digest)
+        ):
+            return False
+        _unchanged(path, directory, expected)
+        return True
+
+    def current(self):
+        """Fast sticky refusal: no flock wait, key derivation, or plaintext."""
+        with self._lock:
+            if self._refused:
+                return False
+            try:
+                current = os.environ.get("OC_BOX_CONTAINER") != "1" and self._checked()
+            except Exception:  # noqa: BLE001 - a check failure never exposes path errors.
+                current = False
+            except BaseException:
+                self._refused = True
+                raise
+            self._refused = not current
+            return current
+
+    def close(self):
+        with self._lock:
+            self._refused = True
+            file, self._file = self._file, None
+            directory, self._dir = self._dir, None
+            _close_fd(file)
+            _close_fd(directory)
+
+
+def load_snapshot(path: Path, passphrase: str) -> AccountSnapshot:
+    """Authenticate one existing store and bind its exact ciphertext lifetime.
+
+    Pass ``snapshot.store`` and ``snapshot.current`` to named-site preparation.
+    Close the snapshot after service drain (or on startup failure). No secret
+    or decrypted record is kept by the generation check. This never grants
+    write authority or initializes or falls back to another store.
+    """
+    secret = _passphrase(passphrase)
+    pinned_dir = pinned_file = generation = None
+    try:
+        with _locked(path) as directory:
+            with _read_ciphertext(path, directory) as (raw, previous, file):
+                store = _open_envelope(raw, secret)
+                _unchanged(path, directory, previous)
+                # A dup of the locked directory would retain its flock. Open
+                # a separate description of the same pinned directory instead.
+                pinned_dir = os.open(".", _DIRECTORY_FLAGS, dir_fd=directory)
+                pinned_file = os.dup(file)
+                generation = _AccountGeneration(
+                    path, pinned_dir, pinned_file, previous, sha256(raw).digest()
+                )
+                pinned_dir = pinned_file = None
+                if not generation.current():
+                    raise WebAccountsError(_UNSAFE)
+                return AccountSnapshot(store, generation.current, generation.close)
+    except BaseException as error:
+        if generation is not None:
+            generation.close()
+        if isinstance(error, Exception) and not isinstance(error, WebAccountsError):
+            raise WebAccountsError(_UNSAFE) from None
+        raise
+    finally:
+        _close_fd(pinned_file)
+        _close_fd(pinned_dir)
+
+
+def _check_enrollment_target(store, username, scope, replacing):
+    existing = next(
+        (item for item in store.accounts if item.username == username), None
+    )
+    if replacing:
+        # A password reset must not quietly expand or narrow the account scope.
+        if existing is None or existing.workspace_ids != scope:
+            raise WebAccountsError(
+                "Web account reset requires the existing workspace scope."
+            )
+    elif existing is not None:
+        raise WebAccountsError("Web account already exists; no record was replaced.")
+    elif len(store.accounts) >= MAX_ACCOUNTS:
+        raise WebAccountsError("Web account store has reached its account limit.")
+
+
+def review_registration(path, passphrase, username, *, workspace_ids, replacing=False):
+    """Read an authenticated store binding before a reviewed enrollment/reset.
+
+    Only a trusted host caller may select the username and verified workspace
+    IDs. Keep this object and its setup bytes inside the host; it is not the
+    one-use browser authorization or an account/session lifecycle fence.
+    """
+    if type(replacing) is not bool:
+        raise WebAccountsError("Web account registration mode is invalid.")
+    name, scope = _username(username), _scope(workspace_ids)
+    secret = _passphrase(passphrase)
+    with _locked(path) as directory:
+        store, previous, digest = _read(path, directory, secret, with_digest=True)
+        _check_enrollment_target(store, name, scope, replacing)
+        return RegistrationReview(
+            path,
+            _identity(os.fstat(directory)),
+            _stamp(previous),
+            name,
+            scope,
+            store.setup,
+            replacing,
+            digest,
+        )
+
+
+def commit_registration(path, passphrase, review, *, registration, current=None):
+    """Publish a vetted protocol upload against its exact reviewed store.
+
+    This performs a storage compare-and-swap only. The caller must enforce
+    host approval, one-use redemption, native owner exclusion/revocation,
+    and proof of possession before calling it. Pass the original reviewed
+    object. A trusted current guard is checked before replacement while
+    holding the store lock. This does not prevent offline store rollback.
+    Do not retry on a stale or unverified outcome.
+    """
+    if type(review) is not RegistrationReview or path != review._path:
+        raise WebAccountsError(_STALE_REVIEW)
+    scope = _scope(review.workspace_ids)
+    if (
+        type(review.workspace_ids) is not tuple
+        or scope != review.workspace_ids
+        or type(review.replacing) is not bool
+        or type(review._ciphertext_digest) is not bytes
+        or len(review._ciphertext_digest) != 32
+        or (current is not None and not callable(current))
+    ):
+        raise WebAccountsError(_STALE_REVIEW)
+    username = _username(review.username)
+    secret = _passphrase(passphrase)
+    record = _protocol_bytes(registration, MAX_REGISTRATION_BYTES)
+    with _locked(path) as directory:
+        if (
+            _identity(os.fstat(directory)) != review._directory_identity
+            or _stamp(_entry(directory, path.name)) != review._file_stamp
+        ):
+            raise WebAccountsError(_STALE_REVIEW)
+        store, previous, digest = _read(path, directory, secret, with_digest=True)
+        if (
+            _stamp(previous) != review._file_stamp
+            or store.setup != review.setup
+            or not secrets.compare_digest(digest, review._ciphertext_digest)
+        ):
+            raise WebAccountsError(_STALE_REVIEW)
+        _check_enrollment_target(store, username, scope, review.replacing)
+        account = Account(username, scope, record)
+        others = (item for item in store.accounts if item.username != username)
+        updated = AccountStore(
+            store.setup,
+            tuple(sorted((*others, account), key=lambda item: item.username)),
+        )
+        try:
+            _publish(path, directory, _seal(updated, secret), previous, current=current)
+        except KeyboardInterrupt:
+            try:
+                _unchanged(path, directory, previous)
+            except (OSError, WebAccountsError, KeyboardInterrupt):
+                raise WebAccountsError(_UNVERIFIED) from None
+            raise
 
 
 def add_account(

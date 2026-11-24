@@ -1,0 +1,24 @@
+/* Only load after web_sessions.css in the internal first-party composition. */
+@import "./web_studio_transcript.css";
+@import "./web_studio_composer.css";
+
+#workspace-chat > #workspace-studio-center {
+  --workspace-studio-style: ready;
+  min-width: 0;
+}
+#workspace-chat[data-first-party-studio] > :is(#native, #no-selection) { display: none; }
+/* The existing shell owns the one visible heading and its drawer controls. */
+#workspace-chat[data-first-party-studio] .workspace-chat-head { flex-wrap: wrap; }
+#workspace-chat[data-first-party-studio] #workspace-conversation-title {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+#workspace-chat[data-first-party-studio] #workspace-studio-transcript .chat-head { display: none; }
+/* The sibling subgrid still reserves its first row for the hidden heading. */
+#workspace-chat[data-first-party-studio] #workspace-studio-transcript .chat-body { grid-row: 2; }
+[data-layout="focus"] #workspace-chat[data-first-party-studio] .workspace-chat-head {
+  padding-inline: max(21px, calc((100% - 714px) / 2));
+}
+#web-shell #workspace-studio-composer .composition-note { margin-top: 7px; }
+#web-shell #workspace-studio-composer .composition-status:empty { margin-top: 0; }
+#web-shell[data-named-studio] #workspace-host-terminal { display: inline-flex; }

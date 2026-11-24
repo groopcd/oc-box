@@ -215,7 +215,7 @@ def admit():
             ADMITTED.reset(token)
 
 
-def run_fenced(command, **options):
+def run_admitted(command, gate, **options):
     """Admit only process creation; an already admitted command may finish.
 
     Stop intent is published before its caller waits for admission. Holding the
@@ -229,7 +229,7 @@ def run_fenced(command, **options):
             raise ValueError("stdin and input cannot be combined")
         options["stdin"] = subprocess.PIPE
     options["start_new_session"] = True
-    with admit():
+    with gate():
         child = subprocess.Popen(command, **options)
     try:
         output, errors = child.communicate(input=data, timeout=timeout)
@@ -243,6 +243,10 @@ def run_fenced(command, **options):
     return subprocess.CompletedProcess(command, child.returncode, output, errors)
 
 
+def run_fenced(command, **options):
+    return run_admitted(command, admit, **options)
+
+
 @dataclass(frozen=True)
 class Source:
     container_id: str
@@ -251,6 +255,7 @@ class Source:
 
 
 def _signature(box, data, info):
+    """Validate the passive entrypoint and bind/volume signature without I/O."""
     if not isinstance(info, dict):
         raise RecoveryError("invalid-container")
     config = info.get("Config")
@@ -322,6 +327,10 @@ def _signature(box, data, info):
     )
 
 
+def passive_workspace_mounts(box, data, info):
+    return _signature(box, data, info)
+
+
 def capture(box, data, info, token, *, refusal=None):
     """Use startup's existing inspection; never probe or start a healthy owner."""
 
@@ -347,7 +356,7 @@ def capture(box, data, info, token, *, refusal=None):
     ):
         return reject("invalid-container")
     try:
-        signature = _signature(box, data, info)
+        signature = passive_workspace_mounts(box, data, info)
     except RecoveryError as exc:
         return reject(exc.reason)
     except (KeyError, TypeError):
@@ -466,7 +475,7 @@ def _inspect(box, path, data, source, *, running):
     if (
         not isinstance(info, dict)
         or info.get("Id") != source.container_id
-        or _signature(box, data, info) != source.mount_signature
+        or passive_workspace_mounts(box, data, info) != source.mount_signature
     ):
         raise RecoveryError("container-changed")
     state = info.get("State")

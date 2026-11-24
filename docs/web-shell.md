@@ -7,15 +7,46 @@ layout from the offline design demo and the deferred sign-in, LAN, and CA
 work. This page describes the live contract.
 
 `oc-box web` opens Studio; the compact session index is no longer served.
-The native guest pairing boundary is unchanged. Studio, Dashboard, Chat
-focus and the metadata-only workspace manager share the existing native iframe
-and the same membership/selection routes. An explicit Workspace history request
-uses a separate bounded private catalog for the registered in-container project
-directory. It does not assert TUI membership or read host archives. Incomplete
-or unverifiable results are unavailable; opening a row verifies the selected
-native identity. The manager exposes no host data or privileged actions.
-Unsupported sections report that they are unavailable rather than displaying
-synthetic values.
+The production outer shell adapts the final [Studio mockup](mockups/web-manager.html)
+shown in the [README concept image](assets/readme-web-studio-demo.png): a two-tier
+masthead, session rail, central conversation header and workspace inspector.
+The masthead shows only the final component of the registered in-container
+project path and a neutral **Workspace guest** label, not a named account or
+sign-in control. Studio's desktop panes start at 248 px and 278 px with 10 px
+dividers; narrow windows use on-demand panes.
+
+The native guest pairing boundary is unchanged. Studio, Dashboard, Chat focus
+and the metadata-only workspace manager share the same native iframe and
+membership/selection routes. The concept's custom transcript, composer,
+synthetic metrics and activity, and simulated host actions are not part of
+this port. The manager adapts the seven-view no-chat layout from the same
+approved mockup (`21e966ce80d2dde4db853c5a784ef10b28d90af4`); it is not the local
+Full TUI or a browser gateway to host management.
+
+- **Status** shows the workspace label, verified TUI membership and the
+  retained browser selection. Refresh is explicit; there are no host resource
+  readings, workspace registry, or activity entries.
+- **Settings** stages display density and whether workspace details open.
+  Apply affects only this page; Reset to defaults stages defaults, and Revert
+  or Esc discards unapplied changes. Reload resets the preferences. There is
+  no automatic refresh, browser storage, or host/native settings write.
+- **Sessions** lists selected-source metadata in a searchable table. Archive
+  filters apply only to workspace history. An explicit row open returns to
+  the last chat layout and uses the existing native selection checks.
+- **Terminals**, **Logs**, **Storage**, and **Backup/restore** provide local host
+  guidance only. The browser manager cannot attach to terminals, read logs or
+  storage, or read or write backups.
+
+The manager tabs wrap on narrow screens. Use Left/Right, Home/End, or 1–7 on a
+focused manager tab; Tab moves into the active view. Switching views does not
+load history or change the mounted native conversation.
+
+Choosing **History** or **Archived** makes an explicit request to the same
+bounded private catalog for the registered in-container project directory.
+History groups non-archived and archived records separately; Archived filters to
+records marked archived in that native catalog. Neither view implies TUI
+membership or reads host archives. Incomplete or unverifiable results are
+unavailable; opening a row verifies the selected native identity.
 Mirroring is eligible on canonical stable OpenCode **`2.x.y`** releases such as
 `2.3.2`, with no leading zeroes or version suffixes. Eligibility is not a claim
 that every release has been tested or that its contracts cannot change.
