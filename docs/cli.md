@@ -656,9 +656,13 @@ inspector; wide Studio panes resize by dragging or with the divider arrow keys.
 The rail and the separate no-chat workspace manager distinguish verified open
 TUI tabs from on-demand, metadata-only history for the registered workspace
 project. **Archived** filters that history; it does not read host archives.
-The browser manager offers only Status and Sessions. It has no host metrics,
-catalogs, logs, workspace/backup operations or host terminal and is not the
-offline demo's Full TUI or the local `oc-box tui` manager.
+The browser manager offers seven no-chat views. Status and Sessions show
+workspace metadata; Settings changes display preferences for the current page
+only. Terminals, Logs, Storage and Backup/restore provide host-side guidance,
+not browser access to those operations. Use Left/Right, Home/End, or 1–7 on
+the manager tabs. Opening a view never fetches history or starts monitoring.
+The browser manager is not the offline demo's Full TUI or the local
+`oc-box tui` manager.
 
 The one-use link is the only browser sign-in method and the HTTP relay binds
 to `127.0.0.1` only. Vault unlock supplies workspace credentials, not browser

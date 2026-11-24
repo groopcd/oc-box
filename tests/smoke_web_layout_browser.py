@@ -147,6 +147,109 @@ def rendered_session(page, gateway, ident, title):
     )
 
 
+def manager_views(page, preserved):
+    manager = page.locator("#workspace-manager")
+    sections = page.get_by_role("tablist", name="Workspace manager sections")
+    status = sections.get_by_role("tab", name="Status", exact=True)
+    backup = sections.get_by_role("tab", name="Backup/restore", exact=True)
+    settings_tab = sections.get_by_role("tab", name="Settings", exact=True)
+    selected_panel = manager.get_by_role("tabpanel")
+    expect(sections.get_by_role("tab")).to_have_count(7)
+    expect(manager).to_contain_text("This browser view is limited to this workspace")
+    expect(selected_panel).to_have_count(1)
+    expect(status).to_be_focused()
+    expect(page.locator("#workspace-manager-tab-count")).to_have_text("2")
+    expect(page.locator("#workspace-manager-selection")).to_have_text("Synthetic Alpha")
+    expect(page.locator("#workspace-manager-history-status")).to_have_text(
+        "Not requested"
+    )
+    require(
+        manager.evaluate(
+            """el => {
+              const style = node => getComputedStyle(node);
+              const strip = el.querySelector('[role=tablist]');
+              const tab = strip.querySelector('[aria-selected=true]');
+              return style(el).padding === "22px" && style(strip).gap === "4px" &&
+                style(tab).boxShadow === "rgb(120, 224, 230) 0px -2px 0px 0px inset" &&
+                style(el.querySelector('.workspace-manager-card')).backgroundColor === "rgb(17, 30, 43)";
+            }"""
+        ),
+        "The approved manager's tabs or cards did not render.",
+    )
+
+    def active(tab, panel_name):
+        expect(tab).to_be_focused()
+        expect(tab).to_have_attribute("aria-selected", "true")
+        expect(tab).to_have_attribute("tabindex", "0")
+        expect(selected_panel).to_have_count(1)
+        expect(selected_panel).to_have_accessible_name(panel_name)
+
+    status.press("ArrowLeft")
+    active(backup, "Backup/restore")
+    backup.press("ArrowRight")
+    active(status, "Status")
+    status.press("End")
+    active(backup, "Backup/restore")
+    backup.press("Home")
+    active(status, "Status")
+    for key, name, guidance in (
+        ("4", "Terminals", "oc-box terminal"),
+        ("5", "Logs", "oc-box logs"),
+        ("6", "Storage", "oc-box tui"),
+        ("7", "Backup/restore", "oc-box restore"),
+    ):
+        sections.locator("[aria-selected=true]").press(key)
+        active(sections.get_by_role("tab", name=name, exact=True), name)
+        expect(selected_panel).to_contain_text(guidance)
+        expect(selected_panel.locator("button,input,select,iframe")).to_have_count(0)
+    expect(page.locator("#workspace-manager-status-refresh")).to_be_hidden()
+
+    backup.press("2")
+    active(settings_tab, "Settings")
+    density = page.get_by_label("Density", exact=True)
+    expand = page.get_by_label("Expand workspace details", exact=True)
+    density.select_option("compact")
+    expand.check()
+    page.get_by_role("button", name="Apply", exact=True).click()
+    expect(manager).to_have_attribute("data-compact", "")
+    page.get_by_role("button", name="Reset to defaults", exact=True).click()
+    expect(density).to_have_value("comfortable")
+    expect(manager).to_have_attribute("data-compact", "")
+    density.press("Escape")
+    expect(density).to_have_value("compact")
+    expect(expand).to_be_checked()
+    settings_tab.press("Home")
+    active(status, "Status")
+    expect(page.locator("#workspace-manager-details")).to_have_attribute("open", "")
+    require(
+        selected_panel.locator("td").first.evaluate(
+            "cell => getComputedStyle(cell).paddingTop === '5px'"
+        ),
+        "Compact preference did not affect the rendered manager table.",
+    )
+
+    page.set_viewport_size({"width": 390, "height": 800})
+    status.press("End")
+    active(backup, "Backup/restore")
+    require(
+        manager.evaluate(
+            """el => {
+              const tabs = el.querySelectorAll('[role=tab]');
+              return el.scrollWidth <= el.clientWidth &&
+                tabs[0].offsetTop < tabs[tabs.length - 1].offsetTop &&
+                getComputedStyle(el).padding === '12px';
+            }"""
+        ),
+        "Narrow manager did not wrap its tabs or remain within its viewport.",
+    )
+    backup.press("Home")
+    active(status, "Status")
+    status.press("Tab")
+    expect(selected_panel).to_be_focused()
+    page.set_viewport_size({"width": 1440, "height": 900})
+    preserved()
+
+
 def workspace_views(page, gateway, first, history):
     root = page.locator("#web-shell")
     layouts = page.get_by_role("navigation", name="Workspace layout", exact=True)
@@ -240,6 +343,13 @@ def workspace_views(page, gateway, first, history):
         expect(button).to_have_attribute("aria-pressed", "true")
         expect(root).to_have_attribute("data-layout", view)
 
+    requests = []
+
+    def first_party(request):
+        if request.frame == page.main_frame:
+            requests.append((request.method, urlsplit(request.url).path))
+
+    page.on("request", first_party)
     try:
         divider = page.get_by_role("separator", name="Resize sessions pane")
         divider.press("ArrowRight")
@@ -293,39 +403,71 @@ def workspace_views(page, gateway, first, history):
         preserved()
         select("Workspace manager", "manager")
         expect(frame).to_be_hidden()
-        sections = page.get_by_role("navigation", name="Workspace manager sections")
-        expect(sections.get_by_role("button")).to_have_count(2)
-        expect(sections.get_by_role("button", name="Status")).to_be_visible()
-        expect(sections.get_by_role("button", name="Sessions")).to_be_visible()
+        expect(page.locator("#workspace-content")).to_be_hidden()
+        manager_views(page, preserved)
+        require(
+            not requests, "Viewing manager panels or display settings issued a request."
+        )
+        page.get_by_role("button", name="Refresh TUI membership").click()
+        expect(
+            page.get_by_role("button", name="Refresh TUI membership")
+        ).to_be_enabled()
+        require(
+            requests == [("GET", web_sessions.CATALOG)],
+            "Explicit Status refresh did not use only the existing TUI catalog.",
+        )
         preserved()
         select("Studio", "studio")
         expect(frame).to_be_visible()
         preserved()
 
         select("Workspace manager", "manager")
-        sections.get_by_role("button", name="Sessions", exact=True).click()
+        sections = page.get_by_role("tablist", name="Workspace manager sections")
+        sections.get_by_role("tab", name="Sessions", exact=True).click()
         preserved()
-        page.get_by_role("button", name="Workspace history", exact=True).click()
-        expect(page.locator("#workspace-search-status")).to_contain_text(
+        require(
+            len(requests) == 1, "Entering Sessions automatically requested history."
+        )
+        source = page.get_by_label("Source", exact=True)
+        source.select_option("history")
+        expect(page.locator("#workspace-manager-session-count")).to_contain_text(
             "workspace history rows"
         )
+        table = page.get_by_role("table", name="Workspace session results")
         expect(
-            page.get_by_role(
+            table.get_by_role(
                 "button", name="Open in native chat: Synthetic History-only"
             )
         ).to_be_visible()
+        archived = table.get_by_role(
+            "button", name="Open in native chat: Synthetic Archived"
+        )
+        expect(archived).to_be_visible()
+        page.get_by_label("Include archived").uncheck()
+        expect(archived).to_have_count(0)
+        source.select_option("archived")
+        expect(archived).to_be_visible()
+        expect(table.get_by_role("button")).to_have_count(1)
+        source.select_option("history")
+        page.get_by_label("Include archived").check()
+        search = page.get_by_role("searchbox", name="Search sessions", exact=True)
+        search.fill("ses_browser_history")
+        expect(table.get_by_role("button")).to_have_count(1)
         expect(
-            page.locator("#workspace-archived-list").get_by_role(
-                "button", name="Open in native chat: Synthetic Archived"
+            table.get_by_role(
+                "button", name="Open in native chat: Synthetic History-only"
             )
         ).to_be_visible()
-        expect(page.locator("#session-tabs")).to_be_hidden()
-        page.get_by_role("button", name="Archived in workspace", exact=True).click()
-        expect(page.locator("#workspace-history-list")).to_be_hidden()
-        expect(page.locator("#workspace-archived-list")).to_be_visible()
-        page.get_by_role("button", name="Workspace history", exact=True).click()
+        page.get_by_role("button", name="Clear search", exact=True).click()
+        expect(search).to_be_focused()
+        expect(archived).to_be_visible()
+        require(
+            requests == [("GET", web_sessions.CATALOG), ("GET", web_sessions.HISTORY)],
+            "History filtering or browsing fetched anything beyond the existing catalogs.",
+        )
         preserved()
     finally:
+        page.remove_listener("request", first_party)
         mark.evaluate("mark => mark.stop()")
         mark.dispose()
 
