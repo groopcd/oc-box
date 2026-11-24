@@ -1,6 +1,6 @@
 import io
 import unittest
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import ExitStack, redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
@@ -12,18 +12,22 @@ from test_uninstall_plan import INSTALLATION, RELEASE
 class UninstallCLITests(unittest.TestCase):
     def setUp(self):
         self.out, self.err = io.StringIO(), io.StringIO()
-        self.enterContext(redirect_stdout(self.out))
-        self.enterContext(redirect_stderr(self.err))
-        self.guard = self.enterContext(patch.object(install_removal, "_guard_host"))
-        self.review = self.enterContext(
+        contexts = ExitStack()
+        self.addCleanup(contexts.close)
+        contexts.enter_context(redirect_stdout(self.out))
+        contexts.enter_context(redirect_stderr(self.err))
+        self.guard = contexts.enter_context(
+            patch.object(install_removal, "_guard_host")
+        )
+        self.review = contexts.enter_context(
             patch.object(
                 install_ownership, "review_installation", return_value=INSTALLATION
             )
         )
-        self.approve = self.enterContext(
+        self.approve = contexts.enter_context(
             patch.object(uninstall_cli.uninstall_tty, "confirm", return_value=True)
         )
-        self.remove = self.enterContext(
+        self.remove = contexts.enter_context(
             patch.object(
                 install_removal,
                 "remove_flat_installation",
