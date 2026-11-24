@@ -433,6 +433,11 @@ the trusted `LocalOrigins` profile, not a request, query parameter or redirect.
   memory, or a malicious controlling service worker; deployment must keep the
   account origin dedicated and free of service workers or unrelated content.
 
+Both installation formats carry the exact source HTML, CSS and JavaScript for
+this bundle. This is not a compiled artifact decision: no WASM or verifier
+binary is included or selected by the installer. The account source hashes
+and limits are unchanged for installed copies.
+
 The internal listener accepts `start_named_http(..., account_assets=prepared)`
 only for the same HTTPS profile and the digest used to prepare its verifier.
 It rechecks the original live account bootstrap before sending a subresource;
