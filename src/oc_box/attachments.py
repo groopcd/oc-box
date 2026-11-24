@@ -398,10 +398,19 @@ class MCP:
             if not self.enabled:
                 raise AttachmentError("Host image broker is not ready.")
             metadata = params.get("_meta")
+            caller = (
+                metadata.get("ai.opencode/sessionID")
+                if isinstance(metadata, dict)
+                else None
+            )
             if (
-                not isinstance(metadata, dict)
-                or metadata.get("ai.opencode/sessionID") != self.session
+                not isinstance(caller, str)
+                or re.fullmatch(r"ses[A-Za-z0-9_-]{1,125}", caller) is None
             ):
+                raise AttachmentError(
+                    "Native ClientMCP did not provide a verified caller session; no image was granted."
+                )
+            if caller != self.session:
                 raise AttachmentError("This image broker belongs to another session.")
             name, arguments = params.get("name"), params.get("arguments")
             key = (

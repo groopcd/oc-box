@@ -323,6 +323,12 @@ class AttachmentMCPTests(unittest.TestCase):
             with self.subTest(meta=meta), patch.object(sharing, "Export") as export:
                 result = self.call("request_image", {"path": str(self.path)}, meta=meta)
                 self.assertTrue(result["isError"])
+                self.assertIn(
+                    "belongs to another session"
+                    if meta == {"ai.opencode/sessionID": OTHER}
+                    else "did not provide a verified caller session",
+                    result["content"][0]["text"],
+                )
                 export.assert_not_called()
         self.consent.assert_not_called()
         self.check.assert_not_called()

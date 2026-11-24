@@ -793,7 +793,7 @@ class Relay:
                 "No clipboard read was retried and nothing was restarted.",
                 file=sys.stderr,
             )
-        elif self.paths_enabled and self.input.disable_reason is not None:
+        if self.paths_enabled and self.input.disable_reason is not None:
             print(
                 "oc-box: Host pathname importing was disabled by terminal input "
                 "framing. Open a fresh client to try again; nothing was restarted.",

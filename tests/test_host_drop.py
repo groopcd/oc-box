@@ -319,7 +319,7 @@ class HostDropTests(unittest.TestCase):
             relay.__exit__()
         self.assertIn("Host pathname importing was disabled", errors.getvalue())
 
-    def test_clipboard_framing_refusal_reports_one_fixed_warning_on_client_exit(self):
+    def test_shared_framing_refusal_reports_each_import_that_was_disabled(self):
         clipboard = Mock()
         relay = host_drop.Relay(
             self.facade,
@@ -340,7 +340,9 @@ class HostDropTests(unittest.TestCase):
             errors.getvalue(),
             "oc-box: Host clipboard importing disabled for this client (input-framing). "
             "Open a fresh client to try again; nothing was restarted.\n"
-            "oc-box: Host input framing stopped at: escape-prefix.\n",
+            "oc-box: Host input framing stopped at: escape-prefix.\n"
+            "oc-box: Host pathname importing was disabled by terminal input framing. "
+            "Open a fresh client to try again; nothing was restarted.\n",
         )
 
     def test_clipboard_framing_recovery_waits_for_fresh_shortcut_in_same_client(self):
@@ -405,6 +407,8 @@ class HostDropTests(unittest.TestCase):
         self.assertEqual(
             errors.getvalue(),
             "oc-box: Host clipboard importing disabled for this client (input-incomplete). "
+            "Open a fresh client to try again; nothing was restarted.\n"
+            "oc-box: Host pathname importing was disabled by terminal input framing. "
             "Open a fresh client to try again; nothing was restarted.\n",
         )
 
