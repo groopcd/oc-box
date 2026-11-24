@@ -140,38 +140,47 @@ through this boundary. The cookie goes upstream only. No credential refresh,
 replacement attach, host OpenCode, host-loopback upstream dial or guest
 fallback is attempted.
 
-The runtime remains unchanged:
+The unserved [`web_named_protocol.py`](../../src/oc_box/web_named_protocol.py)
+producer is an explicit, in-process owning-launcher opt-in. It requires the
+actual held workspace lifecycle lock and an unchanged stop-intent baseline
+from normal owning preparation. It will not convert a live default owner or
+replace a controller socket, even one that looks stale. Before starting its
+private native worker, it inspects the workspace container's ownership label,
+registered mounts and isolated network, capturing a full immutable ID and
+running `StartedAt` value. The worker starts against that full ID, checks the
+actual authenticated `/api/info` response for **2.3.2**, and reports readiness
+only over the existing private pipe. The host rechecks the exact run before
+publishing or lending the owner.
 
-- [`workspace_service.Owner`](../../src/oc_box/workspace_service.py) starts its
-  private native service via the container `opencode_v2_io.py lease` worker.
-  `Owner.handle()` checks same-user Unix peer credentials, workspace ID,
-  readiness and the close fence. It counts `attach` clients until that stream
-  closes or the owner ends; `wait_clients()` uses that count before shutdown.
-- `workspace_service.attach()` checks the registered project/directory and
-  the owned running container mount, then uses the private runtime
-  `socket_path()` and verifies the peer and endpoint. Its internal
-  `_attach_control()` exposes the original held stream and peer PID to trusted
-  borrowers without creating a second lease. The ordinary `attach()` interface
-  still yields only the connection dictionary. Neither the PID nor
-  `controller_running()` attests the native owner's generation.
-- `inspect_owned()` can return the full Podman `Id`, but the current owner
-  reply does not bind that immutable ID and running instance to the stream.
-  An optional UI-reporting generation is not a mandatory owner generation.
-  The existing guest `relay_command()` opens an exec pipe, not the registered
-  cancellable socket required by the named connector.
+The private `oc-box.named-owner/1` request and reply use same-user Unix peer
+credentials and a fresh challenge authenticated by a per-owner in-memory
+capability. The reply binds that challenge, an owner generation independent
+of UI reports, the workspace, version, endpoint, container ID and `StartedAt`
+to the original `_attach_control()` stream. Neither process IDs nor the
+client count are evidence of native identity. The holder rechecks the original
+readiness worker, running instance and stop/closure fence; it will not
+reconnect or follow a replaced container by name. This is not a guarantee of
+continuous native HTTP responsiveness or an atomic transaction with native
+execution. The private control credential never goes to the browser.
 
-Before enabling named mode, a reviewed runtime producer must bind the native
-owner's exact generation and running container identity to the held stream,
-including stop/close and native liveness checks. It must reserve one named
-lifetime per owner, avoid rewrapping a failed lease, supply a confined and
-cancellable connector to that exact container, and prove that guest admission
-cannot bypass named policy on that owner. The listener must stop admission,
-run owner/expiry sweeps, cancel and drain workers, then release the attach.
-Checks are not atomic with native execution and cannot recall already
-transmitted bytes. Synthetic owner observations and Unix socket pairs check
-the consumer contract only; they do not establish this producer, connector,
-full Studio capability, or live cleanup. Public one-use link behavior remains
-unchanged.
+Mode is fixed before startup. A legacy owner will not accept the named
+action, and a named-only owner rejects **both** legacy `info` and `attach`
+requests. Legacy web, TUI and terminal requests cannot be distinguished on
+that wire, so none receive native credentials from an opted-in owner. The
+owner-local legacy `web_session()` path also refuses. The default `Owner`,
+ordinary `attach()` and public one-use link behavior are unchanged.
+
+This leaves a separate **tracked namespace connector** task. The guest
+`relay_command()` provides exec pipes, not the registered cancellable socket
+needed for named requests. A future adapter must bind the exact container,
+register I/O and process ownership before startup, and prove cleanup and
+reaping on timeout, cancellation and owner loss. Do not start a relay worker
+without that contract. Before serving, also verify old-relay drain and guest
+exclusion across live owner transitions on an external host, compose the
+listener and browser flow, run owner/expiry sweeps, and drain all workers
+before releasing the attach. These checks cannot recall already transmitted
+bytes. Synthetic control-socket and worker fixtures are not Podman, native
+wire, browser, or full Studio acceptance.
 
 A later LAN instance can use distinct existing sites and certificates under
 operator control. Isolated guest LAN tests can establish transport behavior
