@@ -23,9 +23,19 @@ Revocation and drain are separate. To turn on routes, account for all
 accepted sockets and relay processes from before dispatch through verified
 retirement, including persistent native WebSockets. A socket being closed,
 or a client count reaching zero, does not establish that in-container work
-has stopped. A Studio grant must not outlive native cookie authority:
-recheck the native scope before sensitive operations and fence observed
-logout or uncertainty. Never turn a browser cookie into a host capability.
+has stopped. For ordinary traffic, a finite metadata reader cannot
+stand in for a duplex native WebSocket relay. The missing evidence is an
+acknowledged native-side retirement on cancellation, followed by strict
+EOF and exact process reap, even when an upgraded stream is idle or
+backpressured. Privately tracking host workers alone is not that evidence.
+
+A Studio grant must not outlive native cookie authority. Recheck the
+current browser cookie for every bounded protected exchange and fence an
+observed loss. A missing cookie retires the page; that does not prove
+server-side invalidation of an earlier copied cookie, or cancellation of a
+write that the native server already admitted. Require measured native
+behavior for any stronger logout claim. Never turn a browser cookie into
+a host capability or add a replacement plaintext sign-in.
 
 ## Named HTTPS: the stop fence must cover every supported writer
 
