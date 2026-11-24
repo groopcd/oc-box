@@ -340,6 +340,12 @@ class RuntimeSafeguardTests(unittest.TestCase):
             workspace_service.confirm_guarded_owner(
                 box, self.data, connection, NEW, time.monotonic() + 30
             )
+        with (
+            patch.object(workspace_service, "api", return_value={"version": NEW}),
+            patch.object(workspace_service.time, "monotonic", side_effect=[40, 50]),
+            self.assertRaisesRegex(box.BoxError, "readiness expired"),
+        ):
+            workspace_service.confirm_guarded_owner(box, self.data, connection, NEW, 50)
 
     def test_real_owner_signal_completes_receipt_and_warm_launch_skips_probe(self):
         with (

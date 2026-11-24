@@ -754,6 +754,8 @@ def confirm_guarded_owner(box, data, connection, expected, deadline):
     if remaining <= 0:
         raise box.BoxError("Guarded OpenCode owner readiness expired.")
     info = api(box, data, connection, "GET", "/api/info", timeout=min(remaining, 10))
+    if time.monotonic() >= deadline:
+        raise box.BoxError("Guarded OpenCode owner readiness expired.")
     if not isinstance(info, dict) or info.get("version") != expected:
         raise box.BoxError(
             "Private owner readiness did not match the guarded OpenCode release."

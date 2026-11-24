@@ -937,7 +937,9 @@ class _Scratch:
                 "--pull=never",
                 "--network=" + network,
                 "--no-hosts",
-                *(("--dns=none",) if offline else ("--dns-search=.",)),
+                # Podman rejects DNS flags with network=none. That namespace
+                # already prevents DNS egress without a resolver override.
+                *(() if offline else ("--dns-search=.",)),
                 "--env-host=false",
                 "--http-proxy=false",
                 "--image-volume=ignore",

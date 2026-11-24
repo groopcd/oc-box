@@ -325,6 +325,7 @@ class PreflightTests(unittest.TestCase):
         self.assertFalse(any("--publish" in cmd for cmd in create))
         self.assertIn("--network=pasta:--no-map-gw", create[0])
         self.assertIn("--network=none", create[1])
+        self.assertFalse(any(arg.startswith("--dns") for arg in create[1]))
         self.assertIn(":/scratch:ro,", create[1][create[1].index("--volume") + 1])
         self.assertIn(("rm", "c" * 64), commands[: commands.index(create[1])])
         self.assertEqual(
