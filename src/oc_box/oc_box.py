@@ -2026,12 +2026,20 @@ def maintenance_terminal(path, data):
                 stop_container(data, env=environment)
 
 
-def exec_command(data, command, *, interactive=False):
+def exec_command(data, command, *, interactive=False, isolated_owner_env=None):
     forwarded = container_env(data)
     live = workspace_service.live_connection()
     if live and live["workspace"] == data["id"]:
         forwarded["OPENCODE_PASSWORD"] = live["password"]
-    environment = os.environ.copy()
+    isolated_owner = isolated_owner_env is not None
+    if isolated_owner and (
+        interactive
+        or isolated_owner_env != maintenance_host_env()
+        or command[:5] != ["/usr/bin/python3", "-I", "-S", "-B", "-c"]
+        or opencode_compat.major(data.get("opencode_version")) != 2
+    ):
+        raise BoxError("Invalid isolated Studio owner execution.")
+    environment = isolated_owner_env.copy() if isolated_owner else os.environ.copy()
     result = ContainerCommand(["podman", "exec", "-i"], environment)
     if interactive and sys.stdin.isatty() and sys.stdout.isatty():
         result.append("-t")
@@ -2055,6 +2063,15 @@ def exec_command(data, command, *, interactive=False):
         "OPENCODE_DB",
     }
     for key, value in forwarded.items():
+        if isolated_owner and key in isolated_owner_env and key not in container_only:
+            raise BoxError("Studio owner engine and workspace environments overlap.")
+        if isolated_owner and (
+            key.startswith(
+                ("CONTAINER_", "CONTAINERS_", "PODMAN_", "STORAGE_", "LD_", "PYTHON")
+            )
+            or key in {"DOCKER_HOST", "SSH_AUTH_SOCK", "BASH_ENV", "ENV", "GCONV_PATH"}
+        ):
+            raise BoxError("Unsupported Studio owner environment setting.")
         if key in container_only:
             result.extend(["--env", f"{key}={value}"])
         else:
@@ -2072,7 +2089,10 @@ def exec_command(data, command, *, interactive=False):
         # Clear image/create-time environment first. Public variable NAMES are
         # argv; values arrive only via Podman's inherited --env NAME mechanism.
         bridge = "import os,sys; keys=sys.argv[1].split(','); env={k:os.environ[k] for k in keys if k in os.environ}; os.execvpe(sys.argv[2],sys.argv[2:],env)"
-        command = ["python3", "-c", bridge, ",".join([*forwarded, "PATH"]), *command]
+        interpreter = (
+            ["/usr/bin/python3", "-I", "-S", "-B"] if isolated_owner else ["python3"]
+        )
+        command = [*interpreter, "-c", bridge, ",".join([*forwarded, "PATH"]), *command]
     result.extend(
         [guarded.record.container if guarded else data["container"], *command]
     )

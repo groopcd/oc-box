@@ -17,6 +17,12 @@ captured, inspection and the guest proof worker use that immutable ID; they
 never fall back to the mutable name. Before spawning, the host also holds
 short workspace admission. A stop published during admission can still race
 an already-admitted spawn; readiness rechecks the token before publish.
+Inspect and the owner exec use the same checked host discovery settings,
+without importing ambient engine selectors or allowing forwarded values to
+change those settings. Both Python bootstraps are isolated from project
+module resolution. This does not itself pin engine configuration files;
+the installed profile and providerless relay must also agree on the
+original store and engine at activation.
 
 The private guest worker launches OpenCode using the normal V2 worker and
 requires authenticated `/api/info` on that worker's own endpoint. The exact
@@ -28,10 +34,12 @@ original lock, registration, container generation and child; an observed
 failure or interrupt is sticky. It does not attest a legacy `AttachedControl`,
 whose counted stream is still not independently bound to a native owner.
 
-Guest worker normal exit is only acknowledged after input EOF was observed
+Guest worker normal exit is acknowledged only after input EOF was observed
 with the original native child still alive, and that child then exited cleanly
-without force. This concerns the native owner worker, **not** gateway HTTP or
-WebSocket drain. The ordinary workspace shutdown implementation is unchanged.
+without force. The host requires an exact wait status for that guest exec and
+does not treat a force-kill, nonzero or missing status, or timeout as success.
+This concerns the native owner worker, **not** gateway HTTP or WebSocket
+drain. No installed caller uses this proof or its retirement path yet.
 
 ## Before any route is enabled
 
@@ -56,6 +64,8 @@ WebSocket drain. The ordinary workspace shutdown implementation is unchanged.
 actual Gateway reservation, with the original owner connection and pinned
 container selection. It is scoped to a one-shot, non-listening probe; it
 does not mint a cookie, register a browser grant, or expose a protected API.
+Two reservations cannot both claim the same original owner generation,
+including after the first reservation is retired.
 
 `tests/smoke_web_studio_guest_owner.py` uses the exact unmodified 2.4.1 ELF
 with a synthetic project and substituted Podman inspect/exec. It tests the

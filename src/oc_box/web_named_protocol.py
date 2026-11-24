@@ -75,7 +75,7 @@ def _read(stream):
     return value
 
 
-def _running_instance(box, data, target):
+def _running_instance(box, data, target, *, env=None):
     """Read the real owned running instance, never retry by mutable name."""
     with box.captured_output(private=True) as output:
         result = box.podman(
@@ -85,7 +85,7 @@ def _running_instance(box, data, target):
             private=True,
             check=False,
             timeout=_INSPECT_TIMEOUT,
-            env=box.maintenance_host_env(),
+            env=box.maintenance_host_env() if env is None else env,
             stdin=subprocess.DEVNULL,
             stdout=output,
             stderr=subprocess.DEVNULL,

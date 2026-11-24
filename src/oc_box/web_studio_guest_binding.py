@@ -83,10 +83,10 @@ def bind_unserved(gateway, listener, owner):
     origin = listener.origin(gateway, listening=False)
     if origin is None:
         raise GuestBindingError()
-    with gateway.lock:
-        if gateway._guest_preview_bound or not _local_match(gateway, listener, owner):
-            raise GuestBindingError()
-        gateway._guest_preview_bound = True
+    # Spend the original owner's handoff, not a flag on one reservation.
+    # An interrupted or stale first claim cannot be tried on a second socket.
+    if not owner.claim_gateway(identity) or not _local_match(gateway, listener, owner):
+        raise GuestBindingError()
     binding = web_studio_guest.GuestBinding(
         identity.workspace_id, identity.generation, identity.container_id, origin
     )

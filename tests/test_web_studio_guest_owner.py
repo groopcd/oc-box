@@ -1,5 +1,6 @@
 """Original owner generation and guest-only private readiness tests."""
 
+from concurrent.futures import ThreadPoolExecutor
 import contextlib
 import fcntl
 import json
@@ -281,3 +282,96 @@ class GuestOwnerTests(unittest.TestCase):
             actual.connection = connection
             self.assertIsNone(joined.current())
         self.assertIsNone(joined.current())
+
+    def test_only_one_gateway_can_claim_the_original_owner_even_after_loss(self):
+        with contextlib.ExitStack() as stack:
+            proof = self.seal(stack)
+            candidates = [
+                service.Gateway(box, proof.pinned_data(), self.owner.connection)
+                for _ in range(3)
+            ]
+            listeners = [
+                stack.enter_context(gateway._listener_preflight())
+                for gateway in candidates
+            ]
+
+            def bind(index):
+                try:
+                    return binding.bind_unserved(
+                        candidates[index], listeners[index], proof
+                    )
+                except binding.GuestBindingError:
+                    return None
+
+            with ThreadPoolExecutor(2) as threads:
+                joined = [result for result in threads.map(bind, (0, 1)) if result]
+            self.assertEqual(len(joined), 1)
+            joined[0].gateway.closed.set()
+            self.assertIsNone(joined[0].current())
+            self.assertIsNotNone(proof.current())
+            self.assertIsNone(bind(2))
+
+    def test_host_retirement_refuses_missing_nonzero_and_unverified_worker_exit(self):
+        for verdict in (
+            0,
+            3,
+            ChildProcessError(),
+            subprocess.TimeoutExpired("fixture", 10),
+        ):
+            with self.subTest(verdict=verdict), contextlib.ExitStack() as stack:
+                self.owner = service.Owner(
+                    box, self.path, self.data, guest_stop_token=self.token
+                )
+                self.seal(stack)
+                child = self.owner.child
+                child.returncode = None
+                child.stdin.closed = False
+
+                def wait(item, timeout):
+                    self.assertIs(item, child)
+                    self.assertEqual(timeout, 10)
+                    child.stdin.close.assert_called_once_with()
+                    if isinstance(verdict, Exception):
+                        raise verdict
+                    child.returncode = verdict
+
+                with (
+                    patch.object(worker, "_wait_exact_child", side_effect=wait),
+                    patch.object(service.os, "killpg") as kill,
+                ):
+                    if verdict == 0:
+                        self.owner.shutdown()
+                    else:
+                        with self.assertRaisesRegex(box.BoxError, "retirement"):
+                            self.owner.shutdown()
+                    kill.assert_not_called()
+
+    def test_guest_exec_uses_isolated_bootstrap_and_ignores_ambient_engine_selectors(
+        self,
+    ):
+        with contextlib.ExitStack() as stack:
+            proof = self.seal(stack)
+            stack.enter_context(patch.dict(os.environ, {"CONTAINER_HOST": "synthetic"}))
+            stack.enter_context(
+                patch.object(
+                    box,
+                    "container_env",
+                    return_value={
+                        "HOME": "/container/home",
+                        "SYNTHETIC_TOKEN": "private-value",
+                    },
+                )
+            )
+            command = proof.worker_command("pass")
+            start = command.index(_CONTAINER) + 1
+            opts = ["/usr/bin/python3", "-I", "-S", "-B", "-c"]
+            self.assertEqual(command[start : start + 5], opts)
+            self.assertEqual(command[start + 7 : start + 12], opts)
+            self.assertNotIn("CONTAINER_HOST", command.environment)
+            self.assertEqual(command.environment["SYNTHETIC_TOKEN"], "private-value")
+            self.assertNotIn("private-value", command)
+            with patch.object(
+                box, "container_env", return_value={"CONTAINER_HOST": "synthetic"}
+            ):
+                with self.assertRaisesRegex(box.BoxError, "Unsupported Studio owner"):
+                    proof.worker_command("pass")

@@ -1,6 +1,7 @@
 """Kernel socket checks on transient loopback-only Gateway reservations."""
 
 from contextlib import ExitStack
+import gc
 import os
 import socket
 from threading import Event
@@ -142,38 +143,31 @@ class GatewayListenerProofTests(unittest.TestCase):
                 replacement._start_listener(old)
             self.assertEqual(new.origin(replacement, listening=False), origin)
 
-    def test_open_socket_in_same_descriptor_and_python_object_is_not_the_original(self):
+    def test_substituted_socket_survives_refusal_and_gateway_finalization(self):
         relay = gateway()
-        with socket.socket() as foreign, ExitStack() as stack:
+        with socket.socket() as foreign:
             foreign.bind((LOOPBACK, 0))
             proof = relay._reserve_listener()
             listener = relay.listener
             fd = listener.fileno()
-
-            def close_original_or_disown():
-                proof._close_original()
-                if listener.fileno() >= 0:
-                    listener.detach()
-
-            stack.callback(close_original_or_disown)
             identity = service._gateway_socket_identity(listener)
-            # Keep the original kernel socket alive while replacing this fd.
-            with listener.dup() as original:
-                try:
-                    os.dup2(foreign.fileno(), fd, inheritable=False)
-                    self.assertIs(relay.listener, listener)
-                    self.assertEqual(service._gateway_socket_identity(listener)[0], fd)
-                    self.assertNotEqual(
-                        service._gateway_socket_identity(listener), identity
-                    )
-                    self.assertIsNone(proof.origin(relay, listening=False))
-                    with self.assertRaises(service._GatewayListenerError):
-                        relay._start_listener(proof)
-                    proof._close_original()
-                    self.assertEqual(listener.getsockname(), foreign.getsockname())
-                finally:
-                    os.dup2(original.fileno(), fd, inheritable=False)
+            os.dup2(foreign.fileno(), fd, inheritable=False)
+            try:
+                self.assertIs(relay.listener, listener)
+                self.assertEqual(service._gateway_socket_identity(listener)[0], fd)
+                self.assertNotEqual(
+                    service._gateway_socket_identity(listener), identity
+                )
                 self.assertIsNone(proof.origin(relay, listening=False))
+                with self.assertRaises(service._GatewayListenerError):
+                    relay._start_listener(proof)
+                self.assertEqual(listener.fileno(), -1)
+                self.assertIsNone(proof.origin(relay, listening=False))
+                del listener, proof, relay
+                gc.collect()
+                self.assertEqual(os.fstat(fd).st_ino, os.fstat(foreign.fileno()).st_ino)
+            finally:
+                os.close(fd)
 
     def test_out_of_band_listen_and_unsafe_option_changes_do_not_revive_proof(self):
         cases = (

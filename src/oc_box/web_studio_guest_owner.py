@@ -4,6 +4,7 @@ from dataclasses import dataclass
 import os
 import re
 import secrets
+import signal
 import stat
 import subprocess
 
@@ -121,10 +122,12 @@ class GuestOwnerProof:
         self._lock_identity = info.st_dev, info.st_ino
         self._identity = self._child = self._connection = None
         self._retired = False
+        self._gateway_claimed = False
         self._generation = secrets.token_hex(16)
+        self._engine_env = owner.box.maintenance_host_env()
         self._check_local()
         self._run = web_named_protocol._running_instance(
-            owner.box, data, data["container"]
+            owner.box, data, data["container"], env=self._engine_env
         )
         self._check_local()
 
@@ -161,6 +164,8 @@ class GuestOwnerProof:
         ):
             raise GuestOwnerError()
         box = self.owner.box
+        if box.maintenance_host_env() != self._engine_env:
+            raise GuestOwnerError()
         workspace_service._validate_workspace_identity(box, path, self.data)
         selected, current = box.find_workspace(None, self.data["id"])
         if selected != path or current != self.data or self.owner.data != self.data:
@@ -169,9 +174,20 @@ class GuestOwnerProof:
     def pinned_data(self):
         return {**self.data, "container": self._run[0]}
 
+    def worker_command(self, source):
+        box = self.owner.box
+        return box.exec_command(
+            self.pinned_data(),
+            self.worker_arguments(source, box.CONTAINER_OPENCODE),
+            isolated_owner_env=self._engine_env,
+        )
+
     def worker_arguments(self, source, binary):
         return [
-            "python3",
+            "/usr/bin/python3",
+            "-I",
+            "-S",
+            "-B",
             "-c",
             web_named_native_profile.named_native_worker_source(source),
             "guest-proof-lease",
@@ -179,11 +195,26 @@ class GuestOwnerProof:
             _VERSION,
         ]
 
+    def claim_gateway(self, identity):
+        with self.owner.condition:
+            if (
+                self._retired
+                or self._gateway_claimed
+                or identity is None
+                or identity is not self._identity
+                or not self.owner.ready
+                or self.owner.closing
+                or self.owner.child is not self._child
+            ):
+                return False
+            self._gateway_claimed = True
+            return True
+
     def _check_run(self):
         self._check_local()
         if (
             web_named_protocol._running_instance(
-                self.owner.box, self.data, self._run[0]
+                self.owner.box, self.data, self._run[0], env=self._engine_env
             )
             != self._run
         ):
@@ -270,3 +301,18 @@ class GuestOwnerProof:
     def retire(self):
         with self.owner.condition:
             self._retired = True
+
+    def retire_worker(self, child):
+        """Require exact host exec retirement; do not compensate with a kill."""
+        if (
+            (self._child is not None and child is not self._child)
+            or child.returncode is not None
+            or child.stdin is None
+            or child.stdin.closed
+            or signal.getsignal(signal.SIGCHLD) != signal.SIG_DFL
+        ):
+            raise GuestOwnerError()
+        child.stdin.close()
+        opencode_v2_io._wait_exact_child(child, 10)
+        if child.returncode != 0:
+            raise GuestOwnerError()

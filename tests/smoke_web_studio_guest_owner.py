@@ -30,25 +30,22 @@ def exercise(root, binary):
     project = root / "project"
     project.mkdir(mode=0o700)
 
-    def exec_worker(data, argv):
+    original_exec = box.exec_command
+
+    def exec_worker(data, argv, *, isolated_owner_env):
+        envelope = original_exec(data, argv, isolated_owner_env=isolated_owner_env)
+        position = envelope.index(_CONTAINER) + 1
         require(
-            argv[:2] == ["python3", "-c"]
-            and argv[3:] == ["guest-proof-lease", box.CONTAINER_OPENCODE, "2.4.1"]
-            and data["container"] == _CONTAINER,
+            argv[:5] == ["/usr/bin/python3", "-I", "-S", "-B", "-c"]
+            and argv[6:] == ["guest-proof-lease", box.CONTAINER_OPENCODE, "2.4.1"]
+            and data["container"] == _CONTAINER
+            and envelope[position : position + 5] == argv[:5]
+            and envelope[position + 7 : -2] == argv[:-2]
+            and "CONTAINER_HOST" not in envelope.environment,
             "The guest proof worker lost its immutable target.",
         )
         return box.ContainerCommand(
-            [
-                sys.executable,
-                "-I",
-                "-S",
-                "-B",
-                "-c",
-                argv[2],
-                "guest-proof-lease",
-                str(binary),
-                "2.4.1",
-            ],
+            [*envelope[position:-2], str(binary), "2.4.1"],
             env,
         )
 
@@ -59,6 +56,10 @@ def exercise(root, binary):
             path, data = box.create_workspace(project, "tumbleweed")
             data.update(ready=True, opencode_version="2.4.1")
             box.atomic_json(path, data)
+            (project / "json.py").write_text(
+                "raise RuntimeError('synthetic module shadow')\n"
+            )
+            os.environ["CONTAINER_HOST"] = "unix:///synthetic/nonexistent.sock"
             with (
                 box.workspace_lock(path),
                 patch.object(box, "podman", side_effect=fixture_inspect(data)),

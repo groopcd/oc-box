@@ -1223,10 +1223,7 @@ class Owner:
                 self._guest_proof = web_studio_guest_owner.GuestOwnerProof(
                     self, self._guest_stop_token
                 )
-                execution_data = self._guest_proof.pinned_data()
-                worker = self._guest_proof.worker_arguments(
-                    script, box.CONTAINER_OPENCODE
-                )
+                command = self._guest_proof.worker_command(script)
             except (
                 box.BoxError,
                 OSError,
@@ -1240,7 +1237,8 @@ class Owner:
                 raise box.BoxError(
                     "Studio guest original workspace owner could not be verified."
                 ) from None
-        command = box.exec_command(execution_data, worker)
+        else:
+            command = box.exec_command(execution_data, worker)
         self.errors = box.captured_output(private=True)
         self.error_file = self.errors.__enter__()
         try:
@@ -1534,6 +1532,7 @@ class Owner:
 
     def shutdown(self):
         self.closing = True
+        guest_retired = True
         if self._guest_proof is not None:
             self._guest_proof.retire()
         if self.listener:
@@ -1543,19 +1542,32 @@ class Owner:
             if self.bound:
                 self.address.unlink(missing_ok=True)
         if self.child:
-            if self.child.stdin:
-                self.child.stdin.close()
-            try:
-                self.child.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                os.killpg(self.child.pid, signal.SIGKILL)
-                self.child.wait(timeout=5)
+            if self._guest_proof is not None:
+                guest_retired = False
+                try:
+                    self._guest_proof.retire_worker(self.child)
+                except (OSError, ValueError, subprocess.SubprocessError):
+                    pass
+                else:
+                    guest_retired = True
+            else:
+                if self.child.stdin:
+                    self.child.stdin.close()
+                try:
+                    self.child.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    os.killpg(self.child.pid, signal.SIGKILL)
+                    self.child.wait(timeout=5)
             if self.child.stdout:
                 self.child.stdout.close()
         if hasattr(self, "token"):
             CONNECTION.reset(self.token)
         if hasattr(self, "errors"):
             self.errors.__exit__(None, None, None)
+        if not guest_retired:
+            raise self.box.BoxError(
+                "Studio guest native owner retirement could not be verified."
+            )
 
     def __exit__(self, *_):
         self.shutdown()
@@ -1854,11 +1866,20 @@ class _GatewayListenerProof:
     def _close_original(self):
         # Startup/unserved cleanup must not close a different socket that
         # replaced the descriptor. No shutdown/drain claim follows from this.
-        try:
-            if _gateway_socket_identity(self._listener) == self._identity:
+        with self._lock:
+            self._retired = True
+            if self._listener.fileno() < 0:
+                return
+            try:
+                original = _gateway_socket_identity(self._listener) == self._identity
+            except (OSError, ValueError):
+                original = False
+            if original:
                 self._listener.close()
-        except (OSError, ValueError):
-            pass
+            else:
+                # Fail closed without leaving a Python finalizer that could
+                # later close a descriptor now owned by a different socket.
+                self._listener.detach()
 
 
 class Gateway:
@@ -1887,7 +1908,6 @@ class Gateway:
         self.capacity = threading.BoundedSemaphore(32)
         self.listener = None
         self._listener_proof = None
-        self._guest_preview_bound = False
 
     def _reserve_listener(self, *, probe_only=False):
         """Bind the actual gateway socket, not the disposable port preflight."""
@@ -1924,11 +1944,12 @@ class Gateway:
             type(proof) is not _GatewayListenerProof
             or proof is not self._listener_proof
             or proof._probe_only
-            or proof.origin(self, listening=False) is None
         ):
             raise _GatewayListenerError()
         listener = proof._listener
         try:
+            if proof.origin(self, listening=False) is None:
+                raise _GatewayListenerError()
             listener.listen(32)
             listener.settimeout(0.2)
             proof._mark_listening(self)
@@ -2060,7 +2081,7 @@ class Gateway:
 
     def __exit__(self, *_):
         self.closed.set()
-        self.listener.close()
+        self._listener_proof._close_original()
         self.thread.join(timeout=2)
         with self.lock:
             children = tuple(self.children)
