@@ -1,10 +1,12 @@
 """Synthetic contract tests; no engine, project or native-history I/O."""
 
+from contextlib import contextmanager
 from dataclasses import replace
 import hashlib
 import json
 import os
 from pathlib import Path
+from subprocess import TimeoutExpired
 import tempfile
 import unittest
 from unittest.mock import Mock, patch
@@ -12,7 +14,7 @@ from unittest.mock import Mock, patch
 from oc_box import workspace_uninstall as review
 
 
-class WorkspaceReviewTest(unittest.TestCase):
+class WorkspaceFixture:
     def setUp(self):
         private = tempfile.TemporaryDirectory()
         self.addCleanup(private.cleanup)
@@ -107,6 +109,8 @@ class WorkspaceReviewTest(unittest.TestCase):
         self.assertNotIn("SYNTHETIC_DO_NOT_RENDER", str(caught.exception))
         return caught.exception
 
+
+class WorkspaceReviewTest(WorkspaceFixture, unittest.TestCase):
     def test_exact_engine_targets_and_legacy_registry_modes_without_project_io(self):
         path, data = self.register(container_project="/original/project")
         path.chmod(0o644)
@@ -579,6 +583,465 @@ class WorkspaceReviewTest(unittest.TestCase):
             ).workspace_id,
             b["id"],
         )
+
+
+class WorkspaceExecutorTest(WorkspaceFixture, unittest.TestCase):
+    def setUp(self):
+        super().setUp()
+        self.path, first = self.register()
+        self.other_path, last = self.register("b" * 32)
+        self.container, self.volume = self.resources(first)
+        self.last_container, self.last_volume = self.resources(last, index=1)
+        self.inventory = self.empty(
+            containers=(self.container, self.last_container),
+            volumes=(self.volume, self.last_volume),
+        )
+        self.reviewed = self.plan(self.inventory)
+        self.inside_lock = False
+        self.lock_entries = 0
+        self.fence = Mock(return_value=True)
+        self.inspect = Mock(side_effect=self.observe)
+        self.remove = Mock(side_effect=self.remove_synthetic)
+        self.absent = Mock(side_effect=self.observe_absence)
+        self.engine = review.EngineActions(self.inspect, self.remove, self.absent)
+
+    @contextmanager
+    def locks(self, reviewed):
+        self.assertIs(reviewed, self.reviewed)
+        self.lock_entries += 1
+        self.assertFalse(self.inside_lock)
+        self.inside_lock = True
+        try:
+            yield self.fence
+        finally:
+            self.inside_lock = False
+
+    def observe(self, names):
+        self.assertTrue(self.inside_lock)
+        self.assertEqual(
+            names,
+            (
+                (self.container.name, self.volume.name),
+                (self.last_container.name, self.last_volume.name),
+            ),
+        )
+        return self.inventory
+
+    def remove_synthetic(self, scope, resource):
+        self.assertTrue(self.inside_lock)
+        self.assertEqual(scope, self.scope)
+        if resource.kind == "container":
+            kept = tuple(
+                item
+                for item in self.inventory.containers
+                if item.ident != resource.container_id
+            )
+            self.assertEqual(len(kept), len(self.inventory.containers) - 1)
+            self.inventory = replace(self.inventory, containers=kept)
+        else:
+            self.assertEqual(resource.kind, "volume")
+            kept = tuple(
+                item for item in self.inventory.volumes if item.name != resource.name
+            )
+            self.assertEqual(len(kept), len(self.inventory.volumes) - 1)
+            self.inventory = replace(self.inventory, volumes=kept)
+        return review.RemovalAck.ACKNOWLEDGED
+
+    def observe_absence(self, scope, resource):
+        self.assertTrue(self.inside_lock)
+        self.assertEqual(scope, self.scope)
+        if resource.kind == "container":
+            return not any(
+                item.name == resource.name or item.ident == resource.container_id
+                for item in self.inventory.containers
+            )
+        return not any(item.name == resource.name for item in self.inventory.volumes)
+
+    def execute(self, **overrides):
+        return review.execute_workspace_plan(
+            self.reviewed,
+            **{
+                "state_root": self.state,
+                "protected_paths": self.protected,
+                "engine": self.engine,
+                "hold_locks": self.locks,
+                **overrides,
+            },
+        )
+
+    def states(self, result, *states):
+        self.assertEqual(
+            tuple(item.state for item in result.resources),
+            tuple(review.ResourceState(state) for state in states),
+        )
+
+    def foreign_use(self):
+        volume = self.volume
+        return review.ContainerInspection(
+            "foreign",
+            "f" * 64,
+            None,
+            None,
+            self.container.state,
+            (
+                review.HostMount(
+                    "volume", volume.mountpoint.path, "/outside", volume.name
+                ),
+            ),
+            (),
+            False,
+        )
+
+    def test_exact_locked_order_and_postchecks_leave_registry_bytes_unchanged(self):
+        saved = self.path.read_bytes(), self.other_path.read_bytes()
+        result = self.execute()
+        self.assertTrue(result.complete)
+        self.assertFalse(self.inside_lock)
+        self.assertEqual(self.lock_entries, 1)
+        self.states(result, *("confirmed",) * 4)
+        actions = tuple(call.args[1] for call in self.remove.call_args_list)
+        self.assertEqual(
+            tuple(
+                (action.kind, action.container_id, action.name) for action in actions
+            ),
+            (
+                ("container", self.container.ident, self.container.name),
+                ("volume", None, self.volume.name),
+                ("container", self.last_container.ident, self.last_container.name),
+                ("volume", None, self.last_volume.name),
+            ),
+        )
+        self.assertEqual(self.absent.call_args_list, self.remove.call_args_list)
+        self.assertEqual(self.inspect.call_count, len(actions) + 1)
+        self.assertEqual((self.path.read_bytes(), self.other_path.read_bytes()), saved)
+        self.assertEqual(
+            {entry.name for entry in self.path.parent.iterdir()}, {"workspace.json"}
+        )
+
+    def test_wrong_state_or_protected_paths_never_enters_locks_or_engine(self):
+        for options in (
+            {"state_root": self.state.parent / "other"},
+            {"protected_paths": ()},
+            {"hold_locks": None},
+        ):
+            result = self.execute(**options)
+            self.assertEqual(result.reason, "invalid-review-scope")
+            self.states(result, *("retained",) * 4)
+        self.assertEqual(self.lock_entries, 0)
+        self.inspect.assert_not_called()
+        self.remove.assert_not_called()
+
+    def test_reviewed_absences_are_checked_but_never_removed(self):
+        self.inventory = replace(self.inventory, containers=(), volumes=(self.volume,))
+        self.reviewed = self.plan(self.inventory)
+        result = self.execute()
+        self.assertTrue(result.complete)
+        self.states(result, "confirmed")
+        self.remove.assert_called_once_with(
+            self.scope, review.ResourceRef(self.ident, "volume", self.volume.name)
+        )
+        self.reviewed = self.plan(self.inventory)
+        self.remove.reset_mock()
+        result = self.execute()
+        self.assertTrue(result.complete)
+        self.assertEqual(result.resources, ())
+        self.remove.assert_not_called()
+
+    def test_changes_to_final_workspace_or_registry_block_first_removal(self):
+        original = self.inventory
+        self.inventory = replace(
+            original,
+            volumes=(
+                self.volume,
+                replace(self.last_volume, created_at="2026-04-04T01:01:01Z"),
+            ),
+        )
+        self.assertEqual(self.execute().reason, "plan-changed")
+        self.inventory = replace(
+            original,
+            containers=(
+                self.container,
+                replace(
+                    self.last_container,
+                    state=replace(self.last_container.state, running=True),
+                ),
+            ),
+        )
+        self.assertEqual(self.execute().reason, "plan-unverified")
+        self.inventory = original
+        data = json.loads(self.other_path.read_text())
+        data["future"] = {"changed": True}
+        self.other_path.write_text(json.dumps(data))
+        result = self.execute()
+        self.assertEqual(result.reason, "plan-changed")
+        self.states(result, *("retained",) * 4)
+        self.remove.assert_not_called()
+        self.absent.assert_not_called()
+
+    def test_scope_and_explicitly_absent_resources_cannot_change(self):
+        self.inventory = replace(
+            self.inventory,
+            scope=replace(
+                self.scope,
+                run_root=replace(self.scope.run_root, identity=(7, 101, 9)),
+            ),
+        )
+        self.assertEqual(self.execute().reason, "plan-changed")
+        previous = self.inventory
+        self.reviewed = self.plan(replace(previous, containers=(self.last_container,)))
+        self.assertEqual(self.execute().reason, "plan-changed")
+        self.remove.assert_not_called()
+
+    def test_foreign_stopped_consumer_prevents_any_removal(self):
+        self.inventory = replace(
+            self.inventory, containers=(*self.inventory.containers, self.foreign_use())
+        )
+        result = self.execute()
+        self.assertEqual(result.reason, "plan-unverified")
+        self.states(result, *("retained",) * 4)
+        self.remove.assert_not_called()
+
+    def test_foreign_name_must_not_alias_a_full_container_id(self):
+        alias = replace(self.foreign_use(), name=self.container.ident, mounts=())
+        self.inventory = replace(
+            self.inventory, containers=(*self.inventory.containers, alias)
+        )
+        self.refused("container-id-ambiguous", self.inventory)
+        self.assertEqual(self.execute().reason, "plan-unverified")
+        self.remove.assert_not_called()
+
+    def test_new_stopped_consumer_or_replacement_prevents_home_removal(self):
+        original = self.inventory
+        for change in (
+            lambda: replace(
+                self.inventory,
+                containers=(*self.inventory.containers, self.foreign_use()),
+            ),
+            lambda: replace(
+                self.inventory,
+                volumes=(
+                    replace(self.volume, created_at="2026-04-04T01:01:01Z"),
+                    self.last_volume,
+                ),
+            ),
+        ):
+
+            def watched_remove(scope, resource):
+                ack = self.remove_synthetic(scope, resource)
+                self.inventory = change()
+                return ack
+
+            self.inventory = original
+            self.remove.reset_mock(side_effect=True)
+            self.remove.side_effect = watched_remove
+            result = self.execute()
+            self.assertIn(result.reason, ("plan-unverified", "plan-changed"))
+            self.states(result, "unknown", "retained", "retained", "retained")
+            self.remove.assert_called_once()
+
+    def test_full_id_still_present_under_other_name_defeats_apparent_absence(self):
+        def renamed(scope, resource):
+            ack = self.remove_synthetic(scope, resource)
+            alias = replace(
+                self.container,
+                name="foreign",
+                workspace_label=None,
+                managed_label=None,
+                mounts=(),
+                writable_paths=(),
+            )
+            self.inventory = replace(
+                self.inventory, containers=(*self.inventory.containers, alias)
+            )
+            return ack
+
+        self.remove.side_effect = renamed
+        self.absent.side_effect = None
+        self.absent.return_value = True
+        result = self.execute()
+        self.assertEqual(result.reason, "plan-changed")
+        self.states(result, "unknown", "retained", "retained", "retained")
+        self.remove.assert_called_once()
+
+    def test_timeout_or_interrupt_is_not_replayed_or_treated_as_absence(self):
+        for error, expected in (
+            (TimeoutExpired(["SYNTHETIC_DO_NOT_RENDER"], 1), "removal-unconfirmed"),
+            (KeyboardInterrupt(), "interrupted"),
+        ):
+            self.remove.reset_mock()
+            self.remove.side_effect = error
+            result = self.execute()
+            self.assertEqual(result.reason, expected)
+            self.states(result, "unknown", "retained", "retained", "retained")
+            self.remove.assert_called_once()
+            self.absent.assert_not_called()
+            self.assertNotIn("SYNTHETIC_DO_NOT_RENDER", repr(result))
+
+    def test_second_dispatch_unconfirmed_keeps_first_confirmed_and_registry(self):
+        saved = self.path.read_bytes()
+
+        def partial(scope, resource):
+            if resource.kind == "volume":
+                # Synthetic model: the operation applied but acknowledgement did not arrive.
+                self.remove_synthetic(scope, resource)
+                return review.RemovalAck.UNCONFIRMED
+            return self.remove_synthetic(scope, resource)
+
+        self.remove.side_effect = partial
+        result = self.execute()
+        self.assertFalse(result.complete)
+        self.states(result, "confirmed", "unknown", "retained", "retained")
+        self.assertEqual(self.remove.call_count, 2)
+        self.absent.assert_called_once()
+        self.assertEqual(self.path.read_bytes(), saved)
+
+    def test_only_exact_ack_and_absence_and_proven_not_dispatched(self):
+        self.remove.side_effect = None
+        for ack, reason, first in (
+            (True, "removal-unconfirmed", "unknown"),
+            (review.RemovalAck.NOT_DISPATCHED, "removal-not-dispatched", "retained"),
+        ):
+            self.remove.return_value = ack
+            result = self.execute()
+            self.assertEqual(result.reason, reason)
+            self.states(result, first, "retained", "retained", "retained")
+            self.absent.assert_not_called()
+        self.remove.return_value = review.RemovalAck.ACKNOWLEDGED
+        self.absent.side_effect = None
+        self.absent.return_value = 1
+        result = self.execute()
+        self.assertEqual(result.reason, "absence-unverified")
+        self.states(result, "unknown", "retained", "retained", "retained")
+
+    def test_lock_refusal_loss_and_unverified_exit_not_success(self):
+        @contextmanager
+        def never_acquired(_):
+            raise RuntimeError("SYNTHETIC_DO_NOT_RENDER")
+            yield
+
+        self.assertEqual(
+            self.execute(hold_locks=never_acquired).reason, "lock-unavailable"
+        )
+        self.fence.return_value = 1
+        self.assertEqual(self.execute().reason, "lock-unverified")
+        self.inspect.assert_not_called()
+        self.fence.return_value = True
+        original = self.inventory
+
+        def lost(*args):
+            ack = self.remove_synthetic(*args)
+            self.fence.return_value = False
+            return ack
+
+        self.remove.side_effect = lost
+        result = self.execute()
+        self.assertEqual(result.reason, "lock-unverified")
+        self.states(result, "unknown", "retained", "retained", "retained")
+        self.absent.assert_not_called()
+
+        @contextmanager
+        def bad_exit(plan):
+            with self.locks(plan) as fence:
+                yield fence
+            raise RuntimeError("SYNTHETIC_DO_NOT_RENDER")
+
+        self.inventory = original
+        self.fence.return_value = True
+        self.remove.side_effect = self.remove_synthetic
+        result = self.execute(hold_locks=bad_exit)
+        self.assertFalse(result.complete)
+        self.assertEqual(result.reason, "lock-exit-unverified")
+        self.assertTrue(result.lock_cleanup_unverified)
+        self.states(result, *("confirmed",) * 4)
+
+    def test_deadline_after_dispatch_leaves_unknown_and_does_not_probe(self):
+        clock = [0]
+
+        def delayed(*args):
+            ack = self.remove_synthetic(*args)
+            clock[0] = review.EXECUTION_TIMEOUT
+            return ack
+
+        self.remove.side_effect = delayed
+        with patch.object(review.time, "monotonic", side_effect=lambda: clock[0]):
+            result = self.execute()
+        self.assertEqual(result.reason, "execution-deadline")
+        self.states(result, "unknown", "retained", "retained", "retained")
+        self.remove.assert_called_once()
+        self.absent.assert_not_called()
+
+
+class PodmanWorkspaceCommandsTest(WorkspaceFixture, unittest.TestCase):
+    def test_only_scoped_nonforce_commands_and_exact_absence_codes(self):
+        _, registration = self.register()
+        container, volume = self.resources(registration)
+        runtime = Mock(side_effect=(0, 1, 1, 0, 1))
+        inspect = Mock()
+        adapter = review.podman_actions(inspect, runtime)
+        container_ref = review.ResourceRef(
+            self.ident, "container", container.name, container.ident
+        )
+        volume_ref = review.ResourceRef(self.ident, "volume", volume.name)
+        for ref in (container_ref, volume_ref):
+            self.assertIs(
+                adapter.remove(self.scope, ref), review.RemovalAck.ACKNOWLEDGED
+            )
+            self.assertIs(adapter.absent(self.scope, ref), True)
+        self.assertEqual(
+            [call.args for call in runtime.call_args_list],
+            [
+                (
+                    self.scope,
+                    ("--remote=false", "container", "rm", "--", container.ident),
+                ),
+                (
+                    self.scope,
+                    ("--remote=false", "container", "exists", "--", container.ident),
+                ),
+                (
+                    self.scope,
+                    ("--remote=false", "container", "exists", "--", container.name),
+                ),
+                (self.scope, ("--remote=false", "volume", "rm", "--", volume.name)),
+                (self.scope, ("--remote=false", "volume", "exists", "--", volume.name)),
+            ],
+        )
+        self.assertTrue(
+            all(
+                call.kwargs == {"timeout": review.PODMAN_COMMAND_TIMEOUT}
+                for call in runtime.call_args_list
+            )
+        )
+        inspect.assert_not_called()
+
+    def test_bad_scope_selectors_result_codes_never_adopt_or_retry(self):
+        _, registration = self.register()
+        container, _ = self.resources(registration)
+        runtime = Mock()
+        adapter = review.podman_actions(Mock(), runtime)
+        valid = review.ResourceRef(
+            self.ident, "container", container.name, container.ident
+        )
+        for scope, ref in (
+            (replace(self.scope, remote=True), valid),
+            (replace(self.scope, rootless=False), valid),
+            (replace(self.scope, graph_root=self.scope.run_root), valid),
+            (self.scope, replace(valid, container_id=container.ident[:12])),
+            (self.scope, replace(valid, name="--force")),
+            (self.scope, replace(valid, kind="network")),
+        ):
+            self.assertIs(adapter.remove(scope, ref), review.RemovalAck.NOT_DISPATCHED)
+            self.assertIs(adapter.absent(scope, ref), False)
+        runtime.assert_not_called()
+        for status in (0, 125, True, None):
+            runtime.reset_mock()
+            runtime.return_value = status
+            self.assertIs(adapter.absent(self.scope, valid), False)
+            runtime.assert_called_once()
+        runtime.reset_mock()
+        runtime.return_value = False
+        self.assertIs(adapter.remove(self.scope, valid), review.RemovalAck.UNCONFIRMED)
+        runtime.assert_called_once()
 
 
 if __name__ == "__main__":

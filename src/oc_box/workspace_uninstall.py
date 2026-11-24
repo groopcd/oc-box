@@ -1,19 +1,23 @@
-"""Read-only workspace review for a future explicit full uninstall.
+"""Workspace review and gated engine-only execution for full uninstall.
 
 The only filesystem inputs read here are the selected registry's directory
 metadata and workspace.json records. No project, marker, lock, transcript,
-native OpenCode, or recovery data is opened. No engine command lives here.
+native OpenCode, or recovery data is opened. There is no subprocess runner,
+engine inspector, lock acquisition, or filesystem deletion here.
 """
 
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
+from enum import Enum
 import hashlib
 import json
 import os
 from pathlib import Path
 import re
 import stat
+import time
+from typing import Callable
 
 
 MAX_RECORD_BYTES = 1024 * 1024
@@ -22,6 +26,8 @@ MAX_ENGINE_OBJECTS = 4096
 MAX_MOUNTS = 128
 MAX_ENGINE_REFERENCES = 16384
 MAX_STORAGE_ALIASES = 8
+EXECUTION_TIMEOUT = 300
+PODMAN_COMMAND_TIMEOUT = 20
 _DIR = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 _WORKSPACE_ID = re.compile(r"[a-f0-9]{32}")
 _ENGINE_ID = re.compile(r"[a-f0-9]{64}")
@@ -177,6 +183,59 @@ class WorkspacePlan:
     engine: EngineScope
     workspaces: tuple[WorkspaceTargets, ...]
     retained_networks: tuple[str, ...]
+    protected_paths: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class ResourceRef:
+    workspace_id: str
+    kind: str
+    name: str
+    container_id: str | None = None
+
+
+class RemovalAck(Enum):
+    ACKNOWLEDGED = "acknowledged"
+    NOT_DISPATCHED = "not-dispatched"
+    UNCONFIRMED = "unconfirmed"
+
+
+class ResourceState(str, Enum):
+    CONFIRMED = "confirmed"
+    RETAINED = "retained"
+    UNKNOWN = "unknown"
+
+
+@dataclass(frozen=True)
+class ResourceOutcome:
+    resource: ResourceRef
+    state: ResourceState
+
+
+@dataclass(frozen=True)
+class WorkspaceExecution:
+    resources: tuple[ResourceOutcome, ...]
+    reason: str | None
+    lock_cleanup_unverified: bool = False
+
+    @property
+    def complete(self):
+        return self.reason is None and not self.lock_cleanup_unverified
+
+
+@dataclass(frozen=True)
+class EngineActions:
+    """Trusted, bounded actions against the same audited local store.
+
+    ``inspect`` implements the review callback contract. ``remove`` must not
+    retry and may return NOT_DISPATCHED only with positive proof no child
+    started. ``absent`` independently checks the original name and, for a
+    container, its full immutable ID. Only exact True establishes absence.
+    """
+
+    inspect: Callable[[tuple[tuple[str, str], ...]], EngineSnapshot]
+    remove: Callable[[EngineScope, ResourceRef], RemovalAck]
+    absent: Callable[[EngineScope, ResourceRef], bool]
 
 
 def _fail(reason, workspace_id=None):
@@ -505,27 +564,34 @@ def _state_stopped(state):
     )
 
 
+def _local_scope(scope):
+    return (
+        type(scope) is EngineScope and scope.rootless is True and scope.remote is False
+    )
+
+
+def _storage_layout(scope):
+    graph, run, volume = scope.graph_root, scope.run_root, scope.volume_root
+    return (
+        all(map(_storage, (graph, run, volume)))
+        and not _storage_overlap(graph, run)
+        and not _storage_overlap(volume, run)
+        and volume.identity[:2] != graph.identity[:2]
+        and Path(volume.path).is_relative_to(graph.path)
+        and volume.path != graph.path
+        and _same_mount(volume, graph)
+    )
+
+
 def _inventory(snapshot, state_root, registry_stamps, protected_paths):
     if type(snapshot) is not EngineSnapshot or snapshot.complete is not True:
         _fail("engine-inventory-unverified")
     scope = snapshot.scope
-    if (
-        type(scope) is not EngineScope
-        or scope.rootless is not True
-        or scope.remote is not False
-    ):
+    if not _local_scope(scope):
         _fail("engine-not-local-rootless")
-    graph, run, volume = scope.graph_root, scope.run_root, scope.volume_root
-    if (
-        not all(map(_storage, (graph, run, volume)))
-        or _storage_overlap(graph, run)
-        or _storage_overlap(volume, run)
-        or volume.identity[:2] == graph.identity[:2]
-        or not Path(volume.path).is_relative_to(graph.path)
-        or volume.path == graph.path
-        or not _same_mount(volume, graph)
-    ):
+    if not _storage_layout(scope):
         _fail("unsupported-engine-storage")
+    graph, run, volume = scope.graph_root, scope.run_root, scope.volume_root
     if any(
         _overlap(storage.path, path)
         for storage in (graph, run, volume)
@@ -693,6 +759,10 @@ def _plan_targets(records, snapshot, containers, volumes):
         if home is not None:
             _private_volume(record, home, scope)
         if container is not None:
+            if container.ident in containers:
+                # The full-ID command selector must not also name a foreign
+                # container, regardless of engine name/ID lookup precedence.
+                _fail("container-id-ambiguous", ident)
             _owned_container(record, container, home, scope)
         paths = (
             *((home.mountpoint,) if home is not None else ()),
@@ -756,6 +826,11 @@ def plan_workspaces(state_root, *, inspect_engine, protected_paths):
     read-only; this module launches no subprocess and has no default adapter.
     A plan is not a lock, an execution token, or permission to delete anything.
     """
+    plan, _ = _plan_and_container_ids(state_root, inspect_engine, protected_paths)
+    return plan
+
+
+def _validate_selectors(state_root, protected_paths):
     try:
         state_root = os.fspath(state_root)
     except TypeError:
@@ -770,6 +845,11 @@ def plan_workspaces(state_root, *, inspect_engine, protected_paths):
         or any(_overlap(state_root, path) for path in protected_paths)
     ):
         _fail("unsafe-state-root")
+    return state_root
+
+
+def _plan_and_container_ids(state_root, inspect_engine, protected_paths):
+    state_root = _validate_selectors(state_root, protected_paths)
     before = _registry(state_root)
     chain, present, records = before
     names = tuple((record.container_name, record.home_volume) for record in records)
@@ -782,11 +862,266 @@ def plan_workspaces(state_root, *, inspect_engine, protected_paths):
     stamps = (*chain, *(record.directory_stamp for record in records))
     containers, volumes = _inventory(snapshot, state_root, stamps, protected_paths)
     targets = _plan_targets(records, snapshot, containers, volumes)
-    return WorkspacePlan(
-        state_root,
-        chain,
-        present,
-        snapshot.scope,
-        targets,
-        tuple(sorted(snapshot.labeled_networks)),
+    return (
+        WorkspacePlan(
+            state_root,
+            chain,
+            present,
+            snapshot.scope,
+            targets,
+            tuple(sorted(snapshot.labeled_networks)),
+            protected_paths,
+        ),
+        frozenset(item.ident for item in containers.values()),
     )
+
+
+class _ExecutionRefusal(ValueError):
+    pass
+
+
+def _refuse(reason):
+    raise _ExecutionRefusal(reason) from None
+
+
+def _command_targets(resource):
+    if (
+        type(resource) is not ResourceRef
+        or not _matches(_WORKSPACE_ID, resource.workspace_id)
+        or type(resource.kind) is not str
+        or not _matches(_RESOURCE_NAME, resource.name)
+    ):
+        return ()
+    if (
+        resource.kind == "container"
+        and resource.name == "oc-box-" + resource.workspace_id
+        and _matches(_ENGINE_ID, resource.container_id)
+    ):
+        return resource.container_id, resource.name
+    if (
+        resource.kind == "volume"
+        and resource.name == "oc-box-home-" + resource.workspace_id
+        and resource.container_id is None
+    ):
+        return (resource.name,)
+    return ()
+
+
+def _execution_steps(plan):
+    if (
+        type(plan) is not WorkspacePlan
+        or type(plan.workspaces) is not tuple
+        or len(plan.workspaces) > MAX_WORKSPACES
+    ):
+        _refuse("invalid-review")
+    steps = []
+    previous = ""
+    for index, workspace in enumerate(plan.workspaces):
+        if (
+            type(workspace) is not WorkspaceTargets
+            or type(workspace.registration) is not Registration
+        ):
+            _refuse("invalid-review")
+        ident = workspace.registration.workspace_id
+        if not _matches(_WORKSPACE_ID, ident) or ident <= previous:
+            _refuse("invalid-review")
+        previous = ident
+        container, volume = workspace.container, workspace.home_volume
+        if container is not None:
+            if type(container) is not ContainerInspection:
+                _refuse("invalid-review")
+            steps.append(
+                (
+                    index,
+                    ResourceRef(ident, "container", container.name, container.ident),
+                )
+            )
+        if volume is not None:
+            if type(volume) is not VolumeInspection:
+                _refuse("invalid-review")
+            steps.append((index, ResourceRef(ident, "volume", volume.name)))
+    if any(not _command_targets(resource) for _, resource in steps):
+        _refuse("invalid-review")
+    return tuple(steps)
+
+
+def _check_fence(check_locks, deadline):
+    if time.monotonic() >= deadline:
+        _refuse("execution-deadline")
+    try:
+        current = check_locks()
+    except Exception:
+        _refuse("lock-unverified")
+    if current is not True:
+        _refuse("lock-unverified")
+    if time.monotonic() >= deadline:
+        _refuse("execution-deadline")
+
+
+def _revalidate(expected, engine, retired_ids, check):
+    check()
+    try:
+        observed, container_ids = _plan_and_container_ids(
+            expected.state_root, engine.inspect, expected.protected_paths
+        )
+    except Exception:
+        _refuse("plan-unverified")
+    check()
+    if observed != expected or retired_ids.intersection(container_ids):
+        _refuse("plan-changed")
+
+
+def _without_resource(plan, index, kind):
+    workspace = plan.workspaces[index]
+    updated = (
+        replace(workspace, container=None)
+        if kind == "container"
+        else replace(workspace, home_volume=None)
+    )
+    return replace(
+        plan,
+        workspaces=(*plan.workspaces[:index], updated, *plan.workspaces[index + 1 :]),
+    )
+
+
+def execute_workspace_plan(
+    reviewed, *, state_root, protected_paths, engine, hold_locks
+):
+    """Execute only the in-process plan already authorized by the caller.
+
+    The required ``hold_locks(reviewed)`` context holds the stable host gate,
+    every workspace lifecycle lock and applicable V2 control admission for
+    the entire pass. It yields a check callable that verifies this same fence,
+    including certainty/stop intent, without initializing or clearing it.
+    Only exact True passes. This module cannot attest a caller's lock
+    implementation or grant confirmation; it never creates/removes a lock.
+
+    No registry, project, launcher, or other filesystem mutation is performed
+    on any outcome. RETAINED means no removal was dispatched by this pass,
+    not a verified observation that the object is still present. CONFIRMED
+    means acknowledged removal and checked absence during this pass. UNKNOWN
+    is never retried, including when a timeout might have reached the engine.
+    """
+    deadline = time.monotonic() + EXECUTION_TIMEOUT
+    try:
+        steps = _execution_steps(reviewed)
+    except _ExecutionRefusal as exc:
+        return WorkspaceExecution((), exc.args[0])
+
+    outcomes = [
+        ResourceOutcome(resource, ResourceState.RETAINED) for _, resource in steps
+    ]
+    try:
+        same_scope = (
+            _validate_selectors(state_root, protected_paths) == reviewed.state_root
+            and protected_paths == reviewed.protected_paths
+        )
+    except WorkspacePlanError:
+        same_scope = False
+    if (
+        not same_scope
+        or type(engine) is not EngineActions
+        or not all(
+            map(callable, (engine.inspect, engine.remove, engine.absent, hold_locks))
+        )
+    ):
+        return WorkspaceExecution(tuple(outcomes), "invalid-review-scope")
+
+    reason, entered, lock_cleanup_unverified = "lock-unavailable", False, False
+    try:
+        with hold_locks(reviewed) as check_locks:
+            entered = True
+
+            def check():
+                _check_fence(check_locks, deadline)
+
+            try:
+                expected, retired = reviewed, set()
+                _revalidate(expected, engine, retired, check)
+                for position, (index, resource) in enumerate(steps):
+                    check()
+                    # A raised, interrupted, or malformed reply cannot prove
+                    # the engine did not accept the request.
+                    outcomes[position] = ResourceOutcome(
+                        resource, ResourceState.UNKNOWN
+                    )
+                    try:
+                        ack = engine.remove(expected.engine, resource)
+                    except Exception:
+                        _refuse("removal-unconfirmed")
+                    if ack is RemovalAck.NOT_DISPATCHED:
+                        outcomes[position] = ResourceOutcome(
+                            resource, ResourceState.RETAINED
+                        )
+                        _refuse("removal-not-dispatched")
+                    if ack is not RemovalAck.ACKNOWLEDGED:
+                        _refuse("removal-unconfirmed")
+                    check()
+                    try:
+                        absent = engine.absent(expected.engine, resource)
+                    except Exception:
+                        _refuse("absence-unverified")
+                    if absent is not True:
+                        _refuse("absence-unverified")
+                    expected = _without_resource(expected, index, resource.kind)
+                    if resource.container_id is not None:
+                        retired.add(resource.container_id)
+                    # Revalidate the whole scope, not only the next volume;
+                    # only this acknowledged removal may differ from review.
+                    _revalidate(expected, engine, retired, check)
+                    outcomes[position] = ResourceOutcome(
+                        resource, ResourceState.CONFIRMED
+                    )
+                reason = None
+            except _ExecutionRefusal as exc:
+                reason = exc.args[0]
+            except KeyboardInterrupt:
+                reason = "interrupted"
+            except Exception:
+                reason = "execution-unverified"
+    except (Exception, KeyboardInterrupt):
+        if entered:
+            lock_cleanup_unverified = True
+            if reason in (None, "lock-unavailable"):
+                reason = "lock-exit-unverified"
+
+    return WorkspaceExecution(tuple(outcomes), reason, lock_cleanup_unverified)
+
+
+def podman_actions(inspect_engine, run_local):
+    """Map reviewed actions to fixed Podman argv using injected transport only.
+
+    ``run_local(scope, argv, timeout=...)`` must pin/reverify the same local
+    executable, selector/environment and EngineScope on every dispatch,
+    enforce the timeout and return an exact exit code without raw output.
+    ``argv`` does not include an executable. No transport or inspection
+    discovery is supplied here; no fallback store is authorized.
+    """
+
+    def call(scope, kind, verb, selector):
+        return run_local(
+            scope,
+            ("--remote=false", kind, verb, "--", selector),
+            timeout=PODMAN_COMMAND_TIMEOUT,
+        )
+
+    def remove(scope, resource):
+        selectors = _command_targets(resource)
+        if not selectors or not _local_scope(scope) or not _storage_layout(scope):
+            return RemovalAck.NOT_DISPATCHED
+        code = call(scope, resource.kind, "rm", selectors[0])
+        if type(code) is int and code == 0:
+            return RemovalAck.ACKNOWLEDGED
+        return RemovalAck.UNCONFIRMED
+
+    def absent(scope, resource):
+        selectors = _command_targets(resource)
+        if not selectors or not _local_scope(scope) or not _storage_layout(scope):
+            return False
+        for selector in selectors:
+            code = call(scope, resource.kind, "exists", selector)
+            if type(code) is not int or code != 1:
+                return False
+        return True
+
+    return EngineActions(inspect_engine, remove, absent)
