@@ -18,7 +18,7 @@ import tempfile
 import time
 from unittest.mock import patch
 
-from smoke_image_preview_x11_v2 import image_bytes, private_display, reap
+from smoke_image_preview_x11_v2 import image_bytes, marker_pixels, private_display, reap
 from smoke_host_drop_v2 import MARKER, canned_provider
 from smoke_session_sync_v2 import bounded, private_environment, require, seed
 from oc_box import host_clipboard, host_drop, oc_box as box, opencode_compat
@@ -176,6 +176,8 @@ def run_case(
     mime,
     content,
     image_hash,
+    *,
+    verify_prompt_pixels,
 ):
     root.mkdir()
     session = seed(native, "ses_clip_" + mode, project)
@@ -183,6 +185,16 @@ def run_case(
     before = native("GET", export_route)
     request_count = len(provider["requests"])
     env = {**env, "OPENCODE_PASSWORD": native.endpoint["password"]}
+    image_on_screen = None
+    if verify_prompt_pixels:
+        screen = {key: env[key] for key in ("DISPLAY", "XAUTHORITY")}
+        env["OPENCODE_CLI_CONFIG_CONTENT"] = json.dumps(
+            {"prompt": {"image_preview": True}, "session": {"image_preview": True}}
+        )
+
+        def image_on_screen():
+            return all(count > 40 for count in marker_pixels(screen))
+
     process = subprocess.Popen(
         [
             *TERMINALS[terminal],
@@ -247,6 +259,8 @@ def run_case(
                 "The native session did not become ready in the terminal.",
             )
             require(not (root / "stage").exists(), "Clipboard staged before Ctrl+Y.")
+            if image_on_screen:
+                require(not image_on_screen(), "Image appeared before Ctrl+Y.")
             xdo("key", "--clearmodifiers", "ctrl+y")
             if mode != "strict":
                 wait(
@@ -260,6 +274,17 @@ def run_case(
             # The transport acknowledgement precedes composer processing.
             # Keep the draft unsent for a separate, bounded observation period.
             time.sleep(1.0)
+            if image_on_screen:
+                if mode == "strict":
+                    require(
+                        not image_on_screen(),
+                        "Strict refusal still displayed the image.",
+                    )
+                else:
+                    wait(
+                        image_on_screen,
+                        "The native composer did not render the staged image.",
+                    )
             require(
                 native("GET", f"/api/session/{session}/inbox")["data"] == []
                 and native("GET", export_route) == before
@@ -309,7 +334,7 @@ def run_case(
     )
 
 
-def exercise(binary, terminal, root):
+def exercise(binary, terminal, root, *, verify_prompt_pixels=False):
     project = root / "project"
     project.mkdir()
     env = private_environment(root / "native")
@@ -395,6 +420,7 @@ def exercise(binary, terminal, root):
                     mime,
                     data,
                     image_hash,
+                    verify_prompt_pixels=verify_prompt_pixels,
                 )
             require(
                 len(provider["requests"]) == 2 and not provider["failures"],
@@ -413,6 +439,12 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--opencode", type=Path, required=True)
     parser.add_argument("--terminal", choices=TERMINALS, default="kitty")
+    parser.add_argument("--verify-prompt-pixels", action="store_true")
     args = parser.parse_args()
     with tempfile.TemporaryDirectory(prefix="oc-box-clipboard-x11-") as directory:
-        exercise(str(args.opencode.resolve()), args.terminal, Path(directory))
+        exercise(
+            str(args.opencode.resolve()),
+            args.terminal,
+            Path(directory),
+            verify_prompt_pixels=args.verify_prompt_pixels,
+        )

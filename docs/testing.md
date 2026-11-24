@@ -845,13 +845,15 @@ is a desktop gesture, focused-composer or rootless-Podman pass.
 
 ```sh
 uv run --no-project --with pillow python3 -B tests/smoke_image_preview_x11_v2.py --opencode /path/to/clean/native
-uv run --no-project --with pillow python3 -B tests/smoke_host_clipboard_x11_v2.py --opencode /path/to/clean/native --terminal kitty
+uv run --no-project --with pillow python3 -B tests/smoke_host_clipboard_x11_v2.py --opencode /path/to/clean/native --terminal kitty --verify-prompt-pixels
 ```
 
 The preview smoke checks a synthetic transcript PNG's color pixels in memory
 with the override on and off. The clipboard smoke checks real X11 typed
 selection, a Ctrl+Y key event, PNG and followed URI-list symlink imports, strict
-symlink refusal, unchanged selections, and a separate explicit Send. Only
+symlink refusal visible in the composer, unchanged selections, and a separate
+explicit Send. The optional pixel assertion independently checks that the
+composer renders the PNG before Send. Only
 the Podman exec boundary for the private helper is replaced with local
 execution. These are isolated-desktop checks, not physical hardware/input,
 Wayland, or Podman acceptance. Neither reads the user's clipboard nor saves
