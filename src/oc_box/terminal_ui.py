@@ -195,8 +195,13 @@ def run_tui(
             # no launcher placement is left for the native app to erase.
             write_all(output_fd, (controls + "\x1b8").encode())
 
+        def safe_to_paint():
+            return detector.safe_to_draw() and (
+                file_drops is None or file_drops.safe_to_inject()
+            )
+
         def clear_if_drawn():
-            if banner_row and detector.safe_to_draw():
+            if banner_row and safe_to_paint():
                 banner(clear=True)
 
         clear_banner = clear_if_drawn
@@ -219,7 +224,7 @@ def run_tui(
                 private_output = file_drops.pending_output()
                 if private_output:
                     write_all(output_fd, private_output)
-            if loading and now >= next_update and detector.safe_to_draw():
+            if loading and now >= next_update and safe_to_paint():
                 banner()
                 next_update = now + refresh
             readers = [master] + ([input_fd] if stdin_open else [])
@@ -244,16 +249,16 @@ def run_tui(
                         if trailing:
                             write_all(output_fd, trailing)
                     break
+                # Clear in the previous, already-forwarded state. The Kitty
+                # boundary advances while filtering the next chunk, even when
+                # that chunk is still waiting to be written to the terminal.
+                clear_if_drawn()
                 if preview_relay is not None:
                     output = preview_relay.output_bytes(output)
                 if file_drops is not None:
                     output = file_drops.output_bytes(output)
-                if loading and output:
-                    # Erase before native output can begin a split control or
-                    # switch buffers; never write an erase into an open string.
-                    clear_if_drawn()
-                    if detector.feed(output):
-                        loading = False
+                if loading and detector.feed(output):
+                    loading = False
                 write_all(output_fd, output)
             if input_fd in ready:
                 content = os.read(input_fd, 65536)

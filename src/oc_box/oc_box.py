@@ -139,7 +139,7 @@ class HistoryWaitTimeout(BoxError):
         self.interrupted_foreground = interrupted_foreground
 
 
-_TTY_PROGRESS = ContextVar("oc_box_tty_progress", default=None)
+_TTY_PROGRESS = ContextVar("oc_box_tty_progress", default=())
 _DEBUG_ONLY_STAGES = frozenset(
     {"history-wait", "history-sync", "history-recovery", "shutdown"}
 )
@@ -195,10 +195,10 @@ def _loading_progress(label, started, interval, stream, concise):
     if concise and not interactive:
         yield
         return
-    progress = _TTY_PROGRESS.get() if concise else None
-    if progress is not None:
-        matches, show_stage, _ = progress
-        if matches(stream):
+    progress = _TTY_PROGRESS.get()
+    if concise and progress:
+        coalesces, matches, show_stage, _ = progress[-1]
+        if coalesces and matches(stream):
             with show_stage(label, started):
                 yield
             return
@@ -274,9 +274,12 @@ def _loading_progress(label, started, interval, stream, concise):
             if len(suffix) < width
             else suffix.lstrip()[:width]
         )
-        emit(badge_erase + "\r\x1b[K" + mark.wire + text + ("\n" if final else ""))
+        output = badge_erase + "\r\x1b[K" + mark.wire + text + ("\n" if final else "")
+        # A flush can be interrupted after the terminal already got the badge.
+        # Keep its deletion armed before attempting the output.
         drawn = not final
         badge_erase = mark.erase
+        emit(output)
 
     class StageOutput:
         """Separate Python output without saving it or capturing child fds."""
@@ -322,24 +325,27 @@ def _loading_progress(label, started, interval, stream, concise):
     @contextlib.contextmanager
     def show_stage(message, since):
         nonlocal label, started
-        with lock:
-            previous = label, started
-            label, started = message, since
-            redraw()
+        previous = label, started
         try:
+            with lock:
+                label, started = message, since
+                redraw()
             yield
         finally:
             with lock:
-                clear()
-                label, started = previous
+                try:
+                    clear()
+                finally:
+                    label, started = previous
 
     @contextlib.contextmanager
     def pause():
         nonlocal paused
-        with lock:
-            previous, paused = paused, True
-            clear()
+        previous = paused
         try:
+            with lock:
+                paused = True
+                clear()
             yield
         finally:
             with lock:
@@ -353,55 +359,68 @@ def _loading_progress(label, started, interval, stream, concise):
                 redraw()
 
     with contextlib.ExitStack() as redirects:
-        if interactive:
-            # Python warnings/status lines must not be overwritten by a redraw.
-            # Inherited subprocess fds and previously saved stream references
-            # remain direct output; this is not a terminal recorder or relay.
-            for name, redirect in (
-                ("stdout", contextlib.redirect_stdout),
-                ("stderr", contextlib.redirect_stderr),
-            ):
-                target = getattr(sys, name)
-                if same_terminal(target):
-                    redirects.enter_context(redirect(StageOutput(target)))
-            if concise:
-                token = _TTY_PROGRESS.set((same_terminal, show_stage, pause))
-                redirects.callback(_TTY_PROGRESS.reset, token)
-            render("... (0s elapsed)")
-            worker = threading.Thread(target=heartbeat, daemon=True)
-            worker.start()
-        else:
-            emit(f"oc-box: {label}...\n")
+        entered = False
         failed = True
         try:
+            if interactive:
+                # Python warnings/status lines must not be overwritten by a redraw.
+                # Inherited subprocess fds and previously saved stream references
+                # remain direct output; this is not a terminal recorder or relay.
+                for name, redirect in (
+                    ("stdout", contextlib.redirect_stdout),
+                    ("stderr", contextlib.redirect_stderr),
+                ):
+                    target = getattr(sys, name)
+                    if same_terminal(target):
+                        redirects.enter_context(redirect(StageOutput(target)))
+                token = _TTY_PROGRESS.set(
+                    (*progress, (concise, same_terminal, show_stage, pause))
+                )
+                redirects.callback(_TTY_PROGRESS.reset, token)
+                render("... (0s elapsed)")
+                worker = threading.Thread(target=heartbeat, daemon=True)
+                worker.start()
+            else:
+                emit(f"oc-box: {label}...\n")
+            entered = True
             yield
             failed = False
         finally:
             stopped.set()
-            if worker is not None:
-                worker.join()
-            with lock:
-                if concise:
-                    clear()
-                else:
-                    elapsed = time.monotonic() - started
-                    suffix = (
-                        f" failed after {elapsed:.1f}s"
-                        if failed
-                        else f" done ({elapsed:.1f}s)"
-                    )
-                    if interactive:
-                        if partial_output:
-                            emit("\n")
-                        render(suffix, final=True)
+            try:
+                if worker is not None:
+                    # start() may be interrupted before the thread is joinable.
+                    # The stop event also prevents a late starter from painting.
+                    with contextlib.suppress(RuntimeError):
+                        worker.join()
+            finally:
+                with lock:
+                    if concise or not entered:
+                        clear()
                     else:
-                        emit(f"oc-box: {label}{suffix}\n")
+                        elapsed = time.monotonic() - started
+                        suffix = (
+                            f" failed after {elapsed:.1f}s"
+                            if failed
+                            else f" done ({elapsed:.1f}s)"
+                        )
+                        if interactive:
+                            if partial_output:
+                                emit("\n")
+                            render(suffix, final=True)
+                        else:
+                            emit(f"oc-box: {label}{suffix}\n")
 
 
+@contextlib.contextmanager
 def _startup_tool_output():
     """Keep live Podman/installer output on inherited FDs without a redraw."""
-    progress = _TTY_PROGRESS.get()
-    return progress[2]() if progress is not None else contextlib.nullcontext()
+    with contextlib.ExitStack() as pauses:
+        # Diagnostics permit independent nested stages. Pause every active
+        # painter, not just the innermost one.
+        for _, _, _, pause in reversed(_TTY_PROGRESS.get()):
+            pauses.enter_context(pause())
+        yield
 
 
 def run_tui(command, *, file_drops=None):

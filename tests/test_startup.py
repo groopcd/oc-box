@@ -13,7 +13,14 @@ import threading
 import time
 import unittest
 from unittest import mock
-from oc_box import lifecycle_output, startup_output, workspace_preferences
+from oc_box import (
+    file_preview,
+    history_recovery,
+    host_drop,
+    lifecycle_output,
+    startup_output,
+    workspace_preferences,
+)
 from oc_box import opencode_v2_io as v2
 from oc_box import oc_box as box, sync_config as sync, terminal_ui as ui
 
@@ -660,6 +667,56 @@ class StartupProgressTests(unittest.TestCase):
                 self.assertIn("Failing failed after ", output.getvalue())
                 self.assertNotIn("done", output.getvalue())
 
+    def test_interruption_before_stage_entry_erases_badge_and_stops_worker(self):
+        image = "\x1b_Ga=T,q=2;TEST\x1b\\"
+        erase = "\x1b_Ga=d,q=2;TEST\x1b\\"
+        thread_factory = threading.Thread
+        for fault in ("first-flush", "before-thread-start", "after-thread-start"):
+            output = self.TTY()
+            spawned = []
+            failure = KeyboardInterrupt(fault)
+
+            def create(**kwargs):
+                thread = thread_factory(**kwargs)
+                spawned.append(thread)
+                start = thread.start
+
+                def interrupt_start():
+                    if fault == "after-thread-start":
+                        start()
+                    raise failure
+
+                thread.start = interrupt_start
+                return thread
+
+            with (
+                self.subTest(fault=fault),
+                self.terminal(),
+                mock.patch.object(sys, "stderr", output),
+                mock.patch.object(
+                    startup_output,
+                    "badge_for",
+                    return_value=startup_output.Badge(image, 2, erase),
+                ),
+                mock.patch.object(box.threading, "Thread", side_effect=create),
+                contextlib.ExitStack() as patches,
+            ):
+                if fault == "first-flush":
+                    patches.enter_context(
+                        mock.patch.object(output, "flush", side_effect=[failure, None])
+                    )
+                with self.assertRaises(KeyboardInterrupt) as caught:
+                    with box.loading_stage("Interrupted setup", interval=60):
+                        self.fail("An interrupted stage must never run its body")
+                self.assertIs(caught.exception, failure)
+                self.assertIs(sys.stderr, output)
+                self.assertEqual(box._TTY_PROGRESS.get(), ())
+            self.assertEqual(len(spawned), int(fault != "first-flush"))
+            self.assertTrue(all(not thread.is_alive() for thread in spawned))
+            self.assertIn(image, output.getvalue())
+            self.assertTrue(output.getvalue().endswith(erase + "\r\x1b[K"))
+            self.assertNotIn("\n", output.getvalue())
+
     def test_tty_frames_use_stream_fd_and_fit_resized_terminal_cells(self):
         for columns in (2, 12, 24, 80):
             with self.subTest(columns=columns):
@@ -794,6 +851,86 @@ class StartupProgressTests(unittest.TestCase):
         self.assertIn("native installer warning\n", rendered)
         self.assertTrue(rendered.endswith("\r\x1b[K"), rendered)
         self.assertEqual(rendered.count("\n"), 2)
+
+    def test_verbose_live_preparation_pauses_all_active_painters_on_inherited_fds(self):
+        output = self.TTY()
+        image = "\x1b_Ga=T,q=2;TEST\x1b\\"
+        erase = "\x1b_Ga=d,q=2;TEST\x1b\\"
+        with (
+            self.terminal(),
+            lifecycle_output.invocation("start", verbose=True, console_level="all"),
+            mock.patch.object(lifecycle_output, "record"),
+            mock.patch.object(lifecycle_output._activity_log(), "record_event"),
+            mock.patch.object(sys, "stdout", output),
+            mock.patch.object(sys, "stderr", output),
+            mock.patch.object(
+                startup_output,
+                "badge_for",
+                return_value=startup_output.Badge(image, 2, erase),
+            ),
+            mock.patch.object(box.threading, "Thread") as workers,
+            mock.patch.object(box.threading, "Event") as event,
+        ):
+
+            def tick(heartbeat):
+                event.return_value.wait.side_effect = [False, True]
+                heartbeat()
+
+            def live_child(command, **kwargs):
+                self.assertEqual(kwargs, {"text": True})
+                self.assertTrue(output.getvalue().endswith(erase + "\r\x1b[K"))
+                for text in ("\x1b#", "8", "unmodified tool output\n"):
+                    # Inherited FDs bypass the launcher Python streams.
+                    output.write(text)
+                    before = output.getvalue()
+                    for call in workers.call_args_list:
+                        tick(call.kwargs["target"])
+                    self.assertEqual(output.getvalue(), before)
+                return subprocess.CompletedProcess(command, 0)
+
+            with box.loading_stage("Preparing configuration", stage="configuration"):
+                with box.loading_stage("Installing packages", stage="dependencies"):
+                    with mock.patch.object(
+                        box.subprocess, "run", side_effect=live_child
+                    ):
+                        box.run(["synthetic-tool"], preparation="container-image")
+                    before = output.getvalue()
+                    tick(workers.call_args.kwargs["target"])
+                    self.assertTrue(
+                        output.getvalue()[len(before) :].startswith("\r\x1b[K" + image)
+                    )
+            self.assertEqual(workers.call_count, 2)
+            self.assertIs(sys.stderr, output)
+        self.assertIn("\x1b#8unmodified tool output\n", output.getvalue())
+
+    def test_fixed_fallback_notices_only_carry_badges_in_native_launch_scope(self):
+        output = self.TTY()
+        with (
+            self.terminal(),
+            mock.patch.object(sys, "stdin", output),
+            mock.patch.object(sys, "stderr", output),
+            mock.patch.object(sys, "stdout", output),
+            mock.patch.object(startup_output.os, "ttyname", return_value="/dev/pts/1"),
+        ):
+
+            def notices():
+                self.assertIsNone(file_preview.client_binding(box, {}, {}))
+                history_recovery.report_skipped(["not-a-fixed-reason"])
+
+            notices()
+            with startup_output.invocation():
+                startup_output.configure(lambda: "ascii")
+                notices()
+            notices()
+        lines = output.getvalue().splitlines()
+        self.assertEqual(len(lines), 6)
+        self.assertEqual(lines[0], file_preview.NOTICE)
+        self.assertEqual(
+            lines[1],
+            "oc-box: Automatic persisted-history snapshot not attempted (unavailable).",
+        )
+        self.assertEqual(lines[2:4], ["[/] " + row for row in lines[:2]])
+        self.assertEqual(lines[4:], lines[:2])
 
     def test_concise_pipes_and_dumb_terminals_log_only_fixed_metadata(self):
         for stage, term, failure, outcome, level in (
@@ -941,6 +1078,63 @@ class StartupProgressTests(unittest.TestCase):
         self.assertFalse(detector.safe_to_draw())
         self.assertTrue(detector.feed(b"\x80"))
         self.assertTrue(detector.safe_to_draw())
+
+    def test_kitty_drop_boundary_fences_draws_between_split_designation_bytes(self):
+        mark = startup_output.Badge("\x1b_Ga=T;TEST\x1b\\", 2, "\x1b_Ga=d;TEST\x1b\\")
+        for prefix, final in ((b"\x1b#", b"8"), (b"\x1b%", b"G")):
+            with (
+                self.subTest(prefix=prefix),
+                self.terminal(),
+                mock.patch.object(
+                    host_drop.sharing, "protected_paths", return_value=[]
+                ),
+            ):
+                drops = host_drop.Relay(box, {}, {}, profile="kitty")
+                with (
+                    mock.patch.object(drops, "start"),
+                    mock.patch.object(ui, "write_all") as output,
+                    mock.patch.object(ui.os, "isatty", return_value=True),
+                    mock.patch.object(ui.os, "close"),
+                    mock.patch.object(
+                        ui.os, "read", side_effect=[prefix, final, b"UI_READY", b""]
+                    ),
+                    mock.patch.object(ui.pty, "openpty", return_value=(20, 21)),
+                    mock.patch.object(ui.fcntl, "ioctl"),
+                    mock.patch.object(ui.termios, "tcgetattr"),
+                    mock.patch.object(ui.termios, "tcsetattr"),
+                    mock.patch.object(ui.tty, "setraw"),
+                    mock.patch.object(ui.signal, "signal"),
+                    mock.patch.object(ui.subprocess, "Popen") as child,
+                    mock.patch.object(
+                        ui.select,
+                        "select",
+                        side_effect=[
+                            ([20], [], []),
+                            ([], [], []),
+                            ([], [], []),
+                            ([20], [], []),
+                            ([20], [], []),
+                            ([20], [], []),
+                        ],
+                    ),
+                    mock.patch.object(startup_output, "relay_badge", return_value=mark),
+                ):
+                    child.return_value.poll.return_value = None
+                    child.return_value.wait.return_value = 0
+                    self.assertEqual(
+                        ui.run_tui(
+                            ["synthetic"],
+                            input_fd=10,
+                            output_fd=11,
+                            refresh=0,
+                            file_drops=drops,
+                        ),
+                        0,
+                    )
+                wire = b"".join(call.args[1] for call in output.call_args_list)
+                self.assertIn(prefix + final + b"UI_READY", wire)
+                self.assertEqual(wire.count(mark.wire.encode()), 1)
+                self.assertLess(wire.index(mark.erase.encode()), wire.index(prefix))
 
     @unittest.skipUnless(sys.platform == "linux", "Linux PTY/termios integration")
     def test_tui_progress_handoff_input_resize_and_terminal_restore(self):

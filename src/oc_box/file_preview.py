@@ -10,8 +10,10 @@ import sys
 import unicodedata
 
 if __package__:
+    from . import startup_output
     from .file_preview_host import InactiveMountSource
 else:
+    import startup_output
     from file_preview_host import InactiveMountSource
 
 RELEASE = re.compile(r"2\.3\.(?:0|[1-9][0-9]*)")
@@ -188,7 +190,7 @@ def client_binding(box, data, connection):
         ):
             pass
     if binding is None:
-        print(NOTICE, flush=True)
+        startup_output.line(NOTICE, flush=True)
     return binding
 
 

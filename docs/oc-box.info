@@ -341,19 +341,21 @@ retain compatible caches.  See [Lifecycle output](#lifecycle-output) for
 transient progress and the final history result.  The progress display
 distinguishes waiting for live activity to settle from copying history
 archives.  A separate loading line covers blank TUI startup frames and
-disappears when OpenCode draws text.  By default, supported terminals
-show a tiny oc-box cube PNG and other terminals use the ‘[/]’ ASCII
-mark.  Save ‘oc-box preferences --startup-logo ascii’ for an existing
-workspace to use the ASCII mark even on a supported terminal.  The
-launcher removes the image before forwarding native output, so it may
-appear only briefly.  Pipes and ‘TERM=dumb’ get neither.  The container
-OpenCode version is verified against the host on every launch; exact
-upgrades and downgrades are supported, with no fallback to another
-release.  With a V2 release supporting image previews, ‘--image-preview’
-enables prompt and transcript image previews through an ephemeral
-native-CLI overlay for this owning TUI generation, without replacing
-saved private preferences.  See the option below for compatibility and
-lifetime.
+disappears when OpenCode draws text.  In interactive native launches,
+launcher progress and status lines carry an inline badge: a one-cell
+cube PNG on supported terminals, or the ‘[/]’ ASCII mark elsewhere.
+Save ‘oc-box preferences --startup-logo ascii’ for a registered
+workspace to always use the ASCII mark.  Completed launcher lines are
+not erased at handoff.  No badge is added to native UI or subprocess
+streams, credential prompts, or other commands such as ‘status’, ‘logs’,
+‘web’, and ‘terminal’.  Pipes and ‘TERM=dumb’ receive neither badge nor
+padding.  The container OpenCode version is verified against the host on
+every launch; exact upgrades and downgrades are supported, with no
+fallback to another release.  With a V2 release supporting image
+previews, ‘--image-preview’ enables prompt and transcript image previews
+through an ephemeral native-CLI overlay for this owning TUI generation,
+without replacing saved private preferences.  See the option below for
+compatibility and lifetime.
 
 Native V2 terminal preferences are container-local.  Host ‘cli.json’
 seeds an absent private file, but later config refreshes preserve the
@@ -3124,9 +3126,11 @@ SSH and multiplexers use ASCII; pipes and ‘TERM=dumb’ receive neither
 badge nor padding.  Detection uses compatibility hints, not proof of the
 emulator.  Completed launcher lines keep their badge; temporary progress
 clears at handoff.  Badges are not added to native OpenCode's UI or
-output, passthrough subprocess output, masked input prompts, web, the
-manager, or terminal shell clients.  From a source checkout, ‘python3
-tools/demo_startup_logo.py ascii’ and ‘python3
+output, passthrough subprocess output, masked input prompts, or raw
+relay teardown diagnostics.  This is native-launch presentation only:
+help, preferences, status and other informational commands, web, the
+manager, and terminal shell clients are not decorated.  From a source
+checkout, ‘python3 tools/demo_startup_logo.py ascii’ and ‘python3
 tools/demo_startup_logo.py graphics’ preview the badge with synthetic
 output, without launching a workspace or saving preferences.
 
@@ -5180,20 +5184,20 @@ Node: Name769
 Node: Synopsis930
 Node: Description5132
 Node: Commands10952
-Node: Options144131
-Node: Lifecycle and persistence207040
-Node: Distribution images209340
-Node: Sessions and recovery214417
-Node: Devices and host permissions221002
-Node: Resource reports223348
-Node: Configuration and environment225459
-Node: Files236840
-Node: Exit status247750
-Node: Examples249158
-Node: Troubleshooting251297
-Node: Installation and manuals263789
-Node: Authors and license273979
-Node: See also274586
+Node: Options144309
+Node: Lifecycle and persistence207374
+Node: Distribution images209674
+Node: Sessions and recovery214751
+Node: Devices and host permissions221336
+Node: Resource reports223682
+Node: Configuration and environment225793
+Node: Files237174
+Node: Exit status248084
+Node: Examples249492
+Node: Troubleshooting251631
+Node: Installation and manuals264123
+Node: Authors and license274313
+Node: See also274920
 
 End Tag Table
 
