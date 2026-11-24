@@ -10,7 +10,7 @@ import unittest
 from unittest.mock import patch
 import zipfile
 
-from oc_box import installation, oc_box
+from oc_box import installation, oc_box, web_named_account_assets
 from tools import check_package
 from tools.check_release import source_identity
 
@@ -18,6 +18,25 @@ APP = Path(__file__).resolve().parents[1]
 
 
 class PackagingTests(unittest.TestCase):
+    def test_exact_named_assets_are_present_without_compiled_payloads(self):
+        source_names = {
+            web_named_account_assets._DOCUMENT[0],
+            *(row[4] for row in web_named_account_assets._SOURCES),
+        }
+        self.assertEqual(source_names, set(check_package._NAMED_STATIC_FILES))
+        toml = (APP / "pyproject.toml").read_text()
+        manifest = (APP / "MANIFEST.in").read_text()
+        for name in source_names:
+            with self.subTest(asset=name):
+                self.assertIn(name, installation.RUNTIME_FILES)
+                self.assertIn(f'"{name}"', toml)
+                self.assertIn(f"src/oc_box/{name}", manifest)
+        self.assertFalse(
+            any(name.endswith(".wasm") for name in installation.RUNTIME_FILES)
+        )
+        self.assertNotIn("*.wasm", manifest)
+        self.assertNotIn("*.wasm", toml)
+
     def test_studio_assets_are_in_the_flat_copy_inventory(self):
         for name in check_package._STUDIO_STATIC_FILES:
             with self.subTest(asset=name):
