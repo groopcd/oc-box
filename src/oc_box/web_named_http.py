@@ -1,8 +1,9 @@
 """First-party dispatch for one accepted named HTTPS request.
 
 The exact prelogin, account protocol, confirm, logout and read-only native
-metadata routes share the same owner/account lifetime. No binding, accepting,
-generic native forwarding, Studio assets or public command are enabled here.
+metadata and optional exact account assets share the same owner/account
+lifetime. No generic native forwarding, Studio assets or public command
+are enabled here.
 """
 
 import socket
@@ -13,6 +14,7 @@ if __package__:
         web_account_ingress,
         web_app_ingress,
         web_local_origins,
+        web_named_account_assets,
         web_named_bootstrap,
         web_named_handoff,
         web_named_headers,
@@ -25,6 +27,7 @@ else:
     import web_account_ingress
     import web_app_ingress
     import web_local_origins
+    import web_named_account_assets
     import web_named_bootstrap
     import web_named_handoff
     import web_named_headers
@@ -43,7 +46,9 @@ _DRAIN_ERROR = web_named_transport.NamedResponse(
 _OK = web_named_transport.NamedResponse(200, b'{"ok":true}')
 
 
-def start_named_http(sites, profile, *, login_document, expires_at):
+def start_named_http(
+    sites, profile, *, expires_at, account_assets=None, login_document=None
+):
     """Activate the exact prepared sites, without taking their lifetime away.
 
     The host must retain ``sites`` and its original reservation/owner even if
@@ -75,6 +80,7 @@ def start_named_http(sites, profile, *, login_document, expires_at):
         reader=reader,
         services=sites.services,
         login_document=login_document,
+        account_assets=account_assets,
     )
     sites.start(
         account=application.account_site,
@@ -103,18 +109,43 @@ def _interrupt(stream):
 
 
 class NamedHTTPApplication:
-    def __init__(self, *, reader, services, login_document):
+    def __init__(self, *, reader, services, account_assets=None, login_document=None):
+        assets = web_named_account_assets
         if (
             type(reader) is not web_named_transport.NamedHTTPSReader
             or type(services) is not web_named_services.NamedServices
             or services.entry._origins != reader._origins
-            or type(login_document) is not bytes
-            or not 0 < len(login_document) <= web_named_transport._DOCUMENT_LIMIT
+            or (
+                account_assets is None
+                and (
+                    type(login_document) is not bytes
+                    or not 0
+                    < len(login_document)
+                    <= web_named_transport._DOCUMENT_LIMIT
+                )
+            )
+            or (
+                account_assets is not None
+                and (
+                    login_document is not None
+                    or type(account_assets) is not assets.PreparedAccountAssets
+                    or type(account_assets.bundle) is not assets.AccountAssetBundle
+                    or account_assets.bundle.origins != reader._origins
+                    or type(account_assets.verifier_sha256) is not bytes
+                    or len(account_assets.verifier_sha256) != 32
+                    or account_assets.verifier_sha256 != services._verifier_sha256
+                )
+            )
         ):
             raise ValueError("Invalid named HTTPS application configuration.")
         self._reader = reader
         self._services = services
-        self._prelogin = reader._prelogin_handler(services.entry, login_document)
+        self._account_assets = (
+            account_assets.bundle if account_assets is not None else None
+        )
+        self._prelogin = reader._prelogin_handler(
+            services.entry, login_document, account_assets=self._account_assets
+        )
         self._handoff = web_named_handoff.NamedHandoffIngress(
             origins=reader._origins,
             app=services.application.ingress,
@@ -122,7 +153,12 @@ class NamedHTTPApplication:
 
     def respond_one(self, peer):
         """Take one already accepted socket; the reader determines its role."""
-        self._reader._exchange(peer, handlers=None, named=self._dispatch)
+        self._reader._exchange(
+            peer,
+            handlers=None,
+            named=self._dispatch,
+            account_assets=self._account_assets is not None,
+        )
 
     def account_site(self, stream, *, check, deadline):
         self._borrowed(stream, "account", check=check, deadline=deadline)
@@ -153,6 +189,7 @@ class NamedHTTPApplication:
             deadline=deadline,
             entry_origins=self._reader._origins,
             include_core=True,
+            account_assets=self._account_assets is not None,
         )
         try:
             self._dispatch(stream, request, deadline, check=check)
@@ -180,6 +217,12 @@ class NamedHTTPApplication:
             ("workspace", web_named_bootstrap.WORKSPACE_ENTRY),
         ):
             self._prelogin(stream, request, deadline, check=check)
+        elif (
+            request.role == "account"
+            and self._account_assets is not None
+            and request.target in web_named_account_assets.ACCOUNT_ASSET_PATHS
+        ):
+            self._serve_account_asset(stream, request, deadline, check=owner_current)
         elif request.role == "account" and request.target in (
             web_account_ingress.START_PATH,
             web_account_ingress.FINISH_PATH,
@@ -245,6 +288,33 @@ class NamedHTTPApplication:
                     write(stream, _DRAIN_ERROR, deadline, check=check)
         else:
             raise web_named_headers.NamedRequestError()
+
+    def _serve_account_asset(self, stream, request, deadline, *, check):
+        translate = self._services.account._translate_nonce
+        original = None
+
+        def capture(nonce):
+            nonlocal original
+            check()
+            peer = translate(nonce)
+            original = (nonce, peer)
+            return peer
+
+        # This validates the exact TLS role's fetch context and account cookie.
+        # Projection never sends the account nonce back as an asset header.
+        reply = self._account_assets.asset(
+            **_arguments(request), translate_nonce=capture
+        )
+
+        def current():
+            check()
+            if original is None:
+                raise web_named_headers.NamedRequestError()
+            nonce, peer = original
+            if translate(nonce) != peer:
+                raise web_named_headers.NamedRequestError()
+
+        web_named_transport._write_account_asset(stream, reply, deadline, check=current)
 
     @staticmethod
     def _deliver_handoff(stream, reply, deadline, *, check):

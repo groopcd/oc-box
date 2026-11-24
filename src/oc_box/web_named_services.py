@@ -89,6 +89,7 @@ class NamedServices:
     _bootstrap: web_bootstrap.BrowserBootstrap
     _flow: web_pake_flow.PakeFlow
     _backend: web_pake_profile.LocalPakeProfile
+    _verifier_sha256: bytes
 
     def close(self, *, timeout=5.0):
         """Fence both sites, then verify internal drain; never release the attach.
@@ -186,7 +187,9 @@ def prepare_services(
         )
         if owner._owner_current(binding) is not True:
             raise ServicePreparationError()
-        return NamedServices(entry, account, app, owner, bootstrap, flow, backend)
+        return NamedServices(
+            entry, account, app, owner, bootstrap, flow, backend, expected_sha256
+        )
     except BaseException as error:
         confirmed = True
         for partial in (bootstrap, owner, flow, backend):

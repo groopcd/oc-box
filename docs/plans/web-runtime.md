@@ -105,8 +105,8 @@ of TLS-socket ownership to the upstream relay. Stopping the sites cancels
 registered upstream traffic before joining workers. A socket-level
 integration fixture covers both verified loopback listeners and the complete
 request path through logout, using a synthetic verifier, owner and upstream.
-This is not yet a launcher entry point and does not serve Studio or the login
-assets.
+The internal dispatcher may serve the exact reviewed login bundle described
+below. It is not yet a launcher entry point and does not serve Studio.
 
 The unserved named HTTPS transport takes ownership of one accepted connection,
 selects a validated TLS context and role by the actual IPv4 loopback endpoint,
@@ -368,7 +368,7 @@ guest fallback. Expiry/replay or a different browser cannot redeem a ticket
 even if a document was already issued. A failure is not proof that a
 pairing already in progress was undone.
 
-### Unserved account assets and deployment contract
+### Account assets and deployment contract
 
 [`web_named_account_assets.py`](../../src/oc_box/web_named_account_assets.py)
 projects the bounded account card from the approved [Studio sign-in markup
@@ -421,11 +421,15 @@ the trusted `LocalOrigins` profile, not a request, query parameter or redirect.
   memory, or a malicious controlling service worker; deployment must keep the
   account origin dedicated and free of service workers or unrelated content.
 
-The host neither downloads nor bundles compiled artifacts, and no package
-manifest, CLI or listener uses this helper yet. Distribution requires independent security, provenance,
-license and applicable IPR review of the exact paired binaries, followed by
-separate activation, owner/relay, host-authorized enrollment and publication
-checks. The internal review pins and synthetic conformance are not approval.
+The internal listener accepts `start_named_http(..., account_assets=prepared)`
+only for the same HTTPS profile and the digest used to prepare its verifier.
+It rechecks the original live account bootstrap before sending a subresource;
+it never serves the ELF, a file selected by the request, or an account asset
+on the workspace origin. No launcher entry point or package selects, downloads,
+or bundles compiled artifacts. Distribution requires independent security,
+provenance, license and applicable IPR review of the exact paired binaries,
+followed by separate activation, owner/relay, host-authorized enrollment and
+publication checks. The review pins and synthetic conformance are not approval.
 
 ### Synthetic two-site browser composition
 

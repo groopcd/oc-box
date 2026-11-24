@@ -18,6 +18,7 @@ from tempfile import TemporaryDirectory
 from threading import BoundedSemaphore, Thread
 from time import monotonic
 from traceback import extract_tb
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from playwright.sync_api import Error as BrowserError, sync_playwright
@@ -34,7 +35,11 @@ from oc_box import (
     web_named_bootstrap,
     web_named_handoff,
     web_named_headers,
+    web_named_http,
+    web_named_listeners,
     web_named_local,
+    web_named_owner,
+    web_named_site_lifecycle,
     web_named_transport,
     web_native_pair,
     web_pake_flow,
@@ -894,6 +899,159 @@ def browser_checks(pw, chrome, homes, hosts, fixture, product):
         browser.close()
 
 
+def check_site_dispatch(pw, chrome, home, hosts, profile, product, sites, native):
+    origins = profile.origins
+    workspace = origins.workspace.value + web_named_bootstrap.WORKSPACE_ENTRY
+    account = origins.account.value + web_named_bootstrap.ACCOUNT_ENTRY
+    handoff = origins.workspace.value + HANDOFF
+    confirm = origins.workspace.value + CONFIRM
+    asset_urls = {
+        origins.account.value + path
+        for path in web_named_account_assets.ACCOUNT_ASSET_PATHS
+    }
+    checked = set()
+    browser = launch(pw, chrome, home, hosts)
+    try:
+        require(
+            browser.version == product.removeprefix("HeadlessChrome/"),
+            "Browser product mismatch.",
+        )
+        with browser.new_context() as context:
+            page = context.new_page()
+            page.set_default_timeout(10_000)
+
+            def asset_seen(response):
+                if response.url in asset_urls and response.status == 200:
+                    checked.add(response.url)
+
+            page.on("response", asset_seen)
+            bootstrap_page(page, workspace, account)
+            wait_state(page, "ready")
+            require(
+                checked == asset_urls,
+                "The reserved sites did not serve every pinned asset.",
+            )
+            cookies(context, origins)
+            submit(page, False)
+            transfer(page, handoff, expected=200)
+            response = click_confirm(page, confirm, 204)
+            _, _, token = cookies(context, origins, admitted=True)
+            check_native_boundary(
+                SimpleNamespace(
+                    sign_in=sites.services.application.sign_in,
+                    native=native,
+                    origins=origins,
+                    binding=sites.services._owner.binding,
+                ),
+                token,
+                response,
+            )
+    finally:
+        browser.close()
+
+
+def reserved_browser_gate(
+    chrome,
+    home,
+    hosts,
+    pairs,
+    research,
+    native,
+    seed_fd,
+    wasm_file,
+    verifier_file,
+):
+    with ExitStack() as cleanup:
+        profile = cleanup.enter_context(web_named_listeners.reserve_profile(**pairs))
+        origins = profile.origins
+        binding = web_admission.WebBinding("a" * 32, "b" * 32, origins.workspace.value)
+        setup, record = research["seed_account"](
+            seed_fd, origins, USERNAME, VECTOR_SIZE
+        )
+        store = web_accounts.AccountStore(
+            setup, (web_accounts.Account(USERNAME, (binding.workspace_id,), record),)
+        )
+        owner_current, pair_native = native.bind(binding, origins.workspace)
+        pin = web_named_account_assets.ReviewedArtifactPin
+        prepared = cleanup.enter_context(
+            web_named_account_assets.prepare_account_assets(
+                origins=origins,
+                workspace_label="Synthetic workspace",
+                wasm_file=wasm_file,
+                wasm_pin=pin(204_179, bytes.fromhex(research["WASM_SHA"])),
+                verifier_file=verifier_file,
+                verifier_pin=pin(524_480, bytes.fromhex(research["WORKER_SHA"])),
+            )
+        )
+        control, control_peer = socket.socketpair()
+        cleanup.enter_context(control)
+        cleanup.enter_context(control_peer)
+        identity = web_named_owner.OwnerIdentity(
+            binding.workspace_id,
+            binding.owner_generation,
+            "c" * 64,
+            native.version,
+            native.endpoint,
+        )
+
+        def unexpected(*_, **__):
+            raise RuntimeError("The account browser should not dial native metadata.")
+
+        lease = web_named_owner.VerifiedOwnerLease(
+            identity,
+            control,
+            "/synthetic/project",
+            "/synthetic/home",
+            native.request.endpoint["password"],
+            lambda: identity if owner_current(binding) else None,
+            unexpected,
+        )
+        cleanup.enter_context(
+            patch.object(
+                web_named_owner.NamedOwnerBinding,
+                "_pair_native",
+                lambda owner, actual, origin: pair_native(actual, origin),
+            )
+        )
+        sites = web_named_site_lifecycle.prepare_sites(
+            None,
+            profile=profile,
+            lease=lease,
+            store=store,
+            account_current=lambda: True,
+            verifier_fd=prepared.verifier_fd,
+            expected_sha256=prepared.verifier_sha256,
+        )
+        pairs_before = native.pairs
+        try:
+            web_named_http.start_named_http(
+                sites, profile, account_assets=prepared, expires_at=monotonic() + 40
+            )
+            with sync_playwright() as pw:
+                check_site_dispatch(
+                    pw,
+                    chrome,
+                    home,
+                    hosts.values(),
+                    profile,
+                    research["PRODUCT"],
+                    sites,
+                    native,
+                )
+            require(
+                native.pairs == pairs_before + 1, "Unexpected native issuance count."
+            )
+        finally:
+            require(sites.close(timeout=10), "Reserved test sites did not drain.")
+        require(
+            control.fileno() >= 0, "The site unexpectedly released the owner lease."
+        )
+    print(
+        "PASS Chromium used the reserved HTTPS dispatcher and all pinned account assets.",
+        flush=True,
+    )
+
+
 def exercise(root, chrome, build_dir, native_binary):
     research = runpy.run_path(str(RESEARCH / "check_browser"))
     pinned = research["pinned"]
@@ -997,6 +1155,17 @@ def exercise(root, chrome, build_dir, native_binary):
                 not flow.cleanup_failed and flow.active_verifiers == 0,
                 "Sign-in teardown was not confirmed.",
             )
+        reserved_browser_gate(
+            chrome,
+            homes[1],
+            hosts,
+            pairs,
+            research,
+            native,
+            seed_fd,
+            wasm_file,
+            verifier_file,
+        )
 
 
 def main():

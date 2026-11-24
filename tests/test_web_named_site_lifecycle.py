@@ -9,11 +9,14 @@ import ssl
 import unittest
 from contextlib import ExitStack, contextmanager
 from dataclasses import replace
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from threading import Event
 from time import monotonic
 from unittest.mock import Mock, patch
 
 import test_web_local_origins as certificates
+import test_web_named_account_assets as asset_fixture
 import test_web_pake_flow as proof
 from test_web_native_pair import native_info
 
@@ -21,6 +24,7 @@ from oc_box import (
     web_accounts,
     web_bootstrap,
     web_local_origins as local,
+    web_named_account_assets as assets,
     web_named_bootstrap as entry,
     web_named_handoff as handoff,
     web_named_http as http,
@@ -70,7 +74,7 @@ class NamedSiteLifecycleTests(unittest.TestCase):
             patch.object(
                 local.LocalOrigins,
                 "__init__",
-                lambda origins: original_init(origins, *ports),
+                lambda origins, *args: original_init(origins, *(args or ports)),
             )
         )
         self.stack.enter_context(
@@ -415,6 +419,82 @@ class NamedSiteLifecycleTests(unittest.TestCase):
             ),
             (b"", b""),
         )
+        self.assertIsNone(sites.stop_reason)
+        self.connector.assert_not_called()
+        self.assertTrue(sites.close())
+
+    def test_exact_pinned_assets_use_only_the_live_account_bootstrap(self):
+        pin = asset_fixture.pin(asset_fixture.VERIFIER)
+        sites = self.prepare(expected_sha256=pin.sha256)
+        self.addCleanup(sites.close)
+        asset = "/account-assets/client.wasm"
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            wasm = root / "approved.wasm"
+            verifier = root / "approved-verifier"
+            wasm.write_bytes(asset_fixture.WASM)
+            verifier.write_bytes(asset_fixture.VERIFIER)
+            with assets.prepare_account_assets(
+                origins=self.site,
+                wasm_file=wasm,
+                verifier_file=verifier,
+                wasm_pin=asset_fixture.pin(asset_fixture.WASM),
+                verifier_pin=pin,
+            ) as prepared:
+                options = {"expires_at": monotonic() + 10}
+                with self.assertRaisesRegex(ValueError, "Invalid named HTTPS"):
+                    http.start_named_http(
+                        sites,
+                        self.profile,
+                        account_assets=replace(prepared, verifier_sha256=b"x" * 32),
+                        **options,
+                    )
+                self.assert_not_served()
+                http.start_named_http(
+                    sites, self.profile, account_assets=prepared, **options
+                )
+
+        self.assertEqual(self.exchange("account", asset), (b"", b""))
+        _, page = self.exchange("workspace", entry.WORKSPACE_ENTRY, document=True)
+        seed = re.search(rb'name="ticket" value="([A-Za-z0-9_-]+)"', page)[1]
+        head, page = self.exchange(
+            "account",
+            entry.ACCOUNT_ENTRY,
+            method="POST",
+            document=True,
+            from_role="workspace",
+            content_type="application/x-www-form-urlencoded",
+            body=b"ticket=" + seed,
+        )
+        self.assertTrue(head.startswith(b"HTTP/1.1 200"))
+        self.assertIn(b"X-Frame-Options: DENY", head)
+        self.assertIn(b"/account-assets/sign-in.mjs", page)
+        cookie = self.cookie(head, "__Host-ocbox-account")
+        for role, path, context in (
+            ("workspace", asset, {}),
+            ("account", asset + "?file=other.wasm", {}),
+            ("account", asset, {"document": True}),
+        ):
+            with self.subTest(role=role, path=path, context=context):
+                self.assertEqual(
+                    self.exchange(role, path, cookie=cookie, **context), (b"", b"")
+                )
+
+        head, content = self.exchange("account", asset, cookie=cookie)
+        self.assertTrue(head.startswith(b"HTTP/1.1 200"))
+        self.assertIn(b"Content-Type: application/wasm", head)
+        self.assertIn(b"Cross-Origin-Resource-Policy: same-origin", head)
+        self.assertNotIn(b"Set-Cookie:", head)
+        self.assertEqual(content, asset_fixture.WASM)
+        self.assertNotIn(asset_fixture.VERIFIER, head + content)
+        write = wire._write_wire
+
+        def retired_before_write(stream, data, deadline, *, check=None):
+            sites.services._bootstrap.close()
+            write(stream, data, deadline, check=check)
+
+        with patch.object(wire, "_write_wire", side_effect=retired_before_write):
+            self.assertEqual(self.exchange("account", asset, cookie=cookie), (b"", b""))
         self.assertIsNone(sites.stop_reason)
         self.connector.assert_not_called()
         self.assertTrue(sites.close())

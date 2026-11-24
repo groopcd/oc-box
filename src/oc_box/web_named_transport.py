@@ -13,6 +13,7 @@ from time import monotonic
 if __package__:
     from . import (
         web_local_origins,
+        web_named_account_assets,
         web_named_bootstrap,
         web_named_handoff,
         web_named_headers,
@@ -20,6 +21,7 @@ if __package__:
     )
 else:
     import web_local_origins
+    import web_named_account_assets
     import web_named_bootstrap
     import web_named_handoff
     import web_named_headers
@@ -64,6 +66,10 @@ _ENTRY_ROUTES = {
     "account": (b"POST", web_named_bootstrap.ACCOUNT_ENTRY.encode("ascii")),
     "workspace": (b"GET", web_named_bootstrap.WORKSPACE_ENTRY.encode("ascii")),
 }
+_ACCOUNT_ASSET_ROUTES = frozenset(
+    (b"GET", path.encode("ascii"))
+    for path in web_named_account_assets.ACCOUNT_ASSET_PATHS
+)
 _RESPONSE_STATUS = {
     200: b"200 OK",
     403: b"403 Forbidden",
@@ -119,20 +125,33 @@ def _recv(stream, size, deadline):
     return data
 
 
-def _head(lines, role, origin, *, entry_origins=None, include_core=False):
+def _head(
+    lines, role, origin, *, entry_origins=None, include_core=False, account_assets=False
+):
     if len(lines) > web_named_headers._MAX_FIELDS + 1:
         _refuse()
     start = lines[0].split(b" ", 2)
     route = tuple(start[:2])
     entry = entry_origins is not None and route == _ENTRY_ROUTES[role]
     core = (entry_origins is None or include_core) and route in _ROUTES[role]
+    asset = (
+        account_assets
+        and entry_origins is not None
+        and include_core
+        and role == "account"
+        and route in _ACCOUNT_ASSET_ROUTES
+    )
     handoff = (
         entry_origins is not None
         and include_core
         and role == "workspace"
         and route == (b"POST", web_named_handoff.HANDOFF_PATH.encode("ascii"))
     )
-    if len(start) != 3 or start[2] != b"HTTP/1.1" or not (entry or core or handoff):
+    if (
+        len(start) != 3
+        or start[2] != b"HTTP/1.1"
+        or not (entry or core or handoff or asset)
+    ):
         _refuse()
     method, target = start[0].decode("ascii"), start[1].decode("ascii")
     headers = []
@@ -197,7 +216,7 @@ def _head(lines, role, origin, *, entry_origins=None, include_core=False):
             or fields.get("content-type") != "application/x-www-form-urlencoded"
         ):
             _refuse()
-    elif role == "account":
+    elif role == "account" and not asset:
         if not size or fields.get("content-type") != "application/json":
             _refuse()
     elif target == "/oc-box/confirm":
@@ -208,7 +227,16 @@ def _head(lines, role, origin, *, entry_origins=None, include_core=False):
     return method, target, headers, size
 
 
-def _read(stream, *, role, origin, deadline, entry_origins=None, include_core=False):
+def _read(
+    stream,
+    *,
+    role,
+    origin,
+    deadline,
+    entry_origins=None,
+    include_core=False,
+    account_assets=False,
+):
     wire = bytearray()
     scan = 0
     while (end := wire.find(_HEAD_END, scan)) < 0:
@@ -218,7 +246,12 @@ def _read(stream, *, role, origin, deadline, entry_origins=None, include_core=Fa
         wire.extend(_recv(stream, min(4096, _HEAD_LIMIT - len(wire)), deadline))
     lines = bytes(wire[:end]).split(b"\r\n", web_named_headers._MAX_FIELDS + 1)
     method, target, headers, size = _head(
-        lines, role, origin, entry_origins=entry_origins, include_core=include_core
+        lines,
+        role,
+        origin,
+        entry_origins=entry_origins,
+        include_core=include_core,
+        account_assets=account_assets,
     )
     body = wire[end + len(_HEAD_END) :]
     if len(body) > size:
@@ -285,6 +318,53 @@ def _write_app_grant(stream, token, deadline, *, check):
         deadline,
         check=check,
     )
+
+
+def _write_account_asset(stream, response, deadline, *, check, policy=None):
+    assets = web_named_account_assets
+    if type(response) is not assets.AccountAssetReply or response.status != 200:
+        _refuse()
+    headers = response.headers
+    prefix_len = len(assets._PRIVATE)
+    if headers[:prefix_len] != assets._PRIVATE:
+        _refuse()
+    suffix = headers[prefix_len:]
+    if policy is not None:
+        limit = _DOCUMENT_LIMIT
+        if (
+            len(suffix) != 3
+            or suffix[:2]
+            != (
+                ("Content-Type", "text/html; charset=utf-8"),
+                ("Content-Security-Policy", policy),
+            )
+            or suffix[2][0] != "Set-Cookie"
+            or not assets._COOKIE.fullmatch(suffix[2][1])
+        ):
+            _refuse()
+    else:
+        limit = assets._MAX_WASM
+        if (
+            len(suffix) != 2
+            or suffix[0][0] != "Content-Type"
+            or suffix[0][1] not in (assets._JS, assets._CSS, "application/wasm")
+            or suffix[1] != ("Content-Security-Policy", assets._ASSET_CSP)
+        ):
+            _refuse()
+    if (
+        type(response.body) is not bytes
+        or not 0 < len(response.body) <= limit
+        or any(
+            not 0 < len(value) <= 2048 or any(not 32 <= ord(ch) < 127 for ch in value)
+            for _, value in headers
+        )
+    ):
+        _refuse()
+    head = "HTTP/1.1 200 OK\r\nConnection: close\r\n" + "".join(
+        f"{name}: {value}\r\n" for name, value in headers
+    )
+    wire = (head + f"Content-Length: {len(response.body)}\r\n\r\n").encode("ascii")
+    _write_wire(stream, wire + response.body, deadline, check=check)
 
 
 def _write_wire(stream, wire, deadline, *, check=None):
@@ -383,13 +463,18 @@ class NamedHTTPSReader:
             prelogin=self._prelogin_handler(ingress, login_document),
         )
 
-    def _prelogin_handler(self, ingress, login_document):
+    def _prelogin_handler(self, ingress, login_document, *, account_assets=None):
         def prelogin(stream, request, deadline, *, check=None):
             if (
                 type(ingress) is not web_named_bootstrap.NamedBootstrapIngress
                 or ingress._origins != self._origins
-                or type(login_document) is not bytes
-                or not 0 < len(login_document) <= _DOCUMENT_LIMIT
+                or (
+                    account_assets is None
+                    and (
+                        type(login_document) is not bytes
+                        or not 0 < len(login_document) <= _DOCUMENT_LIMIT
+                    )
+                )
             ):
                 _refuse()
             if check is not None:
@@ -402,6 +487,7 @@ class NamedHTTPSReader:
                 actual_tls=True,
             )
             account_origin = self._origins.account.value
+            account_reply = None
             try:
                 if (
                     request.role == "workspace"
@@ -418,7 +504,11 @@ class NamedHTTPSReader:
                     request.role == "account"
                     and request.target == web_named_bootstrap.ACCOUNT_ENTRY
                 ):
-                    body, cookie = login_document, ingress.account(**arguments).cookie
+                    accepted = ingress.account(**arguments)
+                    if account_assets is not None:
+                        account_reply = account_assets.document(accepted)
+                    else:
+                        body, cookie = login_document, accepted.cookie
                     cookie_name = "__Host-ocbox-account"
                     policy = web_named_handoff.account_policy(self._origins)
                 else:
@@ -429,6 +519,21 @@ class NamedHTTPSReader:
                     NamedResponse(403, b'{"error":"Named entry refused."}'),
                     deadline,
                     check=check,
+                )
+                return
+
+            def current():
+                if check is not None:
+                    check()
+                ingress._live()
+
+            if account_reply is not None:
+                _write_account_asset(
+                    stream,
+                    account_reply,
+                    deadline,
+                    check=current,
+                    policy=account_assets._policy,
                 )
                 return
             if (
@@ -452,16 +557,20 @@ class NamedHTTPSReader:
                 + body
             )
 
-            def current():
-                if check is not None:
-                    check()
-                ingress._live()
-
             _write_wire(stream, wire, deadline, check=current)
 
         return prelogin
 
-    def _exchange(self, peer, *, handlers, native=None, prelogin=None, named=None):
+    def _exchange(
+        self,
+        peer,
+        *,
+        handlers,
+        native=None,
+        prelogin=None,
+        named=None,
+        account_assets=False,
+    ):
         deadline = monotonic() + _REQUEST_TIMEOUT
         try:
             with peer:
@@ -504,6 +613,7 @@ class NamedHTTPSReader:
                         if prelogin is not None or named is not None
                         else None,
                         include_core=named is not None,
+                        account_assets=account_assets,
                     )
                     if all(mode is None for mode in modes):
                         return request
