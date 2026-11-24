@@ -85,6 +85,7 @@ RUNTIME_FILES = (
     "__main__.py",
     "bootstrap.py",
     "sync_config.py",
+    "startup_output.py",
     "terminal_ui.py",
     "cli_help.py",
     "cli_table.py",

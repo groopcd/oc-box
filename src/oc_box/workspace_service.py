@@ -31,9 +31,10 @@ from urllib.parse import urlparse
 from urllib.request import Request, build_opener, ProxyHandler
 
 if __package__:
-    from . import lifecycle_output
+    from . import lifecycle_output, startup_output
 else:
     import lifecycle_output
+    import startup_output
 
 CONNECTION = contextvars.ContextVar("oc_box_v2_connection")
 MAX_CONTROL = 16384
@@ -589,7 +590,7 @@ def client_command(
                         )
 
                 if preview_host_open is None:
-                    print(
+                    startup_output.line(
                         f"oc-box: Experimental host opening is off ({reason}).",
                         flush=True,
                     )
@@ -1287,12 +1288,12 @@ class Owner:
                         stage="shutdown",
                         reason="holder-active",
                     )
-                    print(
+                    startup_output.line(
                         "oc-box: Waiting for attached clients. Close them to finish shutdown, or use 'oc-box stop'.",
                         flush=True,
                     )
                 else:
-                    print(
+                    startup_output.line(
                         "oc-box: Attached web/terminal/file-sharing clients are still active; waiting before history sync and container stop. Close those clients or use 'oc-box stop'.",
                         flush=True,
                     )

@@ -2789,18 +2789,19 @@ flag is saved or changes another client.
 
 ### --startup-logo ascii|graphics
 
-For `preferences` only. Save the startup display for future native `start`
-and `reset` clients of a registered workspace. `ascii` always uses the `[/]`
-mark on the loading line. `graphics` (the default) requests a one-row PNG in
-direct Kitty or Konsole 22.04+ (including Yakuake using that Konsole part).
-It falls back to ASCII
-when the terminal is unsupported or the launcher detects conflicting markers,
-SSH or a multiplexer. The PNG disappears before native output begins; the
-option does not affect web, the manager, or terminal shell clients.
-Terminal detection uses compatibility hints, not proof of the emulator.
+For `preferences` only. Save the inline badge for launcher progress and status
+lines in future native `start` and `reset` clients of a registered workspace.
+`ascii` uses `[/]`; `graphics` (the default) requests a one-cell PNG in direct
+Kitty or Konsole 22.04+ (including Yakuake using that Konsole part).
+Unsupported or ambiguous terminals, SSH and multiplexers use ASCII; pipes
+and `TERM=dumb` receive neither badge nor padding. Detection uses compatibility
+hints, not proof of the emulator. Completed launcher lines keep their badge;
+temporary progress clears at handoff. Badges are not added to native OpenCode's
+UI or output, passthrough subprocess output, masked input prompts, web, the
+manager, or terminal shell clients.
 From a source checkout, `python3 tools/demo_startup_logo.py ascii` and
-`python3 tools/demo_startup_logo.py graphics` preview the loading line without
-launching a workspace or saving preferences.
+`python3 tools/demo_startup_logo.py graphics` preview the badge with synthetic
+output, without launching a workspace or saving preferences.
 
 ### Experimental Ctrl-click host file opening
 

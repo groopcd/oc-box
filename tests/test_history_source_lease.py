@@ -764,6 +764,7 @@ print("flat-history-source-ok")
                 "history_reader.py",
                 "history_recovery.py",
                 "lifecycle_output.py",
+                "startup_output.py",
                 "workspace_control.py",
                 "opencode_v2_io.py",
             ):

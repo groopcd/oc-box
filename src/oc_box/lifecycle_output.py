@@ -13,6 +13,11 @@ from contextlib import contextmanager, suppress
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 
+if __package__:
+    from . import startup_output
+else:
+    import startup_output
+
 
 @dataclass
 class _Invocation:
@@ -138,7 +143,9 @@ def preparation(task):
         else:
             hint = "log unavailable; use --verbose for live output"
         with suppress(OSError, ValueError):
-            print(f"oc-box: {label} ({hint})", file=sys.stderr, flush=True)
+            startup_output.line(
+                f"oc-box: {label} ({hint})", file=sys.stderr, flush=True
+            )
     try:
         yield report
     except KeyboardInterrupt:
@@ -194,7 +201,7 @@ def flush_console():
     try:
         with suppress(OSError, ValueError, KeyboardInterrupt):
             for line in current.console:
-                print(line, file=sys.stderr)
+                startup_output.line(line, file=sys.stderr)
             sys.stderr.flush()
     finally:
         current.console.clear()
