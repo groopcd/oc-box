@@ -1,6 +1,7 @@
 """Real local control UDS and lifecycle lock, synthetic container/native I/O."""
 
 import contextlib
+from importlib.util import find_spec
 import json
 import os
 from pathlib import Path
@@ -16,6 +17,8 @@ from unittest.mock import Mock, patch
 
 from test_web_native_pair import native_info
 import test_web_pake_flow as pake_fixtures
+import test_web_local_origins as certificate_fixtures
+import test_web_named_account_assets as artifact_fixtures
 
 from oc_box import (
     oc_box as box,
@@ -26,6 +29,8 @@ from oc_box import (
     web_app_ingress,
     web_local_origins,
     web_named_bootstrap,
+    web_named_account_assets,
+    web_named_foreground,
     web_named_handoff,
     web_named_headers,
     web_named_http,
@@ -33,6 +38,7 @@ from oc_box import (
     web_named_owner,
     web_named_protocol as protocol,
     web_named_services,
+    web_named_site_lifecycle,
     web_named_transport,
     web_native_pair,
     web_pake_flow,
@@ -179,6 +185,130 @@ class OwnerProtocolTests(unittest.TestCase):
             peer.getsockname.return_value = address
             peer.getsockopt.return_value = 0
         return web_named_listeners.ReservedProfile(origins, tls, account, workspace)
+
+    @contextlib.contextmanager
+    def foreground_inputs(self):
+        certs = certificate_fixtures.LocalTLSFileTests()
+        with contextlib.ExitStack() as cleanup:
+            cleanup.callback(certs.doCleanups)
+            certs.setUp()
+            with socket.socket() as first, socket.socket() as second:
+                for stream in (first, second):
+                    stream.bind(("127.0.0.1", 0))
+                ports = tuple(stream.getsockname()[1] for stream in (first, second))
+            original = web_local_origins.LocalOrigins.__init__
+            cleanup.enter_context(
+                patch.object(
+                    web_local_origins.LocalOrigins,
+                    "__init__",
+                    lambda origins, *args: original(origins, *(args or ports)),
+                )
+            )
+            cleanup.enter_context(
+                patch.object(web_named_listeners, "_host_allowed", return_value=True)
+            )
+            profile = cleanup.enter_context(
+                web_named_listeners.reserve_profile(
+                    account_cert=certs.cert,
+                    account_key=certs.key,
+                    workspace_cert=certs.app_cert,
+                    workspace_key=certs.app_key,
+                )
+            )
+            wasm = self.root / "browser.wasm"
+            verifier = self.root / "verifier"
+            wasm.write_bytes(artifact_fixtures.WASM)
+            verifier.write_bytes(artifact_fixtures.VERIFIER)
+            assets = cleanup.enter_context(
+                web_named_account_assets.prepare_account_assets(
+                    origins=profile.origins,
+                    wasm_file=wasm,
+                    wasm_pin=artifact_fixtures.pin(artifact_fixtures.WASM),
+                    verifier_file=verifier,
+                    verifier_pin=artifact_fixtures.pin(artifact_fixtures.VERIFIER),
+                )
+            )
+            path = self.root / "accounts"
+            phrase = "synthetic named account store passphrase"
+            web_accounts.initialize(path, phrase, setup=b"s" * 128)
+            account = cleanup.enter_context(web_accounts.load_snapshot(path, phrase))
+            client = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+            client.load_verify_locations(cafile=certs.app_cert)
+            yield profile, account, assets, (path, phrase), client
+
+    @unittest.skipUnless(
+        certificate_fixtures.OPENSSL and find_spec("cryptography"),
+        "requires openssl and optional account-store crypto",
+    )
+    def test_foreground_sites_fence_replaced_account_and_hold_the_actual_attach_on_false_drain(
+        self,
+    ):
+        backend = Mock(sizes=web_pake_flow.MessageSizes(96, 320, 64))
+        backend.close.return_value = True
+        with (
+            self.foreground_inputs() as (profile, account, assets, store, client),
+            self.owner() as owner,
+            patch.object(web_pake_profile, "LocalPakeProfile", return_value=backend),
+        ):
+            arguments = {"profile": profile, "account": account, "assets": assets}
+            expired = web_named_foreground.NamedForeground(owner, **arguments)
+            with self.assertRaises(web_named_foreground.ForegroundError):
+                expired.start(expires_at=time.monotonic() - 1)
+            self.assertTrue(expired.close())
+            self.assertEqual(owner.clients, 0)
+
+            foreground = web_named_foreground.NamedForeground(owner, **arguments)
+            try:
+                entry_url = foreground.start(expires_at=time.monotonic() + 15)
+                site = profile.origins.workspace
+                entry = web_named_bootstrap.WORKSPACE_ENTRY
+                self.assertEqual(entry_url, site.value + entry)
+                self.assertEqual(owner.clients, 1)
+                with (
+                    socket.create_connection(
+                        profile.origins.workspace_bind, timeout=2
+                    ) as raw,
+                    client.wrap_socket(raw, server_hostname=site.hostname) as peer,
+                ):
+                    peer.sendall(
+                        (
+                            f"GET {entry} HTTP/1.1\r\n"
+                            f"Host: {site.value.removeprefix('https://')}\r\n"
+                            "Sec-Fetch-Site: none\r\nSec-Fetch-Mode: navigate\r\n"
+                            "Sec-Fetch-Dest: document\r\n\r\n"
+                        ).encode("ascii")
+                    )
+                    with peer.makefile("rb") as incoming:
+                        response = incoming.read(16 * 1024)
+                self.assertTrue(response.startswith(b"HTTP/1.1 200"))
+                self.assertIn(b"Continue to sign in", response)
+                self.assertNotIn(_SECRET.encode("ascii"), response)
+
+                web_accounts.add_account(
+                    *store,
+                    "updated-synthetic",
+                    workspace_ids=(self.data["id"],),
+                    registration=b"r" * 192,
+                )
+                self.assertTrue(foreground.wait_stopped(timeout=3))
+                self.assertIs(
+                    foreground.stop_reason,
+                    web_named_site_lifecycle.StopReason.OWNER_OR_ACCOUNT,
+                )
+                self.assertFalse(account.current())
+                backend.close.return_value = False
+                self.assertFalse(foreground.close())
+                self.assertEqual(owner.clients, 1)
+                with self.assertRaises(web_named_foreground.ForegroundError):
+                    foreground.start(expires_at=time.monotonic() + 15)
+            finally:
+                backend.close.return_value = True
+                self.assertTrue(foreground.close())
+            with owner.condition:
+                self.assertTrue(
+                    owner.condition.wait_for(lambda: not owner.clients, timeout=1)
+                )
+            self.assertFalse(owner.closing)
 
     def test_prepared_named_services_hold_real_attach_and_invalidate_a_stale_account_scope(
         self,
