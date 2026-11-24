@@ -1,0 +1,94 @@
+/* Read-only center from docs/mockups/web-manager.html at 21e966c.
+   Never style the native frame, outer shell controls or manager views here. */
+#workspace-studio-transcript {
+  min-width: 0;
+  color: var(--workspace-text, #e5edf5);
+  font: 14px/1.5 system-ui, sans-serif;
+}
+#workspace-studio-transcript * { box-sizing: border-box; }
+#workspace-studio-transcript :is(h2, p) { margin: 0; }
+#workspace-studio-transcript h2 {
+  font-size: 18px;
+  letter-spacing: -.025em;
+  overflow-wrap: anywhere;
+}
+#workspace-studio-transcript .chat-head {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 21px;
+  border-bottom: 1px solid var(--workspace-line, #243447);
+  background: var(--workspace-panel, #0e1824);
+}
+#workspace-studio-transcript .chat-head > div { min-width: 0; }
+#workspace-studio-transcript .chat-head .eyebrow {
+  margin-bottom: 4px;
+  color: var(--workspace-muted, #a1b3c7);
+  font: 11px/1.5 var(--workspace-mono, ui-monospace, "Liberation Mono", monospace);
+  letter-spacing: .09em;
+  text-transform: uppercase;
+}
+#workspace-studio-transcript .chat-body {
+  display: flex;
+  flex-direction: column;
+  min-height: max(455px, calc(100dvh - 190px));
+  width: min(100%, 760px);
+  margin: auto;
+  padding: 22px 24px 16px;
+}
+#workspace-studio-transcript .transcript {
+  flex: 1;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+#workspace-studio-transcript .message { margin-bottom: 22px; }
+#workspace-studio-transcript .message p {
+  max-width: 66ch;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+#workspace-studio-transcript .by {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+  font-size: 12px;
+}
+#workspace-studio-transcript .avatar {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+  color: var(--workspace-accent, #78e0e6);
+  background: var(--workspace-select, #17323f);
+  font: 700 12px var(--workspace-mono, ui-monospace, "Liberation Mono", monospace);
+}
+#workspace-studio-transcript .message.you p {
+  padding: 11px 13px;
+  border: 1px solid var(--workspace-line, #243447);
+  border-radius: 8px;
+  background: var(--workspace-surface, #122131);
+}
+#workspace-studio-transcript .transcript-notice {
+  color: var(--workspace-muted, #a1b3c7);
+  font-size: 12px;
+}
+#workspace-studio-transcript .transcript-earlier { margin-bottom: 14px; }
+#workspace-studio-transcript .transcript-clipped { display: block; margin-top: 5px; }
+[data-layout="dashboard"] #workspace-studio-transcript .chat-body {
+  min-height: max(420px, calc(100dvh - 374px));
+}
+[data-layout="focus"] #workspace-studio-transcript .chat-head {
+  padding-inline: max(21px, calc((100% - 714px) / 2));
+}
+[data-layout="focus"] #workspace-studio-transcript .chat-body {
+  min-height: calc(100dvh - 200px);
+}
+@media (max-width: 680px) {
+  #workspace-studio-transcript .chat-head { padding: 11px 13px; }
+  #workspace-studio-transcript .chat-body { min-height: 410px; padding: 14px 13px; }
+}
