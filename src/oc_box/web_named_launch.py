@@ -2,7 +2,11 @@
 
 from contextlib import ExitStack
 from dataclasses import dataclass
+import json
+import os
 from pathlib import Path
+import re
+import stat
 
 if __package__:
     from . import (
@@ -11,6 +15,7 @@ if __package__:
         web_named_account_assets,
         web_named_foreground,
         web_named_listeners,
+        web_tls,
     )
 else:
     import secret_prompt
@@ -18,6 +23,7 @@ else:
     import web_named_account_assets
     import web_named_foreground
     import web_named_listeners
+    import web_tls
 
 
 class NamedLaunchError(ValueError):
@@ -67,6 +73,116 @@ class NamedLaunchInputs:
             raise NamedLaunchError(
                 "Named HTTPS requires independently reviewed artifact pins."
             )
+
+
+_PROFILE_LIMIT = 16384
+_CERT_KEYS = ("account_cert", "account_key", "workspace_cert", "workspace_key")
+
+
+def _profile_path(value):
+    if (
+        type(value) is not str
+        or not 1 < len(value.encode("utf-8")) <= 4096
+        or not value.startswith("/")
+        or any(ord(char) < 32 or ord(char) == 127 for char in value)
+    ):
+        raise ValueError
+    path = Path(value)
+    if path.anchor != "/" or str(path) != value or ".." in path.parts:
+        raise ValueError
+    return path
+
+
+def _unique(values):
+    result = dict(values)
+    if len(result) != len(values):
+        raise ValueError
+    return result
+
+
+def _artifact(row):
+    if (
+        type(row) is not dict
+        or row.keys() != {"path", "size", "sha256"}
+        or type(row["sha256"]) is not str
+        or re.fullmatch(r"[a-f0-9]{64}", row["sha256"]) is None
+    ):
+        raise ValueError
+    return _profile_path(row["path"]), web_named_account_assets.ReviewedArtifactPin(
+        row["size"], bytes.fromhex(row["sha256"])
+    )
+
+
+def load_named_inputs(path):
+    """Read one explicitly selected private host profile, without creating it.
+
+    The profile selects paths and independently reviewed SHA-256 pins only.
+    It is not approval to distribute artifacts and contains no password or
+    credential fields. The eventual TLS/artifact/account loaders independently
+    verify their corresponding input descriptors before use.
+    """
+    if not web_named_listeners._host_allowed():
+        raise NamedLaunchError(
+            "Named HTTPS preparation requires a regular Linux host user."
+        )
+    try:
+        if not isinstance(path, Path):
+            raise ValueError
+        path = _profile_path(str(path))
+        with ExitStack() as cleanup:
+            pinned = web_tls._pin_file(path, cleanup)
+            info = os.fstat(pinned)
+            stamp = web_tls._stamp(info)
+            if (
+                not stat.S_ISREG(info.st_mode)
+                or info.st_uid != os.getuid()
+                or info.st_nlink != 1
+                or stat.S_IMODE(info.st_mode) not in (0o400, 0o600)
+                or not 0 < info.st_size <= _PROFILE_LIMIT
+            ):
+                raise ValueError
+            data_fd = os.open(
+                f"/proc/self/fd/{pinned}", os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC
+            )
+            cleanup.callback(os.close, data_fd)
+            if web_tls._stamp(os.fstat(data_fd)) != stamp:
+                raise ValueError
+            raw = bytearray()
+            while len(raw) < info.st_size:
+                chunk = os.pread(data_fd, info.st_size - len(raw), len(raw))
+                if not chunk:
+                    raise ValueError
+                raw.extend(chunk)
+            if (
+                os.pread(data_fd, 1, len(raw))
+                or web_tls._stamp(os.fstat(data_fd)) != stamp
+                or web_tls._stamp(os.fstat(web_tls._pin_file(path, cleanup))) != stamp
+            ):
+                raise ValueError
+        value = json.loads(raw.decode("utf-8"), object_pairs_hook=_unique)
+        if (
+            type(value) is not dict
+            or value.keys() != {"version", "tls", "wasm", "verifier", "account_store"}
+            or type(value["version"]) is not int
+            or value["version"] != 1
+            or type(value["tls"]) is not dict
+            or set(value["tls"]) != set(_CERT_KEYS)
+        ):
+            raise ValueError
+        wasm, wasm_pin = _artifact(value["wasm"])
+        verifier, verifier_pin = _artifact(value["verifier"])
+        return NamedLaunchInputs(
+            *(_profile_path(value["tls"][key]) for key in _CERT_KEYS),
+            wasm,
+            wasm_pin,
+            verifier,
+            verifier_pin,
+            _profile_path(value["account_store"]),
+        )
+    except (OSError, ValueError, TypeError, RecursionError):
+        raise NamedLaunchError(
+            "The explicit named HTTPS profile could not be verified."
+        ) from None
 
 
 class PreparedNamedLaunch:

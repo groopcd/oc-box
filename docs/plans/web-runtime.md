@@ -286,6 +286,15 @@ exact owner's sites with a scope present in the authenticated account store.
 Once an owner attach exists, a false close retains every path-bound resource;
 do not treat that as a normal client exit. No CLI calls this internal API yet.
 
+`load_named_inputs` accepts one explicit, owner-only regular JSON profile
+(`0400` or `0600`, at most 16 KiB, no symlink or additional hard link).
+Its exact v1 fields are `version: 1`, `tls` (the four absolute `account_cert`,
+`account_key`, `workspace_cert`, `workspace_key` paths), `wasm` and `verifier`
+(each `{path, size, sha256}` for an independently reviewed artifact), and
+the absolute `account_store` path. Unknown fields, including password or
+secret fields, refuse. The profile read does not open the referenced files,
+choose artifacts, update profile files or authorize distribution.
+
 A later LAN instance can use distinct existing sites and certificates under
 operator control. Isolated guest LAN tests can establish transport behavior
 using a synthetic private CA, without touching public DNS or requesting a
