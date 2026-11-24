@@ -20,9 +20,19 @@ Keep the two runs distinct:
 | `25681c6d1932d2c662c34e0e2e17ef021681f1108d5c1ab46005839c234fb039` | `descriptor_incomplete`: same private profile, exact container IDs, stopped named-subpath consumer and dependency, zero home mount count, and distinct descriptor were observed. Outside the rootless namespace the operand-free list did not establish mounted state (`mounted_catalog_available=false`). Populated planner admission stayed false. |
 
 The runner reported both guests reaped and their disposable disk, ISO, and
-QMP socket removed. Retain the sanitized receipts only. This evidence does
-not cover the new opt-in namespace diagnostic, positive mounted/alias
-controls, normal-host compatibility, or uninstall.
+QMP socket removed. Retain the sanitized receipts only.
+
+A separate clean `9dc7844db98d7facf869d3e2135c9658e0c0358e` guest
+ran the explicit namespace diagnostic on the same RPM-pinned Podman 5.8.1.
+The baseline remained `descriptor_incomplete`; the namespace observation was
+`namespace_unavailable`, with neither verified namespace context nor an
+unmounted verdict. Exact stopped IDs, named subpath/dependency references
+and the distinct-descriptor negative control still passed. The runner
+confirmed guest shutdown, reaping, and removal of the writable disk, ISO
+and socket. Sanitized receipt SHA-256:
+`e4000ba2576207e898807b7a1f0073ade2cb52404ed79f8b3460a699a8f6143c`.
+None of these runs validates positive mounted/alias controls, normal-host
+compatibility, or uninstall.
 
 ## What the pinned source establishes
 
