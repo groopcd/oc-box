@@ -176,6 +176,196 @@ complete result. An incomplete result must keep the launcher and recovery
 state. The caller must invalidate its confirmation on every attempt; this
 actor has no persistent replay or recreation fence.
 
+## Minimum production admission contract
+
+The [exact-source guest receipts](plans/uninstall-podman-diagnostic.md#recorded-external-guest-evidence)
+verify two different positive controls: `fdb5023` matched a known mounted
+rootfs against the joined Podman catalog and kernel, and `3d788f9` matched a
+deliberately attached same-device named-home bind against kernel mount
+identity and the backing descriptor and refused the old destination pin.
+Neither tested production removal. In particular, the alias run's direct
+baseline remained incomplete and did not rerun the mounted-rootfs control.
+The [adapter](../src/oc_box/workspace_podman.py) still exposes only an
+empty-store proof to the [workspace planner](../src/oc_box/workspace_uninstall.py);
+the guest helpers and their setup operations are not production admission
+or a fallback for either reader.
+
+### Close the engine, namespace, and consumer scope
+
+- Start with one host UID, one explicitly reviewed registry, and one
+  source- and distribution-audited local rootless Podman 5.8.1 profile.
+  Bind the packaged executable, effective selectors and config, and held
+  no-follow graph/run/volume roots for inspection and mutation. Verify
+  that provisioning and review refer to this same store. Refuse remote or
+  rootful engines, overrides or layouts outside the audited profile,
+  plugins, additional/external stores, and missing or ambiguous bindings.
+  The synthetic guest's private config and the version string prove none
+  of these production bindings.
+- For a populated store, require the existing, attributable rootless
+  namespace for that exact UID and store. Pin a live owner/process
+  generation, user and mount namespaces and their ownership/mappings;
+  corroborate the original and joined store identities. In that scope,
+  require a successful **operand-free** Podman mount catalog and
+  corresponding kernel evidence for the exact target paths. No probe
+  mounts, fresh namespace, `podman unshare` fallback, auto-start, auto-stop,
+  or auto-unmount. Unavailable, partial, or contradictory evidence is
+  unknown, not unmounted. Exit 125 leaves the catalog unknown, and an
+  absent `MergedDir` alone supplies no verdict.
+- Account for all consumers possible in the admitted scope, not just
+  workspace-labeled rows. Reconcile all regular and external catalogs,
+  present/absent exact names, inspected IDs and generations, and
+  configured/stopped and active dependencies and mounts. Cover named
+  volumes, subpaths, project and foreign binds, writable layers and any
+  implicit or runtime mounts permitted by the profile; refuse unknown
+  forms or an in-use target. Resolve sources in the relevant namespace
+  against held no-follow descriptors and filesystem-relative mount roots.
+  Check ancestors, descendants, and aliases of each writable layer,
+  home, and protected path, including a different mount ID on the same
+  filesystem. Neither an equal device number nor unequal path strings
+  exclude a bind; zero `MountCount` does not exclude stopped consumers.
+  The fixture did not discover an unknown bind, project an arbitrary
+  consumer, or prove that this enumeration is complete.
+- The initial supported scope needs **enforceable exclusion** of other
+  namespace/store users and changes for the whole destructive window, or
+  an engine contract that provides equivalent exclusion. One possible
+  scope to qualify is a provisioned, exclusively managed store with an
+  enforced access boundary; do not assume that exclusivity for today's
+  ordinary per-user store or switch an existing registry to a different
+  store. A Podman catalog, a scan of accessible `/proc` entries, and oc-box
+  locks do not exclude other mount namespaces, pre-existing open
+  descriptors, direct Podman/storage clients, old binaries, or a process
+  that opens or renames a target after the scan. Operator confirmation
+  and repeated snapshots are not that exclusion. Any unaccounted consumer
+  or unbound access path blocks the whole full mode.
+
+### Freeze authority and make interruption durable
+
+- Build a bounded review of the registry chain and exact record bytes,
+  installation owner, engine scope, protected set, and relevant inventory
+  and proof generation. Require the registered expected name and labels,
+  full non-ambiguous container ID, and for a local private home the exact
+  name, creation generation and pinned backing. Reject stale or incomplete
+  records, lookalikes, replacements and suspicious orphans; matching names
+  and labels do not establish ownership of a different generation.
+  Today registrations do not attest a historical store/resource identity,
+  and `WorkspacePlan` equality does not retain every foreign row or the
+  physical evidence behind a consumer claim. Require a verified ownership
+  binding and compare the admitted proof itself, not just the target list.
+- Keep review non-mutating and dry-run non-interactive. Require a separate
+  typed controlling-TTY approval of the exact targets, retained data and
+  destructive consequences. Under a stable host gate, hold the same
+  workspace lifecycle lock inodes and V2 admission where applicable.
+  Require owners and client leases to be closed, stop intent unchanged,
+  and control/restore state certain; do not initialize or clear it.
+  Cover writers that bypass those locks (including new registration,
+  stop intent published before admission, restore and state/config writes),
+  and installation changes if removing installed artifacts. Rebuild and
+  compare the whole proof under these fences before dispatch and after
+  each step, allowing only the verified expected removal. Any stale review
+  or drift invalidates approval; never fix it up into a new target.
+- The pinned native transport must issue one non-force operation for the
+  exact reviewed full container ID, then its private home name, with
+  independent same-store absence (original name and ID for a container;
+  name for a volume) and an inventory recheck. Podman's name-based volume
+  removal is **not identity-conditional**: a generation
+  check followed by `rm` leaves a replacement window without exclusion.
+  Keep the exclusion through transport and verification; never substitute
+  purge/reset/prune, label sweeps, `rm --volumes`, graph-directory deletion,
+  or a different store. A command acknowledgement alone is not proof.
+  A full-mode refusal must not fall through to launcher-only removal.
+- Before any request can reach the engine, persist a private, crash-durable
+  pending record bound to the reviewed scope and exact resource, outside
+  the entries scheduled for removal. Its publication must survive process
+  loss and reboot; failure to reserve it prevents dispatch. Persist
+  confirmed outcomes only after acknowledgement, independent absence,
+  and revalidation. A lost reply, timeout, interruption, unsafe lock
+  exit or ambiguous follow-up blocks further cleanup and recreation;
+  retain launcher, registry, and recovery evidence. Future runs must
+  recognize the fence, including competing lifecycle paths, and require
+  explicit same-store reconciliation and a new review, not replay or
+  adoption of a replacement. Rebind the live descriptors after reboot;
+  namespace-local mount IDs are not durable store identities. Observation
+  of absence after a lost reply does not retroactively prove who removed
+  it. Store only bounded recovery metadata, never raw native replies or
+  secrets. This fence does not exist in the engine actor and is not the
+  V2 start-transition marker.
+
+### Unserved recovery-fence component
+
+[`uninstall_recovery`](../src/oc_box/uninstall_recovery.py) implements the
+local write-ahead step separately from the actor and CLI. It accepts only a
+non-dry-run full request and a typed, nonempty workspace review. A future
+profile must independently provision one stable private recovery directory
+and pristine journal for the admitted authority, outside **all** removal
+targets. It must retain the expected generation and stamps independently
+of the journal and recheck the directory's named, no-follow binding. It must
+not capture a new baseline from what it happens to find, choose a new slot
+on approval or installation changes, or recreate missing evidence. The
+component does not provision, locate, or reconcile that anchor.
+
+The component locks the verified journal without waiting. Before handing the
+caller an in-process reservation for the next exact resource, it checks the
+still-held authority and complete review and appends and syncs a pending row
+(file, then directory). Pending rows identify the reviewed installation,
+durable store, approval, live store projection, registration generation,
+and exact resource. A home volume binds its creation timestamp and reviewed
+backing; a container binds its full ID and reviewed writable backing. The
+journal stores bounded identifiers and digests, not raw paths, registry
+records, or native replies. It does not infer a durable store generation
+from the live projection.
+
+Only exact native acknowledgement, independent same-scope absence, and
+revalidation allowing only the expected change can append a confirmation.
+A lost reply, failed proof after reservation, or partial append leaves the
+journal spent; even `NOT_DISPATCHED` is not a retry path. A fresh process
+cannot resume from a journal, infer success from later absence, or unlock
+admission by presenting a fresh review. Even a journal with every resource
+confirmed gives no aggregate cleanup or launcher-removal authority. Changed
+filesystem identities after reboot can also cause refusal; no recovery,
+resumption, or automatic re-provisioning is implemented.
+
+The journal lock only serializes users of this component. It does not close
+engine access, attest the caller's digests, protect against deliberate
+same-user tampering or storage rollback, or make volume removal
+identity-conditional. There is no production anchor issuer or reader in
+competing lifecycle paths, and no integration with the existing engine-only
+actor. Offline exercises of process loss and sync failures are not a reboot
+test or external-host acceptance. All production admission gates still apply.
+
+### Keep non-uninstall authority out of the plan
+
+Treat default and selected native OpenCode config, data, state, auth, history
+and services, project trees and `.oc-box-id`, backup/restore archives and
+exports, and externally selected log/backup paths as protected. Bind
+exclusions without reading protected payloads or probing OpenCode. Refuse
+an overlap or one that cannot be ruled out, including physical aliases.
+A retained project marker may require manual recovery on reinstall;
+uninstall authorizes no project repair, session mutation, final sync,
+credential access, or backup/restore. The review must disclose that
+deleting a private workspace home can discard unsynchronized sessions
+and other workspace state.
+Retain archive provenance and recovery files; an intact native archive
+without its provenance is not necessarily recoverable. A separately
+authorized host-settings backup does not back up a workspace home or native
+host history and confers no deletion authority.
+
+Only independently verified allowlisted oc-box-owned state and the exact
+installation's owned artifacts could be retired after complete engine
+verification. Never recurse over a whole state/XDG root to discover deletable
+entries; unknown entries, archives and the durable fence are not targets.
+The [installation ownership reader](../src/oc_box/install_ownership.py)
+supplies review evidence, not a filesystem executor or package-manager
+authority. Unsupported ownership stays manual; no project or native data
+becomes eligible through an installation receipt.
+
+**Concrete prerequisite:** qualify one bounded production profile with a
+read-only, descriptor-backed consumer/namespace proof and demonstrate how
+exclusion is maintained through a name-based deletion and its postcheck.
+If uncoordinated use or replacement cannot be excluded, keep populated
+admission disabled. Only then can a separately reviewed transport, lock
+context, and persistent fence be integrated and tested against a fresh
+isolated store. The present guest passes do not waive any of those gates.
+
 ## Before any destructive release
 
 1. Complete and independently test the populated-store inspection projection
@@ -209,8 +399,8 @@ actor has no persistent replay or recreation fence.
    results through CLI and state-cleanup integration. No label sweeps,
    `rm --volumes`, broad prune/reset, direct graphroot deletion, or adoption
    of a replacement. Named-volume removal is not atomic with the preceding
-   identity check; require store quiescence and do not claim cross-client
-   exclusion. Fence unintended recreation, keep recovery state and launcher
+   identity check; require enforceable store exclusion, not quiescence or
+   launcher locks alone. Fence unintended recreation, keep recovery state and launcher
    after a partial or unknown outcome, and require a new review.
 5. Test the final integrated source with fault injection, then in a fresh
    isolated external rootless-Podman store before making a live safety or
