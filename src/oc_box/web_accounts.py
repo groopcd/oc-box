@@ -25,7 +25,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from hashlib import sha256
 from pathlib import Path
-from threading import Lock
+from threading import Lock, current_thread
 
 MAX_ACCOUNTS = 128
 MAX_WORKSPACES = 32
@@ -643,23 +643,31 @@ def review_registration(path, passphrase, username, *, workspace_ids, replacing=
     IDs. Keep this object and its setup bytes inside the host; it is not the
     one-use browser authorization or an account/session lifecycle fence.
     """
-    if type(replacing) is not bool:
-        raise WebAccountsError("Web account registration mode is invalid.")
-    name, scope = _username(username), _scope(workspace_ids)
+    name, scope = _review_target(username, workspace_ids, replacing)
     secret = _passphrase(passphrase)
     with _locked(path) as directory:
-        store, previous, digest = _read(path, directory, secret, with_digest=True)
-        _check_enrollment_target(store, name, scope, replacing)
-        return RegistrationReview(
-            path,
-            _identity(os.fstat(directory)),
-            _stamp(previous),
-            name,
-            scope,
-            store.setup,
-            replacing,
-            digest,
-        )
+        return _review_locked(path, directory, secret, name, scope, replacing)
+
+
+def _review_target(username, workspace_ids, replacing):
+    if type(replacing) is not bool:
+        raise WebAccountsError("Web account registration mode is invalid.")
+    return _username(username), _scope(workspace_ids)
+
+
+def _review_locked(path, directory, secret, name, scope, replacing):
+    store, previous, digest = _read(path, directory, secret, with_digest=True)
+    _check_enrollment_target(store, name, scope, replacing)
+    return RegistrationReview(
+        path,
+        _identity(os.fstat(directory)),
+        _stamp(previous),
+        name,
+        scope,
+        store.setup,
+        replacing,
+        digest,
+    )
 
 
 def commit_registration(path, passphrase, review, *, registration, current=None):
@@ -672,6 +680,16 @@ def commit_registration(path, passphrase, review, *, registration, current=None)
     holding the store lock. This does not prevent offline store rollback.
     Do not retry on a stale or unverified outcome.
     """
+    username, scope, secret, record = _registration_inputs(
+        path, passphrase, review, registration, current
+    )
+    with _locked(path) as directory:
+        _commit_registration_locked(
+            path, directory, review, username, scope, secret, record, current
+        )
+
+
+def _registration_inputs(path, passphrase, review, registration, current):
     if type(review) is not RegistrationReview or path != review._path:
         raise WebAccountsError(_STALE_REVIEW)
     scope = _scope(review.workspace_ids)
@@ -687,34 +705,116 @@ def commit_registration(path, passphrase, review, *, registration, current=None)
     username = _username(review.username)
     secret = _passphrase(passphrase)
     record = _protocol_bytes(registration, MAX_REGISTRATION_BYTES)
-    with _locked(path) as directory:
-        if (
-            _identity(os.fstat(directory)) != review._directory_identity
-            or _stamp(_entry(directory, path.name)) != review._file_stamp
-        ):
-            raise WebAccountsError(_STALE_REVIEW)
-        store, previous, digest = _read(path, directory, secret, with_digest=True)
-        if (
-            _stamp(previous) != review._file_stamp
-            or store.setup != review.setup
-            or not secrets.compare_digest(digest, review._ciphertext_digest)
-        ):
-            raise WebAccountsError(_STALE_REVIEW)
-        _check_enrollment_target(store, username, scope, review.replacing)
-        account = Account(username, scope, record)
-        others = (item for item in store.accounts if item.username != username)
-        updated = AccountStore(
-            store.setup,
-            tuple(sorted((*others, account), key=lambda item: item.username)),
-        )
+    return username, scope, secret, record
+
+
+def _commit_registration_locked(
+    path, directory, review, username, scope, secret, record, current
+):
+    if (
+        _identity(os.fstat(directory)) != review._directory_identity
+        or _stamp(_entry(directory, path.name)) != review._file_stamp
+    ):
+        raise WebAccountsError(_STALE_REVIEW)
+    store, previous, digest = _read(path, directory, secret, with_digest=True)
+    if (
+        _stamp(previous) != review._file_stamp
+        or store.setup != review.setup
+        or not secrets.compare_digest(digest, review._ciphertext_digest)
+    ):
+        raise WebAccountsError(_STALE_REVIEW)
+    _check_enrollment_target(store, username, scope, review.replacing)
+    account = Account(username, scope, record)
+    others = (item for item in store.accounts if item.username != username)
+    updated = AccountStore(
+        store.setup,
+        tuple(sorted((*others, account), key=lambda item: item.username)),
+    )
+    try:
+        _publish(path, directory, _seal(updated, secret), previous, current=current)
+    except KeyboardInterrupt:
         try:
-            _publish(path, directory, _seal(updated, secret), previous, current=current)
-        except KeyboardInterrupt:
+            _unchanged(path, directory, previous)
+        except (OSError, WebAccountsError, KeyboardInterrupt):
+            raise WebAccountsError(_UNVERIFIED) from None
+        raise
+
+
+@dataclass(frozen=True, slots=True, eq=False, repr=False)
+class _HeldRegistration:
+    """Private storage capability, not browser proof or workspace authority."""
+
+    review: RegistrationReview
+    _save: Callable[..., None]
+
+    def commit(self, passphrase, review, *, registration, current):
+        self._save(self, passphrase, review, registration, current)
+
+
+@contextmanager
+def _hold_registration(path, passphrase, username, *, workspace_ids, replacing=False):
+    """Hold the ordinary account-directory flock from review through one CAS.
+
+    No production callers. The original process/thread must keep this context
+    open. The caller owns ceremony deadlines, host approval, proof and any
+    independent workspace fence. Its current guard must be bounded and
+    read-only. Never pass this capability to the browser or a worker.
+    Acquiring the lock is bounded as for every other store operation; only
+    scope exit releases it, including after a refused or uncertain CAS.
+    """
+    name, scope = _review_target(username, workspace_ids, replacing)
+    secret = _passphrase(passphrase)
+    del passphrase
+    with _locked(path) as directory:
+        review = _review_locked(path, directory, secret, name, scope, replacing)
+        del secret
+        owner, pid = current_thread(), os.getpid()
+        attempted = False
+
+        def held_here(candidate):
+            return (
+                held is not None
+                and candidate is held
+                and current_thread() is owner
+                and os.getpid() == pid
+                and os.environ.get("OC_BOX_CONTAINER") != "1"
+            )
+
+        def save(candidate, passphrase, expected, registration, current):
+            nonlocal attempted
+            if not held_here(candidate) or expected is not review or attempted:
+                raise WebAccountsError(_STALE_REVIEW)
+            attempted = True
+            if not callable(current):
+                raise WebAccountsError(_STALE_REVIEW)
+
+            def checked():
+                if not held_here(candidate) or current() is not True:
+                    return False
+                if not held_here(candidate):
+                    return False
+                _check_directory(path, directory)
+                return _stamp(_entry(directory, path.name)) == review._file_stamp
+
+            user, ids, secret, record = _registration_inputs(
+                path, passphrase, review, registration, current
+            )
             try:
-                _unchanged(path, directory, previous)
-            except (OSError, WebAccountsError, KeyboardInterrupt):
-                raise WebAccountsError(_UNVERIFIED) from None
-            raise
+                # Refuse directory substitution before reading or deriving
+                # the store key again after the caller's review interval.
+                _check_directory(path, directory)
+                _commit_registration_locked(
+                    path, directory, review, user, ids, secret, record, checked
+                )
+            except (OSError, UnicodeError):
+                # The caller may catch this while still holding the context.
+                raise WebAccountsError(_UNSAFE) from None
+
+        held = _HeldRegistration(review, save)
+        try:
+            yield held
+        finally:
+            held = None
 
 
 def add_account(
