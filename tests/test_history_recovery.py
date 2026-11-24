@@ -728,9 +728,14 @@ class HistoryRecoveryTests(unittest.TestCase):
             ("job-metadata", False, True),
             ("job-kind", False, True),
             ("legacy-jobs", False, True),
+            ("machine-schema", False, True),
             ("active-response", False, True),
             ("job-schema", True, True),
             ("database-unsafe", False, False),
+            ("video-state", False, False),
+            ("machine-state", False, False),
+            ("blob-state", False, False),
+            ("host-service-state", False, False),
             ("private-sentinel", False, False),
             ({"private-sentinel": 1}, False, False),
         )
@@ -927,6 +932,9 @@ class HistoryRecoveryTests(unittest.TestCase):
             "2.3.2",
             "2.3.47",
             "2.3.9999",
+            "2.4.0",
+            "2.4.1",
+            "2.4.2",
         ):
             with self.subTest(release=release):
                 self.assertEqual(
@@ -940,7 +948,7 @@ class HistoryRecoveryTests(unittest.TestCase):
                 )
         for release in (
             "2.2.8",
-            "2.4.0",
+            "2.5.0",
             "2.3.01",
             "2.3.٢",
             "2.3.0+unknown",
@@ -993,6 +1001,20 @@ class HistoryRecoveryTests(unittest.TestCase):
             "eligible-shell": {},
             "eligible-shell-232": {"release": "2.3.2"},
             "eligible-subagent-232": {"release": "2.3.2", "kind": "subagent"},
+            "retained-mixed-241": {
+                "release": "2.4.1",
+                "count": 20,
+                "mixed": True,
+                "shells": 6,
+            },
+            "interrupted-foreground-241": {
+                "release": "2.4.1",
+                "foreground": 1,
+                "count": 20,
+                "mixed": True,
+                "shells": 6,
+                "expected": 1,
+            },
             "interrupted-foreground-232": {
                 "release": "2.3.2",
                 "foreground": 2,
@@ -1047,8 +1069,14 @@ class HistoryRecoveryTests(unittest.TestCase):
                 "refusal": "custom-podman-options",
             },
             "unsupported-version": {
-                "release": "2.4.0",
+                "release": "2.5.0",
                 "refusal": "unsupported-version",
+            },
+            "next-24-patch-shares-strict-profile": {
+                "release": "2.4.2",
+                "count": 20,
+                "mixed": True,
+                "shells": 6,
             },
             "future-invalid-active-response": {
                 "release": "2.3.9999",
@@ -1143,7 +1171,7 @@ class HistoryRecoveryTests(unittest.TestCase):
                                 "id": "job_synthetic_" + str(index),
                                 "sessionID": "ses_synthetic",
                                 "kind": "subagent"
-                                if case.get("mixed") and index >= 3
+                                if case.get("mixed") and index >= case.get("shells", 3)
                                 else case.get("kind", "shell"),
                                 "status": "running",
                             }

@@ -10,6 +10,7 @@ import signal
 import sqlite3
 import subprocess
 import tempfile
+import time
 from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
@@ -46,6 +47,7 @@ key TEXT PRIMARY KEY, value TEXT NOT NULL,
 time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL)"""
 ENDPOINT = {"url": "http://127.0.0.1:23456", "password": "synthetic_" + "x" * 32}
 STABLE_23_VERSIONS = ("2.3.0", "2.3.1", "2.3.2", "2.3.47", "2.3.9999")
+STABLE_24_VERSIONS = ("2.4.0", "2.4.1", "2.4.2", "2.4.9999")
 DATA = {
     "id": "synthetic-workspace",
     "container": "a" * 64,
@@ -370,7 +372,11 @@ class JobMetadataGuardTests(unittest.TestCase):
     def test_series_profiles_and_default_scheduler_only_compatibility(self):
         self.assertEqual(
             reader.SNAPSHOT_JOB_KINDS,
-            {"2.2": {"shell"}, "2.3": {"shell", "subagent"}},
+            {
+                "2.2": {"shell"},
+                "2.3": {"shell", "subagent"},
+                "2.4": {"shell", "subagent"},
+            },
         )
         self.store(self.job("image"))
         for version in (None, "2.2.6", "2.2.7"):
@@ -379,7 +385,7 @@ class JobMetadataGuardTests(unittest.TestCase):
         for version in STABLE_23_VERSIONS:
             with self.subTest(version=version):
                 self.refusal("job-kind", version=version)
-        for version in ("2.2.8", "2.4.0", "2.3.01", "2.3.0+unknown", "2.3.0-dev"):
+        for version in ("2.2.8", "2.5.0", "2.3.01", "2.3.0+unknown", "2.3.0-dev"):
             with self.subTest(version=version):
                 with patch.object(reader.sqlite3, "connect") as native_store:
                     with self.assertRaisesRegex(reader.Refusal, "unsupported-version"):
@@ -640,6 +646,86 @@ class JobMetadataGuardTests(unittest.TestCase):
         with self.connect() as connection:
             connection.execute("UPDATE job SET status='unknown' WHERE kind='subagent'")
         self.refusal("job-metadata")
+
+    def audited_241_database(self):
+        with self.connect() as connection:
+            connection.execute("DROP TABLE schedule")
+            connection.execute(AUTOMATION_SCHEMA)
+            connection.execute(
+                "CREATE TABLE machine (id TEXT PRIMARY KEY, time_created INTEGER NOT NULL, key TEXT)"
+            )
+
+    def test_241_requires_the_audited_automation_and_machine_layouts(self):
+        self.refusal("schedule-schema", version="2.4.1")
+        self.audited_241_database()
+        self.store(self.job("subagent"))
+        for version in STABLE_24_VERSIONS:
+            with self.subTest(version=version):
+                reader._check_database(self.database, version=version)
+        for kind in ("image", "video", "codemode", "unknown"):
+            with self.subTest(kind=kind):
+                self.store(self.job(kind))
+                self.assert_pre_native_refusal("job-kind", version="2.4.1")
+        self.store(self.job("shell"))
+        with self.connect() as connection:
+            connection.execute(
+                "INSERT INTO machine VALUES ('synthetic', 1, 'private-sentinel')"
+            )
+        self.assert_pre_native_refusal("machine-state", version="2.4.1")
+        with self.connect() as connection:
+            connection.execute("ALTER TABLE machine ADD COLUMN unknown TEXT")
+        self.assert_pre_native_refusal("machine-schema", version="2.4.1")
+
+    def test_241_refuses_wal_video_records_even_without_a_job(self):
+        self.audited_241_database()
+        with self.connect() as writer:
+            writer.execute("PRAGMA journal_mode=WAL")
+            writer.execute("PRAGMA wal_autocheckpoint=0")
+            for key, value in (
+                ("video:fixture-a", '{"status":"running"}'),
+                ("video:fixture-b", '{"status":"completed"}'),
+                ("video:fixture-c", "private-sentinel-invalid-json"),
+                ("video-leader", "private-sentinel"),
+            ):
+                with self.subTest(key=key):
+                    writer.execute("INSERT INTO kv VALUES (?, ?, 0, 0)", (key, value))
+                    writer.commit()
+                    self.assertTrue(Path(str(self.database) + "-wal").stat().st_size)
+                    self.assert_pre_native_refusal("video-state", version="2.4.1")
+                    self.assertEqual(
+                        writer.execute("SELECT key, value FROM kv").fetchall(),
+                        [(key, value)],
+                    )
+                    writer.execute("DELETE FROM kv")
+                    writer.commit()
+            writer.execute("INSERT INTO kv VALUES ('videoother', '{}', 0, 0)")
+        reader._check_database(self.database, version="2.4.1")
+
+    def test_241_checks_native_blob_retention_before_both_stores(self):
+        self.audited_241_database()
+        root = self.database.parent
+        deadline = time.monotonic() + 4
+        reader._check_24_blobs(root, deadline)
+        blobs = root / "blobs"
+        blobs.mkdir(mode=0o700)
+        blob = blobs / "blob_synthetic"
+        blob.write_bytes(b"not a transcript")
+        reader._check_24_blobs(root, deadline)
+        old = time.time() - 8 * 24 * 3600
+        os.utime(blob, (old, old))
+        self.assert_pre_native_refusal("blob-state", version="2.4.1", host_commands=0)
+        self.assertEqual(blob.read_bytes(), b"not a transcript")
+        blob.unlink()
+        blob.symlink_to(self.database)
+        self.assert_pre_native_refusal("blob-state", version="2.4.1", host_commands=0)
+        blob.unlink()
+        blobs.rmdir()
+        blobs.symlink_to(self.root)
+        self.assert_pre_native_refusal("blob-state", version="2.4.1", host_commands=0)
+        alternate = self.root / "linked-data"
+        alternate.symlink_to(root.parent, target_is_directory=True)
+        with self.assertRaisesRegex(reader.Refusal, "blob-state"):
+            reader._check_24_blobs(alternate / "opencode", deadline)
 
     def test_unknown_kind_status_invalid_ids_and_timestamp_types_are_fixed_refusals(
         self,
@@ -904,7 +990,7 @@ class JobMetadataGuardTests(unittest.TestCase):
         reader._check_database(self.database, allow_missing=True, version="2.3.0")
         self.assertFalse(self.database.exists())
 
-    def assert_pre_native_refusal(self, category, *, version="2.3.0"):
+    def assert_pre_native_refusal(self, category, *, version="2.3.0", host_commands=2):
         inputs = SimpleNamespace(
             buffer=io.BytesIO(
                 json.dumps({"bridge": "public", "version": version}).encode() + b"\n"
@@ -929,14 +1015,19 @@ class JobMetadataGuardTests(unittest.TestCase):
         )
         with (
             patch.object(reader, "_check_system_config"),
+            patch.dict(os.environ, {"XDG_STATE_HOME": str(self.root / "host-state")}),
             self.assertRaisesRegex(BoxError, category),
         ):
             reader.assert_host_safe(
-                box, None, {**DATA, "opencode_version": version}, {}, lambda: 5
+                box,
+                None,
+                {**DATA, "opencode_version": version},
+                {"XDG_DATA_HOME": str(self.database.parent.parent)},
+                lambda: 5,
             )
         self.assertEqual(
             [call.args[0][1:] for call in box.run.call_args_list],
-            [["--version"], ["debug", "paths", "db"]],
+            [["--version"], ["debug", "paths", "db"]][:host_commands],
         )
 
 
@@ -968,9 +1059,18 @@ class EnvironmentTests(unittest.TestCase):
         system = patch.object(reader, "_check_system_config")
         system.start()
         self.addCleanup(system.stop)
+        temporary = tempfile.TemporaryDirectory(prefix="history-host-state-")
+        self.addCleanup(temporary.cleanup)
+        state = patch.dict(os.environ, {"XDG_STATE_HOME": temporary.name})
+        state.start()
+        self.addCleanup(state.stop)
 
     def test_changed_host_native_version_refuses_before_path_or_store_projection(self):
-        for expected, actual in (("2.2.6", "2.2.7"), ("2.3.2", "2.3.47")):
+        for expected, actual in (
+            ("2.2.6", "2.2.7"),
+            ("2.3.2", "2.3.47"),
+            ("2.4.1", "2.4.2"),
+        ):
             with self.subTest(expected=expected, actual=actual):
                 box = fake_box()
                 box.run.side_effect = None
@@ -981,7 +1081,7 @@ class EnvironmentTests(unittest.TestCase):
                             box,
                             Path("/synthetic/workspace.json"),
                             {**DATA, "opencode_version": expected},
-                            {},
+                            {"XDG_DATA_HOME": "/synthetic/native-data"},
                             lambda: 3,
                         )
                 guard.assert_not_called()
@@ -993,6 +1093,7 @@ class EnvironmentTests(unittest.TestCase):
             "2.2.6": "2.2",
             "2.2.7": "2.2",
             **dict.fromkeys(STABLE_23_VERSIONS, "2.3"),
+            **dict.fromkeys(STABLE_24_VERSIONS, "2.4"),
         }
         supported = tuple(profiles)
         for release in supported:
@@ -1002,7 +1103,7 @@ class EnvironmentTests(unittest.TestCase):
                     reader._check_version(output, release)
             for changed in (
                 *(version for version in supported if version != release),
-                "2.4.0",
+                "2.5.0",
                 "2.3.0+unknown",
                 "2.3.0-dev",
             ):
@@ -1017,7 +1118,10 @@ class EnvironmentTests(unittest.TestCase):
             {"version": "2.3.2"},
             "",
             "2.2.8",
-            "2.4.0",
+            "2.5.0",
+            "2.4.01",
+            "2.4.1+unreviewed",
+            "2.4.1-dev",
             "3.3.0",
             "2.3",
             "2.3.-1",
@@ -1056,6 +1160,37 @@ class EnvironmentTests(unittest.TestCase):
                 box, None, {**DATA, "opencode_version": "2.3.0"}, {}, lambda: 5
             )
         box.run.assert_not_called()
+
+    def test_24_observes_real_host_service_namespace_without_reading_markers(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            host_state = root / "host-state"
+            directory = host_state / "opencode"
+            directory.mkdir(parents=True)
+            data = {**DATA, "opencode_version": "2.4.2"}
+            env = {
+                "XDG_DATA_HOME": str(root / "native-data"),
+                "XDG_STATE_HOME": str(root / "fenced"),
+            }
+            with patch.dict(os.environ, {"XDG_STATE_HOME": str(host_state)}):
+                for name in (
+                    "service.json",
+                    "service-preview.json",
+                    "service-synthetic.json",
+                ):
+                    with self.subTest(name=name):
+                        marker = directory / name
+                        marker.symlink_to(root / "never-read")
+                        box = fake_box()
+                        with self.assertRaisesRegex(BoxError, "host-service-state"):
+                            reader.assert_host_safe(box, None, data, env, lambda: 5)
+                        box.run.assert_not_called()
+                        self.assertTrue(marker.is_symlink())
+                        marker.unlink()
+                reader._check_24_host_service(time.monotonic() + 2)
+                directory.chmod(0o777)
+                with self.assertRaisesRegex(reader.Refusal, "host-service-state"):
+                    reader._check_24_host_service(time.monotonic() + 2)
 
     def test_fence_keeps_public_store_selectors_but_no_credentials_or_execution_config(
         self,
@@ -1106,6 +1241,11 @@ class EnvironmentTests(unittest.TestCase):
                 for action in ("plugin.use", "provider.use", "tool.use")
             ],
         )
+        current = reader.fence_environment(original, version="2.4.1")
+        current_settings = json.loads(current["OPENCODE_CONFIG_CONTENT"])
+        self.assertEqual(current["OPENCODE_FLAGS"], "-machines,-sqlite_fts")
+        self.assertEqual(current_settings, {**settings, "automations": False})
+        self.assertNotIn("private-sentinel", repr(current))
 
     def test_host_destination_uses_native_path_handler_and_local_guard_only(self):
         box = fake_box()
@@ -1545,7 +1685,7 @@ class ReaderTests(unittest.TestCase):
                 "2.2.5",
                 "2.2.8",
                 "2.2.7+unknown",
-                "2.4.0",
+                "2.5.0",
                 "2.3.01",
                 "2.3.٢",
                 "2.3.2-dev",

@@ -82,6 +82,7 @@ COMPATIBILITY_REFUSALS = frozenset(
         "job-metadata",
         "job-kind",
         "legacy-jobs",
+        "machine-schema",
         "invalid-active-response",
         "invalid-jobs-response",
         "active-response",
@@ -357,13 +358,25 @@ def capture(box, data, info, token, *, refusal=None):
 def exit_retry_eligible(box, data, failure):
     """Route one archival attempt, never authorize live reads or normal startup.
 
-    Timeout observations retain their version-scoped hints. Positively classified
-    transport or pending-history failures on 2.3 may retry through the same Reader, whose
-    source/destination metadata, exact binaries and idle checks remain mandatory.
-    Explicit compatibility and cleanup refusals are not automatically retried.
+    The minor profile selects the safety contract, not a per-patch allowlist.
+    On 2.4 a request that failed after the normal quiet gate must have failed
+    at a positively known source boundary, not while mutating the destination.
     """
+    profile = history_reader.snapshot_profile(data.get("opencode_version"))
+    if profile == history_reader.SNAPSHOT_24 and (
+        getattr(failure, "history_compatibility_category", None) is not None
+        or getattr(failure, "history_reader_category", None) is not None
+        or getattr(failure, "history_contract_refusal", False)
+        or getattr(failure, "history_source_cleanup_failed", False)
+    ):
+        return False
     if isinstance(failure, box.HistoryWaitTimeout):
         return failure.recovery_eligible
+    if profile == history_reader.SNAPSHOT_24:
+        return isinstance(failure, box.HistoryPending) or (
+            isinstance(failure, box.BoxError)
+            and getattr(failure, "history_source_read_failed", False) is True
+        )
     return (
         isinstance(failure, box.BoxError)
         and (
@@ -371,7 +384,7 @@ def exit_retry_eligible(box, data, failure):
             or getattr(failure, "history_retryable", False) is True
             or isinstance(failure.__cause__, subprocess.TimeoutExpired)
         )
-        and history_reader.snapshot_profile(data.get("opencode_version")) == "2.3"
+        and profile == "2.3"
         and getattr(failure, "history_compatibility_category", None) is None
         and getattr(failure, "history_reader_category", None) is None
         and not getattr(failure, "history_contract_refusal", False)
@@ -588,6 +601,10 @@ def recover(box, path, data, source):
             "snapshot-incomplete": "pending",
             "stop-requested": "stop-requested",
             "deadline": "timeout",
+            "reader-video-state": "video-state",
+            "reader-machine-state": "machine-state",
+            "reader-blob-state": "blob-state",
+            "reader-host-service-state": "host-service-state",
         }.get(category, compatibility_category(compatibility_reason) or "sync-failed")
     if report is not None:
         report.reason = reason

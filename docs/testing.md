@@ -113,6 +113,15 @@ exports/imports, retained and pending history, and actual quiet detection
 after a held shell. It uses synthetic databases and substituted transport,
 not rootless Podman.
 
+The 2.4 recovery CI job pins public Linux x64 executables for 2.4.0 and 2.4.1 and runs
+the retained-subagent, graceful foreground/queued-input and abrupt foreground
+Reader regressions. This does not replace the older native matrix or the
+source-pinned external-host gate. Read-only guard tests separately cover
+machine state, unsafe/stale blobs and durable video keys (including WAL-only
+rows with an empty `job` table). A successful snapshot archives settled
+history; it does not clear jobs, consume inbox entries, or prove that an
+interrupted response completed.
+
 The exact OpenCode 2.3.0 V2-only CI job also runs the native smoke and the
 offline native contracts for `tools/test_v2_lifecycle_podman.py` and the
 exact-version global-vault helpers. The lifecycle host

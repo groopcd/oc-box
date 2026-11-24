@@ -24,18 +24,25 @@ import time
 
 CURRENT = contextvars.ContextVar("oc_box_history_reader", default=None)
 EXPORTS = contextvars.ContextVar("oc_box_history_exports", default=None)
-# Legacy 2.2.6/2.2.7 and the stable 2.3.x storage profile only. Series membership
-# selects guards, never bypasses them: incompatible schemas/recovery forms refuse.
-# The 2.3 profile is ONLY for unregistered serve --stdio, not managed-service
-# restart continuity. Images have no native non-execution canary.
-# Neither profile waives live readiness or establishes whole-container acceptance.
+# The profiles select storage guards, never bypass them. The subagent profiles
+# are ONLY for unregistered serve --stdio, not managed-service restart continuity.
+# No profile waives live readiness or establishes whole-container acceptance.
+SNAPSHOT_24 = "2.4"
+SUBAGENT_SNAPSHOT_PROFILES = frozenset(("2.3", SNAPSHOT_24))
+_SHELL_SUBAGENT = frozenset(("shell", "subagent"))
 SNAPSHOT_JOB_KINDS = {
     "2.2": frozenset(("shell",)),
-    "2.3": frozenset(("shell", "subagent")),
+    "2.3": _SHELL_SUBAGENT,
+    SNAPSHOT_24: _SHELL_SUBAGENT,
 }
 MAX_JOB_ROWS = 10000
 MAX_JOB_RECOVERY_BYTES = 65536
 MAX_JOB_METADATA_BYTES = 8 * 1024 * 1024
+MAX_BLOB_ENTRIES = 10000
+MAX_SERVICE_ENTRIES = 4096
+# The audited 2.4 releases sweep blob_* using a seven-day retention clock.
+# Leave an hour of headroom beyond all Reader/cleanup deadlines.
+BLOB_MAX_AGE = 7 * 24 * 3600 - 3600
 MAX_CONTROL = 16384
 MAX_PAYLOAD = 131072
 PATH = "/opt/oc-box/runtime/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
@@ -52,6 +59,11 @@ GUARD_CATEGORIES = frozenset(
         "job-kind",
         "job-limit",
         "legacy-jobs",
+        "video-state",
+        "machine-schema",
+        "machine-state",
+        "blob-state",
+        "host-service-state",
         "deadline",
         "system-config",
         "unsupported-version",
@@ -109,7 +121,7 @@ def snapshot_profile(version):
     """Select a guarded storage contract, not an assurance of native acceptance.
 
     Only canonical stable versions qualify; prereleases, build suffixes and
-    unknown minor/major series must not inherit the 2.3 contract.
+    unknown minor/major series must not inherit an audited contract.
     """
     if not isinstance(version, str):
         return None
@@ -117,6 +129,8 @@ def snapshot_profile(version):
         return "2.3"
     if version in ("2.2.6", "2.2.7"):
         return "2.2"
+    if re.fullmatch(r"2\.4\.(?:0|[1-9][0-9]*)", version):
+        return SNAPSHOT_24
     return None
 
 
@@ -155,13 +169,15 @@ def _table_schema(connection, name, expected, category):
 def _check_scheduler(connection, profile):
     """Refuse before native's flag-independent scheduler/automation rewake."""
     table = "schedule"
-    if profile == "2.3":
+    if profile in SUBAGENT_SNAPSHOT_PROFILES:
         layouts = connection.execute(
             "SELECT name, type FROM sqlite_master WHERE name IN ('schedule', 'automation')"
         ).fetchall()
         if len(layouts) != 1 or layouts[0][1] != "table":
             raise Refusal("schedule-schema")
         table = layouts[0][0]
+        if profile == SNAPSHOT_24 and table != "automation":
+            raise Refusal("schedule-schema")
         # 2.3.0's schedule and 2.3.1+'s automation are the two known contracts.
         # Empty old stores may migrate forward; missing/ambiguous/new shapes
         # never inherit a pass merely because the native version is 2.3.x.
@@ -229,7 +245,7 @@ def _check_scheduler(connection, profile):
 
 
 def _check_jobs(connection, deadline):
-    """Validate bounded 2.3.x recovery metadata, never outputs or transcripts.
+    """Validate bounded shell/subagent metadata, never outputs or transcripts.
 
     All known statuses remain historical metadata, not proof of completion. The
     unregistered native profile must preserve these rows, including execution
@@ -301,7 +317,7 @@ def _check_jobs(connection, deadline):
             if not isinstance(item, dict):
                 raise Refusal("job-metadata")
             kind = item.get("kind")
-            if not isinstance(kind, str) or kind not in SNAPSHOT_JOB_KINDS["2.3"]:
+            if not isinstance(kind, str) or kind not in _SHELL_SUBAGENT:
                 raise Refusal("job-kind")
             keys = (
                 {"kind", "sessionID", "shellID", "command"}
@@ -360,7 +376,7 @@ def _check_jobs(connection, deadline):
             size,
             encoded,
         ) = row
-        if kind not in SNAPSHOT_JOB_KINDS["2.3"]:
+        if kind not in _SHELL_SUBAGENT:
             raise Refusal("job-kind")
         if (
             not identity(notice, "msg")
@@ -427,6 +443,162 @@ def _check_jobs(connection, deadline):
     budget()
 
 
+def _check_24_state(connection):
+    """Refuse new startup work outside the native job/automation tables."""
+    # An unregistered server also starts the video poller. It can remove
+    # malformed/expired rows, acquire a leader lease, or contact a provider
+    # for a durable job created outside a session. Never read its values.
+    if (
+        connection.execute(
+            "SELECT 1 FROM kv WHERE key = 'video-leader' OR "
+            "(key >= 'video:' AND key < 'video;') LIMIT 1"
+        ).fetchone()
+        is not None
+    ):
+        raise Refusal("video-state")
+    _table_schema(
+        connection,
+        "machine",
+        {
+            "id": ("TEXT", None, True),
+            "time_created": ("INTEGER", True, False),
+            "key": ("TEXT", False, False),
+        },
+        "machine-schema",
+    )
+    if connection.execute("SELECT 1 FROM machine LIMIT 1").fetchone() is not None:
+        raise Refusal("machine-state")
+
+
+@contextlib.contextmanager
+def _native_directory(root, deadline, category):
+    """Traverse native storage paths without following links; None is absent."""
+    root = Path(root)
+    if not root.is_absolute() or ".." in root.parts:
+        raise Refusal(category)
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    try:
+        fd = os.open(root.anchor, flags)
+        try:
+            for part in root.parts[1:]:
+                if time.monotonic() >= deadline:
+                    raise Refusal("deadline")
+                try:
+                    child = os.open(part, flags, dir_fd=fd)
+                except FileNotFoundError:
+                    yield None
+                    return
+                os.close(fd)
+                fd = child
+            _native_directory_identity(os.fstat(fd), category)
+            yield fd
+        finally:
+            os.close(fd)
+    except OSError:
+        raise Refusal(category) from None
+
+
+def _native_directory_identity(info, category):
+    if (
+        not stat.S_ISDIR(info.st_mode)
+        or info.st_uid != os.getuid()
+        or info.st_mode & 0o022
+    ):
+        raise Refusal(category)
+    return (info.st_dev, info.st_ino, info.st_mtime_ns, info.st_ctime_ns)
+
+
+def _check_24_blobs(root, deadline):
+    """Do not let native's automatic retention sweep clean up live data."""
+
+    def check(info):
+        return _native_directory_identity(info, "blob-state")
+
+    def check_budget():
+        if time.monotonic() >= deadline:
+            raise Refusal("deadline")
+
+    def recheck(identity):
+        with _native_directory(root, deadline, "blob-state") as current_fd:
+            current = None if current_fd is None else check(os.fstat(current_fd))
+            if current != identity:
+                raise Refusal("blob-state")
+
+    try:
+        with contextlib.ExitStack() as stack:
+            data_fd = stack.enter_context(
+                _native_directory(root, deadline, "blob-state")
+            )
+            if data_fd is None:
+                # A fresh host destination need not have a native data root.
+                recheck(None)
+                return
+            data_identity = check(os.fstat(data_fd))
+            try:
+                blob_fd = os.open(
+                    "blobs",
+                    os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                    dir_fd=data_fd,
+                )
+            except FileNotFoundError:
+                recheck(data_identity)
+                check_budget()
+                return
+            stack.callback(os.close, blob_fd)
+            blob_identity = check(os.fstat(blob_fd))
+            cutoff = time.time() - BLOB_MAX_AGE
+            with os.scandir(blob_fd) as entries:
+                for count, entry in enumerate(entries, 1):
+                    check_budget()
+                    if count > MAX_BLOB_ENTRIES:
+                        raise Refusal("blob-state")
+                    if entry.name.startswith("blob_"):
+                        info = entry.stat(follow_symlinks=False)
+                        if (
+                            not stat.S_ISREG(info.st_mode)
+                            or info.st_uid != os.getuid()
+                            or info.st_nlink != 1
+                            or info.st_mode & 0o022
+                            or info.st_mtime <= cutoff
+                        ):
+                            raise Refusal("blob-state")
+            check_budget()
+            if (
+                check(os.stat("blobs", dir_fd=data_fd, follow_symlinks=False))
+                != blob_identity
+            ):
+                raise Refusal("blob-state")
+            recheck(data_identity)
+    except OSError:
+        raise Refusal("blob-state") from None
+
+
+def _check_24_host_service(deadline):
+    """Best-effort refusal, not a DB lock. Never read the registration body."""
+    root = Path(os.environ.get("XDG_STATE_HOME") or (Path.home() / ".local/state"))
+    category = "host-service-state"
+    root /= "opencode"
+    with _native_directory(root, deadline, category) as fd:
+        identity = (
+            None if fd is None else _native_directory_identity(os.fstat(fd), category)
+        )
+        if fd is not None:
+            with os.scandir(fd) as entries:
+                for count, entry in enumerate(entries, 1):
+                    if time.monotonic() >= deadline:
+                        raise Refusal("deadline")
+                    if count > MAX_SERVICE_ENTRIES or re.fullmatch(
+                        r"service(?:-[A-Za-z0-9._-]+)?\.json", entry.name
+                    ):
+                        raise Refusal(category)
+    with _native_directory(root, deadline, category) as fd:
+        current = (
+            None if fd is None else _native_directory_identity(os.fstat(fd), category)
+        )
+        if current != identity:
+            raise Refusal(category)
+
+
 def _check_database(path, *, allow_missing=False, timeout=1, version=None):
     """Inspect scheduler and explicitly selected job metadata without mutation.
 
@@ -439,6 +611,7 @@ def _check_database(path, *, allow_missing=False, timeout=1, version=None):
     profile = snapshot_profile(version)
     if version is not None and profile is None:
         raise Refusal("unsupported-version")
+    strict = profile in SUBAGENT_SNAPSHOT_PROFILES
     deadline = time.monotonic() + timeout
     path = Path(path)
     try:
@@ -463,7 +636,7 @@ def _check_database(path, *, allow_missing=False, timeout=1, version=None):
             opened = os.fstat(descriptor)
             if (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino):
                 raise Refusal("database-unsafe")
-            if profile == "2.3" and any(
+            if strict and any(
                 getattr(opened, key) != getattr(before, key)
                 for key in ("st_uid", "st_mode", "st_nlink")
             ):
@@ -475,7 +648,7 @@ def _check_database(path, *, allow_missing=False, timeout=1, version=None):
                     )
                 )
             )
-            if profile == "2.3":
+            if strict:
                 connection.set_progress_handler(
                     lambda: int(time.monotonic() >= deadline), 1000
                 )
@@ -487,10 +660,12 @@ def _check_database(path, *, allow_missing=False, timeout=1, version=None):
                 # Forward migration of an empty schedule store is different from
                 # silently admitting an in-place native downgrade.
                 raise Refusal("schedule-schema")
-            if profile == "2.3":
+            if strict:
                 _check_jobs(connection, deadline)
+            if profile == SNAPSHOT_24:
+                _check_24_state(connection)
             after = path.lstat()
-            if profile == "2.3" and any(
+            if strict and any(
                 getattr(after, key) != getattr(before, key)
                 for key in ("st_mode", "st_nlink")
             ):
@@ -508,12 +683,12 @@ def _check_database(path, *, allow_missing=False, timeout=1, version=None):
     except (OSError, sqlite3.Error, ValueError) as error:
         if isinstance(error, Refusal):
             raise
-        if profile == "2.3" and time.monotonic() >= deadline:
+        if strict and time.monotonic() >= deadline:
             raise Refusal("deadline") from None
         raise Refusal("database-invalid") from None
 
 
-def fence_environment(env):
+def fence_environment(env, *, version=None):
     """New public-only environment; retain native store/record path selectors.
 
     The input is an already constructed private_host_env, not os.environ. In
@@ -562,6 +737,11 @@ def fence_environment(env):
             ),
         }
     )
+    if snapshot_profile(version) == SNAPSHOT_24:
+        result["OPENCODE_FLAGS"] = "-machines,-sqlite_fts"
+        config = json.loads(result["OPENCODE_CONFIG_CONTENT"])
+        config["automations"] = False
+        result["OPENCODE_CONFIG_CONTENT"] = json.dumps(config)
     return result
 
 
@@ -597,7 +777,16 @@ def assert_host_safe(box, path, data, env, remaining):
         if snapshot_profile(data.get("opencode_version")) is None:
             raise Refusal("unsupported-version")
         _check_system_config()
-        result_env = fence_environment(env)
+        release = data["opencode_version"]
+        result_env = fence_environment(env, version=release)
+        if snapshot_profile(release) == SNAPSHOT_24:
+            _check_24_host_service(time.monotonic() + _budget(remaining, 1))
+            data_home = result_env.get("XDG_DATA_HOME")
+            if not isinstance(data_home, str) or not Path(data_home).is_absolute():
+                raise Refusal("blob-state")
+            _check_24_blobs(
+                Path(data_home) / "opencode", time.monotonic() + _budget(remaining, 1)
+            )
         command = box.host_command(data, "debug", "paths", "db")
         version = box.run(
             [command[0], "--version"],
@@ -638,7 +827,7 @@ def assert_host_safe(box, path, data, env, remaining):
 
 
 @contextlib.contextmanager
-def _remote_environment(home):
+def _remote_environment(home, *, version=None):
     """Private empty discovery roots, with only the real source data directory."""
     with tempfile.TemporaryDirectory(prefix="oc-box-history-") as temporary:
         root = Path(temporary)
@@ -657,7 +846,8 @@ def _remote_environment(home):
                 "XDG_CACHE_HOME": str(root / "cache"),
                 "XDG_DATA_HOME": home + "/.local/share",
                 "OPENCODE_DB": "oc-box-v2.db",
-            }
+            },
+            version=version,
         )
         yield root, env
 
@@ -668,6 +858,7 @@ def _remote(argv):
     # Clear create-time container secrets even from this helper's environment.
     os.environ.clear()
     os.environ.update({"PATH": PATH, "LANG": "C.UTF-8"})
+    release = None
     if action == "lease":
         payload = sys.stdin.buffer.readline(MAX_PAYLOAD + 1)
         if len(payload) > MAX_PAYLOAD or not payload.endswith(b"\n"):
@@ -679,13 +870,16 @@ def _remote(argv):
         ):
             raise Refusal("unsupported-version")
         _check_system_config()
+        release = settings["version"]
+        if snapshot_profile(release) == SNAPSHOT_24:
+            _check_24_blobs(Path(home) / ".local/share/opencode", time.monotonic() + 1)
         _check_database(
             Path(home) / ".local/share/opencode/oc-box-v2.db",
             version=settings["version"],
         )
     elif action != "command":
         raise Refusal("startup-payload")
-    with _remote_environment(home) as (root, env):
+    with _remote_environment(home, version=release) as (root, env):
         os.chdir(root)
         os.environ.clear()
         os.environ.update(env)
