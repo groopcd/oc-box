@@ -1765,9 +1765,13 @@ are preserved as `legacy-docs`. No workspaces or credentials are migrated/delete
 GitHub automatic updates are off by default and follow the saved release channel.
 `--auto-update on` saves `auto_update: true` in the existing host oc-box
 configuration, retaining settings such as `pass_env`.
-Normal installed `start` launches check before Podman/workspace setup and, when
-updated, continue with the same arguments. No background daemon, active-session
-update, or automatic check for list/status/terminal/reset/purge is introduced.
+The verified active launcher checks before Podman/workspace setup. The installer
+rechecks the active source, and only a compatible, verified target continues
+with the same arguments, holding its use lock across the restart. Use explicit
+upgrade for a target without the automatic handoff protocol. A retained copy
+using this protocol does not update or recreate a missing installation.
+No background daemon, active-session update, or automatic check for
+list/status/terminal/reset/purge is introduced.
 Direct source-checkout launches skip automatic updates. A concurrent check does
 not block another normal launcher. Network/download failures are reported and
 the normal launch continues with the installed version; explicit upgrade failures

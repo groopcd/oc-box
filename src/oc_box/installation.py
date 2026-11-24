@@ -116,6 +116,7 @@ RUNTIME_FILES = (
     "workspace_identity.py",
     "installation.py",
     "install_ownership.py",
+    "install_removal.py",
     "updater.py",
     "update_channels.py",
     "package_updates.py",
@@ -273,7 +274,13 @@ def _lock_file(path, flags):
 
 
 def install(
-    source, home=None, *, with_vault=False, with_tui=False, verified_release=False
+    source,
+    home=None,
+    *,
+    with_vault=False,
+    with_tui=False,
+    verified_release=False,
+    expected_active=None,
 ):
     """Activate a release; only the verified bootstrap can enroll a new install."""
     # The build backend imports file inventories, not host enrollment policy.
@@ -301,16 +308,19 @@ def install(
     build = get_version_info(source)
     fresh = (
         host_file_open_policy.fresh_locations(home)
-        if verified_release and shutil.which("oc-box") is None
+        if expected_active is None
+        and verified_release
+        and shutil.which("oc-box") is None
         else None
     )
-    target.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        # mkdir is the election point: a concurrent installer/updater or an
-        # already existing empty root disqualifies this installer from marking.
-        target.mkdir()
-    except FileExistsError:
-        fresh = None
+    if expected_active is None:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            # mkdir is the election point: a concurrent installer/updater or an
+            # already existing empty root disqualifies this installer from marking.
+            target.mkdir()
+        except FileExistsError:
+            fresh = None
     if target.is_symlink():
         raise ValueError("The oc-box installation root must not be a symlink.")
     root_identity = (
@@ -318,12 +328,16 @@ def install(
     )
     file_open_enabled = False
     with open(
-        target / host_file_open_policy.INSTALL_LOCK, "a+", opener=_lock_file
+        target / host_file_open_policy.INSTALL_LOCK,
+        "a+" if expected_active is None else "r+",
+        opener=_lock_file,
     ) as lock:
         lock_fd = lock.fileno()
         if not stat.S_ISREG(os.fstat(lock_fd).st_mode):
             raise ValueError("The oc-box installation lock must be a regular file.")
         fcntl.flock(lock, fcntl.LOCK_EX)
+        if expected_active is not None:
+            install_ownership.require_activation(home, expected_active, lock_fd=lock_fd)
         if fresh is not None and not host_file_open_policy.still_fresh(
             fresh, root_identity, lock_fd, initial=True
         ):
@@ -358,6 +372,7 @@ def install(
         staged = release.lstat()
         activated = False
         try:
+            atomic_file(release / install_ownership.USE_LOCK, b"", 0o600, replace=False)
             for name in PROGRAM_FILES:
                 shutil.copyfile(source_file(source, name), release / name)
                 (release / name).chmod(0o644)
@@ -390,6 +405,9 @@ def install(
                         "Optional TUI installation timed out; existing installation retained."
                     ) from exc
                 atomic_file(release / "tui-support.json", b'{"optional_tui": true}\n')
+            staging = install_ownership.capture_staged_inventory(
+                home, release, staged=staged
+            )
             if fresh is not None and not host_file_open_policy.still_fresh(
                 fresh, root_identity, lock_fd
             ):
@@ -459,35 +477,35 @@ def install(
                 file_open_enabled = host_file_open_policy.record_fresh(
                     fresh, root_identity, lock_fd, release
                 )
-            install_ownership.record_inventory(
-                home, release, outputs, lock_fd=lock_fd, staged=staged
-            )
         finally:
             if not activated:
                 shutil.rmtree(release)
-    utility = shutil.which("install-info") or shutil.which(
-        "install-info", path="/usr/sbin:/sbin"
-    )
-    if utility:
-        try:
-            result = subprocess.run(
-                [utility, "--info-dir=" + str(info.parent), str(info)],
-                capture_output=True,
-                text=True,
-                timeout=15,
-            )
-            if result.returncode:
+        utility = shutil.which("install-info") or shutil.which(
+            "install-info", path="/usr/sbin:/sbin"
+        )
+        if utility:
+            try:
+                result = subprocess.run(
+                    [utility, "--info-dir=" + str(info.parent), str(info)],
+                    capture_output=True,
+                    text=True,
+                    timeout=15,
+                )
+                if result.returncode:
+                    print(
+                        "Note: Info index update failed; use 'info --file "
+                        + str(info)
+                        + "'."
+                    )
+            except (OSError, subprocess.TimeoutExpired):
                 print(
-                    "Note: Info index update failed; use 'info --file "
+                    "Note: Info index update unavailable; use 'info --file "
                     + str(info)
                     + "'."
                 )
-        except (OSError, subprocess.TimeoutExpired):
-            print(
-                "Note: Info index update unavailable; use 'info --file "
-                + str(info)
-                + "'."
-            )
+        install_ownership.record_inventory(
+            home, release, outputs, lock_fd=lock_fd, staging=staging
+        )
     print(f"Installed {binary} ({build['version']})")
     if file_open_enabled:
         print(

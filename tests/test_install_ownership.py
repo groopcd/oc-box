@@ -272,6 +272,53 @@ class FlatOwnershipTests(unittest.TestCase):
         with self.assertRaises(ownership.OwnershipError):
             self.review(active)
 
+    def test_artifacts_changed_during_info_indexing_are_not_adopted(self):
+        for change in ("foreign", "replace"):
+            with self.subTest(change=change):
+
+                def dependencies(release):
+                    package = release / "tui-deps/example"
+                    package.mkdir(parents=True)
+                    (package / "provided.py").write_bytes(b"synthetic installed bytes")
+
+                def index(*args, **kwargs):
+                    active = (self.target / "current").resolve(strict=True)
+                    self.assertTrue(self.launcher.is_file())
+                    self.assertFalse((active / ownership.INVENTORY).exists())
+                    package = active / "tui-deps/example"
+                    if change == "foreign":
+                        (package / "unowned").write_text("late foreign data")
+                    else:
+                        expected = package / "provided.py"
+                        other = package / "late-replacement"
+                        other.write_bytes(expected.read_bytes())
+                        other.chmod(expected.stat().st_mode & 0o777)
+                        os.replace(other, expected)
+                    return subprocess.CompletedProcess(args, 0)
+
+                with (
+                    patch.object(
+                        installation, "optional_tui_runtime", side_effect=dependencies
+                    ),
+                    patch.object(
+                        installation.shutil,
+                        "which",
+                        return_value="/synthetic/install-info",
+                    ),
+                    patch.object(installation.subprocess, "run", side_effect=index),
+                ):
+                    active = self.install(with_tui=True)
+                self.assertFalse((active / ownership.INVENTORY).exists())
+                with self.assertRaisesRegex(
+                    ownership.OwnershipError, "no verified uninstall inventory"
+                ):
+                    self.review(active)
+                if change == "foreign":
+                    self.assertEqual(
+                        (active / "tui-deps/example/unowned").read_text(),
+                        "late foreign data",
+                    )
+
 
 class PackageOwnershipTests(unittest.TestCase):
     def setUp(self):

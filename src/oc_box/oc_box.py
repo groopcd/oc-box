@@ -25,6 +25,11 @@ import time
 import unicodedata
 import uuid
 
+# Older auto-updaters can exec this flat script directly, without the
+# installed wrapper's -B. Keep a pinned install immutable in both cases.
+if not __package__ and __name__ == "__main__":
+    sys.dont_write_bytecode = True
+
 if __package__:
     from . import (
         cli_help,
@@ -5301,24 +5306,12 @@ def _main_command(args, argv):
             from updater import UpdateError, automatic_upgrade
 
         try:
-            release = automatic_upgrade(APP)
+            automatic_upgrade(APP, launch_args=sys.argv[1:] if argv is None else argv)
         except (UpdateError, OSError, ValueError) as exc:
             startup_output.line(
                 f"oc-box: automatic update unavailable: {exc}; continuing with the installed version.",
                 file=sys.stderr,
             )
-        else:
-            if release is not None:
-                environment = {**os.environ, "OC_BOX_UPDATE_CHECKED": "1"}
-                os.execve(
-                    sys.executable,
-                    [
-                        sys.executable,
-                        str(release / "oc_box.py"),
-                        *(sys.argv[1:] if argv is None else argv),
-                    ],
-                    environment,
-                )
     with loading_stage("Checking rootless Podman", stage="backend"):
         check_backend(
             **({"env": maintenance_host_env()} if args.command == "terminal" else {}),
@@ -5756,5 +5749,22 @@ def entrypoint():
         return result
 
 
+def _installed_entrypoint():
+    if (
+        __package__
+        or PACKAGE.parent.name != "releases"
+        or _help_requested(sys.argv[1:])
+    ):
+        return entrypoint()
+    from install_ownership import installed_runtime_use, OwnershipError
+
+    try:
+        with installed_runtime_use(PACKAGE):
+            return entrypoint()
+    except OwnershipError as exc:
+        print(f"oc-box: {exc}", file=sys.stderr)
+        return 1
+
+
 if __name__ == "__main__":
-    sys.exit(entrypoint())
+    sys.exit(_installed_entrypoint())

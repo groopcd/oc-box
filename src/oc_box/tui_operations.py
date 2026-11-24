@@ -1253,4 +1253,14 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    if __package__ or box.PACKAGE.parent.name != "releases":
+        raise SystemExit(main())
+    from install_ownership import installed_runtime_use, OwnershipError
+
+    try:
+        # A parent dashboard can die while its private child is still using
+        # the release to finish a reviewed operation and cleanup.
+        with installed_runtime_use(box.PACKAGE):
+            raise SystemExit(main())
+    except OwnershipError as exc:
+        raise SystemExit(f"oc-box: {exc}") from None
