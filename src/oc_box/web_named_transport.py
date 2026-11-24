@@ -321,28 +321,32 @@ class NamedHTTPSReader:
         self._configure(origins, tls)
 
     @classmethod
-    def from_reservation(cls, reservation):
+    def from_reservation(cls, reservation, *, configure_tls=True):
         """Reuse the already verified per-site TLS contexts, not certificate paths."""
         if (
             type(reservation) is not web_named_listeners.ReservedProfile
             or type(reservation.origins) is not web_local_origins.LocalOrigins
             or type(reservation.tls) is not web_local_origins.LocalTLS
+            or type(configure_tls) is not bool
         ):
             _refuse()
         reader = cls.__new__(cls)
-        reader._configure(reservation.origins, reservation.tls)
+        reader._configure(
+            reservation.origins, reservation.tls, configure_tls=configure_tls
+        )
         return reader
 
-    def _configure(self, origins, tls):
+    def _configure(self, origins, tls, *, configure_tls=True):
         self._origins = origins
         self._endpoints = {
             origins.account_bind: ("account", origins.account, tls.account),
             origins.workspace_bind: ("workspace", origins.workspace, tls.workspace),
         }
-        for context in (tls.account, tls.workspace):
-            context.set_alpn_protocols(["http/1.1"])
-            context.options |= ssl.OP_NO_TICKET | ssl.OP_NO_RENEGOTIATION
-            context.num_tickets = 0
+        if configure_tls:
+            for context in (tls.account, tls.workspace):
+                context.set_alpn_protocols(["http/1.1"])
+                context.options |= ssl.OP_NO_TICKET | ssl.OP_NO_RENEGOTIATION
+                context.num_tickets = 0
 
     def read_one(self, peer):
         """Take ownership of one connected socket accepted by the trusted caller.
@@ -380,7 +384,7 @@ class NamedHTTPSReader:
         )
 
     def _prelogin_handler(self, ingress, login_document):
-        def prelogin(stream, request, deadline):
+        def prelogin(stream, request, deadline, *, check=None):
             if (
                 type(ingress) is not web_named_bootstrap.NamedBootstrapIngress
                 or ingress._origins != self._origins
@@ -388,6 +392,8 @@ class NamedHTTPSReader:
                 or not 0 < len(login_document) <= _DOCUMENT_LIMIT
             ):
                 _refuse()
+            if check is not None:
+                check()
             arguments = dict(
                 method=request.method,
                 target=request.target,
@@ -422,6 +428,7 @@ class NamedHTTPSReader:
                     stream,
                     NamedResponse(403, b'{"error":"Named entry refused."}'),
                     deadline,
+                    check=check,
                 )
                 return
             if (
@@ -444,7 +451,13 @@ class NamedHTTPSReader:
                 + f"Content-Length: {len(body)}\r\n\r\n".encode("ascii")
                 + body
             )
-            _write_wire(stream, wire, deadline, check=ingress._live)
+
+            def current():
+                if check is not None:
+                    check()
+                ingress._live()
+
+            _write_wire(stream, wire, deadline, check=current)
 
         return prelogin
 

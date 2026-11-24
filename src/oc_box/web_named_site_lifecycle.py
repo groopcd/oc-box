@@ -467,6 +467,12 @@ class _NamedSites:
             return False
         try:
             self._fence(StopReason.REQUESTED)
+            # A relay may be blocked on its private upstream rather than the
+            # browser TCP connection stopped by the accept fence. Cancel its
+            # admission before joining, without closing the backend, listener
+            # reservation, or owner lease out from under any worker.
+            admission = self._services.application.sign_in.admission
+            admission.close()
             with self._lock:
                 threads = [self._monitor, *(worker.thread for worker in self._workers)]
             for thread in threads:

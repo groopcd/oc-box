@@ -1,7 +1,9 @@
 """Synthetic loopback TLS, owner control pair, and listener teardown only."""
 
 import errno
+import json
 import os
+import re
 import socket
 import ssl
 import unittest
@@ -12,16 +14,22 @@ from time import monotonic
 from unittest.mock import Mock, patch
 
 import test_web_local_origins as certificates
+import test_web_pake_flow as proof
+from test_web_native_pair import native_info
 
 from oc_box import (
     web_accounts,
     web_bootstrap,
     web_local_origins as local,
+    web_named_bootstrap as entry,
+    web_named_handoff as handoff,
+    web_named_http as http,
     web_named_listeners as reserve,
     web_named_owner,
     web_named_services,
     web_named_site_lifecycle as lifecycle,
     web_named_transport as wire,
+    web_native_pair,
     web_pake_flow,
     web_pake_profile,
 )
@@ -150,6 +158,266 @@ class NamedSiteLifecycleTests(unittest.TestCase):
         self.assertEqual(self.profile.account.fileno(), -1)
         self.assertEqual(self.profile.workspace.fileno(), -1)
         self.assert_not_served()
+
+    def request(
+        self,
+        role,
+        path,
+        *,
+        method="GET",
+        body=b"",
+        content_type=None,
+        cookie=None,
+        from_role=None,
+        document=False,
+    ):
+        origin = getattr(self.site, role).value
+        fields = [
+            f"{method} {path} HTTP/1.1",
+            f"Host: {origin.removeprefix('https://')}",
+            f"Sec-Fetch-Site: {'cross-site' if from_role else 'same-origin'}",
+            f"Sec-Fetch-Mode: {'navigate' if document else 'same-origin'}",
+            f"Sec-Fetch-Dest: {'document' if document else 'empty'}",
+        ]
+        if not document or from_role:
+            fields.append(f"Origin: {getattr(self.site, from_role or role).value}")
+        if method == "POST":
+            fields.append(f"Content-Length: {len(body)}")
+        if content_type:
+            fields.append(f"Content-Type: {content_type}")
+        if cookie:
+            fields.append(f"Cookie: {cookie}")
+        return ("\r\n".join(fields) + "\r\n\r\n").encode("ascii") + body
+
+    def exchange(self, role, path, **kwargs):
+        with self.connect(role) as peer:
+            peer.sendall(self.request(role, path, **kwargs))
+            with peer.makefile("rb") as response:
+                reply = response.read(64 * 1024)
+        head, _, body = reply.partition(b"\r\n\r\n")
+        return head, body
+
+    def cookie(self, head, name):
+        prefix = f"Set-Cookie: {name}=".encode("ascii")
+        cookies = [
+            line.removeprefix(b"Set-Cookie: ").partition(b";")[0].decode("ascii")
+            for line in head.split(b"\r\n")
+            if line.startswith(prefix)
+        ]
+        self.assertEqual(len(cookies), 1)
+        return cookies[0]
+
+    def connect_fixture_relay(self, relay):
+        def connect(identity, *, track, check, deadline):
+            self.assertEqual(identity, self.lease.identity)
+            check()
+            track(relay)
+
+        self.connector.side_effect = connect
+
+    def begin_proof(self):
+        backend = proof.SyntheticBackend()
+        backend.sizes = proof.SIZES
+        backend.close = Mock(return_value=True)
+        self.worker_factory.return_value = backend
+        identity = self.lease.identity
+        sites = self.prepare(
+            store=web_accounts.AccountStore(
+                b"s" * 128,
+                (
+                    web_accounts.Account(
+                        "fixture", (identity.workspace_id,), b"r" * 192
+                    ),
+                ),
+            )
+        )
+        self.addCleanup(sites.close)
+        document = b"<h1>Fixture sign-in</h1>"
+        native_value = "K" * 10 + "." + "s" * 43
+        owner = sites.services._owner
+        self.mint = self.stack.enter_context(
+            patch.object(
+                web_native_pair,
+                "pair_cookie",
+                return_value=web_native_pair.NativeCookie(
+                    owner.binding,
+                    identity.endpoint,
+                    self.site.workspace.value.removeprefix("https://"),
+                    native_value,
+                    version=identity.version,
+                    owner_current=owner._owner_current,
+                ),
+            )
+        )
+        http.start_named_http(
+            sites, self.profile, login_document=document, expires_at=monotonic() + 10
+        )
+
+        head, page = self.exchange("workspace", entry.WORKSPACE_ENTRY, document=True)
+        self.assertTrue(head.startswith(b"HTTP/1.1 200"))
+        nonce = self.cookie(head, "__Host-ocbox-bootstrap")
+        seed = re.search(rb'name="ticket" value="([A-Za-z0-9_-]+)"', page)[1]
+        head, page = self.exchange(
+            "account",
+            entry.ACCOUNT_ENTRY,
+            method="POST",
+            document=True,
+            from_role="workspace",
+            content_type="application/x-www-form-urlencoded",
+            body=b"ticket=" + seed,
+        )
+        self.assertTrue(head.startswith(b"HTTP/1.1 200"))
+        self.assertEqual(page, document)
+        account = self.cookie(head, "__Host-ocbox-account")
+        head, body = self.exchange(
+            "account",
+            "/start",
+            method="POST",
+            cookie=account,
+            content_type="application/json",
+            body=json.dumps({"username": "fixture", "ke1": proof.KE1}).encode("ascii"),
+        )
+        self.assertTrue(head.startswith(b"HTTP/1.1 200"))
+        challenge = json.loads(body)["challenge_id"]
+        head, body = self.exchange(
+            "account",
+            "/finish",
+            method="POST",
+            cookie=account,
+            content_type="application/json",
+            body=json.dumps({"challenge_id": challenge, "ke3": proof.PROOF}).encode(
+                "ascii"
+            ),
+        )
+        self.assertTrue(head.startswith(b"HTTP/1.1 200"))
+        ticket = json.loads(body)["ticket"].encode("ascii")
+        head, page = self.exchange(
+            "workspace",
+            handoff.HANDOFF_PATH,
+            method="POST",
+            document=True,
+            from_role="account",
+            content_type="application/x-www-form-urlencoded",
+            body=b"ticket=" + ticket,
+        )
+        self.assertTrue(head.startswith(b"HTTP/1.1 200"))
+        self.assertIn(b"Confirm workspace sign-in", page)
+        self.assertNotIn(b"Set-Cookie:", head)
+        self.mint.assert_not_called()
+        confirm = dict(
+            method="POST", cookie=nonce, content_type="text/plain", body=ticket
+        )
+        return sites, confirm, native_value.encode("ascii")
+
+    def test_exact_application_dispatch_and_borrowed_relay_under_one_listener(self):
+        sites, confirm, native_value = self.begin_proof()
+        head, _ = self.exchange("workspace", "/api/info")
+        self.assertEqual(head, b"")
+        self.assertIsNone(sites.stop_reason)
+        self.connector.assert_not_called()
+
+        head, body = self.exchange("workspace", handoff.CONFIRM_PATH, **confirm)
+        self.assertTrue(head.startswith(b"HTTP/1.1 204"))
+        self.assertEqual(body, b"")
+        self.assertNotIn(b"Content-Length:", head)
+        self.assertNotIn(native_value, head)
+        self.assertNotIn(confirm["body"], head)
+        cookie = self.cookie(head, "__Host-ocbox-app")
+        replay, _ = self.exchange("workspace", handoff.CONFIRM_PATH, **confirm)
+        self.assertTrue(replay.startswith(b"HTTP/1.1 403"))
+        self.assertNotIn(b"Set-Cookie:", replay)
+        self.mint.assert_called_once()
+
+        identity = self.lease.identity
+        with ExitStack() as peers:
+            relay, native = map(peers.enter_context, socket.socketpair())
+            native.settimeout(2)
+            self.connect_fixture_relay(relay)
+            reply = json.dumps(native_info(identity.endpoint)).encode("ascii")
+            native.sendall(
+                b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+                b"Set-Cookie: synthetic-native-rotation=private\r\n"
+                + f"Content-Length: {len(reply)}\r\n\r\n".encode("ascii")
+                + reply
+            )
+            native.shutdown(socket.SHUT_WR)
+            head, body = self.exchange("workspace", "/api/info", cookie=cookie)
+            self.assertTrue(head.startswith(b"HTTP/1.1 200"))
+            self.assertEqual(
+                json.loads(body),
+                {"version": identity.version, "pid": 141, "urls": [identity.endpoint]},
+            )
+            self.assertNotIn(b"Set-Cookie:", head)
+            self.assertNotIn(native_value, head + body)
+            self.assertNotIn(b"private-native-hostname", body)
+            with native.makefile("rb") as incoming:
+                upstream = incoming.read(2048)
+            self.assertIn(native_value, upstream)
+            self.assertNotIn(cookie.encode("ascii"), upstream)
+            self.assertEqual(relay.fileno(), -1)
+        self.connector.assert_called_once()
+        self.assertIsNone(
+            sites.stop_reason
+        )  # The relay did not close the site worker's TLS.
+
+        head, _ = self.exchange(
+            "workspace", "/oc-box/logout", method="POST", cookie=cookie
+        )
+        self.assertTrue(head.startswith(b"HTTP/1.1 200"))
+        self.assertIn(b"Max-Age=0", head)
+        self.assertEqual(
+            self.exchange("workspace", "/api/info", cookie=cookie), (b"", b"")
+        )
+        self.connector.assert_called_once()
+        self.assertIsNone(sites.stop_reason)
+        self.assertTrue(sites.close())
+        self.assertGreaterEqual(self.lease.control.fileno(), 0)
+
+    def test_shutdown_interrupts_upstream_and_retains_owner_until_drain(self):
+        sites, confirm, _ = self.begin_proof()
+        head, _ = self.exchange("workspace", handoff.CONFIRM_PATH, **confirm)
+        cookie = self.cookie(head, "__Host-ocbox-app")
+        with ExitStack() as peers:
+            relay, native = map(peers.enter_context, socket.socketpair())
+            native.settimeout(2)
+            self.connect_fixture_relay(relay)
+            peer = peers.enter_context(self.connect("workspace"))
+            peer.sendall(self.request("workspace", "/api/info", cookie=cookie))
+            with native.makefile("rb") as incoming:
+                self.assertEqual(incoming.readline(), b"GET /api/info HTTP/1.1\r\n")
+                self.assertTrue(sites.close(timeout=1))
+                self.assertEqual(incoming.read(2048)[-4:], b"\r\n\r\n")
+            self.assertEqual(relay.fileno(), -1)
+            self.assert_closed(peer)
+        self.assert_stopped(sites, lifecycle.StopReason.REQUESTED)
+        self.assertGreaterEqual(self.lease.control.fileno(), 0)
+
+    def test_failed_cookie_delivery_revokes_the_exact_browser_grant(self):
+        sites, confirm, _ = self.begin_proof()
+        tokens = []
+
+        def disconnected(stream, token, deadline, *, check):
+            check()
+            tokens.append(token)
+            raise BrokenPipeError()
+
+        with patch.object(wire, "_write_app_grant", side_effect=disconnected):
+            self.assertEqual(
+                self.exchange("workspace", handoff.CONFIRM_PATH, **confirm), (b"", b"")
+            )
+        self.assertEqual(len(tokens), 1)
+        admission = sites.services.application.sign_in.admission
+        binding = sites.services._owner.binding
+        self.assertIsNone(admission.lookup(binding, tokens[0]))
+        self.assertEqual(
+            self.exchange(
+                "workspace", "/api/info", cookie="__Host-ocbox-app=" + tokens[0]
+            ),
+            (b"", b""),
+        )
+        self.assertIsNone(sites.stop_reason)
+        self.connector.assert_not_called()
+        self.assertTrue(sites.close())
 
     def test_exact_preflight_sockets_and_tls_dispatch_both_fixed_roles(self):
         sites = self.use_sites()

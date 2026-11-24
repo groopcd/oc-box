@@ -109,6 +109,7 @@ class NamedServices:
                 cleaned
                 and worker
                 and relay
+                and not self.application.sign_in.admission.cancellation_failed
                 and self._flow.active_verifiers == 0
                 and not self._flow.cleanup_failed
             )

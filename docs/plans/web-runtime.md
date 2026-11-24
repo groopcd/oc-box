@@ -98,8 +98,14 @@ proof, browser handoff, same-origin confirmation, logout, and the bounded
 native metadata requests through one validated TLS request. Confirmation
 registers delivery under the newly issued browser admission and returns an
 empty 204 with only the opaque app cookie. Failed delivery revokes that
-admission; logout acknowledges only checked drain. This is not yet a
-launcher entry point and does not serve Studio or the login assets.
+admission; logout acknowledges only checked drain. The internal listener
+uses this same dispatcher after TLS, without a second handshake or a transfer
+of TLS-socket ownership to the upstream relay. Stopping the sites cancels
+registered upstream traffic before joining workers. A socket-level
+integration fixture covers both verified loopback listeners and the complete
+request path through logout, using a synthetic verifier, owner and upstream.
+This is not yet a launcher entry point and does not serve Studio or the login
+assets.
 
 The unserved named HTTPS transport takes ownership of one accepted connection,
 selects a validated TLS context and role by the actual IPv4 loopback endpoint,

@@ -143,8 +143,9 @@ class _WorkspaceChild:
 class _RegisteredIO:
     """Own this request's sockets and optional exec from startup through drain."""
 
-    def __init__(self, browser):
+    def __init__(self, browser, *, owns_browser):
         self.browser = browser
+        self._owns_browser = owns_browser
         self.upstream = None
         self._workspace = None
         self._lock = Lock()
@@ -202,7 +203,12 @@ class _RegisteredIO:
                     if self.upstream is not None:
                         self.upstream.close()
                 finally:
-                    self.browser.close()
+                    if self._owns_browser:
+                        self.browser.close()
+                    else:
+                        # The site worker alone checks identity and closes its
+                        # TLS stream. Late cancellation must not touch it.
+                        self.browser = None
         finally:
             if self._workspace is not None:
                 self._workspace.close()
@@ -283,7 +289,10 @@ def _read_reply(peer, *, deadline, check):
     if pending.count(b"\r\n", 0, end) > https.web_named_headers._MAX_FIELDS:
         _refuse()
     split = end + len(boundary)
-    status, headers, _ = pair._reply(bytes(pending[:split]))
+    try:
+        status, headers, _ = pair._reply(bytes(pending[:split]))
+    except pair.NativePairError:
+        _refuse()
     length = headers.get("content-length", ())
     if (
         status != 200
@@ -370,7 +379,13 @@ class NamedNativeRelay:
         """After ingress close, require drain before releasing the owner lease."""
         return self._ingress._admission.wait_drained(timeout)
 
-    def _respond(self, stream, request, deadline):
+    def respond_site(self, stream, request, deadline, *, check):
+        """Borrow an already admitted site's TLS stream for one exchange."""
+        if not callable(check):
+            _refuse()
+        self._respond(stream, request, deadline, site_check=check)
+
+    def _respond(self, stream, request, deadline, *, site_check=None):
         if (
             type(request) is not https.NamedRequest
             or request.role != "workspace"
@@ -392,13 +407,15 @@ class NamedNativeRelay:
             _refuse()
         session = ingress._session(token)
         deadline = min(deadline, session.expires_at)
-        io = _RegisteredIO(stream)
+        io = _RegisteredIO(stream, owns_browser=site_check is None)
         with ingress._admission.connection(
             ingress._binding, session, cancel=io.cancel
         ) as use:
             try:
 
                 def check():
+                    if site_check is not None:
+                        site_check()
                     if use is None or use.cancelled:
                         _refuse()
                     https._remaining(deadline)
