@@ -10,6 +10,7 @@ import argparse
 import base64
 import contextlib
 import contextvars
+from dataclasses import dataclass
 import hashlib
 import json
 import math
@@ -1328,14 +1329,28 @@ class Owner:
         self.shutdown()
 
 
+@dataclass(frozen=True, slots=True, repr=False)
+class AttachedControl:
+    """Trusted borrower view of one same-user attach, not owner attestation."""
+
+    connection: dict
+    stream: socket.socket
+    peer_pid: int
+
+
 @contextlib.contextmanager
-def attach(box, path, data):
+def _attach_control(box, path, data):
+    """Hold the original connected stream, never acquire a second lease.
+
+    Borrowers must not close it, read additional replies, or treat a same-user
+    PID and connected descriptor as proof of the native owner's generation.
+    """
     validate_workspace(box, path, data)
     stream = socket.socket(socket.AF_UNIX)
     try:
         stream.settimeout(5)
         stream.connect(str(socket_path(box, data)))
-        _, uid, _ = struct.unpack(
+        peer_pid, uid, _ = struct.unpack(
             "3i", stream.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12)
         )
         if uid != os.getuid():
@@ -1368,9 +1383,15 @@ def attach(box, path, data):
         stream.close()
         raise
     try:
-        yield connection
+        yield AttachedControl(connection, stream, peer_pid)
     finally:
         stream.close()
+
+
+@contextlib.contextmanager
+def attach(box, path, data):
+    with _attach_control(box, path, data) as attached:
+        yield attached.connection
 
 
 def relay_command(box, data, port):

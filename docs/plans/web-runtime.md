@@ -149,10 +149,11 @@ The runtime remains unchanged:
   closes or the owner ends; `wait_clients()` uses that count before shutdown.
 - `workspace_service.attach()` checks the registered project/directory and
   the owned running container mount, then uses the private runtime
-  `socket_path()` and verifies the peer and endpoint. The original connected
-  `stream` inside `attach()` is the retained control handle; the yielded
-  connection dictionary is not that handle. `controller_running()` only
-  probes the path and does not attest a ready owner or retain a lease.
+  `socket_path()` and verifies the peer and endpoint. Its internal
+  `_attach_control()` exposes the original held stream and peer PID to trusted
+  borrowers without creating a second lease. The ordinary `attach()` interface
+  still yields only the connection dictionary. Neither the PID nor
+  `controller_running()` attests the native owner's generation.
 - `inspect_owned()` can return the full Podman `Id`, but the current owner
   reply does not bind that immutable ID and running instance to the stream.
   An optional UI-reporting generation is not a mandatory owner generation.

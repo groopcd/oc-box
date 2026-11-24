@@ -1921,9 +1921,21 @@ class WorkspaceServiceTests(unittest.TestCase):
         ):
             owner.publish("ses_shared")
             self.assertTrue(service.controller_running(box, self.data))
-            with service.attach(box, self.path, self.data) as attached:
-                self.assertEqual(attached["session"], "ses_shared")
+            with service._attach_control(box, self.path, self.data) as held:
+                self.assertEqual(held.connection["session"], "ses_shared")
+                self.assertEqual(held.peer_pid, os.getpid())
+                self.assertEqual(held.stream.family, socket.AF_UNIX)
+                self.assertGreaterEqual(held.stream.fileno(), 0)
+                self.assertNotIn(self.connection["password"], repr(held))
                 self.assertEqual(owner.clients, 1)
+                with service.attach(box, self.path, self.data) as attached:
+                    self.assertIs(type(attached), dict)
+                    self.assertEqual(attached["session"], "ses_shared")
+                    self.assertEqual(owner.clients, 2)
+                with owner.condition:
+                    self.assertTrue(
+                        owner.condition.wait_for(lambda: owner.clients == 1, timeout=1)
+                    )
                 exited = threading.Event()
                 thread = threading.Thread(
                     target=lambda: (owner.wait_clients(), exited.set())
@@ -1934,6 +1946,7 @@ class WorkspaceServiceTests(unittest.TestCase):
                 with self.assertRaises(box.BoxError):
                     with box.workspace_lock(self.path):
                         pass
+            self.assertEqual(held.stream.fileno(), -1)
             thread.join(timeout=2)
             self.assertTrue(exited.is_set())
         self.assertFalse(owner.address.exists())
