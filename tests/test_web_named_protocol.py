@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import socket
+import ssl
 import subprocess
 import sys
 import tempfile
@@ -17,10 +18,17 @@ from oc_box import (
     oc_box as box,
     opencode_v2_io as worker,
     ui_state,
+    web_accounts,
     web_local_origins,
+    web_named_bootstrap,
+    web_named_headers,
+    web_named_listeners,
     web_named_owner,
     web_named_protocol as protocol,
+    web_named_services,
     web_native_pair,
+    web_pake_flow,
+    web_pake_profile,
     workspace_control,
     workspace_service as service,
 )
@@ -144,6 +152,121 @@ class OwnerProtocolTests(unittest.TestCase):
 
     def lease(self, owner):
         return protocol.verified_owner_lease(owner, connect_native=self.connector)
+
+    def named_profile(self):
+        origins = web_local_origins.LocalOrigins()
+        tls = web_local_origins.LocalTLS(
+            ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER),
+            ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER),
+        )
+        account, workspace = Mock(), Mock()
+        for peer, address in (
+            (account, origins.account_bind),
+            (workspace, origins.workspace_bind),
+        ):
+            peer.getsockname.return_value = address
+            peer.getsockopt.return_value = 0
+        return web_named_listeners.ReservedProfile(origins, tls, account, workspace)
+
+    def test_prepared_named_services_hold_real_attach_and_invalidate_a_stale_account_scope(
+        self,
+    ):
+        profile = self.named_profile()
+        approval = Mock(return_value=True)
+        store = web_accounts.AccountStore(
+            b"s" * 128,
+            (
+                web_accounts.Account(
+                    "synthetic-account", (self.data["id"],), b"r" * 192
+                ),
+            ),
+        )
+        backend = Mock(sizes=web_pake_flow.MessageSizes(96, 320, 64))
+        backend.close.return_value = False
+        with (
+            self.owner() as owner,
+            self.lease(owner) as lease,
+            patch.object(web_pake_profile, "LocalPakeProfile", return_value=backend),
+        ):
+            services = web_named_services.prepare_services(
+                box,
+                profile=profile,
+                lease=lease,
+                store=store,
+                account_current=approval,
+                verifier_fd=7,
+                expected_sha256="a" * 64,
+            )
+            headers = [
+                ("Host", profile.origins.workspace.value.removeprefix("https://")),
+                ("Sec-Fetch-Site", "none"),
+                ("Sec-Fetch-Mode", "navigate"),
+                ("Sec-Fetch-Dest", "document"),
+            ]
+            request = {
+                "method": "GET",
+                "target": web_named_bootstrap.WORKSPACE_ENTRY,
+                "headers": headers,
+                "body": b"",
+                "actual_tls": True,
+            }
+            self.assertIn(
+                b"Continue to sign in", services.entry.workspace(**request).html
+            )
+            self.assertEqual(owner.clients, 1)
+            self.assertEqual(
+                services.application.sign_in._binding.owner_generation,
+                lease.identity.generation,
+            )
+            self.assertGreaterEqual(lease.control.fileno(), 0)
+            self.assertNotIn(_SECRET, repr(services))
+
+            approval.return_value = False
+            with self.assertRaises(web_named_headers.NamedRequestError):
+                services.entry.workspace(**request)
+            approval.return_value = True
+            with self.assertRaises(web_named_headers.NamedRequestError):
+                services.entry.workspace(**request)
+
+            self.assertFalse(services.close())
+            self.assertGreaterEqual(lease.control.fileno(), 0)
+            backend.close.return_value = True
+            self.assertTrue(services.close())
+            self.assertGreaterEqual(lease.control.fileno(), 0)
+            self.connector.assert_not_called()
+        for peer in (profile.account, profile.workspace):
+            peer.listen.assert_not_called()
+            peer.close.assert_not_called()
+
+    def test_named_services_reject_listening_or_mismatched_store_before_backend_start(
+        self,
+    ):
+        profile = self.named_profile()
+        approval = Mock(return_value=True)
+        store = web_accounts.AccountStore(b"s" * 128, ())
+        with (
+            self.owner() as owner,
+            self.lease(owner) as lease,
+            patch.object(web_pake_profile, "LocalPakeProfile") as backend,
+        ):
+            for listening, captured in (
+                (1, store),
+                (0, web_accounts.AccountStore(b"wrong-size", ())),
+            ):
+                with self.subTest(listening=listening):
+                    profile.workspace.getsockopt.return_value = listening
+                    with self.assertRaises(web_named_services.ServicePreparationError):
+                        web_named_services.prepare_services(
+                            box,
+                            profile=profile,
+                            lease=lease,
+                            store=captured,
+                            account_current=approval,
+                            verifier_fd=7,
+                            expected_sha256="a" * 64,
+                        )
+            backend.assert_not_called()
+            approval.assert_not_called()
 
     def wire(self, owner, send):
         with socket.socket(socket.AF_UNIX) as stream:

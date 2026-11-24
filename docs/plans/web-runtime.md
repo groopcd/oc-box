@@ -222,6 +222,15 @@ checks cannot recall already transmitted bytes. Synthetic control-socket
 and subprocess fixtures are not Podman, native-wire, browser, or full
 Studio acceptance.
 
+The internal service assembler now binds the entry, account, app, and
+metadata relay components to the same reserved profile, verified attach,
+and locally authenticated account-store snapshot. A change to that store's
+reviewed generation permanently fences the binding. Service teardown
+checks verifier and relay drain but does not close the borrowed control
+stream; the lease holder must keep it until listener workers are also
+confirmed stopped. The assembler performs no vault prompt, listener
+activation, or workspace transition.
+
 A later LAN instance can use distinct existing sites and certificates under
 operator control. Isolated guest LAN tests can establish transport behavior
 using a synthetic private CA, without touching public DNS or requesting a
