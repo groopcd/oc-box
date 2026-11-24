@@ -94,3 +94,31 @@ host tests cover idle and blocked loopback traffic, wrong/absent/duplicated
 receipt evidence, a kept-open pipe, nonzero or lost reap status, and an
 observably substituted descriptor. Actual Podman stdio, owner coordination
 and live browser behavior remain separate validation gates.
+
+## Unwired browser byte pump
+
+`web_guest_duplex_host.pump_worker` takes the original `AcceptedWorkers`
+callback handle, a fresh same-thread `DuplexHost` for an already-admitted
+helper, and the preclassified request prefix (including any coalesced bytes).
+It does not start a helper, serve routes, own the browser socket, or complete
+any registered activity. The existing `NativeResponseHeaders` handles
+interims, pairing `Location` rewrite and cookie passthrough, and final
+non-upgrade `Connection: close`; bytes after the final head, including a
+`101` stream in both directions, remain opaque. This is not HTTP message
+framing, pipelining, a half-close bridge, or a per-request dispatcher.
+
+The pump retains the bounded initial read, sends one native frame per credit,
+and returns native output credit only once the original parser has buffered
+partial headers or the browser socket has accepted the emitted bytes. It
+does not equate a socket write with browser or native application consumption.
+An idle upgrade does not time out on inactivity; startup and stalled
+pending bytes are bounded. A worker fence, lost browser, or expired caller
+deadline stops byte forwarding and uses the original tunnel cancellation
+handshake with its separate bounded cleanup budget. A positive return
+verifies that tunnel's retirement only. A negative return leaves the original
+handle and drain uncertainty with the caller. Closing a socket cannot undo
+already-delivered bytes or show that any admitted application work has ended.
+
+The pump tests use synthetic browser socket pairs and local native peers over
+private subprocess pipes. There is no production Gateway caller, proof of
+real Podman stdio, or owner/stop integration.

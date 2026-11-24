@@ -1,13 +1,15 @@
-"""Unserved host supervision of one already registered guest duplex exec."""
+"""Unserved host supervision and byte pumping for a registered guest duplex exec."""
 
 from collections import deque
 from dataclasses import dataclass
 import fcntl
 import io
+import math
 import os
 import secrets
 import select
 import signal
+import socket
 import stat
 import subprocess
 from threading import current_thread
@@ -296,9 +298,10 @@ class DuplexHost:
         else:
             raise DuplexHostError()
 
-    def _step(self, milliseconds, *, deadline=None):
+    def _step(self, milliseconds, *, deadline=None, poller=None, allow_io=None):
         self._check_pipes()
-        poller = select.poll()
+        if poller is None:
+            poller = select.poll()
         if self._out:
             poller.register(self._tx_pin[0], select.POLLOUT)
         if not self._eof:
@@ -309,23 +312,35 @@ class DuplexHost:
             raise DuplexHostError()
         # Accept only bounded records. Output ownership is never handed to a
         # browser writer; the caller owns its own independent sink bounds.
-        for event in events.values():
-            if event & select.POLLNVAL:
+        for pin in (self._rx_pin, self._tx_pin):
+            if events.get(pin[0], 0) & select.POLLNVAL:
                 raise DuplexHostError()
-        if self._rx_pin[0] in events and not self._eof:
+        if (
+            self._rx_pin[0] in events
+            and not self._eof
+            and (allow_io is None or allow_io(events))
+        ):
             self._read()
-        if self._tx_pin[0] in events and self._out:
+        if (
+            self._tx_pin[0] in events
+            and self._out
+            and (allow_io is None or allow_io(events))
+        ):
             if deadline is not None and monotonic() >= deadline:
                 raise DuplexHostError()
             self._write()
+        return events
 
     def advance(self, *, milliseconds=0):
         """One short poll slice for a future duplex pump, not a lifetime timer."""
-        self._usable()
         if type(milliseconds) is not int or not 0 <= milliseconds <= 100:
             raise DuplexHostError()
+        self._advance(milliseconds)
+
+    def _advance(self, milliseconds, *, poller=None, allow_io=None):
+        self._usable()
         try:
-            self._step(milliseconds)
+            return self._step(milliseconds, poller=poller, allow_io=allow_io)
         except (OSError, ValueError):
             self._failed = True
             raise DuplexHostError() from None
@@ -472,3 +487,182 @@ class DuplexHost:
 
 def _slice(deadline):
     return min(50, max(0, int((deadline - monotonic()) * 1000)))
+
+
+_MAX_PREFETCH = 65536 + 4096  # Match a classified Gateway head plus its last read.
+_MAX_PAIRING_PATH = 4096
+_PUMP_START = 5
+_PUMP_STALL = 10  # Try cancellation before the guest's 15-second credit timeout.
+_PEER_GONE = select.POLLHUP | select.POLLERR | select.POLLNVAL | select.POLLRDHUP
+
+
+def pump_worker(workers, use, tunnel, initial, *, pairing_path=None, deadline=None):
+    """Unwired relay for a preclassified request on its registered worker.
+
+    The caller pre-registers the exact native helper and supplies its fresh,
+    exclusively owned DuplexHost on this thread, with the consumed browser
+    prefix (including any coalesced bytes). A trusted pairing path, if given,
+    replaces only the native pairing redirect handled by NativeResponseHeaders.
+    This function neither classifies requests nor takes browser ownership.
+
+    An optional absolute monotonic deadline fences bytes, not cancellation.
+    Return only the result of this tunnel's bounded CLOSED/EOF/reap check,
+    even when the exchange failed. Never complete a worker activity here:
+    admitted application work may survive closing the tunnel. On False the
+    caller retains the original handle and the uncertainty. Invalid arguments
+    or an already-used tunnel are refused before handoff; caller owns cleanup.
+    """
+    if __package__:
+        from .web_guest_worker_drain import AcceptedWorker, AcceptedWorkers
+        from .workspace_service import NativeResponseHeaders
+    else:
+        from web_guest_worker_drain import AcceptedWorker, AcceptedWorkers
+        from workspace_service import NativeResponseHeaders
+
+    if (
+        type(workers) is not AcceptedWorkers
+        or type(use) is not AcceptedWorker
+        or type(tunnel) is not DuplexHost
+        or type(initial) is not bytes
+        or not 0 < len(initial) <= _MAX_PREFETCH
+        or (
+            deadline is not None
+            and (
+                type(deadline) not in (int, float)
+                or not -math.inf < deadline < math.inf
+            )
+        )
+        or (
+            pairing_path is not None
+            and (
+                type(pairing_path) is not str
+                or not 1 <= len(pairing_path) <= _MAX_PAIRING_PATH
+                or not pairing_path.startswith("/")
+                or pairing_path.startswith("//")
+                or "\\" in pairing_path
+                or any(not 33 <= ord(char) <= 126 for char in pairing_path)
+            )
+        )
+    ):
+        raise DuplexHostError()
+    tunnel._usable()
+    if tunnel._open_queued:
+        raise DuplexHostError()
+    headers = NativeResponseHeaders(
+        None if pairing_path is None else lambda: pairing_path
+    )
+    try:
+        _bridge(workers, use, tunnel, memoryview(initial), headers, deadline)
+    except (OSError, ValueError):
+        pass  # Never expose request/response data or OS diagnostics.
+    finally:
+        retired = tunnel.close()
+    return retired
+
+
+def _bridge(workers, use, tunnel, prefix, headers, deadline):
+    def current(end):
+        return workers.current(use) and monotonic() < end
+
+    lifetime = math.inf if deadline is None else deadline
+    if not current(lifetime):
+        return
+    browser = use.stream
+    fd = browser.fileno()
+    browser.setblocking(False)
+    if not current(lifetime):
+        return
+    tunnel.open()
+    start_by = monotonic() + _PUMP_START
+    request_by = response_by = header_by = math.inf
+    output = None
+    while not tunnel.ended:
+        if tunnel._queued_data is None:
+            request_by = math.inf
+        if tunnel._rx_credit is None:
+            response_by = math.inf
+        end = min(
+            lifetime,
+            math.inf if tunnel.ready else start_by,
+            request_by,
+            response_by,
+            header_by,
+        )
+
+        def allowed(events):
+            return (
+                not tunnel.ended and current(end) and not events.get(fd, 0) & _PEER_GONE
+            )
+
+        if not current(end):
+            return
+        if output is None and (incoming := tunnel.receive()) is not None:
+            # At most LIMIT bytes of initial headers plus one DATA record
+            # and the bounded redirect/Connection rewrite. Stop feeding the
+            # parser until this single output slot drains.
+            output = memoryview(headers.feed(incoming))
+            if not current(end):
+                return
+            response_by = monotonic() + _PUMP_STALL
+            end = min(end, response_by)
+            if not headers.pending:
+                header_by = math.inf
+            elif header_by == math.inf:
+                header_by = monotonic() + _PUMP_STALL
+                end = min(end, header_by)
+            if not output:
+                # Incomplete headers consume into the parser's bounded slot;
+                # withholding their credit would deadlock fragmented headers.
+                tunnel.consumed()
+                output = None
+
+        can_send = tunnel.ready and tunnel._queued_data is None
+        if prefix and can_send:
+            if not current(end):
+                return
+            chunk = prefix[: wire.MAX_DATA]
+            if not tunnel.send(bytes(chunk)):
+                raise DuplexHostError()
+            prefix = prefix[len(chunk) :]
+            request_by = monotonic() + _PUMP_STALL
+            end = min(end, request_by)
+            can_send = False
+
+        poller = select.poll()
+        # The wire has no half-close: observe browser EOF even when request
+        # credit is held or a response is backpressured.
+        mask = select.POLLRDHUP | (select.POLLIN if can_send else 0)
+        if output is not None:
+            mask |= select.POLLOUT
+        poller.register(fd, mask)
+        wait = math.ceil(max(0.0, min(0.2, end - monotonic())) * 1000)
+        events = tunnel._advance(wait, poller=poller, allow_io=allowed)
+        if not allowed(events):
+            return
+        flags = events.get(fd, 0)
+        if output is not None and flags & select.POLLOUT:
+            try:
+                count = browser.send(output, socket.MSG_DONTWAIT)
+            except BlockingIOError:
+                pass
+            else:
+                if not count:
+                    return
+                output = output[count:]
+                if not output:
+                    if not current(end):
+                        return
+                    tunnel.consumed()
+                    output = None
+        if can_send and flags & select.POLLIN:
+            if not current(end):
+                return
+            try:
+                chunk = browser.recv(wire.MAX_DATA, socket.MSG_DONTWAIT)
+            except BlockingIOError:
+                continue
+            if not chunk or not current(end):
+                return
+            if not tunnel.send(chunk):
+                raise DuplexHostError()
+            request_by = monotonic() + _PUMP_STALL
