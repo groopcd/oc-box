@@ -152,6 +152,36 @@ def workspace_views(page, gateway, first, history):
     layouts = page.get_by_role("navigation", name="Workspace layout", exact=True)
     frame = page.locator("#native")
     expect(root).to_have_attribute("data-layout", "studio")
+    expect(page.locator("#workspace-toolbar .workspace-project")).to_contain_text(
+        "synthetic-project"
+    )
+    expect(page.locator("#workspace-toolbar .workspace-guest")).to_have_text(
+        "Workspace guest"
+    )
+    expect(page.locator("#workspace-review #workspace-layouts")).to_be_visible()
+    expect(
+        page.locator("#workspace-library").get_by_role("heading", name="Sessions")
+    ).to_be_visible()
+    expect(
+        page.locator("#workspace-overview").get_by_role("heading", name="Status")
+    ).to_be_visible()
+    require(
+        page.evaluate(
+            """() => {
+              const rect = id => document.getElementById(id).getBoundingClientRect();
+              const top = rect("workspace-toolbar"), review = rect("workspace-review");
+              const library = rect("workspace-library"), chat = rect("workspace-chat");
+              const inspector = rect("workspace-overview");
+              return top.height === 68.5 && top.bottom === review.top &&
+                review.bottom === library.top && library.top === chat.top && chat.top === inspector.top &&
+                library.width === 248 && inspector.width === 278 &&
+                chat.left - library.right === 10 && inspector.left - chat.right === 10 &&
+                getComputedStyle(document.getElementById("workspace-toolbar")).backgroundColor === "rgb(12, 21, 32)" &&
+                document.querySelector(".workspace-brand use").getBBox().width > 0;
+            }"""
+        ),
+        "The final Studio masthead, palette, icons, pane geometry or gutters did not render.",
+    )
     expect(page.get_by_role("tab", name="Synthetic Bravo", exact=True)).to_be_visible()
     # Saved membership is real but the fixture supplies no fresh focus report.
     # A bare launcher must open Studio without guessing which tab to select.
@@ -159,6 +189,9 @@ def workspace_views(page, gateway, first, history):
     page.get_by_role("tab", name="Synthetic Alpha", exact=True).click()
     expect(page.locator("#workspace-conversation-title")).to_have_text(
         "Synthetic Alpha"
+    )
+    expect(page.locator("#workspace-conversation-source")).to_have_text(
+        "OpenCode / Open TUI tab"
     )
     rendered_session(page, gateway, first, "Synthetic Alpha")
     page.emulate_media(color_scheme="light")
@@ -208,6 +241,13 @@ def workspace_views(page, gateway, first, history):
         expect(root).to_have_attribute("data-layout", view)
 
     try:
+        divider = page.get_by_role("separator", name="Resize sessions pane")
+        divider.press("ArrowRight")
+        expect(divider).to_have_attribute("aria-valuenow", "264")
+        divider.press("Enter")
+        expect(divider).to_have_attribute("aria-valuenow", "248")
+        preserved()
+
         select("Dashboard", "dashboard")
         expect(frame).to_be_visible()
         preserved()
@@ -222,6 +262,10 @@ def workspace_views(page, gateway, first, history):
         search.press("Escape")
         expect(toggle).to_have_attribute("aria-expanded", "false")
         expect(toggle).to_be_focused()
+        toggle.click()
+        page.get_by_role("button", name="Close sessions", exact=True).click()
+        expect(toggle).to_have_attribute("aria-expanded", "false")
+        expect(toggle).to_be_focused()
         preserved()
 
         select("Studio", "studio")
@@ -232,20 +276,27 @@ def workspace_views(page, gateway, first, history):
         expect(page.locator("#workspace-library")).to_be_hidden()
         expect(frame).to_be_visible()
         inspector.click()
-        overview = page.get_by_role("heading", name="Workspace overview", exact=True)
+        overview = page.get_by_role("heading", name="Status", exact=True)
         expect(overview).to_be_focused()
-        page.get_by_role("link", name="Open native OpenCode Home").press("Escape")
+        overview.press("Escape")
         expect(inspector).to_be_focused()
         expect(inspector).to_have_attribute("aria-expanded", "false")
         page.set_viewport_size({"width": 1440, "height": 900})
-        expect(inspector).to_be_hidden()
+        expect(inspector).to_be_visible()
         expect(overview).to_be_visible()
+        page.get_by_role("button", name="Close inspector", exact=True).click()
+        expect(overview).to_be_hidden()
+        expect(page.locator("#workspace-divider-right")).to_be_hidden()
+        inspector.click()
+        expect(overview).to_be_visible()
+        expect(page.locator("#workspace-divider-right")).to_be_visible()
         preserved()
         select("Workspace manager", "manager")
         expect(frame).to_be_hidden()
         sections = page.get_by_role("navigation", name="Workspace manager sections")
-        sections.get_by_role("button", name="Logs", exact=True).click()
-        expect(page.locator("#workspace-unavailable")).to_be_visible()
+        expect(sections.get_by_role("button")).to_have_count(2)
+        expect(sections.get_by_role("button", name="Status")).to_be_visible()
+        expect(sections.get_by_role("button", name="Sessions")).to_be_visible()
         preserved()
         select("Studio", "studio")
         expect(frame).to_be_visible()
@@ -263,6 +314,16 @@ def workspace_views(page, gateway, first, history):
                 "button", name="Open in native chat: Synthetic History-only"
             )
         ).to_be_visible()
+        expect(
+            page.locator("#workspace-archived-list").get_by_role(
+                "button", name="Open in native chat: Synthetic Archived"
+            )
+        ).to_be_visible()
+        expect(page.locator("#session-tabs")).to_be_hidden()
+        page.get_by_role("button", name="Archived in workspace", exact=True).click()
+        expect(page.locator("#workspace-history-list")).to_be_hidden()
+        expect(page.locator("#workspace-archived-list")).to_be_visible()
+        page.get_by_role("button", name="Workspace history", exact=True).click()
         preserved()
     finally:
         mark.evaluate("mark => mark.stop()")
@@ -377,7 +438,12 @@ def exercise(binary, browser, root):
             history = seed(
                 native, "ses_browser_history", project, title="Synthetic History-only"
             )
+            archived = seed(
+                native, "ses_browser_archived", project, title="Synthetic Archived"
+            )
+            native("PATCH", "/api/session/" + archived, {"archived": True})
             members = (first, second)
+            session_ids = {*members, history, archived}
             for expected in ((first,), members):
                 client = Client(binary, env, project, native.endpoint, expected[-1])
                 try:
@@ -389,9 +455,7 @@ def exercise(binary, browser, root):
                 finally:
                     client.close()
             before_tabs = snapshot()
-            before_exports = {
-                ident: exported(native, ident) for ident in (*members, history)
-            }
+            before_exports = {ident: exported(native, ident) for ident in session_ids}
             connection = {
                 **native.endpoint,
                 "workspace": data["id"],
@@ -429,7 +493,7 @@ def exercise(binary, browser, root):
             )
             require(
                 {info["id"] for info in bridge.service_session_catalog(native)}
-                == {*members, history}
+                == session_ids
                 and all(
                     exported(native, ident) == before_exports[ident]
                     for ident in before_exports

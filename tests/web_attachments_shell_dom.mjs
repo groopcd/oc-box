@@ -106,6 +106,7 @@ async function fixture(version = "2.2.6") {
     Object.defineProperty(window, name, { get() { throw Error("private browser store"); } });
   const document = {
     hidden: false, getElementById: id => elements[id],
+    createElementNS: (_namespace, tag) => new Element(tag),
     createElement(tag) {
       assert.notEqual(tag, "iframe", "addon must not create another iframe");
       return new Element(tag);

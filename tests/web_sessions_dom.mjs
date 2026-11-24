@@ -37,7 +37,7 @@ class Element extends Events {
     }
   }
   getAttribute(name) { return this.attrs.get(name) ?? null; }
-  append(child) { this.children.push(child); }
+  append(...children) { this.children.push(...children); }
   replaceChildren(...children) { this.children = children; }
   click() { this.dispatchEvent({ type: "click" }); }
 }
@@ -95,6 +95,7 @@ function fixture(initial = rows[1], membershipStatus = "valid") {
   const document = {
     hidden: false,
     getElementById: id => elements[id],
+    createElementNS: (_namespace, tag) => new Element(tag),
     createElement: tag => {
       assert.notEqual(tag, "iframe");
       return new Element(tag);
@@ -123,7 +124,7 @@ assert.equal(f.frame.writes, 0); // No startup iframe reload.
 assert.equal(f.elements["session-tabs"].children.length, 4);
 assert.equal(f.elements["session-tabs"].children[1].getAttribute("aria-selected"), "true");
 assert.equal(api.selection().sessionID, "ses_2");
-assert.equal(f.elements["session-tabs"].children[0].textContent, rows[0].title);
+assert.equal(f.elements["session-tabs"].children[0].children[1].children[0].textContent, rows[0].title);
 f.elements["session-tabs"].children[3].click();
 assert.equal(f.frame.getAttribute("src"), rows[3].route);
 assert.equal(f.window.location.searchParams.get("session"), "ses_4");
