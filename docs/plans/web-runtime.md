@@ -105,8 +105,10 @@ of TLS-socket ownership to the upstream relay. Stopping the sites cancels
 registered upstream traffic before joining workers. A socket-level
 integration fixture covers both verified loopback listeners and the complete
 request path through logout, using a synthetic verifier, owner and upstream.
-The internal dispatcher may serve the exact reviewed login bundle described
-below. It is not yet a launcher entry point and does not serve Studio.
+The internal dispatcher may serve the exact reviewed login bundle and, only
+with explicit Studio composition on the verified 2.4.1 profile, the pinned
+iframe-free Studio document, recent catalog and scoped conversation/Send
+routes. It is not yet a launcher entry point.
 
 The unserved named HTTPS transport takes ownership of one accepted connection,
 selects a validated TLS context and role by the actual IPv4 loopback endpoint,
@@ -273,6 +275,17 @@ client had exited. No CLI, artifact distribution or host unlock is enabled by
 this composition. A local fixture uses real TLS, the signed owner-control
 exchange and encrypted-store replacement with synthetic native/Podman I/O.
 
+`prepare_named_launch` is the internal pre-owner entry point for explicit
+host choices. It reserves both loopback sockets, checks the reviewed browser
+and verifier source/binary inputs, and then prompts on the host for the
+separate encrypted **web account store** passphrase. It does not initialize an
+account store, ask for a browser password or provider vault, select compiled
+artifacts, or inspect/create/launch a workspace. The caller still owns
+normal vault and workspace preparation. Its retained handle starts only one
+exact owner's sites with a scope present in the authenticated account store.
+Once an owner attach exists, a false close retains every path-bound resource;
+do not treat that as a normal client exit. No CLI calls this internal API yet.
+
 A later LAN instance can use distinct existing sites and certificates under
 operator control. Isolated guest LAN tests can establish transport behavior
 using a synthetic private CA, without touching public DNS or requesting a
@@ -433,6 +446,11 @@ the trusted `LocalOrigins` profile, not a request, query parameter or redirect.
   memory, or a malicious controlling service worker; deployment must keep the
   account origin dedicated and free of service workers or unrelated content.
 
+Both installation formats carry the exact source HTML, CSS and JavaScript for
+this bundle. This is not a compiled artifact decision: no WASM or verifier
+binary is included or selected by the installer. The account source hashes
+and limits are unchanged for installed copies.
+
 The internal listener accepts `start_named_http(..., account_assets=prepared)`
 only for the same HTTPS profile and the digest used to prepare its verifier.
 It rechecks the original live account bootstrap before sending a subresource;
@@ -497,6 +515,19 @@ process, PAKE, TLS and browser cookies are real. No real vault, enrollment,
 workspace owner attach, Studio relay, Podman, VM or production listener is
 used. This does not enable named mode, change the existing guest link, or
 establish live owner-relay, security-review or publication acceptance.
+
+### Authenticated named Studio browser composition
+
+`tests/smoke_named_studio_https_browser.py` uses the real reserved TLS
+dispatcher and an unmodified, pinned OpenCode 2.4.1 in a private loopback-only
+network namespace. A synthetic owner and already-authenticated app grant
+isolate the post-login path. Chromium navigates to the pinned first-party
+document, fetches the real recent native session catalog, clicks a session,
+and displays its real native text projection. It also checks that the
+named page has no native iframe or script-readable cookie and keeps an
+empty composer disabled. The fixture replaces only native exec and owner
+provenance at the boundary; no provider/native agent runs. This smoke does
+not verify PAKE login, browser Send, live Podman, or launcher deployment.
 
 ## Isolated feasibility results
 

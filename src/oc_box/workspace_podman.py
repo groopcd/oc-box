@@ -374,9 +374,13 @@ def _read_only_query(argv):
 
 
 def _private_capture(executable, argv, environment, deadline, limit):
-    """Hard stdout cap, no disk capture, no stderr, and bounded direct reap."""
     if argv[:1] != ("--remote=false",) or not _read_only_query(argv[1:]):
         _fail("engine-command-unverified")
+    return _capture_pinned(executable, argv, environment, deadline, limit)
+
+
+def _capture_pinned(executable, argv, environment, deadline, limit):
+    """Private transport only; operation allowlists belong to the caller."""
     if type(limit) is not int or not 0 < limit <= _INSPECT:
         _fail("engine-output-limit")
     deadline = min(deadline, time.monotonic() + _COMMAND_SECONDS)
@@ -494,6 +498,70 @@ def _creation_time(value):
     return review._valid_created(value) and not value.startswith("0001-")
 
 
+def _mount_catalog(raw, observations, store_roots):
+    rows = _json(raw)
+    if type(rows) is not list or len(rows) > len(observations):
+        _fail("mount-catalog-unverified")
+    original = {item.ident: item.name for item in observations}
+    report = {}
+    for row in rows:
+        if type(row) is not dict or set(row) != {"id", "Names", "mountpoint"}:
+            _fail("mount-catalog-unverified")
+        ident, path = row["id"], row["mountpoint"]
+        if (
+            not review._matches(review._ENGINE_ID, ident)
+            or ident not in original
+            or ident in report
+            or row["Names"] != [original[ident]]
+            or not review._path(path)
+            or not any(path.startswith(root.path + "/") for root in store_roots)
+        ):
+            _fail("mount-catalog-unverified")
+        report[ident] = path
+    return tuple(sorted(report.items()))
+
+
+def _bound_profile(info, pinned_roots, storage_conf):
+    """Project the exact schema against a caller's independently bound store."""
+    if type(info) is not dict:
+        _fail("engine-profile-unverified")
+    host, store, version, plugins = (
+        info.get(key) for key in ("host", "store", "version", "plugins")
+    )
+    if not all(type(value) is dict for value in (host, store, version, plugins)):
+        _fail("engine-profile-unverified")
+    security = host.get("security")
+    counts = store.get("containerStore")
+    options = store.get("graphOptions")
+    if (
+        type(security) is not dict
+        or security.get("rootless") is not True
+        or host.get("serviceIsRemote") is not False
+        or version.get("Version") != _VERSION
+        or store.get("graphDriverName") != "overlay"
+        or store.get("transientStore") is not False
+        or store.get("configFile") != storage_conf
+        # Native volume ls calls Volume.Inspect before projecting its table.
+        or plugins.get("volume") != ["local"]
+        or type(options) is not dict
+        or any(key.endswith("additionalImageStores") for key in options)
+        or type(counts) is not dict
+        or not all(
+            _uint(counts.get(k)) for k in ("number", "running", "paused", "stopped")
+        )
+        or counts["number"] != counts["running"] + counts["paused"] + counts["stopped"]
+        or counts["number"] > _LIMIT
+        or tuple(store.get(k) for k in ("graphRoot", "runRoot", "volumePath"))
+        != tuple(pin.path for pin in pinned_roots)
+    ):
+        _fail("engine-profile-unverified")
+    roots = tuple(review.StoragePath(pin.path, pin.stamp[:3]) for pin in pinned_roots)
+    scope = review.EngineScope(True, False, *roots)
+    if not review._storage_layout(scope):
+        _fail("engine-profile-unverified")
+    return PodmanProfile(_VERSION, scope), counts["number"]
+
+
 class _LocalInventory:
     def __init__(self, uid, environment, executable, roots, pinned, vendor, capture):
         self._uid = uid
@@ -554,47 +622,7 @@ class _LocalInventory:
 
     def _info(self, deadline):
         info = _json(self._query(deadline, _SMALL, *_INFO)[1])
-        if type(info) is not dict:
-            _fail("engine-profile-unverified")
-        host, store, version, plugins = (
-            info.get(key) for key in ("host", "store", "version", "plugins")
-        )
-        if not all(type(value) is dict for value in (host, store, version, plugins)):
-            _fail("engine-profile-unverified")
-        security = host.get("security")
-        counts = store.get("containerStore")
-        options = store.get("graphOptions")
-        if (
-            type(security) is not dict
-            or security.get("rootless") is not True
-            or host.get("serviceIsRemote") is not False
-            or version.get("Version") != _VERSION
-            or store.get("graphDriverName") != "overlay"
-            or store.get("transientStore") is not False
-            or store.get("configFile") != _DEFAULT_STORAGE_CONF
-            # Native volume ls calls Volume.Inspect before projecting its
-            # table, which would contact any configured volume plugin.
-            or plugins.get("volume") != ["local"]
-            or type(options) is not dict
-            or any(key.endswith("additionalImageStores") for key in options)
-            or type(counts) is not dict
-            or not all(
-                _uint(counts.get(k)) for k in ("number", "running", "paused", "stopped")
-            )
-            or counts["number"]
-            != counts["running"] + counts["paused"] + counts["stopped"]
-            or counts["number"] > _LIMIT
-            or tuple(store.get(k) for k in ("graphRoot", "runRoot", "volumePath"))
-            != tuple(pin.path for pin in self._roots)
-        ):
-            _fail("engine-profile-unverified")
-        roots = tuple(
-            review.StoragePath(pin.path, pin.stamp[:3]) for pin in self._roots
-        )
-        scope = review.EngineScope(True, False, *roots)
-        if not review._storage_layout(scope):
-            _fail("engine-profile-unverified")
-        return PodmanProfile(_VERSION, scope), counts["number"]
+        return _bound_profile(info, self._roots, _DEFAULT_STORAGE_CONF)
 
     def _catalogs(self, deadline, expected_containers):
         def ids(*extra):
@@ -791,26 +819,7 @@ class _LocalInventory:
         code, raw = self._query(deadline, _SMALL, *_MOUNT_LIST, codes=(0, 125))
         if code == 125:
             return None
-        rows = _json(raw)
-        if type(rows) is not list or len(rows) > len(observations):
-            _fail("mount-catalog-unverified")
-        original = {item.ident: item.name for item in observations}
-        report = {}
-        for row in rows:
-            if type(row) is not dict or set(row) != {"id", "Names", "mountpoint"}:
-                _fail("mount-catalog-unverified")
-            ident, path = row["id"], row["mountpoint"]
-            if (
-                not review._matches(review._ENGINE_ID, ident)
-                or ident not in original
-                or ident in report
-                or row["Names"] != [original[ident]]
-                or not review._path(path)
-                or not any(path.startswith(root.path + "/") for root in self._roots[:2])
-            ):
-                _fail("mount-catalog-unverified")
-            report[ident] = path
-        return tuple(sorted(report.items()))
+        return _mount_catalog(raw, observations, self._roots[:2])
 
     def _volume(self, item):
         required = (

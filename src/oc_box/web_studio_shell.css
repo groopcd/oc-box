@@ -21,3 +21,4 @@
 }
 #web-shell #workspace-studio-composer .composition-note { margin-top: 7px; }
 #web-shell #workspace-studio-composer .composition-status:empty { margin-top: 0; }
+#web-shell[data-named-studio] #workspace-host-terminal { display: inline-flex; }

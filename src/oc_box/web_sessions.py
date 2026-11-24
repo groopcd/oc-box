@@ -31,6 +31,9 @@ CATALOG = INDEX + "/catalog"
 SELECTION = INDEX + "/selection"
 HISTORY = INDEX + "/history"
 NATIVE_HOME = '<a href="/" target="_blank" rel="noopener noreferrer">Open native OpenCode Home</a>'
+NAMED_STUDIO_ASSET_PREFIX = "/oc-box/studio/"
+_NAMED_STUDIO_MAX_TABS = 512
+_NAMED_SESSION = re.compile(r"ses[A-Za-z0-9_-]{1,125}")
 
 
 def native_session_route(url, ident):
@@ -349,8 +352,22 @@ def _manager_panel(ident, heading, description, body, tag=""):
 </section>"""
 
 
-def _workspace_manager(name):
+def _workspace_manager(name, *, named_studio=False):
     """The approved no-chat layout with only this browser's existing scope."""
+    catalog_name = "Recent sessions" if named_studio else "Open TUI tabs"
+    catalog_note = (
+        "Up to 16, not TUI membership" if named_studio else "Separate from history"
+    )
+    history_note = (
+        "History, when available, is limited to this workspace and separate from TUI membership."
+        if named_studio
+        else "History is limited to the registered workspace project. Native browser tabs are independent of TUI membership."
+    )
+    open_note = (
+        "Browse this workspace’s session metadata. Opening a row returns to Studio without adding a TUI tab."
+        if named_studio
+        else "Browse this workspace’s session metadata. Opening a row returns to native chat without adding a TUI tab."
+    )
     tabs = "\n".join(
         f'<button type="button" role="tab" id="workspace-tab-{ident}" data-section="{ident}" '
         f'aria-controls="workspace-manager-{ident}" aria-selected="{str(index == 1).lower()}" '
@@ -364,8 +381,8 @@ def _workspace_manager(name):
         f"""<div class="workspace-manager-grid">
   <section class="workspace-manager-card"><h3 class="workspace-eyebrow">Workspace</h3>
     <p class="workspace-manager-value"><bdi>{name}</bdi></p><small>Current private service</small></section>
-  <section class="workspace-manager-card"><h3 class="workspace-eyebrow">Open TUI tabs</h3>
-    <p class="workspace-manager-value" id="workspace-manager-tab-count">Unknown</p><small>Separate from history</small></section>
+  <section class="workspace-manager-card"><h3 class="workspace-eyebrow">{catalog_name}</h3>
+    <p class="workspace-manager-value" id="workspace-manager-tab-count">Unknown</p><small>{catalog_note}</small></section>
   <section class="workspace-manager-card"><h3 class="workspace-eyebrow">Browser selection</h3>
     <p class="workspace-manager-value" id="workspace-manager-selection" dir="auto">None</p><small>Not evidence of TUI focus</small></section>
 </div>
@@ -373,14 +390,14 @@ def _workspace_manager(name):
   <section class="workspace-manager-card"><h3>Session sources</h3>
     <div class="workspace-manager-table-scroll"><table class="workspace-manager-table">
       <thead><tr><th scope="col">Source</th><th scope="col">Catalog status</th></tr></thead>
-      <tbody><tr><td>Open TUI tabs</td><td><span id="workspace-manager-membership-status" role="status">Unavailable</span></td></tr>
+      <tbody><tr><td>{catalog_name}</td><td><span id="workspace-manager-membership-status" role="status">Unavailable</span></td></tr>
         <tr><td>Workspace history</td><td id="workspace-manager-history-status">Not requested</td></tr></tbody>
     </table></div>
   </section>
   <section class="workspace-manager-card"><h3>Selected workspace</h3>
     <p><bdi>{name}</bdi></p>
     <details id="workspace-manager-details"><summary>Workspace details</summary>
-      <p>History is limited to the registered workspace project. Native browser tabs are independent of TUI membership.</p>
+      <p>{history_note}</p>
       <p id="workspace-manager-selection-details" dir="auto"></p>
     </details>
   </section>
@@ -414,12 +431,12 @@ def _workspace_manager(name):
     sessions = _manager_panel(
         "sessions",
         "Sessions",
-        "Browse this workspace’s session metadata. Opening a row returns to native chat without adding a TUI tab.",
+        open_note,
         f"""<div class="workspace-manager-card">
   <div class="workspace-manager-toolbar">
     <div class="workspace-manager-field workspace-manager-source"><label for="workspace-manager-source">Source</label>
       <select id="workspace-manager-source">
-        <option value="tabs">Open TUI tabs</option><option value="history">Workspace history</option>
+        <option value="tabs">{catalog_name}</option><option value="history">Workspace history</option>
         <option value="archived">Archived in workspace</option>
       </select>
     </div>
@@ -503,19 +520,54 @@ def _workspace_manager(name):
 
 
 def _workspace_layout_body(
-    state, conversation, fallback, attachments, workspace_name, *, first_party_studio
+    state,
+    conversation,
+    fallback,
+    attachments,
+    workspace_name,
+    *,
+    first_party_studio,
+    named_studio=False,
 ):
     """Port the final Studio chrome; data and native UI stay behind their existing boundaries."""
     name = escape(workspace_name)
-    title = escape((state["selection"] or {}).get("title") or "Native conversation")
+    label = "Workspace conversation" if named_studio else "Native conversation"
+    title = escape((state["selection"] or {}).get("title") or label)
+    access = "Named workspace" if named_studio else "Workspace guest"
+    refresh = "Refresh recent sessions" if named_studio else "Refresh TUI tabs"
+    source_name = "Recent" if named_studio else "TUI tabs"
+    catalog_name = "Recent workspace sessions" if named_studio else "Open TUI tabs"
+    native_access = (
+        '<span class="workspace-tag" id="workspace-host-terminal">Native OpenCode: host terminal</span>'
+        if named_studio
+        else NATIVE_HOME
+    )
+    source_note = (
+        "history here doesn’t add a TUI tab."
+        if named_studio
+        else "history here doesn’t add a TUI tab. Native browser tabs stay independent."
+    )
+    reload_note = (
+        "Native OpenCode access stays in the host terminal."
+        if named_studio
+        else f'<a href="{INDEX}">Reload shell</a> (may interrupt a draft).'
+    )
     addon_hidden = "" if attachments else " hidden"
+    addon = (
+        ""
+        if named_studio
+        else f"""<div class="workspace-addons"{addon_hidden}>
+      <details><summary>Browser attachments</summary><div id="session-controls"></div></details>
+      <p id="addon-status" role="status"{addon_hidden}></p>
+    </div>"""
+    )
     studio = (
         """
     <div id="workspace-studio-center" hidden>
       <div id="workspace-studio-transcript"></div>
       <div id="workspace-studio-composer" hidden></div>
     </div>"""
-        if first_party_studio
+        if first_party_studio or named_studio
         else ""
     )
     return f"""{_ICONS}
@@ -523,10 +575,10 @@ def _workspace_layout_body(
   <div id="workspace-toolbar">
     <h1 class="workspace-brand">{_icon("box")}oc-box</h1>
     <div class="workspace-project"><span class="workspace-eyebrow">Workspace</span><bdi>{name}</bdi></div>
-    <span class="workspace-guest">{_icon("user")}Workspace guest</span>
+    <span class="workspace-guest">{_icon("user")}{access}</span>
     <div class="workspace-top-end">
       <span class="workspace-tag"><span class="workspace-dot" aria-hidden="true"></span>Private workspace</span>
-      {NATIVE_HOME}
+      {native_access}
     </div>
   </div>
   <div id="workspace-review">
@@ -545,7 +597,7 @@ def _workspace_layout_body(
     <div class="workspace-rail-head">
       <h2 id="workspace-library-title">Sessions</h2>
       <div class="workspace-actions">
-        <button type="button" class="workspace-action" id="refresh-tabs" aria-label="Refresh TUI tabs" title="Refresh TUI tabs">Refresh</button>
+        <button type="button" class="workspace-action" id="refresh-tabs" aria-label="{refresh}" title="{refresh}">Refresh</button>
         <button type="button" class="workspace-action" id="workspace-sessions-close" aria-label="Close sessions" hidden>×</button>
       </div>
     </div>
@@ -554,12 +606,12 @@ def _workspace_layout_body(
         placeholder="Search sessions" maxlength="128" autocomplete="off">
     </label>
     <div class="workspace-picker workspace-session-sources" role="group" aria-label="Session source">
-      <button type="button" id="workspace-open-tabs" aria-pressed="true">TUI tabs</button>
+      <button type="button" id="workspace-open-tabs" aria-pressed="true">{source_name}</button>
       <button type="button" id="workspace-history-tabs" aria-pressed="false" aria-label="Workspace history">History</button>
       <button type="button" id="workspace-archived-tabs" aria-pressed="false" aria-label="Archived in workspace">Archived</button>
     </div>
     <section class="workspace-group" id="workspace-open-group">
-      <h3 class="workspace-eyebrow" id="workspace-open-title">Open TUI tabs</h3>
+      <h3 class="workspace-eyebrow" id="workspace-open-title">{catalog_name}</h3>
       <div id="session-tabs" role="tablist" aria-labelledby="workspace-open-title"></div>
     </section>
     <section class="workspace-group" id="workspace-history-group" hidden>
@@ -580,9 +632,9 @@ def _workspace_layout_body(
   <div id="workspace-divider-left" class="workspace-divider" tabindex="0" role="separator" aria-orientation="vertical"
     aria-label="Resize sessions pane" aria-controls="workspace-library"
     title="Drag or use Left/Right; double-click or press Enter to reset" hidden></div>
-  <section id="workspace-chat" aria-label="Native conversation">
+  <section id="workspace-chat" aria-label="{label}">
     <header class="workspace-chat-head">
-      <div><p class="workspace-eyebrow" id="workspace-conversation-source">OpenCode / Native conversation</p>
+      <div><p class="workspace-eyebrow" id="workspace-conversation-source">OpenCode / {label}</p>
         <h2 id="workspace-conversation-title" dir="auto">{title}</h2></div>
       <div class="workspace-actions">
         <button id="workspace-sessions-toggle" class="workspace-action" type="button"
@@ -591,10 +643,7 @@ def _workspace_layout_body(
           aria-expanded="true" aria-controls="workspace-overview">{_icon("grid")} Inspector</button>
       </div>
     </header>
-    <div class="workspace-addons"{addon_hidden}>
-      <details><summary>Browser attachments</summary><div id="session-controls"></div></details>
-      <p id="addon-status" role="status"{addon_hidden}></p>
-    </div>
+    {addon}
     {conversation}{studio}
   </section>
   <div id="workspace-divider-right" class="workspace-divider" tabindex="0" role="separator" aria-orientation="vertical"
@@ -611,14 +660,98 @@ def _workspace_layout_body(
       <section><h3>Browser selection</h3><p id="workspace-current-session" dir="auto">No conversation selected.</p>
         <p id="selection-status">{escape(state["selectionNotice"])}</p><div id="retained-selection"></div></section>
       <section><h3>Session source</h3><p>TUI membership and workspace history are separate. Opening
-        history here doesn’t add a TUI tab. Native browser tabs stay independent.</p>
+        {source_note}</p>
         <p>No host data or workspace health metrics are available.</p>
-        <p><a href="{INDEX}">Reload shell</a> (may interrupt a draft).</p></section>
+        <p>{reload_note}</p></section>
     </div>
   </aside>
 </div>
-{_workspace_manager(name)}
+{_workspace_manager(name, named_studio=named_studio)}
 </main></body></html>"""
+
+
+def _named_studio_document(sessions, status, workspace_name, named_page):
+    """Render only bounded display metadata from the caller's verified catalog."""
+    if (
+        type(sessions) not in (list, tuple)
+        or len(sessions) > _NAMED_STUDIO_MAX_TABS
+        or status not in ("valid", "missing", "unavailable")
+        or status != "valid"
+        and sessions
+    ):
+        raise ValueError("Invalid trusted Studio catalog.")
+    rows = []
+    seen = set()
+    for info in sessions:
+        ident = info.get("id") if type(info) is dict else None
+        if (
+            type(ident) is not str
+            or not _NAMED_SESSION.fullmatch(ident)
+            or ident in seen
+        ):
+            raise ValueError("Invalid trusted Studio catalog.")
+        seen.add(ident)
+        title = info.get("title")
+        rows.append(
+            {
+                "id": ident,
+                "title": title[:256] if type(title) is str and title else ident,
+            }
+        )
+    state = {
+        "status": status,
+        "sessions": rows,
+        "selection": None,
+        "selectionNotice": "Choose a verified session from this workspace.",
+    }
+    prefix = NAMED_STUDIO_ASSET_PREFIX
+    entry = page = ""
+    if named_page is not None:
+        if (
+            type(named_page) is not dict
+            or named_page.keys() != {"page", "generation", "sessionID"}
+            or type(named_page["page"]) is not str
+            or re.fullmatch(r"[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]", named_page["page"])
+            is None
+            or type(named_page["generation"]) is not int
+            or named_page["generation"] != 0
+            or named_page["sessionID"] is not None
+        ):
+            raise ValueError("Invalid trusted Studio page state.")
+        page = (
+            ' data-studio-page="'
+            + escape(json.dumps(named_page, ensure_ascii=True), quote=True)
+            + '"'
+        )
+        entry = (
+            f'<script type="module" src="{prefix}web_named_studio_entry.mjs"></script>'
+        )
+    start = (
+        '<!doctype html><html lang="en"><head><meta charset="utf-8">'
+        '<meta name="viewport" content="width=device-width, initial-scale=1">'
+        "<title>oc-box — Studio</title>"
+        f'<link rel="stylesheet" href="{prefix}web_sessions.css">'
+        f'<link rel="stylesheet" href="{prefix}web_studio_shell.css">'
+        f'<script defer src="{prefix}web_sessions.js"></script>'
+        + entry
+        + '</head><body><main id="web-shell" data-layout="studio" data-named-studio'
+        + page
+        + ' data-bootstrap="'
+        + escape(json.dumps(state, ensure_ascii=True), quote=True)
+        + '">'
+    )
+    return (
+        start
+        + _workspace_layout_body(
+            state,
+            '<section id="no-selection" role="status"><p>Studio controls are not connected.</p></section>',
+            "",
+            False,
+            workspace_name,
+            first_party_studio=False,
+            named_studio=True,
+        )
+    ).encode("utf-8", errors="replace")
 
 
 def document(
@@ -630,6 +763,8 @@ def document(
     *,
     workspace_name="Private workspace",
     first_party_studio=False,
+    named_studio=False,
+    named_page=None,
 ):
     if (
         not isinstance(addon_scripts, tuple)
@@ -641,6 +776,16 @@ def document(
     # and a preauthorized controller separately. No ordinary route enables it.
     if type(first_party_studio) is not bool or (first_party_studio and addon_scripts):
         raise ValueError("Invalid first-party Studio composition.")
+    # Named pages never construct a native route or accept legacy bootstrap
+    # state. A trusted entry separately installs the named controller.
+    if type(named_studio) is not bool:
+        raise ValueError("Invalid named Studio composition.")
+    if named_studio:
+        if first_party_studio or addon_scripts or state is not None:
+            raise ValueError("Invalid named Studio composition.")
+        return _named_studio_document(sessions, status, workspace_name, named_page)
+    if named_page is not None:
+        raise ValueError("Named page state requires the named Studio document.")
     state = state or {
         **catalog(url, sessions, status),
         "selection": None,

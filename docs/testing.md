@@ -85,6 +85,12 @@ Build plugin becomes active, and a second launch does not reinstall the CLI
 or SDK. It substitutes a local process for `podman exec`; distro package
 selection and live Podman behavior still need their own checks.
 
+The exact incident regression also runs `2.3.2 → 2.4.0` in that native
+fixture. The runtime safeguard unit fixtures separately exercise isolated
+refusal, prior runtime retention, patch rechecks, and durable forward
+admission. They are not external-host Podman acceptance or proof that an
+older helper can safely reopen the normal host store.
+
 The fixture audits the generated public plugin SDK dependency tree at all
 reported severities before installing the resolved tree. An advisory or
 failed audit fails the job and therefore blocks PyPI publication through the

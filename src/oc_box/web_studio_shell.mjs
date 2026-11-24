@@ -11,11 +11,12 @@ function sameSelection(a, b) {
 }
 
 /**
- * Trusted bootstrap only, after the native shell and the Studio CSS are ready.
+ * Trusted bootstrap only, after the corresponding shell and Studio CSS are ready.
  * The controller synchronously supplies {sessionID, generation, writable} or
  * null, reads a bounded transcript for {sessionID, generation}, and may send
  * {sessionID, generation, text}. A writable selection requires an admitted
- * send function. The existing native selection is a cross-check, not authority.
+ * send function. The shell's selected conversation is a cross-check, not
+ * authority, both for the native iframe and the iframe-free named chrome.
  *
  * Caller-owned: invalidation on observed route/document, visibility, owner or
  * admission changes; advance the generation even on away/back. Call invalidate()
@@ -29,14 +30,16 @@ export function createStudioShellView(root, controller) {
       (controller.send !== undefined && typeof controller.send !== "function")) return null;
   const document = root.ownerDocument;
   const window = document.defaultView;
-  const shell = window?.ocBoxWebShell;
+  const named = root.dataset.namedStudio === "";
+  const shell = named ? window?.ocBoxNamedStudioChrome : window?.ocBoxWebShell;
   const chat = root.querySelector(":scope > #workspace-content > #workspace-chat");
   const frame = chat?.querySelector(":scope > #native");
   const center = chat?.querySelector(":scope > #workspace-studio-center");
   const transcriptSlot = center?.querySelector(":scope > #workspace-studio-transcript");
   const composerSlot = center?.querySelector(":scope > #workspace-studio-composer");
   if (document.getElementById("web-shell") !== root || !root.isConnected ||
-      !frame || shell?.version !== 1 || shell.frame !== frame ||
+      (named ? root.querySelector("iframe") : !frame || shell?.frame !== frame) ||
+      shell?.version !== 1 ||
       typeof shell.selection !== "function" || !center?.hidden || !transcriptSlot || !composerSlot ||
       !composerSlot.hidden || transcriptSlot.hasChildNodes() || composerSlot.hasChildNodes() ||
       composerSlot.closest("form") || chat.hasAttribute(activeAttribute) ||
@@ -53,8 +56,9 @@ export function createStudioShellView(root, controller) {
   let highestGeneration = -1;
 
   function current() {
-    if (!root.isConnected || window.ocBoxWebShell !== shell || !center.isConnected ||
-        document.hidden || chat.hidden || frame.hidden) return null;
+    if (!root.isConnected || (named ? window.ocBoxNamedStudioChrome : window.ocBoxWebShell) !== shell ||
+        !center.isConnected || document.hidden || chat.hidden ||
+        (named ? root.querySelector("iframe") : frame.hidden)) return null;
     try {
       const { sessionID, generation, writable } = readSelection() ?? {};
       if (typeof sessionID === "string" && sessionIDPattern.test(sessionID) &&
@@ -114,7 +118,7 @@ export function createStudioShellView(root, controller) {
     reading = true;
     let result = null;
     try { result = await readTranscript(ticket); }
-    catch { /* Keep native fallback; don't display upstream errors. */ }
+    catch { /* Keep fallback; don't display upstream errors. */ }
     finally { reading = false; }
     if (binding !== next) return false;
     if (!transcript.commit(ticket, result)) {
@@ -127,7 +131,7 @@ export function createStudioShellView(root, controller) {
       if (binding === next) invalidate();
       return false;
     }
-    // The fallback frame stays mounted with its original src and attributes.
+    // On the ordinary page the fallback stays mounted with its original attributes.
     chat.setAttribute(activeAttribute, "");
     chat.setAttribute("aria-label", "Workspace conversation");
     center.hidden = false;

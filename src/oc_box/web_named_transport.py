@@ -72,6 +72,7 @@ _ACCOUNT_ASSET_ROUTES = frozenset(
 )
 _STUDIO_SELECTION = b"/oc-box/studio/selection"
 _STUDIO_SEND = b"/oc-box/studio/send"
+_STUDIO_CATALOG = b"/oc-box/studio/catalog"
 _STUDIO_READ = re.compile(
     rb"/oc-box/studio/conversation\?session=ses[A-Za-z0-9_-]{1,125}"
 )
@@ -130,6 +131,19 @@ def _recv(stream, size, deadline):
     return data
 
 
+def _studio_ui_get(route):
+    if len(route) != 2 or route[0] != b"GET":
+        return False
+    if route[1] == b"/":
+        return True
+    # Optional studio assets are admitted only for the composed Studio site.
+    if __package__:
+        from .web_named_studio_ui import ASSET_PATHS
+    else:
+        from web_named_studio_ui import ASSET_PATHS
+    return route[1] in ASSET_PATHS
+
+
 def _head(
     lines,
     role,
@@ -139,6 +153,7 @@ def _head(
     include_core=False,
     account_assets=False,
     include_studio=False,
+    include_studio_ui=False,
 ):
     if len(lines) > web_named_headers._MAX_FIELDS + 1:
         _refuse()
@@ -167,7 +182,14 @@ def _head(
         and len(route) == 2
         and (
             (route[0] == b"POST" and route[1] in (_STUDIO_SELECTION, _STUDIO_SEND))
-            or (route[0] == b"GET" and _STUDIO_READ.fullmatch(route[1]) is not None)
+            or (
+                route[0] == b"GET"
+                and (
+                    route[1] == _STUDIO_CATALOG
+                    or _STUDIO_READ.fullmatch(route[1]) is not None
+                )
+            )
+            or (include_studio_ui and _studio_ui_get(route))
         )
     )
     if (
@@ -204,7 +226,7 @@ def _head(
         ("cross-site",)
         if form_origin is not None
         else ("none", "same-origin")
-        if entry
+        if entry or (studio and route == (b"GET", b"/"))
         else (None, "same-origin")
     )
     if (
@@ -264,6 +286,7 @@ def _read(
     include_core=False,
     account_assets=False,
     include_studio=False,
+    include_studio_ui=False,
 ):
     wire = bytearray()
     scan = 0
@@ -281,6 +304,7 @@ def _read(
         include_core=include_core,
         account_assets=account_assets,
         include_studio=include_studio,
+        include_studio_ui=include_studio_ui,
     )
     body = wire[end + len(_HEAD_END) :]
     if len(body) > size:
@@ -600,6 +624,7 @@ class NamedHTTPSReader:
         named=None,
         account_assets=False,
         include_studio=False,
+        include_studio_ui=False,
     ):
         deadline = monotonic() + _REQUEST_TIMEOUT
         try:
@@ -645,6 +670,7 @@ class NamedHTTPSReader:
                         include_core=named is not None,
                         account_assets=account_assets,
                         include_studio=include_studio,
+                        include_studio_ui=include_studio_ui,
                     )
                     if all(mode is None for mode in modes):
                         return request

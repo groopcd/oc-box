@@ -5,9 +5,9 @@
 [explicit text Send adapter](web-studio-send.md) with the actual named app and
 its [page selection registry](web-studio-selection.md). The internal reserved
 listener can compose these exact routes with an explicit trusted `studio=True`
-option. The launcher does not request it, and there is no authenticated Studio
-landing page or browser controller yet. There is no guest, 2.3.2, or
-native-proxy fallback.
+option. The authenticated page can be supplied by the separately pinned
+Studio UI composition; the launcher still does not activate either option.
+There is no guest, 2.3.2, or native-proxy fallback.
 
 ## Exact browser envelopes
 

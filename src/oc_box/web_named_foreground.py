@@ -68,13 +68,14 @@ class NamedForeground:
         self._sites = None
         self._attempted = self._retired = self._uncertain = self._released = False
 
-    def start(self, *, expires_at):
+    def start(self, *, expires_at, studio=False):
         """Start once and return only the fixed, token-free workspace entry URL."""
         if self._attempted or self._retired:
             raise ForegroundError()
         self._attempted = True
         if (
-            type(expires_at) not in (int, float)
+            type(studio) is not bool
+            or type(expires_at) not in (int, float)
             or not math.isfinite(expires_at)
             or expires_at <= monotonic()
             or not web_named_listeners._host_allowed()
@@ -122,6 +123,8 @@ class NamedForeground:
                 self._profile,
                 account_assets=self._assets,
                 expires_at=expires_at,
+                studio=studio,
+                studio_ui=studio,
             )
         except (OSError, ValueError):
             raise ForegroundError() from None

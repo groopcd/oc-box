@@ -29,8 +29,13 @@ PREPARATION_TASKS = {
     "baseline-tools": "Setting up container runtime tools",
     "native-cli-install": "Installing the matching OpenCode CLI",
     "plugin-dependencies": "Installing OpenCode plugin dependencies",
+    "native-preflight": "Checking an isolated OpenCode runtime",
+    "native-preflight-stage": "Staging the exact native CLI and SDK",
+    "native-preflight-probe": "Verifying the required Build plugin offline",
+    "native-preflight-cleanup": "Verifying native preflight cleanup",
 }
 PREPARATION_EVENTS = frozenset({"preparation.started", "preparation.finished"})
+PREPARATION_COMMANDS = ("start", "reset", "sync", "web", "runtime-check")
 
 EVENTS = frozenset(
     {
@@ -72,6 +77,7 @@ COMMANDS = frozenset(
         "distros",
         "status",
         "doctor",
+        "runtime-check",
         "completion",
         "tui",
         "sessions",
@@ -126,6 +132,9 @@ REASONS = frozenset(
         "client-failed",
         "source-unavailable",
         "stop-requested",
+        "build-plugin-failed",
+        "stage-image",
+        "scratch-creation",
     }
 )
 METRICS = frozenset(
@@ -153,6 +162,9 @@ METRICS = frozenset(
         "background_max_ms",
         "remaining_ms",
         "last_complete_age_ms",
+        "opencode_major",
+        "opencode_minor",
+        "opencode_patch",
     }
 )
 MAX_METRIC_VALUE = 2**31 - 1
@@ -420,7 +432,7 @@ def _sanitize(record):
         return None
     if record["event"] in PREPARATION_EVENTS and (
         record.get("stage") not in PREPARATION_TASKS
-        or record.get("command") not in ("start", "reset", "sync", "web")
+        or record.get("command") not in PREPARATION_COMMANDS
     ):
         return None
     cleaned = dict(record)

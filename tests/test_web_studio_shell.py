@@ -1,5 +1,8 @@
 import hashlib
+import json
 import unittest
+from html.parser import HTMLParser
+from unittest.mock import patch
 
 from oc_box import web_sessions
 
@@ -30,6 +33,16 @@ def fixture_document(state=None, addons=(), **options):
         workspace_name="Synthetic workspace",
         **options,
     )
+
+
+class Page(HTMLParser):
+    def __init__(self, body):
+        super().__init__()
+        self.tags = []
+        self.feed(body.decode())
+
+    def handle_starttag(self, name, attrs):
+        self.tags.append((name, dict(attrs)))
 
 
 class StudioShellMarkupTests(unittest.TestCase):
@@ -76,6 +89,89 @@ class StudioShellMarkupTests(unittest.TestCase):
             fixture_document(
                 state, ("/auth/oc-box-attachments.js",), first_party_studio=True
             )
+
+    def test_explicit_named_uses_same_chrome_but_no_native_authority_or_route(self):
+        private = "synthetic-never-disclosed-marker"
+        sessions = [
+            {
+                **item,
+                "route": "/server/" + private,
+                "authorization": private,
+                "location": {"directory": "/path/" + private},
+            }
+            for item in ITEMS
+        ]
+        with patch.object(
+            web_sessions, "native_session_route", side_effect=AssertionError
+        ):
+            body = web_sessions.document(
+                "http://" + private,
+                sessions,
+                "valid",
+                workspace_name="Named <workspace>",
+                named_studio=True,
+            )
+        self.assertNotIn(private.encode(), body)
+        tags = Page(body).tags
+        ids = {attrs["id"]: attrs for _, attrs in tags if "id" in attrs}
+        self.assertIn("data-named-studio", ids["web-shell"])
+        self.assertEqual(
+            json.loads(ids["web-shell"]["data-bootstrap"]),
+            {
+                "status": "valid",
+                "sessions": ITEMS,
+                "selection": None,
+                "selectionNotice": "Choose a verified session from this workspace.",
+            },
+        )
+        for name in ("iframe", "a", "form", "textarea"):
+            self.assertNotIn(name, [tag for tag, _ in tags])
+        prefix = web_sessions.NAMED_STUDIO_ASSET_PREFIX
+        self.assertEqual(
+            [attrs["href"] for tag, attrs in tags if tag == "link"],
+            [prefix + "web_sessions.css", prefix + "web_studio_shell.css"],
+        )
+        self.assertEqual(
+            [attrs["src"] for tag, attrs in tags if tag == "script"],
+            [prefix + "web_sessions.js"],
+        )
+        self.assertTrue(
+            {
+                "workspace-masthead",
+                "workspace-library",
+                "workspace-chat",
+                "workspace-overview",
+                "workspace-manager",
+                "workspace-studio-center",
+                "workspace-studio-composer",
+                "workspace-studio-transcript",
+            }
+            <= ids.keys()
+        )
+        self.assertIn(b"Named &lt;workspace&gt;", body)
+        self.assertIn(b"Native OpenCode: host terminal", body)
+        self.assertNotIn("session-controls", ids)
+        self.assertNotIn("fallback-links", ids)
+        self.assertNotIn(b"/auth/", body)
+
+    def test_named_refuses_legacy_authority_and_invalid_catalog(self):
+        for options in (
+            {"named_studio": "true"},
+            {"named_studio": True, "first_party_studio": True},
+            {"named_studio": True, "addons": ("/auth/oc-box-attachments.js",)},
+            {"named_studio": True, "state": fixture_state()},
+        ):
+            with self.subTest(options=tuple(options)), self.assertRaises(ValueError):
+                fixture_document(**options)
+        for records, status in (
+            (ITEMS + ITEMS, "valid"),
+            ([{"id": "ses_escape\n"}], "valid"),
+            (ITEMS, "missing"),
+            (ITEMS, "unavailable"),
+            ([], "unknown"),
+        ):
+            with self.subTest(status=status), self.assertRaises(ValueError):
+                web_sessions.document(None, records, status, named_studio=True)
 
 
 if __name__ == "__main__":

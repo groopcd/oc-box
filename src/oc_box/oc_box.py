@@ -45,6 +45,7 @@ if __package__:
         paths,
         plugin_compat,
         private_memory,
+        runtime_safeguard,
         startup_output,
         sync_config,
         vault,
@@ -66,6 +67,7 @@ else:
     import paths
     import plugin_compat
     import private_memory
+    import runtime_safeguard
     import startup_output
     import sync_config
     import vault
@@ -930,6 +932,22 @@ def run(argv, *, capture=False, check=True, private=False, preparation=None, **k
             if history_recovery.FENCE.get() is not None
             else subprocess.run
         )
+        guarded = runtime_safeguard.current()
+        if (
+            guarded
+            and guarded.launching
+            and history_recovery.FENCE.get() is None
+            and (
+                getattr(argv, "guarded_spawn", False)
+                or command[0] == guarded.host.command(sys.modules[__name__])
+            )
+        ):
+
+            def invoke(command, **options):
+                return history_recovery.run_admitted(
+                    command, lambda: guarded.spawn(sys.modules[__name__]), **options
+                )
+
         if capture:
             # Mainline OpenCode can truncate large exports when stdout is a
             # pipe. Use regular files for captured CLI output instead.
@@ -1653,6 +1671,9 @@ def start_container(path, data):
 
 
 def stop_container(data, *, env=None):
+    guarded = runtime_safeguard.current()
+    if guarded is not None:
+        data = {**data, "container": guarded.record.container}
     options = {"env": env} if env is not None else {}
     info = inspect_owned(data, **options)
     if info and info["State"]["Running"]:
@@ -1711,12 +1732,22 @@ def host_cli_env(path):
 
 
 def host_command(data, *arguments):
+    release = data.get("opencode_version", "1.0.0")
+    guarded = runtime_safeguard.current()
+    if guarded is not None and release != guarded.record.version:
+        raise BoxError("Host OpenCode release does not match the guarded workspace.")
     return opencode_compat.command(
-        data.get("opencode_version", "1.0.0"), "opencode", arguments
+        release,
+        guarded.host.command(sys.modules[__name__]) if guarded else "opencode",
+        arguments,
     )
 
 
-def detect_opencode_release():
+def detect_opencode_release(*, isolated=False):
+    if isolated:
+        return runtime_safeguard.read_version(
+            sys.modules[__name__], "opencode", path=os.environ.get("PATH", os.defpath)
+        )
     return opencode_compat.version(
         run(["opencode", "--version"], capture=True, timeout=15).stdout
     )
@@ -2033,12 +2064,18 @@ def exec_command(data, command, *, interactive=False):
         command = (
             container_cli(data, command[1:]) if "--version" not in command else command
         )
+    guarded = runtime_safeguard.current()
+    if guarded and guarded.launching:
+        command = runtime_safeguard.bound_command(command, guarded.record.digest)
+        result.guarded_spawn = True
     if opencode_compat.major(data.get("opencode_version", "1.0.0")) == 2:
         # Clear image/create-time environment first. Public variable NAMES are
         # argv; values arrive only via Podman's inherited --env NAME mechanism.
         bridge = "import os,sys; keys=sys.argv[1].split(','); env={k:os.environ[k] for k in keys if k in os.environ}; os.execvpe(sys.argv[2],sys.argv[2:],env)"
         command = ["python3", "-c", bridge, ",".join([*forwarded, "PATH"]), *command]
-    result.extend([data["container"], *command])
+    result.extend(
+        [guarded.record.container if guarded else data["container"], *command]
+    )
     return result
 
 
@@ -2412,37 +2449,58 @@ def config_archive(
 
 def ensure_opencode_version(data, version):
     """Use exactly the host release, including downgrades; never fall back."""
-    current = run(
-        exec_command(data, [CONTAINER_OPENCODE, "--version"]),
-        capture=True,
-        check=False,
-        timeout=30,
-    )
-    if current.returncode or opencode_compat.version(current.stdout) != version:
-        run(
-            exec_command(
-                data,
-                [
-                    "npm",
-                    "install",
-                    "--global",
-                    "--force",  # V1 and V2 packages own the same CLI symlink.
-                    "--prefix",
-                    "/opt/oc-box/runtime",
-                    "--no-audit",
-                    "--no-fund",
-                    f"{'@opencode/cli' if opencode_compat.major(version) == 2 else 'opencode-ai'}@{version}",
-                ],
-            ),
-            timeout=600,
-            preparation="native-cli-install",
+    guarded = runtime_safeguard.current()
+    if guarded:
+        digest = runtime_safeguard.container_digest(sys.modules[__name__], data)
+        install = digest != guarded.record.digest
+        if install and not guarded.transition:
+            raise BoxError(
+                "The installed OpenCode artifact changed in a guarded workspace; "
+                "no replacement runtime was started."
+            )
+    else:
+        current = run(
+            exec_command(data, [CONTAINER_OPENCODE, "--version"]),
+            capture=True,
+            check=False,
+            timeout=30,
         )
+        install = (
+            current.returncode or opencode_compat.version(current.stdout) != version
+        )
+    if install:
+        if guarded:
+            runtime_safeguard.install_container(sys.modules[__name__], data)
+        else:
+            run(
+                exec_command(
+                    data,
+                    [
+                        "npm",
+                        "install",
+                        "--global",
+                        "--force",  # V1 and V2 packages own the same CLI symlink.
+                        "--prefix",
+                        "/opt/oc-box/runtime",
+                        "--no-audit",
+                        "--no-fund",
+                        f"{'@opencode/cli' if opencode_compat.major(version) == 2 else 'opencode-ai'}@{version}",
+                    ],
+                ),
+                timeout=600,
+                preparation="native-cli-install",
+            )
+    if install or guarded:
         installed = run(
             exec_command(data, [CONTAINER_OPENCODE, "--version"]),
             capture=True,
             timeout=30,
         ).stdout.strip()
         if opencode_compat.version(installed) != version:
+            if guarded:
+                raise BoxError(
+                    "The live OpenCode version did not match the guarded runtime."
+                )
             raise BoxError(
                 f"OpenCode version mismatch: host is {version}, container reports {installed!r}. Refusing to launch a different version."
             )
@@ -2495,12 +2553,22 @@ def prepare_runtime(
     copy_command = exec_command(data, ["python3", "-c", unpack, version])
     # binary input requires the binary subprocess mode here.
     try:
-        proc = subprocess.run(
-            copy_command,
-            env=copy_command.environment,
-            input=archive,
-            capture_output=True,
-            timeout=60,
+        guarded = runtime_safeguard.current()
+        copy_options = {
+            "env": copy_command.environment,
+            "input": archive,
+            "stdout": subprocess.PIPE,
+            "stderr": subprocess.PIPE,
+            "timeout": 60,
+        }
+        proc = (
+            history_recovery.run_admitted(
+                copy_command,
+                lambda: guarded.spawn(sys.modules[__name__]),
+                **copy_options,
+            )
+            if guarded
+            else subprocess.run(copy_command, **copy_options)
         )
     except subprocess.TimeoutExpired as exc:
         raise BoxError("Copying configuration into the container timed out.") from exc
@@ -3649,6 +3717,9 @@ def launch_environment(path, data, args, *, image_preview_snapshot=None):
             image_preview_snapshot = validate_image_preview(version)
     if opencode_compat.major(version) == 2 or credentials.has_unlocked_values():
         check_private_output()
+    guarded = runtime_safeguard.current()
+    if guarded:
+        guarded.begin(sys.modules[__name__], data)
     if data.get("opencode_version") != version:
         data["opencode_version"] = version
         atomic_json(path, data)
@@ -3664,7 +3735,9 @@ def launch_environment(path, data, args, *, image_preview_snapshot=None):
     error, owner = None, None
     stop_token, source, cleanup_data = None, None, data
     control_refusal = "control-unavailable"
-    if (
+    if guarded:
+        stop_token = guarded.stop_token
+    elif (
         opencode_compat.major(version) == 2
         and args.command != "sync"
         and path.is_file()
@@ -3686,7 +3759,11 @@ def launch_environment(path, data, args, *, image_preview_snapshot=None):
     report_token = history_recovery.REPORT.set(report)
     try:
         with loading_stage(f"Starting {data['distro']} container", stage="container"):
-            initial_info = start_container(path, data)
+            initial_info = (
+                guarded.start(sys.modules[__name__], data)
+                if guarded
+                else start_container(path, data)
+            )
         with loading_stage(
             "Preparing OpenCode and syncing configuration", stage="configuration"
         ):
@@ -3710,7 +3787,7 @@ def launch_environment(path, data, args, *, image_preview_snapshot=None):
             with loading_stage("Syncing session history", stage="history-sync"):
                 with (
                     workspace_service.history_source(sys.modules[__name__], data)
-                    if opencode_compat.major(version) == 2
+                    if not guarded and opencode_compat.major(version) == 2
                     else contextlib.nullcontext()
                 ):
                     sync_sessions(path, data, announce=False)
@@ -3737,6 +3814,8 @@ def launch_environment(path, data, args, *, image_preview_snapshot=None):
                 else None
             )
             if owner:
+                if guarded:
+                    guarded.ready(sys.modules[__name__], data)
                 refusals = []
                 source = history_recovery.capture(
                     sys.modules[__name__],
@@ -4217,8 +4296,9 @@ def purge(path, data, args):
             + data["id"]
             + "' to retain project files and host history."
         )
+    guarded = runtime_safeguard.current()
     if not data.get("restore_incomplete") or args.all or args.delete_sessions:
-        release = detect_opencode_release()
+        release = guarded.record.version if guarded else detect_opencode_release()
         if opencode_compat.major(release) != opencode_compat.major(
             data.get("opencode_version", "1.0.0")
         ):
@@ -4237,7 +4317,12 @@ def purge(path, data, args):
     # Keep default purge history-preserving even if the previous exit was
     # interrupted. A failed sync leaves the volume intact for manual recovery.
     try:
-        if (
+        if guarded:
+            guarded.begin(sys.modules[__name__], data)
+            guarded.start(sys.modules[__name__], data)
+            runtime_safeguard.verify_container(sys.modules[__name__], data)
+            sync_sessions(path, data)
+        elif (
             not (args.delete_sessions or args.all)
             and not data.get("restore_incomplete")
             and inspect_owned(data)
@@ -4327,6 +4412,7 @@ def parser():
             "share",
             "attach",
             "preferences",
+            "runtime-check",
         ),
         default=cli_help.DEFAULT_COMMAND,
         help="operation to run; omitting it starts or resumes OpenCode",
@@ -4520,6 +4606,11 @@ def parser():
         "--no-vault",
         action="store_true",
         help="V2 owning start/reset/web only: skip vault use for this launch without changing saved policy",
+    )
+    result.add_argument(
+        "--runtime-guard",
+        action="store_true",
+        help="enroll an existing stopped V2 workspace in isolated runtime preflight",
     )
     result.add_argument(
         "--env-secret",
@@ -4823,6 +4914,8 @@ def main(argv=None):
         else:
             from uninstall_cli import cli
         return cli(PACKAGE, arguments)
+    if arguments and arguments[0] == "runtime-check":
+        return runtime_safeguard.cli(sys.modules[__name__], arguments[1:])
     if arguments and arguments[0] == "logs":
         if __package__:
             from .logs_cli import cli
@@ -4894,20 +4987,6 @@ def main(argv=None):
         args.journald = web.journald
         args.lifecycle_diagnostics = web.lifecycle_diagnostics
         args.verbose = web.verbose
-        args._opencode_release = detect_opencode_release()
-        if opencode_compat.major(args._opencode_release) != 2:
-            raise BoxError(
-                "'oc-box web' requires OpenCode 2.x; use the native TUI with 1.x."
-            )
-        if web.attachments:
-            if __package__:
-                from .web_attachments import SUPPORTED
-            else:
-                from web_attachments import SUPPORTED
-            if args._opencode_release not in SUPPORTED:
-                raise BoxError(
-                    "The browser attachment adapter requires native OpenCode 2.2.6 or 2.3.0."
-                )
         workspace_service.preflight_port(web.port)
     else:
         args = parser().parse_args(argv)
@@ -4928,7 +5007,47 @@ def main(argv=None):
         return _main_command(args, argv)
 
 
+def _validate_web_release(args, version):
+    if opencode_compat.major(version) != 2:
+        raise BoxError(
+            "'oc-box web' requires OpenCode 2.x; use the native TUI with 1.x."
+        )
+    if getattr(args, "attachments", False):
+        if __package__:
+            from .web_attachments import SUPPORTED
+        else:
+            from web_attachments import SUPPORTED
+        if version not in SUPPORTED:
+            raise BoxError(
+                "The browser attachment adapter requires native OpenCode 2.2.6 or 2.3.0."
+            )
+
+
+def _stop_selected(path, data):
+    record = runtime_safeguard.load(sys.modules[__name__], path)
+    if record:
+        info = inspect_owned(data)
+        if not info or info.get("Id") != record.container:
+            raise BoxError(
+                "The guarded container identity changed; no substitute was stopped."
+            )
+        data = {**data, "container": record.container}
+    stop_container(data)
+
+
 def _main_command(args, argv):
+    if getattr(args, "runtime_guard", False) and (
+        args.command != "start"
+        or args.status
+        or args.about
+        or args.version
+        or args.json
+    ):
+        raise BoxError(
+            "--runtime-guard applies only to owning start on a registered workspace."
+        )
+    if args.command == "runtime-check":
+        raise BoxError("Use 'oc-box runtime-check VERSION' with no workspace options.")
     _validate_table_options(args)
     lifecycle_output.bind_command(args.command)
     if args.command == "logs":
@@ -5322,6 +5441,19 @@ def _main_command(args, argv):
                 f"oc-box: automatic update unavailable: {exc}; continuing with the installed version.",
                 file=sys.stderr,
             )
+    web_selection = None
+    web_attach_only = False
+    if args.command == "web":
+        web_selection = find_workspace(args.project, args.workspace)
+        _, selected = web_selection
+        web_attach_only = bool(
+            selected
+            and opencode_compat.major(selected.get("opencode_version", "1.0.0")) == 2
+            and workspace_service.controller_running(sys.modules[__name__], selected)
+        )
+        if not web_attach_only:
+            args._opencode_release = detect_opencode_release(isolated=True)
+            _validate_web_release(args, args._opencode_release)
     with loading_stage("Checking rootless Podman", stage="backend"):
         check_backend(
             **({"env": maintenance_host_env()} if args.command == "terminal" else {}),
@@ -5333,10 +5465,18 @@ def _main_command(args, argv):
         )
     image_preview_snapshot = None
     state_root().mkdir(parents=True, exist_ok=True, mode=0o700)
-    path, data = find_workspace(
-        args.project, args.workspace, allow_identity_change=args.command == "repair"
+    path, data = (
+        web_selection
+        if web_selection is not None
+        else find_workspace(
+            args.project, args.workspace, allow_identity_change=args.command == "repair"
+        )
     )
     if data is None:
+        if getattr(args, "runtime_guard", False):
+            raise BoxError(
+                "The runtime safeguard can only enroll an existing stopped V2 workspace."
+            )
         if args.command not in ("start", "web"):
             raise BoxError(
                 "No oc-box workspace registered here. Use 'oc-box list' or '--workspace ID'."
@@ -5347,7 +5487,9 @@ def _main_command(args, argv):
         version = getattr(args, "_opencode_release", None)
         if version is None:
             with loading_stage("Checking OpenCode version", stage="version"):
-                version = detect_opencode_release()
+                version = detect_opencode_release(isolated=args.command == "web")
+        if args.command == "web":
+            _validate_web_release(args, version)
         if args.no_vault and opencode_compat.major(version) != 2:
             raise BoxError("--no-vault requires native OpenCode 2.x.")
         if args.image_preview:
@@ -5371,17 +5513,19 @@ def _main_command(args, argv):
     # never auto-restart a stopped container; the running TUI can then be exited.
     if args.command == "stop":
         if opencode_compat.major(data.get("opencode_version", "1.0.0")) == 1:
-            stop_container(data)
+            _stop_selected(path, data)
         else:
             try:
+                # Publish before inspecting the independent runtime sidecar.
+                # Its pending/ready replacement must never cancel stop intent.
                 workspace_control.request_stop(path)
                 with workspace_control.admission(path, timeout=45):
-                    stop_container(data)
+                    _stop_selected(path, data)
                     workspace_control.require_certain(path)
             except workspace_control.ControlError as exc:
                 # Still honor stop as far as possible, but never claim an ordered
                 # successful stop if startup/control state could not be fenced.
-                stop_container(data)
+                _stop_selected(path, data)
                 raise BoxError(str(exc)) from None
         print("Container stopped; files, packages, and conversations retained.")
         return 0
@@ -5443,6 +5587,7 @@ def _main_command(args, argv):
                     args.clear_podman_args,
                     args.no_vault,
                     args.image_preview is not None,
+                    getattr(args, "runtime_guard", False),
                 )
             ):
                 raise BoxError(
@@ -5492,9 +5637,13 @@ def _main_command(args, argv):
                         else {}
                     ),
                 )
-        if args.command == "web" and workspace_service.controller_running(
-            sys.modules[__name__], data
+        if args.command == "web" and (
+            web_attach_only
+            or workspace_service.controller_running(sys.modules[__name__], data)
         ):
+            # A request that observed an existing controller is attach-only.
+            # Losing it before the actual attach must not turn this request
+            # into an owner launch, native probe or vault unlock.
             if args.no_vault:
                 raise BoxError(
                     "An attached web client cannot change vault use; exit the owning launcher before a --no-vault launch."
@@ -5502,9 +5651,53 @@ def _main_command(args, argv):
             with workspace_service.attach(
                 sys.modules[__name__], path, data
             ) as connection:
+                _validate_web_release(args, connection["version"])
                 return workspace_service.web_session(
                     sys.modules[__name__], data, connection, args
                 )
+    with workspace_lock(path), contextlib.ExitStack() as launch_context:
+        if args.command != "repair":
+            rechecked_path, data = find_workspace(None, data["id"])
+            if rechecked_path != path or not data or data.get("version") != 2:
+                raise BoxError(
+                    "The workspace registration changed; retry with the intended workspace."
+                )
+        return _locked_workspace_command(
+            path, data, args, launch_context, image_preview_snapshot
+        )
+
+
+def _locked_workspace_command(path, data, args, launch_context, image_preview_snapshot):
+    if data.get("restore_incomplete") and args.command != "purge":
+        raise BoxError(
+            "This workspace restore did not finish. Do not start it; inspect backup recovery staging and use plain purge by ID before retrying into a new destination."
+        )
+    record = (
+        runtime_safeguard.load(sys.modules[__name__], path)
+        if args.command in ("start", "reset", "sync", "web", "terminal", "purge")
+        else None
+    )
+    guard = record is not None or getattr(args, "runtime_guard", False)
+    if (
+        not guard
+        and data.get("ready") is True
+        and runtime_safeguard.release_key(data.get("opencode_version")) is not None
+        and args.command in ("start", "reset", "sync", "web", "purge")
+    ):
+        release = getattr(args, "_opencode_release", None) or detect_opencode_release(
+            isolated=True
+        )
+        args._opencode_release = release
+        guard = runtime_safeguard.version_upgrade(data.get("opencode_version"), release)
+    if guard:
+        launch_context.enter_context(
+            runtime_safeguard.admit(sys.modules[__name__], path, data, args, record)
+        )
+    if args.command == "web":
+        args._opencode_release = getattr(
+            args, "_opencode_release", None
+        ) or detect_opencode_release(isolated=True)
+        _validate_web_release(args, args._opencode_release)
     if (
         args.image_preview
         or getattr(args, "host_file_open", None) is True
@@ -5537,90 +5730,85 @@ def _main_command(args, argv):
         configure_host_clipboard_preferences(
             path, data, args, getattr(args, "_opencode_release", None)
         )
-    with workspace_lock(path), contextlib.ExitStack() as launch_context:
-        if data.get("restore_incomplete") and args.command != "purge":
+    if args.command in ("start", "reset", "web"):
+        # Validate/unlock before setup or reset changes the environment.
+        # Wrong/missing credentials must never destroy the old OS.
+        try:
+            launch_context.enter_context(launch_credentials(data, args))
+        except vault.VaultError as exc:
+            raise BoxError(str(exc)) from exc
+    if args.command in ("start", "reset", "sync", "terminal", "web"):
+        refresh_workspace_identity(path, data)
+    if args.command == "terminal":
+        return maintenance_terminal(path, data)
+    if args.command == "repair":
+        repair_workspace(path, data)
+        return 0
+    if args.command in ("start", "reset", "sync", "web"):
+        if (
+            args.command == "start"
+            and args.distro
+            and distro_name(args.distro) != data["distro"]
+        ):
             raise BoxError(
-                "This workspace restore did not finish. Do not start it; inspect backup recovery staging and use plain purge by ID before retrying into a new destination."
+                f"Existing workspace uses {data['distro']}. Use 'oc-box reset --distro {args.distro}' to switch."
             )
-        if args.command in ("start", "reset", "web"):
-            # Validate/unlock before setup or reset changes the environment.
-            # Wrong/missing credentials must never destroy the old OS.
-            try:
-                launch_context.enter_context(launch_credentials(data, args))
-            except vault.VaultError as exc:
-                raise BoxError(str(exc)) from exc
-        if args.command in ("start", "reset", "sync", "terminal", "web"):
-            refresh_workspace_identity(path, data)
-        if args.command == "terminal":
-            return maintenance_terminal(path, data)
-        if args.command == "repair":
-            repair_workspace(path, data)
-            return 0
-        if args.command in ("start", "reset", "sync", "web"):
+        configure_podman_options(data, args)
+        if args.command == "reset":
+            current_path, _ = find_workspace(data["project"])
+            if current_path != path:
+                raise BoxError(
+                    "Project marker does not match the selected workspace; refusing to reset it. Use 'oc-box --status' to select the current workspace."
+                )
+            # Identity and credential validation take precedence; validate
+            # CLI compatibility before deleting a working container.
             if (
-                args.command == "start"
-                and args.distro
-                and distro_name(args.distro) != data["distro"]
+                getattr(args, "_opencode_release", None) is not None
+                and detect_opencode_release() != args._opencode_release
             ):
                 raise BoxError(
-                    f"Existing workspace uses {data['distro']}. Use 'oc-box reset --distro {args.distro}' to switch."
+                    "The host OpenCode release changed during credential preparation; reset was not performed. Retry with the intended executable."
                 )
-            configure_podman_options(data, args)
-            if args.command == "reset":
-                current_path, _ = find_workspace(data["project"])
-                if current_path != path:
-                    raise BoxError(
-                        "Project marker does not match the selected workspace; refusing to reset it. Use 'oc-box --status' to select the current workspace."
-                    )
-                # Identity and credential validation take precedence; validate
-                # CLI compatibility before deleting a working container.
-                if (
-                    getattr(args, "_opencode_release", None) is not None
-                    and detect_opencode_release() != args._opencode_release
-                ):
-                    raise BoxError(
-                        "The host OpenCode release changed during credential preparation; reset was not performed. Retry with the intended executable."
-                    )
-                if getattr(args, "_opencode_release", None) is None:
-                    args._opencode_release = detect_opencode_release()
-                if (
-                    opencode_compat.major(args._opencode_release) == 2
-                    or credentials.has_unlocked_values()
-                ):
-                    check_private_output()
-                check_resource_controllers(data)
-                remove_resources(data, keep_home=True)
-                data["ready"] = False
-                # Reset rebuilds the distro, not the captured custom OS image.
-                # Keep any restored internal paths for the preserved home DB.
+            if getattr(args, "_opencode_release", None) is None:
+                args._opencode_release = detect_opencode_release()
+            if (
+                opencode_compat.major(args._opencode_release) == 2
+                or credentials.has_unlocked_values()
+            ):
+                check_private_output()
+            check_resource_controllers(data)
+            remove_resources(data, keep_home=True)
+            data["ready"] = False
+            # Reset rebuilds the distro, not the captured custom OS image.
+            # Keep any restored internal paths for the preserved home DB.
+            data["image"] = DISTROS[data["distro"]][0]
+            if args.distro:
+                data["distro"] = distro_name(args.distro)
                 data["image"] = DISTROS[data["distro"]][0]
-                if args.distro:
-                    data["distro"] = distro_name(args.distro)
-                    data["image"] = DISTROS[data["distro"]][0]
-            for name in ("cpus", "memory"):
-                if getattr(args, name):
-                    if args.command != "reset" and inspect_owned(data):
-                        raise BoxError("Change resource limits using 'oc-box reset'.")
-                    data[name] = getattr(args, name)
-            if args.pids_limit is not None:
-                if args.pids_limit < 32:
-                    raise BoxError("--pids-limit must be at least 32.")
+        for name in ("cpus", "memory"):
+            if getattr(args, name):
                 if args.command != "reset" and inspect_owned(data):
                     raise BoxError("Change resource limits using 'oc-box reset'.")
-                data["pids"] = args.pids_limit
-            atomic_json(path, data)
-            return launch(
-                path,
-                data,
-                args,
-                **(
-                    {"image_preview_snapshot": image_preview_snapshot}
-                    if effective_image_preview(args)
-                    else {}
-                ),
-            )
-        if args.command == "purge":
-            purge(path, data, args)
+                data[name] = getattr(args, name)
+        if args.pids_limit is not None:
+            if args.pids_limit < 32:
+                raise BoxError("--pids-limit must be at least 32.")
+            if args.command != "reset" and inspect_owned(data):
+                raise BoxError("Change resource limits using 'oc-box reset'.")
+            data["pids"] = args.pids_limit
+        atomic_json(path, data)
+        return launch(
+            path,
+            data,
+            args,
+            **(
+                {"image_preview_snapshot": image_preview_snapshot}
+                if effective_image_preview(args)
+                else {}
+            ),
+        )
+    if args.command == "purge":
+        purge(path, data, args)
     return 0
 
 
