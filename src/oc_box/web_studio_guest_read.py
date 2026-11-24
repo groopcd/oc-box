@@ -57,6 +57,26 @@ def _catalog(peer, identity, directory, hidden):
     return value
 
 
+def _selected(peer, identity, directory, session_id):
+    path = "/api/session/" + session_id
+    before = studio._snapshot(
+        peer.query, identity.endpoint, directory, path, session_id
+    )
+    if before[0] != identity.native_pid:
+        raise studio.ConversationError()
+    studio._require_unmoved(peer.query, path + "/message")
+    after = studio._snapshot(
+        lambda target: peer.query(target, closing=target == path),
+        identity.endpoint,
+        directory,
+        path,
+        session_id,
+    )
+    if after != before:
+        raise studio.ConversationError()
+    return session_id
+
+
 def _cookie_secret(binding, cookie):
     name = web_native_pair._cookie_name(binding.authority)
     values = [
@@ -137,30 +157,30 @@ def read(
                 raise studio.ConversationError()
             check()
 
-        current()
-        relay = web_guest_duplex_exec.GuestDuplexExec(binding, workers, worker_use)
-        peer = web_studio_guest_send._Peer(
-            relay.start(deadline=deadline),
-            binding.native.binding,
-            cookie,
-            deadline,
-            check=check,
-            current=current,
-            identity=identity,
-        )
-        peer.open()
-        if type(operation) is Catalog:
-            value = _catalog(peer, identity, directory, hidden)
-        elif type(operation) is Select:
+        def open_peer():
+            nonlocal relay
+            current()
+            relay = web_guest_duplex_exec.GuestDuplexExec(binding, workers, worker_use)
+            peer = web_studio_guest_send._Peer(
+                relay.start(deadline=deadline),
+                binding.native.binding,
+                cookie,
+                deadline,
+                check=check,
+                current=current,
+                identity=identity,
+            )
+            peer.open()
+            return peer
+
+        if type(operation) is Select:
 
             def verify(origin, request_use, session_id, _):
                 if origin is not binding.native.binding or request_use is not use:
                     raise studio.ConversationError()
-                path = "/api/session/" + session_id
-                witness = studio._snapshot(
-                    peer.query, identity.endpoint, directory, path, session_id
-                )
-                return session_id if witness[0] == identity.native_pid else None
+                # The authenticated change has already invalidated the old
+                # selection before relay startup or native membership I/O.
+                return _selected(open_peer(), identity, directory, session_id)
 
             view = selections.change(
                 use,
@@ -169,7 +189,10 @@ def read(
                 verify=verify,
             )
             value = view.public_state()
+        elif type(operation) is Catalog:
+            value = _catalog(open_peer(), identity, directory, hidden)
         else:
+            peer = open_peer()
             value = studio._conversation(
                 lambda path, limit: peer.query(path, limit=limit, raw=True),
                 identity.endpoint,
