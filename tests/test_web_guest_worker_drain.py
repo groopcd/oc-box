@@ -102,6 +102,64 @@ class AcceptedWorkerTests(unittest.TestCase):
         self.assertTrue(workers.close(timeout=3))
         self.assertTrue(workers.close(timeout=0))
 
+    def test_exact_interrupt_keeps_other_peer_live_and_drain_joins_post_close(self):
+        workers = drain.AcceptedWorkers()
+        stream, peer = self.pair()
+        second, second_peer = self.pair()
+        first_use = Queue()
+        retired = Queue()
+        proceed = Event()
+
+        def finish(confirmed):
+            retired.put((confirmed, stream.fileno()))
+            return proceed.wait(3)
+
+        def run(use):
+            self.assertTrue(workers.on_retirement(use, finish))
+            self.assertFalse(workers.on_retirement(use, lambda _: True))
+            first_use.put(use)
+            self.assertEqual(use.stream.recv(1), b"")
+
+        def other(use):
+            data = use.stream.recv(1)
+            use.stream.sendall(data)
+
+        self.assertTrue(workers.dispatch(stream, run))
+        self.assertTrue(workers.dispatch(second, other))
+        use = first_use.get(timeout=3)
+        try:
+            workers.interrupt(use)
+            self.assertTrue(use.cancelled)
+            self.assertEqual(peer.recv(1), b"")
+            self.assertEqual(retired.get(timeout=3), (True, -1))
+            second_peer.sendall(b"x")
+            self.assertEqual(second_peer.recv(1), b"x")
+            self.assertFalse(workers.close(timeout=0))
+        finally:
+            proceed.set()
+        self.assertTrue(workers.close(timeout=3))
+
+    def test_post_close_refusal_is_sticky_and_cleanup_loss_is_never_confirmed(self):
+        for missing_activity in (False, True):
+            with self.subTest(missing_activity=missing_activity):
+                workers = drain.AcceptedWorkers()
+                stream, _ = self.pair()
+                calls = Queue()
+
+                def finish(confirmed):
+                    calls.put((confirmed, stream.fileno()))
+                    return False
+
+                def run(use):
+                    self.assertTrue(workers.on_retirement(use, finish))
+                    if missing_activity:
+                        self.assertIsNotNone(workers.admit(use, wake=lambda: None))
+
+                self.assertTrue(workers.dispatch(stream, run))
+                self.assertEqual(calls.get(timeout=3), (not missing_activity, -1))
+                self.assertFalse(workers.close(timeout=3))
+                self.assertFalse(workers.close(timeout=0))
+
     def test_fence_during_admitted_start_wakes_before_native_work_and_does_not_reopen(
         self,
     ):

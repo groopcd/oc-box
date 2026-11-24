@@ -66,7 +66,15 @@ synthetic helpers.
    failure remains. Concurrent `close` calls cannot report success while a
    notification is in flight. A wait timeout can check the **same** drain
    again; ambiguous startup or cleanup cannot. Never call the final join
-   from the worker that it would join.
+    from the worker that it would join.
+
+An adapter may register one post-close `on_retirement(use, finish)` before
+admitting its HTTP exchange. The actual worker calls the hook with its exact
+socket/activity verdict, after dispatch has ended. The hook cannot reopen a
+peer or start a helper. Drain waits for it and refuses if it cannot retire
+the corresponding browser admission. A scoped `interrupt(use)` wakes only
+the exact registered socket and helpers; it is not permission to finish
+the browser admission before actual closure.
 
 An empty, fenced tracker proves only that *its own* registration set drained.
 It does not account for a pending kernel `accept()` result, an untracked
