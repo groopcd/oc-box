@@ -80,17 +80,34 @@ account and workspace origins, verifies the public transcript context and
 supplies the separate client and verifier IDs. It sends only the username
 and KE1 on `/start`, then the challenge ID and KE3 on `/finish`, both as
 bounded, same-origin HTTPS JSON POSTs without redirects or fallback.
-Cancellation stops this client's transport; it cannot undo a POST already
-processed by the ingress. A successful response yields only a one-use
-in-memory ticket carrier, not app admission.
+The module allows one controller per account document and only one live
+exchange or pending ticket at a time. Cancellation aborts the transport and
+blocks progress at checkpoints; it cannot interrupt synchronous WASM or undo
+a POST the ingress has already processed.
 
-The session interface is for a trusted, independently reviewed WASM binding
-that prepares the password locally, verifies the server proof before
-emitting KE3 and confirms cleanup. The adapter does not validate artifact
-provenance or establish memory erasure. The Node fixture checks both origins
-and the exact Python wire format with a synthetic session that checks its
-arguments; it does not verify a password, make browser requests, or establish
-browser trust. Run it from a source checkout with
+A successful response yields only an opaque in-memory ticket carrier. It
+expires locally after at most five seconds, never later than the attempt
+deadline, and is invalidated on `pagehide`, cancellation, explicit `discard()`,
+or a single `take()`. A future caller may take it only for the separately
+reviewed POST handoff, never a URL. Taking it does not prove app admission;
+the server remains authoritative for expiry, browser binding and replay.
+
+The offline binding now supplies `openAttempt` in the trusted controller
+configuration. Before any password access, `openAttempt()` must return a fresh,
+empty handle with synchronous `start(readPassword)`, `finish(bindings)` and
+`discard()`. `exchange({username, readPassword, signal})` makes a one-shot byte
+reader available only to `start`, after taking ownership of the handle.
+The trusted binding must clean up those local bytes, verify the server proof
+before emitting KE3, and confirm teardown by returning `true` from `discard()`.
+Uncertain teardown permanently fences that controller; a new one cannot
+replace it in the same document. The earlier one-step `createSession`
+contract is not accepted. The wire, `finish` binding parameters and artifact
+review requirements are unchanged.
+
+The adapter does not validate artifact provenance or establish memory erasure.
+The Node fixture checks both origins and the exact Python wire format with a
+synthetic session that checks its arguments; it does not verify a password,
+make browser requests, or establish browser trust. Run it from a source checkout:
 `PYTHONPATH=src python3 -B -m unittest discover -s tests -p test_web_pake_client.py -v`.
 Activation still requires independent review of the exact native/WASM
 artifacts and interface, matching host-authorized enrollment (including

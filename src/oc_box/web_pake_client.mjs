@@ -9,7 +9,10 @@ const WORKSPACE_HOST = "workspace.ocbox-app.test";
 const SIZES = Object.freeze({ ke1: 96, ke2: 320, ke3: 64 });
 const MAX_BODY_BYTES = 8192;
 const EXCHANGE_MS = 30_000; // Local deadline, not a wire field or the server TTL.
+const TICKET_MS = 5_000; // Local retention budget; the server can expire it sooner.
 const REFUSAL = "Named sign-in refused.";
+const mountedPages = new WeakSet();
+const readAbortState = Object.getOwnPropertyDescriptor(AbortSignal.prototype, "aborted").get;
 
 function require(condition) {
   if (!condition) throw new Error(REFUSAL);
@@ -28,8 +31,9 @@ function localPort(origin, hostname) {
   return port;
 }
 
-function checkPage(origin) {
+function checkPage(origin, page) {
   require(globalThis.window === globalThis && globalThis.top === globalThis &&
+    page && globalThis.document === page &&
     globalThis.isSecureContext === true && globalThis.location?.origin === origin &&
     !globalThis.navigator?.serviceWorker?.controller);
 }
@@ -118,17 +122,35 @@ async function post(origin, path, payload, fields, signal, checkpoint) {
 
 class HandoffTicket {
   #value;
+  #checkpoint;
+  #release;
 
-  constructor(value) {
+  constructor(value, checkpoint, release) {
     this.#value = value;
+    this.#checkpoint = checkpoint;
+    this.#release = release;
     Object.freeze(this);
   }
 
   // Only for a future, independently reviewed POST handoff. Never a URL.
   take() {
-    const value = this.#value;
+    if (this.#value === null) return null;
+    try {
+      this.#checkpoint();
+      return this.#value;
+    } catch {
+      return null;
+    } finally {
+      this.discard();
+    }
+  }
+
+  discard() {
+    if (this.#value === null) return;
     this.#value = null;
-    return value;
+    const release = this.#release;
+    this.#checkpoint = this.#release = null;
+    release();
   }
 }
 
@@ -136,20 +158,24 @@ class HandoffTicket {
  * Origins come from trusted account-page configuration, never the URL, native
  * frame or an ingress reply. Call from the trusted top-level account page only.
  *
- * A trusted caller prepares a fresh, synchronous, bounded WASM session per
- * attempt via createSession(). The binding alone owns password preparation and
- * lifetime. It returns {ke1: Uint8Array, finish(bindings): Uint8Array, discard():
- * true}. finish MUST verify the server's OPAQUE proof before emitting KE3.
- * discard MUST confirm cleanup, even after finish or refusal. Neither callback
- * failures nor returned byte shapes attest to provenance or authentication.
+ * The independently reviewed binding's openAttempt() must not handle any
+ * password. It returns a fresh, discardable handle with synchronous, bounded
+ * start(readPassword): Uint8Array, finish(bindings): Uint8Array and discard():
+ * true. Only start may call the one-shot readPassword() for local bytes, which
+ * the binding owns and must clean up. finish must verify the server proof
+ * before emitting KE3. discard must confirm cleanup even after a local failure.
+ * Cancellation gates progress; it cannot interrupt a synchronous WASM call.
  */
 export function createLocalPakeClient(config) {
-  let accountOrigin, workspaceOrigin;
+  let accountOrigin, workspaceOrigin, openAttempt, page;
   try {
-    ({ accountOrigin, workspaceOrigin } = config);
+    ({ accountOrigin, workspaceOrigin, openAttempt } = config);
     require(localPort(accountOrigin, ACCOUNT_HOST) !==
       localPort(workspaceOrigin, WORKSPACE_HOST));
-    checkPage(accountOrigin);
+    page = globalThis.document;
+    checkPage(accountOrigin, page);
+    require(typeof openAttempt === "function" && !mountedPages.has(page));
+    mountedPages.add(page);
   } catch {
     throw new Error(REFUSAL);
   }
@@ -169,48 +195,91 @@ export function createLocalPakeClient(config) {
     async exchange(input) {
       require(!busy && !fenced);
       busy = true;
-      const controller = new AbortController();
-      const cancel = () => controller.abort(); // Do not forward arbitrary abort reasons.
-      const deadline = performance.now() + EXCHANGE_MS;
-      let watchedSignal, timer, session, cleanupPending = false;
+      let controller, watchedSignal, timer, deadline, ticket;
+      let attempt, dispose, cleanupPending = false;
+      let watchingPage = false;
+      const cancel = () => {
+        controller?.abort(); // Do not forward arbitrary abort reasons.
+        ticket?.discard();
+      };
+      const signalCancelled = () => watchedSignal !== undefined && readAbortState.call(watchedSignal);
+      const onSignalAbort = () => {
+        if (signalCancelled()) cancel(); // Synthetic events do not change the signal's state.
+      };
       const checkpoint = () => {
-        require(!controller.signal.aborted && performance.now() < deadline);
-        checkPage(accountOrigin);
+        require(!controller.signal.aborted && !signalCancelled() && performance.now() < deadline);
+        checkPage(accountOrigin, page);
+      };
+      const release = () => {
+        clearTimeout(timer);
+        if (watchingPage) globalThis.removeEventListener("pagehide", cancel);
+        if (watchedSignal !== undefined) {
+          EventTarget.prototype.removeEventListener.call(watchedSignal, "abort", onSignalAbort);
+        }
+        controller?.abort();
+        ticket = watchedSignal = undefined;
+        busy = false;
       };
       const discard = () => {
         if (!cleanupPending) return true;
         cleanupPending = false;
         try {
-          if (localResult(session?.discard()) === true) return true;
+          if (dispose && localResult(Reflect.apply(dispose, attempt, [])) === true) return true;
         } catch {
-          // A failed cleanup fences this client. Never expose the binding error.
+          // Unconfirmed attempt teardown permanently fences this page's client.
         } finally {
-          session = undefined;
+          attempt = dispose = undefined;
         }
         fenced = true;
         return false;
       };
 
       try {
-        let { username, createSession, signal: suppliedSignal } = input;
+        const { username, signal: suppliedSignal } = input;
+        // Do not invoke a credential-reading accessor while validating the input.
+        let readPassword = Object.getOwnPropertyDescriptor(input, "readPassword")?.value;
         input = undefined;
         require(matches(/^[a-z0-9][a-z0-9_-]{0,31}$/, username) &&
-          typeof createSession === "function" &&
-          (suppliedSignal === undefined || suppliedSignal instanceof AbortSignal));
+          typeof readPassword === "function");
+        controller = new AbortController();
+        deadline = performance.now() + EXCHANGE_MS;
         if (suppliedSignal !== undefined) {
-          AbortSignal.prototype.throwIfAborted.call(suppliedSignal);
-          EventTarget.prototype.addEventListener.call(suppliedSignal, "abort", cancel, { once: true });
+          require(!readAbortState.call(suppliedSignal)); // Also checks the signal's brand.
+          EventTarget.prototype.addEventListener.call(suppliedSignal, "abort", onSignalAbort);
           watchedSignal = suppliedSignal;
         }
         globalThis.addEventListener("pagehide", cancel, { once: true });
+        watchingPage = true;
         timer = setTimeout(cancel, EXCHANGE_MS);
         checkpoint();
         cleanupPending = true;
-        session = localResult(createSession());
-        createSession = undefined;
-        require(typeof session?.finish === "function" && typeof session?.discard === "function");
+        attempt = localResult(openAttempt());
+        dispose = attempt?.discard;
+        require(typeof dispose === "function");
+        const begin = attempt.start;
+        const complete = attempt.finish;
+        require(typeof begin === "function" && typeof complete === "function");
+        checkpoint();
+        let passwordTaken = false;
+        const takePassword = () => {
+          checkpoint();
+          require(readPassword !== undefined);
+          const read = readPassword;
+          readPassword = undefined;
+          const bytes = localResult(read());
+          require(bytes instanceof Uint8Array);
+          passwordTaken = true;
+          return bytes;
+        };
+        let ke1;
+        try {
+          ke1 = encode(localResult(Reflect.apply(begin, attempt, [takePassword])), SIZES.ke1);
+          require(passwordTaken);
+        } finally {
+          readPassword = undefined;
+        }
         const start = await post(accountOrigin, "/start",
-          { username, ke1: encode(localResult(session.ke1), SIZES.ke1) },
+          { username, ke1 },
           ["challenge_id", "ke2", "context"], controller.signal, checkpoint);
         require(matches(/^[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$/, start.challenge_id));
         const ke2 = decode(start.ke2, SIZES.ke2);
@@ -220,25 +289,24 @@ export function createLocalPakeClient(config) {
         const clientIdentifier = await binding(PROFILE, "client", username);
         const verifierIdentifier = await binding(PROFILE, "verifier", accountOrigin);
         checkpoint();
-        const proof = localResult(session.finish({ ke2, context, clientIdentifier, verifierIdentifier }));
+        const proof = localResult(Reflect.apply(complete, attempt,
+          [{ ke2, context, clientIdentifier, verifierIdentifier }]));
         const ke3 = encode(proof, SIZES.ke3);
         require(discard()); // Do not send proof with uncertain local cleanup.
         const finish = await post(accountOrigin, "/finish",
           { challenge_id: start.challenge_id, ke3 }, ["ticket"], controller.signal, checkpoint);
         require(matches(/^[A-Za-z0-9_-]{53}[AQgw]$/, finish.ticket));
         checkpoint();
-        return new HandoffTicket(finish.ticket);
+        clearTimeout(timer);
+        deadline = Math.min(deadline, performance.now() + TICKET_MS);
+        timer = setTimeout(cancel, Math.max(0, deadline - performance.now()));
+        ticket = new HandoffTicket(finish.ticket, checkpoint, release);
+        return ticket;
       } catch {
         throw new Error(REFUSAL);
       } finally {
-        cancel();
-        clearTimeout(timer);
-        globalThis.removeEventListener("pagehide", cancel);
-        if (watchedSignal) {
-          EventTarget.prototype.removeEventListener.call(watchedSignal, "abort", cancel);
-        }
         discard();
-        busy = false;
+        if (!ticket) release();
       }
     },
   });
