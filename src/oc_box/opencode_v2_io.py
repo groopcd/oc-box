@@ -31,7 +31,10 @@ if __package__:
         named_native_json,
         named_native_supports,
     )
-elif __name__ != "__main__":
+elif globals().get("__spec__") is not None:
+    # A real flat import has a module spec. The offline safeguard probe
+    # instead embeds this ordinary bridge in an isolated namespace with no
+    # importable checkout. Named workers embed their audited profile directly.
     from web_named_native_profile import (
         named_native_info,
         named_native_json,
