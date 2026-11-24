@@ -50,3 +50,20 @@ gate. The lock checks require Linux `/proc/self/fdinfo` flock reporting. The
 checksum and descriptor checks are not protection against a malicious same-user
 writer with direct filesystem or Podman access, or against an older launcher
 that ignores the fence.
+
+## Disjoint Studio registration profile
+
+The same record algorithm can now operate on a verified `studio_scope(...)`
+under `studio-workspaces/`, with its own `studio-stop.lock`, magic and checksum
+binding. The fence is sealed to the exact private Studio registration file and
+its directory; selecting a byte-identical replacement cannot adopt its state.
+The profile keeps the ordinary history stop token and earlier named format
+unchanged. Recording intent, losing the owner process or releasing its flock
+does not authorize an ordinary stop or reset a pending operation.
+
+The read-only registry can select a scope, but cannot enroll it or prove that
+the initial registration is fresh. Fixture enrollment is explicit. No
+launcher path or engine stop is wired, and the marker does not exclude
+unaudited or direct same-user writers. A production runner still needs
+enforced scope, exact owner/attach binding and independent drain and verified
+stop evidence before it can complete a record.

@@ -69,6 +69,8 @@ _WEB_RUNTIME_FILES = (
     "web_studio_guest_read.py",
     "web_studio_guest_selection.py",
     "web_studio_guest_send.py",
+    "web_named_stop_fence.py",
+    "studio_registry.py",
     "web_history.py",
     "web_tls.py",
     "web_local_origins.py",
