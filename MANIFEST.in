@@ -11,6 +11,7 @@ include src/oc_box/web_sessions.css
 include src/oc_box/web_studio_shell.css src/oc_box/web_studio_shell.mjs
 include src/oc_box/web_studio_transcript.css src/oc_box/web_studio_transcript.mjs
 include src/oc_box/web_studio_composer.css src/oc_box/web_studio_composer.mjs
+include src/oc_box/web_named_studio_client.mjs
 include src/oc_box/oc-box-mark.svg src/oc_box/oc-box-mark.png
 recursive-include tests *.py *.mjs
 include tools/host_sandbox.js
