@@ -86,3 +86,7 @@ process to exit does not prove the in-container socket closed. If the
 existing proxy's half-close/EOF behavior is insufficient, a separate managed
 tunnel needs explicit native-side retirement evidence, strict final EOF and
 exact clean reap. This tracker does not approximate that protocol.
+
+The [unserved native duplex worker](web-guest-duplex-worker.md) exercises the
+worker side of that handshake on synthetic local pipes and loopback. Host
+transport, exact reap, and Gateway/lifecycle wiring remain separate work.
