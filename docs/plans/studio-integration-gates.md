@@ -33,6 +33,11 @@ local synthetic pipes and TCP. The next gate must show the same contract
 through rootless `podman exec -i`: the original exec must carry cancellation
 and stdout EOF correctly even under backpressure. Then the gateway must
 register that exact process and every other native helper before dispatch.
+The unserved exec binding now does that registration for one tunnel,
+rechecks the original owner and stop admission at spawn, and uses the
+fixed providerless worker with the owner's pinned engine environment.
+It cannot retire an attempted exec without its exact transport evidence,
+and does not authorize or account for a native application job.
 
 A Studio grant must not outlive native cookie authority. Recheck the
 current browser cookie for every bounded protected exchange and fence an
