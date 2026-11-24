@@ -1,17 +1,20 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Synthetic account page only; no fallback, form serialization, or handoff.
+// Synthetic account page only; password never enters a serialized form.
 import { createLocalPakeClient } from "./transport.mjs";
 import { openLoginAttempt } from "./slot.mjs";
+import { createWorkspaceTransfer } from "./transfer.mjs";
 
 const form = document.getElementById("login-form");
 const user = document.getElementById("login-user");
 const password = document.getElementById("login-password");
 const button = document.getElementById("login-submit");
+const next = document.getElementById("login-continue");
 const status = document.getElementById("login-status");
 const accountOrigin = document.querySelector('meta[name="ocbox-account-origin"]').content;
 const workspaceOrigin = document.querySelector('meta[name="ocbox-workspace-origin"]').content;
 const cancelled = new AbortController();
 let auth;
+let transfer, ticket;
 
 const show = (state, text) => {
   form.dataset.state = state;
@@ -24,8 +27,25 @@ const enable = on => {
 addEventListener("pagehide", () => {
   password.value = "";
   cancelled.abort();
+  ticket?.discard();
+  ticket = undefined;
+  next.disabled = true;
   enable(false);
 }, { once: true });
+
+next.addEventListener("click", event => {
+  if (!event.isTrusted || !ticket || cancelled.signal.aborted) return;
+  const carrier = ticket;
+  ticket = undefined;
+  next.disabled = true;
+  next.hidden = true;
+  try {
+    transfer(carrier);
+  } catch {
+    show("refused", "Named sign-in refused.");
+    enable(true);
+  } finally { carrier.discard(); }
+});
 
 function readPassword() {
   // Fixed scratch size; never stringify the PAKE bytes or persist them.
@@ -54,7 +74,6 @@ form.addEventListener("submit", async event => {
   const username = user.value;
   enable(false);
   show("running", "Checking the local proof…");
-  let ticket;
   try {
     let pending;
     try {
@@ -65,16 +84,19 @@ form.addEventListener("submit", async event => {
       password.value = "";
     }
     ticket = await pending;
-    if (cancelled.signal.aborted) return;
-    // AccountIngress issued a real browser-bound ticket. It remains opaque;
-    // this fixture neither takes it nor posts it to a workspace.
-    show("complete", "Proof verified. No workspace was opened.");
+    if (cancelled.signal.aborted) {
+      ticket.discard();
+      ticket = undefined;
+      return;
+    }
+    next.hidden = false;
+    next.disabled = false;
+    show("verified", "Proof verified. Continue to confirm this browser.");
   } catch {
     if (!cancelled.signal.aborted) show("refused", "Named sign-in refused.");
   } finally {
-    ticket?.discard();
     password.value = "";
-    if (!cancelled.signal.aborted && form.dataset.state !== "complete") enable(true);
+    if (!cancelled.signal.aborted && form.dataset.state !== "verified") enable(true);
   }
 });
 
@@ -87,6 +109,7 @@ try {
   auth = createLocalPakeClient({
     accountOrigin, workspaceOrigin, openAttempt: () => openLoginAttempt(module),
   });
+  transfer = createWorkspaceTransfer({ accountOrigin, workspaceOrigin });
   if (!cancelled.signal.aborted) {
     show("ready", "Use the synthetic web account for this test.");
     enable(true);

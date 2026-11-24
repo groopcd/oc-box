@@ -148,6 +148,16 @@ class LocalNamedSignIn:
         finally:
             self._pairs.release()
 
+    def handoff_available(self, ticket):
+        """Cross-site document gate only: this does not authenticate the browser."""
+        return (
+            self._live()
+            and self._handoff.available(
+                self._binding, ticket, auth_origin=self._auth_origin
+            )
+            and self._live()
+        )
+
     def expire(self):
         self._handoff.expire()
         self._flow.expire()

@@ -14,7 +14,7 @@
     <section class="login-card">
       <p class="eyebrow">oc-box / Web sign-in</p>
       <h1 id="login-title">Sign in to the test workspace</h1>
-      <p id="login-help">Synthetic integration only. Never enter real credentials. This page does not open a workspace.</p>
+      <p id="login-help">Synthetic integration only. Never enter real credentials. No live workspace is connected.</p>
       <form id="login-form" autocomplete="off" data-state="loading">
         <label for="login-user">Web username</label>
         <input type="text" id="login-user" required disabled autocomplete="off" autocapitalize="none"
@@ -25,6 +25,7 @@
         <p id="login-status" role="status">Preparing local sign-in…</p>
         <button id="login-submit" type="submit" disabled>Sign in</button>
       </form>
+      <button id="login-continue" type="button" disabled hidden>Continue to workspace</button>
     </section>
   </main>
 </body>
