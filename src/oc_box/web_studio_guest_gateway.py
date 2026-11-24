@@ -57,6 +57,7 @@ class _ManagedGateway:
         self._gateway = self._listener = self._binding = self._acceptor = None
         self._studio_requested = studio
         self._studio = None
+        self._retained_result = None
         self._workers = web_guest_worker_drain.AcceptedWorkers(activities_per_worker=1)
         self._relays_lock = Lock()
         self._relays = set()
@@ -271,32 +272,110 @@ class _ManagedGateway:
         is transport/lease evidence only; it is not permission to stop an
         application job, sync history, or retire the owner.
         """
+        return (
+            self.drain_review(join_timeout=join_timeout)
+            is web_guest_worker_drain.DrainReview.VERIFIED
+        )
+
+    def drain_review(self, *, join_timeout=5.0):
+        """Report a bounded join separately from an unverified outcome."""
+        verdict = web_guest_worker_drain.DrainReview
         if (
             current_thread() is not self._foreground
             or not self._start_attempted
             or type(join_timeout) not in (int, float)
             or not 0 <= join_timeout <= 30
         ):
-            return False
+            return verdict.UNCONFIRMED
         deadline = monotonic() + join_timeout
         self._fence()
         if not self._started:
-            return False
+            return verdict.UNCONFIRMED
         self._acceptor.join(max(0.0, deadline - monotonic()))
         if self._acceptor.is_alive():
-            return False
-        workers_drained = self._workers.close(timeout=max(0.0, deadline - monotonic()))
-        with self._relays_lock:
-            relays_drained = not self._relays
-        return (
+            return verdict.UNCONFIRMED if self._failed.is_set() else verdict.WAITING
+        if not (
             self._accept_finished
             and self._listener_closed
             and self._gateway.listener is self._listener._listener
             and self._gateway._listener_proof is self._listener
             and self._pending_accept is None
-            and workers_drained
-            and relays_drained
+            and not self._failed.is_set()
+        ):
+            return verdict.UNCONFIRMED
+        workers = self._workers.close_review(timeout=max(0.0, deadline - monotonic()))
+        if workers is not verdict.VERIFIED:
+            return verdict.UNCONFIRMED if self._failed.is_set() else workers
+        with self._relays_lock:
+            relays_drained = not self._relays
+        if (
+            relays_drained
             and (self._studio is None or self._studio.drained())
             and not self._failed.is_set()
             and self._binding.lease_current()
-        )
+        ):
+            return verdict.VERIFIED
+        return verdict.UNCONFIRMED
+
+
+_NOT_CAPTURED = object()
+
+
+class _RetainedRunResult:
+    """Unserved foreground result; owning scope and exact handle must stay held.
+
+    This never releases a lease, clears a stop record, chooses an exit code,
+    syncs history, or stops anything. A future caller must arm its durable
+    lifecycle fence before startup and prevent ordinary unwind on uncertainty.
+    """
+
+    def __init__(self, gateway):
+        if (
+            type(gateway) is not _ManagedGateway
+            or gateway._foreground is not current_thread()
+            or not gateway._owner._in_original_scope()
+            or gateway._retained_result is not None
+        ):
+            raise web_studio_guest_binding.GuestBindingError()
+        self._gateway = gateway
+        self._raw = _NOT_CAPTURED
+        self._verdict = None
+        gateway._retained_result = self
+
+    def _foreground(self):
+        if (
+            self._gateway._foreground is not current_thread()
+            or not self._gateway._owner._in_original_scope()
+        ):
+            raise web_studio_guest_binding.GuestBindingError()
+
+    def capture(self, raw):
+        """Capture a raw nonzero/signal result or explicit unknown exactly once."""
+        self._foreground()
+        if self._raw is not _NOT_CAPTURED or (
+            raw is not None and (type(raw) is not int or not -255 <= raw <= 255)
+        ):
+            raise web_studio_guest_binding.GuestBindingError()
+        self._raw = raw
+
+    @property
+    def raw(self):
+        if self._raw is _NOT_CAPTURED:
+            raise web_studio_guest_binding.GuestBindingError()
+        return self._raw
+
+    def observe(self, *, join_timeout=5.0):
+        """Re-observe only an explicit pending join, never an unknown outcome."""
+        self._foreground()
+        _ = self.raw  # The raw result is independent of every drain observation.
+        verdict = web_guest_worker_drain.DrainReview
+        if self._verdict in (verdict.VERIFIED, verdict.UNCONFIRMED):
+            return self._verdict
+        self._verdict = verdict.UNCONFIRMED
+        try:
+            result = self._gateway.drain_review(join_timeout=join_timeout)
+        except (KeyboardInterrupt, Exception):
+            return self._verdict
+        if type(result) is verdict:
+            self._verdict = result
+        return self._verdict
