@@ -134,6 +134,7 @@ REASONS = frozenset(
         "stop-requested",
         "build-plugin-failed",
         "stage-image",
+        "scratch-creation",
     }
 )
 METRICS = frozenset(

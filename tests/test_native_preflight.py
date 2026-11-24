@@ -325,6 +325,7 @@ class PreflightTests(unittest.TestCase):
         self.assertFalse(any("--publish" in cmd for cmd in create))
         self.assertIn("--network=pasta:--no-map-gw", create[0])
         self.assertIn("--network=none", create[1])
+        self.assertFalse(any(arg.startswith("--dns") for arg in create[1]))
         self.assertIn(":/scratch:ro,", create[1][create[1].index("--volume") + 1])
         self.assertIn(("rm", "c" * 64), commands[: commands.index(create[1])])
         self.assertEqual(
@@ -420,9 +421,16 @@ class PreflightTests(unittest.TestCase):
 
     def test_uncertain_create_recovers_only_a_matching_identity(self):
         self.engine.ambiguous_create = True
-        self.refused("stage")
+        self.refused("scratch-create")
         self.assertFalse(self.engine.objects)
         self.assertIn(("rm", "c" * 64), [cmd for _, _, cmd, _ in self.engine.calls])
+        budgets = [
+            limits["timeout"]
+            for _, _, args, limits in self.engine.calls
+            if args[0] == "create"
+        ]
+        self.assertEqual(budgets, [90])
+        self.assertLess(preflight._CONTROL_SECONDS, budgets[0])
 
 
 class EmbeddedCodeTests(unittest.TestCase):
