@@ -356,15 +356,17 @@ class HostClipboardPreferenceTests(unittest.TestCase):
         before = policy.read_bytes()
         stack = self.main_fixture()
         stack.enter_context(patch.dict(box.os.environ, {"OC_BOX_CONTAINER": "0"}))
-        stack.enter_context(
-            patch.object(box, "detect_opencode_release", return_value="2.3.2")
-        )
+        native = stack.enter_context(patch.object(box, "detect_opencode_release"))
         stack.enter_context(
             patch.object(
                 box, "run", side_effect=AssertionError("unexpected host command")
             )
         )
-        connection = {"url": "http://127.0.0.1:12345", "session": None}
+        connection = {
+            "url": "http://127.0.0.1:12345",
+            "session": None,
+            "version": "2.3.2",
+        }
         stack.enter_context(
             patch.object(box.workspace_service, "controller_running", return_value=True)
         )
@@ -381,13 +383,18 @@ class HostClipboardPreferenceTests(unittest.TestCase):
         unlock = stack.enter_context(patch.object(box, "launch_credentials"))
         self.assertEqual(box.main(["web", "--workspace", self.ident, "--no-open"]), 0)
         self.discover.assert_not_called()
+        native.assert_not_called()
         unlock.assert_not_called()
         self.assertEqual(policy.read_bytes(), before)
 
     def test_new_workspace_saves_explicit_choice_before_owner_credentials(self):
         stack = self.main_fixture()
         stack.enter_context(
-            patch.object(box, "find_workspace", return_value=(None, None))
+            patch.object(
+                box,
+                "find_workspace",
+                side_effect=[(None, None), (self.path, self.data)],
+            )
         )
         project = Path(self.data["project"])
         stack.enter_context(patch.object(box, "validate_project", return_value=project))

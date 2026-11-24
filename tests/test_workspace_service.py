@@ -1445,6 +1445,29 @@ class WorkspaceServiceTests(unittest.TestCase):
         self.assertIn("ses_shared", tui.call_args.args[0])
         prepare.assert_not_called()
 
+    def test_browser_owner_loss_after_initial_observation_never_falls_back_to_start(
+        self,
+    ):
+        with (
+            patch.object(box, "check_backend"),
+            patch.object(
+                service, "controller_running", side_effect=(True, False)
+            ) as observation,
+            patch.object(
+                service, "attach", side_effect=box.BoxError("Synthetic owner exited.")
+            ) as attach,
+            patch.object(box, "detect_opencode_release") as discover,
+            patch.object(box, "_locked_workspace_command") as launch,
+            patch.object(vault, "hidden") as prompt,
+        ):
+            with self.assertRaisesRegex(box.BoxError, "Synthetic owner exited"):
+                box.main(["web", "--workspace", self.data["id"], "--no-open"])
+        observation.assert_called_once()
+        attach.assert_called_once()
+        discover.assert_not_called()
+        launch.assert_not_called()
+        prompt.assert_not_called()
+
     def test_additional_native_clients_choose_host_open_independently_of_owner(self):
         self.data["opencode_version"] = "2.3.2"
         self.connection["version"] = "2.3.2"

@@ -75,7 +75,7 @@ def _activity_log():
     return activity_log
 
 
-def _preparation_hint():
+def preparation_hint():
     if __package__:
         from .log_config import overridden_directory
     else:
@@ -92,7 +92,7 @@ def _preparation_hint():
 
 def preparation_failure_hint(report):
     if report.get("recorded"):
-        return f"Details: {_preparation_hint()}."
+        return f"Details: {preparation_hint()}."
     return "Preparation result could not be logged; use --verbose on a later launch for live output."
 
 
@@ -111,11 +111,11 @@ def preparation_label(task):
 
 
 @contextmanager
-def preparation(task):
+def preparation(task, *, quiet=False, metrics=None):
     """Publish fixed metadata at subprocess boundaries, never child output."""
     current = _CURRENT.get()
     report = {"outcome": "failure"}
-    if not preparing_environment():
+    if current is None or current.command not in _activity_log().PREPARATION_COMMANDS:
         yield report
         return
     activity = _activity_log()
@@ -127,6 +127,8 @@ def preparation(task):
         "workspace": current.workspace,
         "stage": task,
     }
+    if metrics is not None:
+        fields["metrics"] = metrics
 
     def append(event, **details):
         # A best-effort log append must not mask a failure or an interrupt
@@ -137,9 +139,9 @@ def preparation(task):
             return False
 
     recorded = append("preparation.started", level="debug")
-    if not live_preparation_output():
+    if not quiet and not live_preparation_output():
         if recorded:
-            hint = "details: " + _preparation_hint()
+            hint = "details: " + preparation_hint()
         else:
             hint = "log unavailable; use --verbose for live output"
         with suppress(OSError, ValueError):
