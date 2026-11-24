@@ -151,6 +151,16 @@ def _descriptor(control):
     return fd, info.st_dev, info.st_ino
 
 
+def _quiet_control(control, descriptor):
+    if _descriptor(control) != descriptor:
+        return False
+    poll = select.poll()
+    poll.register(descriptor[0], select.POLLIN | select.POLLRDHUP)
+    # A completed attach never sends another reply. EOF, error or even
+    # unexpected data is loss, without reading from a borrowed socket.
+    return not poll.poll(0) and _descriptor(control) == descriptor
+
+
 @dataclass(frozen=True, slots=True, eq=False, repr=False)
 class BoundNamedApp:
     sign_in: web_named_local.LocalNamedSignIn
@@ -195,14 +205,7 @@ class NamedOwnerBinding:
         return self._binding
 
     def _quiet_control(self):
-        control = self._lease.control
-        if _descriptor(control) != self._control:
-            return False
-        poll = select.poll()
-        poll.register(self._control[0], select.POLLIN | select.POLLRDHUP)
-        # A completed attach never sends another reply. EOF, error or even
-        # unexpected data is loss, without reading from a borrowed socket.
-        return not poll.poll(0) and _descriptor(control) == self._control
+        return _quiet_control(self._lease.control, self._control)
 
     def _owner_current(self, binding):
         if (

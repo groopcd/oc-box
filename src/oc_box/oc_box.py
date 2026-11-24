@@ -1225,7 +1225,11 @@ def workspace_lock(path):
             raise BoxError(
                 "This workspace already has an active oc-box process. Exit it before changing its environment."
             ) from exc
-        yield
+        held = workspace_service.LIFECYCLE_LOCK.set((path, stream))
+        try:
+            yield
+        finally:
+            workspace_service.LIFECYCLE_LOCK.reset(held)
 
 
 def repair_workspace(path, data):

@@ -129,7 +129,7 @@ def _deadline_timeout(deadline, maximum=60):
     return min(maximum, remaining)
 
 
-def _deadline_http(parsed, method, path, data, headers, deadline):
+def _deadline_http(parsed, method, path, data, headers, deadline, *, max_body=None):
     """Public HTTPConnection socket access keeps every I/O within one budget."""
     connection = HTTPConnection(
         parsed.hostname, parsed.port, timeout=_deadline_timeout(deadline)
@@ -141,16 +141,23 @@ def _deadline_http(parsed, method, path, data, headers, deadline):
         connection.request(method, path, body=data, headers=headers)
         stream.settimeout(_deadline_timeout(deadline))
         with connection.getresponse() as response:
+            if max_body is not None and response.status != 200:
+                raise FixedError(READINESS)
             if response.status >= 400:
                 raise HTTPError(
                     path, response.status, "Private request failed", {}, None
                 )
-            chunks = []
+            chunks, size = [], 0
             while not response.isclosed():
                 stream.settimeout(_deadline_timeout(deadline))
-                chunk = response.read1(65536)
+                chunk = response.read1(
+                    65536 if max_body is None else max_body + 1 - size
+                )
                 if not chunk:
                     break
+                size += len(chunk)
+                if max_body is not None and size > max_body:
+                    raise FixedError(READINESS)
                 chunks.append(chunk)
             _deadline_timeout(deadline)
             body = b"".join(chunks)
@@ -181,11 +188,17 @@ def endpoint_request(endpoint):
     auth = "Basic " + base64.b64encode(("opencode:" + password).encode()).decode()
     opener = build_opener(ProxyHandler({}))
 
-    def request(method, path, data=None, *, deadline=None):
+    def request(method, path, data=None, *, deadline=None, max_body=None):
         headers = {"Authorization": auth, "Content-Type": "application/json"}
         encoded = json.dumps(data).encode() if data is not None else None
         if deadline is not None:
+            if max_body is not None:
+                return _deadline_http(
+                    parsed, method, path, encoded, headers, deadline, max_body=max_body
+                )
             return _deadline_http(parsed, method, path, encoded, headers, deadline)
+        if max_body is not None:
+            raise FixedError(READINESS)
         req = Request(
             address.rstrip("/") + path,
             method=method,
@@ -1046,6 +1059,23 @@ def ready_plugins(request, directory, *, startup_deadline=None):
     raise FixedError(BUILD_PLUGIN_TIMEOUT)
 
 
+def _verify_named_owner(request, deadline):
+    """Confirm the actual private native release before granting owner readiness."""
+    info = request(
+        "GET", "/api/info", deadline=min(deadline, time.monotonic() + 2), max_body=8192
+    )
+    if (
+        not request.alive()
+        or type(info) is not dict
+        or info.keys() != {"pid", "version", "urls"}
+        or info["version"] != "2.3.2"  # Exact audited named pairing release.
+        or type(info["pid"]) is not int
+        or not 0 < info["pid"] <= 2**31 - 1
+        or info["urls"] != [request.endpoint["url"].rstrip("/")]
+    ):
+        raise FixedError(READINESS)
+
+
 def main(argv):
     action, binary = argv
     if action == "seed":
@@ -1076,12 +1106,14 @@ def main(argv):
             endpoint_request(settings["endpoint"]), settings["members"]
         )
         print(json.dumps(value), flush=True)
-    elif action == "lease":
+    elif action in ("lease", "named-lease"):
         descriptor = require_control_pipe()
         # Leave time for the owner-side control wait and service teardown.
         deadline = time.monotonic() + 165
         with server(binary, startup_deadline=deadline) as request:
             ready_plugins(request, os.getcwd(), startup_deadline=deadline)
+            if action == "named-lease":
+                _verify_named_owner(request, deadline)
             # Control credentials are returned only through the owner's pipe,
             # kept in memory, and never written to the workspace or service.json.
             write_control_record(descriptor, request.endpoint)
