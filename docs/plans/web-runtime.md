@@ -79,6 +79,14 @@ never includes a ticket in a URL or accepts a password field. The account
 step yields only a bootstrap cookie; the reviewed login assets, response
 writer and live routing still need to be connected.
 
+`tests/smoke_named_bootstrap_browser.py` exercises these exact handlers with
+Chromium on two synthetic loopback HTTPS sites. A fresh browser home trusts
+only the test CA added to its private NSS database for this fixture. The test
+verifies a real cross-site form submission, host-only bootstrap cookies, and
+replay refusal without certificate bypass or changes to the operator's trust.
+It does not establish durable enrollment, named workspace admission, or
+external-host acceptance.
+
 The unserved named HTTPS transport takes ownership of one accepted connection,
 selects a validated TLS context and role by the actual IPv4 loopback endpoint,
 then checks that role's exact HTTP/1.1 method, route and origin. Before reading
