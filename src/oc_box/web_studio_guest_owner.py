@@ -174,6 +174,15 @@ class GuestOwnerProof:
     def pinned_data(self):
         return {**self.data, "container": self._run[0]}
 
+    def _in_original_scope(self):
+        held = workspace_service.LIFECYCLE_LOCK.get()
+        return (
+            type(held) is tuple
+            and len(held) == 2
+            and held[0] == self.owner.path
+            and held[1] is self._lock_file
+        )
+
     def worker_command(self, source):
         box = self.owner.box
         return box.exec_command(

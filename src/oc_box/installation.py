@@ -49,6 +49,7 @@ RUNTIME_FILES = (
     "web_studio_guest.py",
     "web_studio_guest_binding.py",
     "web_studio_guest_cookie_duplex.py",
+    "web_studio_guest_gateway.py",
     "web_studio_guest_ingress.py",
     "web_studio_guest_native.py",
     "web_studio_guest_owner.py",

@@ -1796,7 +1796,7 @@ def _gateway_socket_identity(listener):
 class _GatewayListenerProof:
     """Listener evidence only; never an owner lease or worker drain verdict."""
 
-    def __init__(self, gateway, *, probe_only):
+    def __init__(self, gateway, *, probe_only, managed=False):
         if gateway.closed.is_set() or gateway._listener_proof is not None:
             raise _GatewayListenerError()
         self._gateway = gateway
@@ -1806,6 +1806,8 @@ class _GatewayListenerProof:
         )
         self._lock = threading.Lock()
         self._probe_only = probe_only
+        self._managed = managed
+        self._managed_binding = None
         self._listening = False
         self._retired = False
 
@@ -1864,22 +1866,23 @@ class _GatewayListenerProof:
         )
 
     def _close_original(self):
-        # Startup/unserved cleanup must not close a different socket that
-        # replaced the descriptor. No shutdown/drain claim follows from this.
+        # Never close a different socket that replaced the descriptor.
+        # This confirms only the local close, not acceptor or worker drain.
         with self._lock:
             self._retired = True
             if self._listener.fileno() < 0:
-                return
+                return False
             try:
                 original = _gateway_socket_identity(self._listener) == self._identity
             except (OSError, ValueError):
                 original = False
             if original:
                 self._listener.close()
-            else:
-                # Fail closed without leaving a Python finalizer that could
-                # later close a descriptor now owned by a different socket.
-                self._listener.detach()
+                return self._listener.fileno() < 0
+            # Fail closed without leaving a Python finalizer that could
+            # later close a descriptor now owned by a different socket.
+            self._listener.detach()
+            return False
 
 
 class Gateway:
@@ -1909,7 +1912,7 @@ class Gateway:
         self.listener = None
         self._listener_proof = None
 
-    def _reserve_listener(self, *, probe_only=False):
+    def _reserve_listener(self, *, probe_only=False, managed=False):
         """Bind the actual gateway socket, not the disposable port preflight."""
         if self.listener is not None or self.closed.is_set():
             raise _GatewayListenerError()
@@ -1919,7 +1922,7 @@ class Gateway:
             listener.bind(("127.0.0.1", self.port))
             try:
                 self._listener_proof = _GatewayListenerProof(
-                    self, probe_only=probe_only
+                    self, probe_only=probe_only, managed=managed
                 )
             except (AttributeError, OSError, ValueError):
                 raise _GatewayListenerError() from None
@@ -1944,6 +1947,7 @@ class Gateway:
             type(proof) is not _GatewayListenerProof
             or proof is not self._listener_proof
             or proof._probe_only
+            or proof._managed
         ):
             raise _GatewayListenerError()
         listener = proof._listener

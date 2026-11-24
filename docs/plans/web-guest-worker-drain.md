@@ -1,9 +1,11 @@
 # Accepted browser worker drain (unserved)
 
 `web_guest_worker_drain.AcceptedWorkers` is private bookkeeping for **one**
-already-proven Gateway listener lifetime. There is no Gateway caller in this
-change. The tracker does not listen, accept, spawn a native process, authenticate
-a request, store credentials, or release the original owner. It starts only
+already-proven Gateway listener lifetime. The
+[managed Gateway composition](web-studio-managed-gateway.md) uses it privately;
+there is no launcher caller. The tracker does not listen, accept, spawn a
+native process, authenticate a request, store credentials, or release the
+original owner. It starts only
 explicitly dispatched host threads; the tests use local socket pairs and
 synthetic helpers.
 
@@ -89,4 +91,5 @@ exact clean reap. This tracker does not approximate that protocol.
 
 The [unserved native duplex worker and host verifier](web-guest-duplex-worker.md)
 exercise that handshake and exact local reap on synthetic pipes and loopback.
-Real Podman stdio and Gateway/lifecycle wiring remain separate work.
+Live Gateway/owner lifecycle acceptance remains separate from the private
+composition and from the source-specific Podman transport gate.
