@@ -1,0 +1,81 @@
+# Studio integration gates
+
+The approved Studio layout and the chat behavior are not the outstanding
+design questions. The remaining gates concern who can authorize a browser
+request, what must have stopped before the launcher releases a workspace,
+and what data the host is allowed to remove.
+
+## One-use Studio: bind the existing gateway, do not add a new login
+
+The native pairing cookie authenticates a browser to OpenCode. It does not
+identify which host gateway reserved the original socket or which launcher
+holds the workspace. The owner, listener and native cookie proofs now have
+separate sources of evidence. A first-party adapter must join them for the
+same lease, without changing how the native link or native UI works.
+
+The owning launcher can pass its original owner directly. An attach-only
+client cannot reconstruct that proof from a same-user connection, a copied
+URL, or the native PID alone. Support attach-only Studio only after a
+reviewed generation-bound exchange on the original counted stream. Never
+redial, start another owner, or unlock credentials on an attach failure.
+
+Revocation and drain are separate. To turn on routes, account for all
+accepted sockets and relay processes from before dispatch through verified
+retirement, including persistent native WebSockets. A socket being closed,
+or a client count reaching zero, does not establish that in-container work
+has stopped. A Studio grant must not outlive native cookie authority:
+recheck the native scope before sensitive operations and fence observed
+logout or uncertainty. Never turn a browser cookie into a host capability.
+
+## Named HTTPS: the stop fence must cover every supported writer
+
+A stop requested from another terminal must be an intent for this exact
+owner. The owner must revoke its browser admission and confirm worker
+drain before history synchronization and stopping the same container.
+Neither a lost control socket nor PID reuse proves completion. The
+separately tested fence is durable across launcher loss, but the ordinary
+older launchers can still recognize the same workspace and ignore it.
+A fresh-registration-only model needs an enforced compatibility boundary,
+not a rule that treats a missing fence as an ordinary workspace. Backup,
+reset, sync and purge must honor the same lifetime rules.
+
+Enrollment also needs a trusted browser entry and a separate local
+approval before atomically comparing and replacing the exact encrypted
+account store. The tested final reply gate only makes a proof eligible for
+review. It does not grant this approval or write the store. Select and
+independently review the exact authentication artifacts, dependencies,
+licenses and applicable IPR before deployment or distribution. Native
+workspace/provider vault credentials stay on the host; named browser
+credentials give no host-management authority.
+
+## Full uninstall: prove that deletion cannot target a replacement
+
+The mounted-rootfs and same-device alias controls show that the diagnostic
+can recognize known examples in a pinned disposable store. They do not
+prove that every consumer and mount is visible in an ordinary per-user
+Podman store. Nor do launcher locks stop another Podman process from
+replacing a volume after a check. A name-based `volume rm` is not an
+identity-conditional operation.
+
+Admit only a store profile that can enforce exclusion through the final
+native mutation and independent postcheck. Require exact reviewed scope,
+durable records for uncertain results, and a separate typed confirmation.
+Refuse the whole operation on ambiguity, rather than doing a narrower
+deletion. Never access or remove host OpenCode history, project files or
+markers, or external backups. Launcher-only uninstall is a separate path
+with its own acceptance.
+
+## Browser manager and runtime safeguard
+
+Provide live Status and Sessions only for the authorized workspace.
+Page-local Settings are not saved host policy. Host-wide Terminals, Logs,
+Storage and Backup need separately authorized operations; guidance is not
+an implementation of them.
+
+The guarded-owner same-version lifecycle and a real forward upgrade are
+separate acceptance cases. The forward case must use the original
+container/volume, verify actual authenticated readiness and retained
+history, and confirm owner and container shutdown. It must not introduce
+automatic downgrade or cold fallback. Final branch and non-publishing CI
+checks must use the exact combined candidates and do not authorize release
+publication.
