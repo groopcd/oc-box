@@ -1,16 +1,15 @@
-"""One browser attempt for a reviewed host enrollment; no listener or store I/O.
+"""Staged, host-reviewed enrollment; no listener, store write or app grant.
 
-The host must approve the exact account/scope and supply a server-verified
-account bootstrap nonce, not a value accepted from a request body. Only the
-trusted host may take a verified upload. Persistence still requires the
-masked host confirmation, an exclusive owner/admission fence, and the account
-store's compare-and-swap. Neither a request nor a proof grants workspace
-access. Keep all protocol values out of logs and URLs.
+The host supplies a verified bootstrap claim for the exact review and transfers
+two dedicated, already-pinned workers. Browser requests select neither the
+account nor the workspace scope, and carry no raw password. Keep protocol
+values out of logs/URLs. Only the trusted host may take the verified result;
+it must still enforce local confirmation, owner exclusion and the store CAS.
 """
 
-import re
 import secrets
 from collections.abc import Callable
+from contextlib import contextmanager
 from dataclasses import dataclass
 from hashlib import sha256
 from threading import Lock
@@ -22,29 +21,30 @@ if __package__:
         web_bootstrap,
         web_local_origins,
         web_pake_flow,
+        web_pake_profile,
         web_pake_worker,
+        web_registration_worker,
     )
-    from .web_pake_profile import _identifier
 else:
     import web_accounts
     import web_bootstrap
     import web_local_origins
     import web_pake_flow
+    import web_pake_profile
     import web_pake_worker
-    from web_pake_profile import _identifier
+    import web_registration_worker
 
 
-_NONCE = re.compile(r"[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]")
 _SETUP_SIZE = 128
 _REQUEST_SIZE = 32
 _RESPONSE_SIZE = 64
 _RECORD_SIZE = 192
-
-
-def _token(value):
-    return (
-        type(value) is str and len(value) == 43 and _NONCE.fullmatch(value) is not None
-    )
+_SIZES = web_pake_worker.LAB_SIZES
+_CLEANUP_ERRORS = (
+    web_pake_flow.VerifierCleanupError,
+    web_pake_worker.PakeWorkerCleanupError,
+    web_registration_worker.RegistrationCleanupError,
+)
 
 
 def _frame(value, size):
@@ -55,10 +55,23 @@ def _digest(token):
     return sha256(token.encode("ascii")).digest()
 
 
+class EnrollmentCleanupError(RuntimeError):
+    """Fixed refusal; retain the owner fence until explicit drain succeeds."""
+
+    def __init__(self):
+        super().__init__("Web enrollment worker cleanup was not confirmed.")
+
+
 @dataclass(frozen=True, slots=True, repr=False)
 class RegistrationResponse:
     challenge: str
     response: bytes
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class EnrollmentProofChallenge:
+    ke2: bytes
+    context: bytes
 
 
 @dataclass(frozen=True, slots=True, repr=False)
@@ -69,12 +82,12 @@ class VerifiedEnrollment:
 
 
 class EnrollmentApproval:
-    """Monotonic one-shot protocol; backend callbacks are trusted host code.
+    """One exact bootstrap and review, with distinct OCOR and OCOP rounds.
 
-    The backend is responsible for a pinned implementation, deadlines and
-    verified cleanup. A slow callback cannot be interrupted by this object;
-    its result is discarded after expiry or close. External owner exclusion
-    is not established by this protocol or by a matching browser nonce.
+    Successful construction transfers ownership of both workers. Never share
+    either with a sign-in flow or another approval: expiry/close retires them.
+    The owner calls expire() while awaiting browser work, and verifies close()
+    before dropping its teardown fence. This does not acquire owner exclusion.
     """
 
     def __init__(
@@ -83,9 +96,8 @@ class EnrollmentApproval:
         review,
         origins,
         claim,
-        respond,
-        validate,
-        prove,
+        registration_worker,
+        proof_profile,
         ttl=90,
     ):
         if (
@@ -93,12 +105,14 @@ class EnrollmentApproval:
             or type(origins) is not web_local_origins.LocalOrigins
             or type(claim) is not web_bootstrap.EnrollmentClaim
             or claim.origin != origins.account.value
+            or claim.workspace_origin != origins.workspace.value
             or type(review.workspace_ids) is not tuple
             or claim.workspace_id not in review.workspace_ids
             or not _frame(review.setup, _SETUP_SIZE)
-            or not callable(respond)
-            or not callable(validate)
-            or not callable(prove)
+            or type(registration_worker)
+            is not web_registration_worker.RegistrationWorker
+            or type(proof_profile) is not web_pake_profile.LocalPakeProfile
+            or not proof_profile.matches(origins)
             or type(ttl) not in (int, float)
             or not 0 < ttl <= 120
         ):
@@ -109,187 +123,252 @@ class EnrollmentApproval:
         self._review = review
         self._origin = origins.account.value
         self._claim = claim
-        self._bindings = {
-            "credential_identifier": _identifier(b"credential", name),
-            "client_identifier": _identifier(b"client", name),
-            "verifier_identifier": _identifier(
-                b"verifier", self._origin.encode("ascii")
-            ),
-        }
-        self._respond = respond
-        self._validate = validate
-        self._prove = prove
+        self._username = name
+        self._credential = web_pake_profile._identifier(b"credential", name)
+        self._registrar = registration_worker
+        self._profile = proof_profile
         self._deadline = monotonic() + ttl
         self._phase = "approved"
-        self._challenge = None
-        self._record = None
-        self._callbacks = 0
+        self._challenge = self._record = self._proof = None
+        self._busy = False
+        self._draining = self._drain_attempted = self._workers_drained = False
         self._cleanup_uncertain = False
         self._lock = Lock()
 
-    def _matching(self, origin, nonce):
-        return self._claim.matches(origin, nonce)
-
     def _close_locked(self):
         self._phase = "closed"
-        self._challenge = self._record = None
-        self._review = None
+        self._challenge = self._record = self._proof = self._review = None
 
     def _current_locked(self, phase):
-        if monotonic() >= self._deadline or not self._claim.current():
+        if self._phase != "closed" and (
+            monotonic() >= self._deadline or not self._claim.current()
+        ):
             self._close_locked()
         return self._phase == phase
 
+    def _fence_locked(self):
+        self._cleanup_uncertain = True
+        self._close_locked()
+
+    @property
+    def cleanup_failed(self):
+        """Sticky uncertainty; a later confirmed reap never restores authority."""
+        with self._lock:
+            return self._cleanup_uncertain
+
     def drained(self):
-        """Check callback completion and any latched cleanup uncertainty."""
+        """True only after both workers and the in-flight callback have drained."""
         with self._lock:
-            return self._callbacks == 0 and not self._cleanup_uncertain
+            return self._workers_drained and not self._busy
 
-    def _after_callback(self, success):
+    def _drain_workers(self, *, recheck=False):
         with self._lock:
-            self._callbacks -= 1
-            if not success:
-                self._close_locked()
+            if self._workers_drained:
+                return True
+            if self._draining or (self._drain_attempted and not recheck):
+                return False
+            self._draining = self._drain_attempted = True
+        confirmed = False
+        try:
+            results = []
+            # Never wait for a worker while holding the approval lock.
+            for worker in (self._registrar, self._profile):
+                try:
+                    results.append(worker.close() is True)
+                except Exception:  # noqa: BLE001 - no raw worker error at the host boundary.
+                    results.append(False)
+            confirmed = all(results)
+        finally:
+            with self._lock:
+                self._draining = False
+                self._workers_drained = confirmed
+                if not confirmed:
+                    self._fence_locked()
+        return confirmed
 
-    def _fence_cleanup(self):
+    def _drain_closed(self):
         with self._lock:
-            self._cleanup_uncertain = True
-            self._close_locked()
+            closed = self._phase == "closed"
+        if closed:
+            self._drain_workers()
 
-    def start(self, *, account_origin, account_nonce, request):
-        """Return at most one response for this browser and reviewed account."""
-        if not self._matching(account_origin, account_nonce):
+    def _reserve(self, origin, nonce, phase, running, challenge, valid):
+        if not self._claim.matches(origin, nonce):
+            self.expire()
             return None
         with self._lock:
-            if not self._current_locked("approved"):
-                return None
-            if not _frame(request, _REQUEST_SIZE):
-                self._close_locked()
-                return None
-            setup = self._review.setup
-            self._phase = "responding"
-            self._callbacks += 1
-        finished = False
+            if self._current_locked(phase) and not self._busy:
+                if phase != "approved" and (
+                    not web_bootstrap._valid(challenge)
+                    or not secrets.compare_digest(_digest(challenge), self._challenge)
+                ):
+                    return None  # Another browser/challenge cannot burn the attempt.
+                if valid:
+                    self._busy = True
+                    self._phase = running
+                    proof, self._proof = self._proof, None
+                    return self._review, proof
+                self._close_locked()  # A rightful malformed frame consumes its round.
+        self._drain_closed()
+        return None
+
+    @contextmanager
+    def _step(self, origin, nonce, phase, running, *, challenge=None, valid):
+        admitted = self._reserve(origin, nonce, phase, running, challenge, valid)
         try:
-            response = self._respond(
-                setup=setup, request=request, deadline=self._deadline, **self._bindings
+            yield admitted
+        except _CLEANUP_ERRORS:
+            with self._lock:
+                self._fence_locked()
+            raise EnrollmentCleanupError() from None
+        except (
+            OSError,
+            ValueError,
+            web_pake_worker.PakeWorkerError,
+            web_registration_worker.RegistrationError,
+        ):
+            pass
+        except Exception:  # noqa: BLE001 - unexpected worker failures are fixed and fenced.
+            with self._lock:
+                self._fence_locked()
+            raise EnrollmentCleanupError() from None
+        except BaseException:
+            with self._lock:
+                self._fence_locked()
+            raise
+        finally:
+            if admitted is not None:
+                with self._lock:
+                    if self._phase == running:
+                        self._close_locked()
+                    self._busy = False
+                self._drain_closed()
+
+    def start(self, *, account_origin, account_nonce, request):
+        """One blinded registration response, with a browser-bound challenge."""
+        with self._step(
+            account_origin,
+            account_nonce,
+            "approved",
+            "responding",
+            valid=_frame(request, _REQUEST_SIZE),
+        ) as admitted:
+            if admitted is None:
+                return None
+            review, _ = admitted
+            response = self._registrar.respond(
+                setup=review.setup,
+                credential_identifier=self._credential,
+                registration_request=request,
+                deadline=self._deadline,
             )
             if not _frame(response, _RESPONSE_SIZE):
                 return None
             challenge = secrets.token_urlsafe(32)
-            if not _token(challenge):
-                return None
-            challenge_hash = _digest(challenge)
-            if self._claim.matches(account_origin, challenge):
+            if not web_bootstrap._valid(challenge) or self._claim.matches(
+                account_origin, challenge
+            ):
                 return None
             with self._lock:
                 if not self._current_locked("responding"):
                     return None
-                self._challenge = challenge_hash
+                self._challenge = _digest(challenge)
                 self._phase = "upload"
-                finished = True
             return RegistrationResponse(challenge, response)
-        except (
-            web_pake_flow.VerifierCleanupError,
-            web_pake_worker.PakeWorkerCleanupError,
-        ):
-            self._fence_cleanup()
-            raise
-        except (OSError, ValueError, web_pake_worker.PakeWorkerError):
-            return None
-        except BaseException:
-            self._fence_cleanup()
-            raise
-        finally:
-            self._after_callback(finished)
+        return None
 
-    def finish(self, *, account_origin, account_nonce, challenge, registration):
-        """Validate one upload, then demand proof of possession before host take.
-
-        ``prove`` is a trusted coordinator for a fresh OCOP login using exactly
-        this tentative setup and record. It must not issue a sign-in handoff.
-        The caller must allow the proof's separate browser round trips and
-        confirmed cleanup; this is not a synchronous HTTP handler.
-        """
-        if not self._matching(account_origin, account_nonce) or not _token(challenge):
-            return False
-        with self._lock:
-            if not self._current_locked("upload") or not secrets.compare_digest(
-                _digest(challenge), self._challenge
-            ):
-                return False
-            if not _frame(registration, _RECORD_SIZE):
-                self._close_locked()
-                return False
-            self._challenge = None
-            self._phase = "validating"
-            self._callbacks += 1
-            setup = self._review.setup
-        finished = False
-        try:
-            checked = self._validate(
-                registration=registration, deadline=self._deadline, **self._bindings
+    def start_proof(
+        self, *, account_origin, account_nonce, challenge, registration, ke1
+    ):
+        """Validate one canonical upload, then return KE2 for its fresh KE1."""
+        with self._step(
+            account_origin,
+            account_nonce,
+            "upload",
+            "starting-proof",
+            challenge=challenge,
+            valid=_frame(registration, _RECORD_SIZE) and _frame(ke1, _SIZES.ke1),
+        ) as admitted:
+            if admitted is None:
+                return None
+            review, _ = admitted
+            record = self._registrar.validate_upload(
+                registration, deadline=self._deadline
             )
-            if not _frame(checked, _RECORD_SIZE) or not secrets.compare_digest(
-                checked, registration
-            ):
-                return False
-            with self._lock:
-                if not self._current_locked("validating"):
-                    return False
-                self._phase = "proving"
-            # Separate the enrollment proof from normal login. The public
-            # context never contains the account cookie or workspace IDs.
-            context = _identifier(
-                b"enrollment-proof", f"{self._origin}\n{challenge}".encode("ascii")
-            )
-            if (
-                self._prove(
-                    setup=setup,
-                    registration=checked,
-                    context=context,
-                    deadline=self._deadline,
-                    **self._bindings,
-                )
-                is not True
-            ):
-                return False
-            with self._lock:
-                if not self._current_locked("proving"):
-                    return False
-                self._record = checked
-                self._phase = "ready"
-                finished = True
-            return True
-        except (
-            web_pake_flow.VerifierCleanupError,
-            web_pake_worker.PakeWorkerCleanupError,
-        ):
-            self._fence_cleanup()
-            raise
-        except (OSError, ValueError, web_pake_worker.PakeWorkerError):
-            return False
-        except BaseException:
-            self._fence_cleanup()
-            raise
-        finally:
-            self._after_callback(finished)
-
-    def take_for_host(self):
-        """Take once after local confirmation and exclusion; never expose to HTTP."""
-        with self._lock:
-            if (
-                not self._current_locked("ready")
-                or self._callbacks
-                or self._cleanup_uncertain
+            if not _frame(record, _RECORD_SIZE) or not secrets.compare_digest(
+                record, registration
             ):
                 return None
-            result = VerifiedEnrollment(
-                self._review, self._record, self._taken_is_current
+            with self._lock:
+                if not self._current_locked("starting-proof"):
+                    return None
+            # Domain-separate from sign-in; never hash browser cookies, private
+            # workspace IDs or store/setup data into the public context.
+            context = web_pake_profile._identifier(
+                b"enrollment-proof", f"{self._origin}\n{challenge}".encode("ascii")
             )
-            self._phase = "taken"
-            self._review = self._record = None
-            return result
+            ke2, proof = self._profile.start(
+                setup=review.setup,
+                credential_identifier=self._username,
+                registration=record,
+                context=context,
+                ke1=ke1,
+                deadline=self._deadline,
+            )
+            if not _frame(ke2, _SIZES.ke2) or not callable(
+                getattr(proof, "finish", None)
+            ):
+                return None
+            with self._lock:
+                if not self._current_locked("starting-proof"):
+                    return None
+                self._record, self._proof = record, proof
+                self._phase = "proof"
+            return EnrollmentProofChallenge(ke2, context)
+        return None
+
+    def finish_proof(self, *, account_origin, account_nonce, challenge, ke3):
+        """Consume the exact KE3; only a verified, drained proof becomes ready."""
+        with self._step(
+            account_origin,
+            account_nonce,
+            "proof",
+            "finishing",
+            challenge=challenge,
+            valid=_frame(ke3, _SIZES.ke3),
+        ) as admitted:
+            if admitted is None:
+                return False
+            _, proof = admitted
+            if proof.finish(ke3) is not True:
+                return False
+            if not self._drain_workers():
+                return False
+            with self._lock:
+                if not self._current_locked("finishing") or self._cleanup_uncertain:
+                    return False
+                self._challenge = None
+                self._phase = "ready"
+                return True
+        return False
+
+    def take_for_host(self):
+        """Return the reviewed result once; never pass it to the browser."""
+        with self._lock:
+            if (
+                self._current_locked("ready")
+                and not self._busy
+                and self._workers_drained
+                and not self._cleanup_uncertain
+            ):
+                result = VerifiedEnrollment(
+                    self._review, self._record, self._taken_is_current
+                )
+                self._phase = "taken"
+                self._review = self._record = None
+                return result
+        self._drain_closed()
+        return None
 
     def _taken_is_current(self):
         with self._lock:
@@ -297,9 +376,12 @@ class EnrollmentApproval:
 
     def expire(self):
         with self._lock:
-            if monotonic() >= self._deadline or not self._claim.current():
-                self._close_locked()
+            self._current_locked("closed")
+        self._drain_closed()
 
     def close(self):
+        """Retire the approval; an explicit recheck can drain only these workers."""
         with self._lock:
             self._close_locked()
+        self._drain_workers(recheck=True)
+        return self.drained()

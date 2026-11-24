@@ -38,6 +38,7 @@ class EnrollmentClaim:
 
     workspace_id: str
     origin: str
+    workspace_origin: str
     _nonce_digest: bytes
     _current: Callable[[], bool]
     _bind_once: Callable[[], bool]
@@ -237,6 +238,7 @@ class BrowserBootstrap:
             return EnrollmentClaim(
                 binding.workspace_id,
                 auth_origin,
+                binding.origin,
                 key,
                 self._claim_guard(key, entry),
                 self._enrollment_bind_guard(key, entry),
