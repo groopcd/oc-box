@@ -389,22 +389,20 @@ class RuntimeSafeguardTests(unittest.TestCase):
             check.assert_not_called()
 
     def test_pinned_descriptor_executes_and_does_not_resolve_path_again(self):
-        # A distro ELF avoids inheriting the test interpreter's mode or loader paths.
-        source = shutil.which("printf", path="/usr/bin:/bin")
-        self.assertIsNotNone(source, "requires a system printf executable")
-        source = Path(source)
+        # Use a system ELF and a shell builtin, independent of how a distro
+        # dispatches external coreutils applets. Keep the executable's basename
+        # and argv[0] aligned for a shell provided by a multicall binary.
+        source = Path("/bin/sh")
         self.assertTrue(source.is_file())
-        # A system printf can be part of a larger multicall binary. Use the
-        # production size bound and copy a fixed amount in bounded chunks.
-        actual = self.root / "fixture-printf"
+        actual = self.root / "sh"
         with source.open("rb") as stream, actual.open("xb") as target:
             size = os.fstat(stream.fileno()).st_size
-            self.assertLessEqual(size, guard._MAX_BINARY)
-            self.assertEqual(stream.read(4), b"\x7fELF", "system printf must be an ELF")
+            self.assertLessEqual(size, min(8 * 1024 * 1024, guard._MAX_BINARY))
+            self.assertEqual(stream.read(4), b"\x7fELF", "system sh must be an ELF")
             stream.seek(0)
             while size:
                 block = stream.read(min(size, 1024 * 1024))
-                self.assertTrue(block, "system printf changed during the fixture copy")
+                self.assertTrue(block, "system sh changed during the fixture copy")
                 target.write(block)
                 size -= len(block)
             self.assertEqual(stream.read(1), b"")
@@ -418,15 +416,14 @@ class RuntimeSafeguardTests(unittest.TestCase):
                 command = selected.command(box)
                 self.assertEqual(command, f"/proc/{os.getpid()}/fd/{selected.fd}")
                 result = subprocess.run(
-                    # Preserve the applet name for multicall printf builds.
-                    ["printf", "%s\n", "pinned"],
+                    ["sh", "-c", "echo pinned"],
                     executable=command,
                     env={"PATH": str(self.root / "missing-bin")},
                     capture_output=True,
                     text=True,
                     timeout=15,
-                    check=True,
                 )
+                self.assertEqual(result.returncode, 0, result.stderr[:512])
                 self.assertEqual(result.stdout, "pinned\n")
             which.assert_called_once_with("opencode")
 
