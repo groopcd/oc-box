@@ -134,6 +134,39 @@ class HistoryRecoveryTests(unittest.TestCase):
             result = recovery.recover(box, self.path, self.data, self.source)
         return result, lease, synchronize
 
+    def test_guarded_24_snapshot_retains_the_exact_captured_digest_on_refusal(self):
+        digest = "d" * 64
+        self.data["opencode_version"] = "2.4.1"
+        refusals = []
+        self.assertIsNone(
+            recovery.capture(
+                box,
+                self.data,
+                self.info,
+                self.token,
+                refusal=refusals.append,
+                runtime_digest="not-a-proof",
+            )
+        )
+        self.assertEqual(refusals, ["runtime-executable-unverified"])
+        self.source = recovery.capture(
+            box, self.data, self.info, self.token, runtime_digest=digest
+        )
+        error = box.BoxError("synthetic refused native executable")
+        error.history_reader_category = "runtime-executable-unverified"
+        self.reader.__enter__.side_effect = error
+
+        result, lease, sync = self.recover()
+
+        self.assertIs(result, False)
+        self.assertEqual(lease.call_args.kwargs["runtime_digest"], digest)
+        self.assertEqual(lease.call_args.args[1]["container"], self.ident)
+        self.assertFalse(self.running)
+        self.assertEqual(self.calls.count("start"), 1)
+        self.assertEqual(self.calls.count("stop"), 2)
+        sync.assert_not_called()
+        self.assertIn("runtime-executable-unverified", self.output.getvalue())
+
     def test_one_existing_id_cycle_and_one_reader_after_verified_stop(self):
         result, lease, sync = self.recover()
         self.assertTrue(result)

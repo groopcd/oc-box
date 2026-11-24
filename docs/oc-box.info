@@ -1098,9 +1098,10 @@ export/import timeout or a duration limit for the entire
 synchronization.  This grace remains unchanged.  The two paths differ:
 
    • Automatic owner exit waits up to 30 seconds before live export.  An
-     eligible timeout, or a supported 2.3.x live-sync failure described
-     below, can then use one guarded post-stop reader attempt.  Checked
-     exports, host imports and native verification take additional time.
+     eligible timeout, or a qualifying live-sync failure on stable 2.3.x
+     or 2.4.x, can then use one guarded post-stop reader attempt.
+     Checked exports, host imports and native verification take
+     additional time.
    • Explicit ‘oc-box sync’ has no original owner's live-readiness wait.
      It uses the same checked archival implementation, with ordinary
      manual-sync preparation and cleanup.
@@ -1223,7 +1224,9 @@ never starts a native service, and is reaped before overall sync
 success.  Malformed or failed transport is not automatically restarted
 or replayed; data and retry guidance remain.  Destination imports and
 independent native verification remain unchanged.  Ordinary live/manual
-sync and V1 retain their existing transports.
+sync and V1 retain their existing transports.  Guarded manual sync uses
+the admitted executable and skips the ordinary unbound quiet-source
+optimization for native 2.3.0.
 
 This conservative path requires a passive container entrypoint, no
 custom Podman arguments or automatic health/restart/shell-loader hooks,
@@ -1231,27 +1234,30 @@ and validated identity/home mounts.  It also refuses native scheduler
 rows (including paused/completed rows), unknown scheduler schemas,
 unsafe stores and nonempty system OpenCode configuration.  Read-only
 executable-version probes must match the captured supported release on
-both sides; a binary changed during the session does not inherit that
-proof.  The host and container must match the captured exact patch
-version, not merely belong to the same minor series.  Unsupported
-versions are warned about before the owning client opens; they retain
-normal live sync and manual-sync retry guidance, not an unsafe recovery
-fallback.  The existing runtime checks validate the selected contract on
-each attempt: recognizing a future stable 2.3 patch does not waive its
-database or API checks.  Recognized schema/metadata or activity-response
-incompatibilities also print an actionable compatibility warning when
-detected.  Check for an oc-box update first; upgrade OpenCode too if it
-is older than a supported release.  If both are current, report the
-fixed refusal category.  Do not reset or downgrade workspace data to
-bypass a compatibility refusal.  A matching schema alone cannot certify
-unknown native startup behavior; unrecognized minor/major series remain
-refused.  Column-layout checks cover names, types, non-primary-column
-requiredness, primary-key membership and generated-column flags, but do
-not fingerprint defaults, triggers, indexes or foreign keys.  They
-cannot detect every schema-preserving behavioral change.  Source and
-destination helpers use isolated configuration, execution denials and
-disabled scheduling/warming.  On stable 2.4.x they also disable machines
-and background FTS indexing.  Flags alone are insufficient: native
+both sides.  On runtime-guarded workspaces, the post-stop reader also
+checks the captured executable digest and uses the verified descriptor
+for startup and each later native helper.  Different bytes that still
+report the same patch version are refused.  The host and container must
+match the captured exact patch version, not merely belong to the same
+minor series.  Unsupported versions are warned about before the owning
+client opens; they retain normal live sync and manual-sync retry
+guidance, not an unsafe recovery fallback.  The existing runtime checks
+validate the selected contract on each attempt: recognizing a future
+stable 2.3 patch does not waive its database or API checks.  Recognized
+schema/metadata or activity-response incompatibilities also print an
+actionable compatibility warning when detected.  Check for an oc-box
+update first; upgrade OpenCode too if it is older than a supported
+release.  If both are current, report the fixed refusal category.  Do
+not reset or downgrade workspace data to bypass a compatibility refusal.
+A matching schema alone cannot certify unknown native startup behavior;
+unrecognized minor/major series remain refused.  Column-layout checks
+cover names, types, non-primary-column requiredness, primary-key
+membership and generated-column flags, but do not fingerprint defaults,
+triggers, indexes or foreign keys.  They cannot detect every
+schema-preserving behavioral change.  Source and destination helpers use
+isolated configuration, execution denials and disabled
+scheduling/warming.  On stable 2.4.x they also disable machines and
+background FTS indexing.  Flags alone are insufficient: native
 automation rewake and the video/blob startup paths can still act on
 stored data.  Other failures retain the normal
 pending-history/manual-sync behavior.  The workspace lock does not
@@ -5314,20 +5320,20 @@ Node: Name769
 Node: Synopsis930
 Node: Description5202
 Node: Commands11022
-Node: Options151042
-Node: Lifecycle and persistence214517
-Node: Distribution images216817
-Node: Sessions and recovery221894
-Node: Devices and host permissions228479
-Node: Resource reports230825
-Node: Configuration and environment232936
-Node: Files244317
-Node: Exit status255227
-Node: Examples256635
-Node: Troubleshooting258774
-Node: Installation and manuals271266
-Node: Authors and license281456
-Node: See also282063
+Node: Options151351
+Node: Lifecycle and persistence214826
+Node: Distribution images217126
+Node: Sessions and recovery222203
+Node: Devices and host permissions228788
+Node: Resource reports231134
+Node: Configuration and environment233245
+Node: Files244626
+Node: Exit status255536
+Node: Examples256944
+Node: Troubleshooting259083
+Node: Installation and manuals271575
+Node: Authors and license281765
+Node: See also282372
 
 End Tag Table
 

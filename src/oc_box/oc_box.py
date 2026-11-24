@@ -3855,6 +3855,7 @@ def launch_environment(path, data, args, *, image_preview_snapshot=None):
                     initial_info,
                     stop_token,
                     refusal=refusals.append,
+                    runtime_digest=guarded.record.digest if guarded else None,
                 )
                 owner._history_source = source
                 owner._history_source_refusal = (

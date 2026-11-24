@@ -87,6 +87,7 @@ CATEGORIES = GUARD_CATEGORIES | frozenset(
         "foreground-active",
         "active-query",
         "reader-source",
+        "runtime-executable-unverified",
         "history-command",
         "history-response",
         "history-cleanup",
@@ -1227,8 +1228,9 @@ def export_pass(box, data):
 class Reader:
     """One unregistered private native lease; never retry the same instance."""
 
-    def __init__(self, box, data, *, remaining):
+    def __init__(self, box, data, *, remaining, runtime_digest=None):
         self.box, self.data, self.remaining = box, dict(data), remaining
+        self._runtime_digest = runtime_digest
         self.child = self.errors = self.error_file = None
         self.connection = None
         self.tokens = []
@@ -1315,18 +1317,36 @@ class Reader:
         return self.box.ContainerCommand(command, env)
 
     def _helper_command(self, action, arguments):
-        return self._container_command(
-            [
-                "python3",
-                "-I",
-                "-S",
-                "-c",
-                (self.box.PACKAGE / "history_reader.py").read_text(),
-                action,
-                self.data["home"],
-                *arguments,
-            ]
-        )
+        command = [
+            "python3",
+            "-I",
+            "-S",
+            "-c",
+            (self.box.PACKAGE / "history_reader.py").read_text(),
+            action,
+            self.data["home"],
+            *arguments,
+        ]
+        if self._runtime_digest is not None:
+            # Host-only import. The unchanged, isolated guard replaces the
+            # native path with its verified descriptor before the Reader can
+            # execute a version probe, server, or subsequent export helper.
+            if __package__:
+                from . import runtime_safeguard
+            else:
+                import runtime_safeguard
+            if (
+                type(self._runtime_digest) is not str
+                or re.fullmatch(r"[a-f0-9]{64}", self._runtime_digest) is None
+                or self.box.CONTAINER_OPENCODE
+                != runtime_safeguard.PREFIX + "/bin/opencode"
+                or self.box.CONTAINER_OPENCODE not in arguments
+            ):
+                raise Refusal("runtime-executable-unverified")
+            command = runtime_safeguard.bound_command(
+                command, self._runtime_digest, no_site=True
+            )
+        return self._container_command(command)
 
     def _startup_category(self):
         self.error_file.seek(0)
@@ -1341,7 +1361,9 @@ class Reader:
                 for line in reversed(lines)
                 if line.startswith(MARKER) and line[len(MARKER) :] in GUARD_CATEGORIES
             ),
-            "startup-failed",
+            "runtime-executable-unverified"
+            if self._runtime_digest is not None and self.child.returncode == 126
+            else "startup-failed",
         )
 
     def _write_payload(self, payload, deadline):

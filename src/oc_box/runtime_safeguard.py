@@ -503,12 +503,13 @@ def current():
     return _ACTIVE.get()
 
 
-def bound_command(arguments, digest):
+def bound_command(arguments, digest, *, no_site=False):
     if PREFIX + "/bin/opencode" not in arguments:
         return arguments
     return [
         "python3",
         "-I",
+        *(["-S"] if no_site else []),
         "-c",
         native_preflight.EXEC_SOURCE,
         PREFIX,

@@ -59,6 +59,7 @@ _WEB_RUNTIME_FILES = (
     "web_guest_duplex_worker.py",
     "web_guest_worker_drain.py",
     "web_studio_guest.py",
+    "web_studio_attach_exchange.py",
     "web_studio_guest_binding.py",
     "web_studio_guest_cookie_duplex.py",
     "web_studio_guest_gateway.py",

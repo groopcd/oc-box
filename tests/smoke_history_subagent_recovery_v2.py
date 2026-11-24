@@ -29,6 +29,7 @@ import json
 import os
 from pathlib import Path
 import shlex
+import shutil
 import signal
 import sqlite3
 import subprocess
@@ -62,6 +63,7 @@ from smoke_session_sync_v2 import (
     seed,
     workspace_service,
 )
+from oc_box import runtime_safeguard
 
 
 class SubagentProvider(BackgroundProvider):
@@ -372,6 +374,88 @@ def require_queued_claim(database, snapshot, columns, ident, admitted):
         ),
         "Stopped foreground lost its queued input or durable execution claim.",
     )
+
+
+def guarded_reader_executable(binary, release, root, path, data, environment, digest):
+    """Prove the guarded reader checks the bytes, not just the native version."""
+    prefix = root / "guarded-runtime"
+    executable = prefix / "lib/node_modules/@opencode/cli/bin/opencode.exe"
+    executable.parent.mkdir(parents=True)
+    shutil.copyfile(binary, executable)
+    executable.chmod(0o700)
+    alias = prefix / "bin/opencode"
+    alias.parent.mkdir()
+    alias.symlink_to("../lib/node_modules/@opencode/cli/bin/opencode.exe")
+    changed = executable.with_suffix(".changed")
+    shutil.copyfile(executable, changed)
+    changed.chmod(0o700)
+    # Change an unused ELF identification padding byte on a fixture copy.
+    # The independent version probe must still agree with the exact patch.
+    with changed.open("r+b") as stream:
+        stream.seek(9)
+        old = stream.read(1)
+        require(len(old) == 1, "The pinned ELF header was incomplete.")
+        stream.seek(9)
+        stream.write(bytes([old[0] ^ 1]))
+    require(
+        file_digest(changed) != digest
+        and compat.version(bounded([str(changed), "--version"], environment, root))
+        == release,
+        "The replacement fixture did not report the same exact version.",
+    )
+    deadline = time.monotonic() + 40
+
+    def reader():
+        return history_reader.Reader(
+            box,
+            data,
+            remaining=lambda: deadline - time.monotonic(),
+            runtime_digest=digest,
+        )
+
+    saved = executable.with_suffix(".retained")
+    with (
+        patch.dict(os.environ, environment, clear=True),
+        patch.object(box, "CONTAINER_OPENCODE", str(alias)),
+        patch.object(runtime_safeguard, "PREFIX", str(prefix)),
+        box.workspace_lock(path),
+    ):
+        with reader() as original:
+            executable.replace(saved)
+            changed.replace(executable)
+            try:
+                try:
+                    original.assert_idle()
+                except box.BoxError as error:
+                    require(
+                        getattr(error, "history_reader_category", None)
+                        == "active-query",
+                        "A replaced reader client failed outside its native launch boundary.",
+                    )
+                else:
+                    raise FixtureFailure(
+                        "A reader helper used new bytes under the same version."
+                    )
+            finally:
+                executable.replace(changed)
+                saved.replace(executable)
+        changed.replace(executable)
+        try:
+            with reader():
+                raise FixtureFailure(
+                    "A guarded reader started native on replaced bytes."
+                )
+        except box.BoxError as error:
+            require(
+                getattr(error, "history_reader_category", None)
+                == "runtime-executable-unverified",
+                "The guarded reader did not report the fixed executable refusal.",
+            )
+        require(
+            history_reader.current() is None
+            and workspace_service.live_connection() is None,
+            "The guarded executable refusal retained a reader connection.",
+        )
 
 
 def exercise(binary, root, children=10, *, foreground=False, producer_close="graceful"):
@@ -1157,6 +1241,19 @@ def exercise(binary, root, children=10, *, foreground=False, producer_close="gra
             "Source refusals changed claims/history or retained a Reader context.",
         )
         no_execution()
+        guarded_bytes_verified = (
+            history_reader.snapshot_profile(release) == history_reader.SNAPSHOT_24
+            and not foreground
+        )
+        if guarded_bytes_verified:
+            guarded_reader_executable(
+                binary, release, root, path, data, host_env, native_digest
+            )
+            require(
+                execution_snapshot(source_db)[0] == persisted,
+                "The guarded executable regression changed durable source data.",
+            )
+            no_execution()
         require(
             file_digest(binary) == native_digest,
             "The native executable changed during the fixture.",
@@ -1180,6 +1277,7 @@ def exercise(binary, root, children=10, *, foreground=False, producer_close="gra
             "provider_requests": provider.requests,
             "destination_provider_requests": destination_provider.requests,
             "durable_execution_history_unchanged": True,
+            "guarded_executable_replacement_refused": guarded_bytes_verified,
             "extra_provider_shell_plugin_execution": False,
         }
         if foreground:
