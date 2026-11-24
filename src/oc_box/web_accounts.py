@@ -22,6 +22,7 @@ import stat
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from hashlib import sha256
 from pathlib import Path
 
 MAX_ACCOUNTS = 128
@@ -83,6 +84,7 @@ class RegistrationReview:
     workspace_ids: tuple[str, ...] = field(repr=False)
     setup: bytes = field(repr=False)
     replacing: bool = field(repr=False)
+    _ciphertext_digest: bytes = field(repr=False)
 
 
 def _passphrase(value, *, new=False):
@@ -383,7 +385,7 @@ def _unchanged(path, directory, expected):
         raise WebAccountsError(_UNSAFE)
 
 
-def _read(path, directory, passphrase):
+def _read(path, directory, passphrase, *, with_digest=False):
     previous = _entry(directory, path.name)
     if previous is None:
         raise WebAccountsError(_MISSING)
@@ -397,6 +399,8 @@ def _read(path, directory, passphrase):
             raise WebAccountsError(_UNSAFE)
     store = _open_envelope(raw, passphrase)
     _unchanged(path, directory, previous)
+    if with_digest:
+        return store, previous, sha256(raw).digest()
     return store, previous
 
 
@@ -407,7 +411,7 @@ def _cleanup(directory, name, fd):
         os.unlink(name, dir_fd=directory)
 
 
-def _publish(path, directory, raw, previous):
+def _publish(path, directory, raw, previous, *, current=None):
     name = ".web-accounts-" + secrets.token_hex(16) + ".tmp"
     fd = os.open(
         name,
@@ -432,6 +436,8 @@ def _publish(path, directory, raw, previous):
             staged
         ):
             raise WebAccountsError(_UNSAFE)
+        if current is not None and current() is not True:
+            raise WebAccountsError(_STALE_REVIEW)
         if previous is None:
             # No-clobber creation. A crash between link and unlink leaves an
             # extra cipher-only link; later operations refuse it, not repair it.
@@ -514,7 +520,7 @@ def review_registration(path, passphrase, username, *, workspace_ids, replacing=
     name, scope = _username(username), _scope(workspace_ids)
     secret = _passphrase(passphrase)
     with _locked(path) as directory:
-        store, previous = _read(path, directory, secret)
+        store, previous, digest = _read(path, directory, secret, with_digest=True)
         _check_enrollment_target(store, name, scope, replacing)
         return RegistrationReview(
             path,
@@ -524,19 +530,33 @@ def review_registration(path, passphrase, username, *, workspace_ids, replacing=
             scope,
             store.setup,
             replacing,
+            digest,
         )
 
 
-def commit_registration(path, passphrase, review, *, registration):
+def commit_registration(path, passphrase, review, *, registration, current=None):
     """Publish a vetted protocol upload against its exact reviewed store.
 
     This performs a storage compare-and-swap only. The caller must enforce
-    host approval, one-use redemption, native owner exclusion/revocation and
-    exact protocol record validation before calling it. Do not retry on a
-    stale or unverified outcome. It does not prevent offline store rollback.
+    host approval, one-use redemption, native owner exclusion/revocation,
+    and proof of possession before calling it. Pass the original reviewed
+    object. A trusted current guard is checked before replacement while
+    holding the store lock. This does not prevent offline store rollback.
+    Do not retry on a stale or unverified outcome.
     """
     if type(review) is not RegistrationReview or path != review._path:
         raise WebAccountsError(_STALE_REVIEW)
+    scope = _scope(review.workspace_ids)
+    if (
+        type(review.workspace_ids) is not tuple
+        or scope != review.workspace_ids
+        or type(review.replacing) is not bool
+        or type(review._ciphertext_digest) is not bytes
+        or len(review._ciphertext_digest) != 32
+        or (current is not None and not callable(current))
+    ):
+        raise WebAccountsError(_STALE_REVIEW)
+    username = _username(review.username)
     secret = _passphrase(passphrase)
     record = _protocol_bytes(registration, MAX_REGISTRATION_BYTES)
     with _locked(path) as directory:
@@ -545,19 +565,28 @@ def commit_registration(path, passphrase, review, *, registration):
             or _stamp(_entry(directory, path.name)) != review._file_stamp
         ):
             raise WebAccountsError(_STALE_REVIEW)
-        store, previous = _read(path, directory, secret)
-        if _stamp(previous) != review._file_stamp or store.setup != review.setup:
+        store, previous, digest = _read(path, directory, secret, with_digest=True)
+        if (
+            _stamp(previous) != review._file_stamp
+            or store.setup != review.setup
+            or not secrets.compare_digest(digest, review._ciphertext_digest)
+        ):
             raise WebAccountsError(_STALE_REVIEW)
-        _check_enrollment_target(
-            store, review.username, review.workspace_ids, review.replacing
-        )
-        account = Account(review.username, review.workspace_ids, record)
-        others = (item for item in store.accounts if item.username != review.username)
+        _check_enrollment_target(store, username, scope, review.replacing)
+        account = Account(username, scope, record)
+        others = (item for item in store.accounts if item.username != username)
         updated = AccountStore(
             store.setup,
             tuple(sorted((*others, account), key=lambda item: item.username)),
         )
-        _publish(path, directory, _seal(updated, secret), previous)
+        try:
+            _publish(path, directory, _seal(updated, secret), previous, current=current)
+        except KeyboardInterrupt:
+            try:
+                _unchanged(path, directory, previous)
+            except (OSError, WebAccountsError, KeyboardInterrupt):
+                raise WebAccountsError(_UNVERIFIED) from None
+            raise
 
 
 def add_account(

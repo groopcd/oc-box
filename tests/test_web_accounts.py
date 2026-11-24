@@ -1,5 +1,6 @@
 import base64
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 import fcntl
 import importlib.util
 import json
@@ -244,6 +245,90 @@ class StoreRefusalTests(StoreFixture):
 
 @unittest.skipUnless(HAS_CRYPTO, "optional cryptography not installed")
 class EncryptedStoreTests(StoreFixture):
+    def test_registration_rechecks_scope_generation_and_current_proof_before_publish(
+        self,
+    ):
+        self.create()
+        reviewed = accounts.review_registration(
+            self.path, PHRASE, USERNAME, workspace_ids=(WORKSPACE,)
+        )
+        before = self.path.read_bytes()
+        for edits in (
+            {"username": "INVALID"},
+            {"workspace_ids": [WORKSPACE]},
+            {"replacing": 1},
+            {"_ciphertext_digest": b"\x00" * 32},
+        ):
+            with (
+                self.subTest(fields=tuple(edits)),
+                self.assertRaises(accounts.WebAccountsError),
+            ):
+                accounts.commit_registration(
+                    self.path,
+                    PHRASE,
+                    replace(reviewed, **edits),
+                    registration=REGISTRATION,
+                )
+            self.assert_unchanged(before)
+        with self.assertRaisesRegex(accounts.WebAccountsError, "no longer current"):
+            accounts.commit_registration(
+                self.path,
+                PHRASE,
+                reviewed,
+                registration=REGISTRATION,
+                current=lambda: False,
+            )
+        self.assert_unchanged(before)
+
+    def test_registration_reports_uncertainty_if_interrupted_after_actual_replace(self):
+        self.create()
+        reviewed = accounts.review_registration(
+            self.path, PHRASE, USERNAME, workspace_ids=(WORKSPACE,)
+        )
+        replace_file = os.replace
+
+        def publish_and_interrupt(*args, **kwargs):
+            replace_file(*args, **kwargs)
+            raise KeyboardInterrupt
+
+        with (
+            patch.object(accounts.os, "replace", side_effect=publish_and_interrupt),
+            self.assertRaisesRegex(accounts.WebAccountsError, "could not be verified"),
+        ):
+            accounts.commit_registration(
+                self.path, PHRASE, reviewed, registration=REGISTRATION
+            )
+        self.assertEqual(
+            accounts.load(self.path, PHRASE).accounts,
+            (accounts.Account(USERNAME, (WORKSPACE,), REGISTRATION),),
+        )
+        self.assertEqual(list(self.directory.iterdir()), [self.path])
+
+    def test_two_writers_from_same_review_cannot_both_publish(self):
+        self.create()
+        reviewed = accounts.review_registration(
+            self.path, PHRASE, USERNAME, workspace_ids=(WORKSPACE,)
+        )
+        records = [REGISTRATION, b"second synthetic upload"]
+
+        def commit(record):
+            try:
+                accounts.commit_registration(
+                    self.path, PHRASE, reviewed, registration=record
+                )
+            except accounts.WebAccountsError as err:
+                self.assertIn("no longer current", str(err))
+                return None
+            return record
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(commit, records))
+        accepted = [item for item in results if item is not None]
+        self.assertEqual(len(accepted), 1)
+        self.assertEqual(
+            accounts.load(self.path, PHRASE).accounts[0].registration, accepted[0]
+        )
+
     def test_reviewed_registration_enrolls_and_resets_under_same_scope(self):
         self.create()
         before = self.path.read_bytes()

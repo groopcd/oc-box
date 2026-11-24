@@ -10,6 +10,7 @@ neither hostname reads the other one's cookies. Never log any value here.
 
 import re
 import secrets
+from collections.abc import Callable
 from dataclasses import dataclass
 from hashlib import sha256
 from threading import Lock
@@ -29,6 +30,32 @@ _TOKEN = re.compile(r"[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]")
 class BootstrapTicket:
     value: str
     app_nonce: str
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class EnrollmentClaim:
+    """Host-only reservation of the exact account bootstrap for enrollment."""
+
+    workspace_id: str
+    origin: str
+    _nonce_digest: bytes
+    _current: Callable[[], bool]
+    _bind_once: Callable[[], bool]
+
+    def current(self):
+        return self._current()
+
+    def bind(self):
+        return self._bind_once()
+
+    def matches(self, origin, nonce):
+        return (
+            type(origin) is str
+            and origin == self.origin
+            and _valid(nonce)
+            and secrets.compare_digest(_digest(nonce), self._nonce_digest)
+            and self.current()
+        )
 
 
 @dataclass(frozen=True, slots=True, repr=False)
@@ -191,6 +218,43 @@ class BrowserBootstrap:
                 self._claimed.add(key)
                 return self._claim_guard(key, entry)
         return None
+
+    def claim_enrollment(self, binding, *, auth_origin, account_nonce):
+        """Claim a bootstrap after independent host approval of enrollment.
+
+        This closes it to login, app confirmation, and other enrollments.
+        Retirement, expiry and owner close still invalidate the reservation.
+        """
+        if not self._matches(binding, auth_origin) or not _valid(account_nonce):
+            return None
+        key = _digest(account_nonce)
+        with self._lock:
+            self._expire(monotonic())
+            entry = self._accounts.get(key)
+            if self._closed or entry is None or key in self._claimed:
+                return None
+            self._claimed.add(key)
+            return EnrollmentClaim(
+                binding.workspace_id,
+                auth_origin,
+                key,
+                self._claim_guard(key, entry),
+                self._enrollment_bind_guard(key, entry),
+            )
+
+    def _enrollment_bind_guard(self, key, entry):
+        bound = False
+
+        def bind():
+            nonlocal bound
+            with self._lock:
+                self._expire(monotonic())
+                if bound or self._closed or self._accounts.get(key) is not entry:
+                    return False
+                bound = True
+                return True
+
+        return bind
 
     def _claim_guard(self, key, entry):
         def current():
