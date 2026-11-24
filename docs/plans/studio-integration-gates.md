@@ -52,6 +52,12 @@ guest grant and a registered use with fresh native authentication. A new
 selection invalidates that page's old view before verification, and a
 late response cannot revive it. The caller must still verify membership
 on the held native workspace and retire every admitted helper.
+The unserved guest Send seam consumes that request's native-cookie
+authorization, checks the exact selected generation, and uses the
+existing workspace/session preflight and native queue-acknowledgment
+schema through the registered OGD tunnel. It never uses host Basic auth
+or retries a possible POST. Its current tests cover exact private wire
+bytes and refusal/acknowledgment handling without enabling any route.
 
 ## Named HTTPS: the stop fence must cover every supported writer
 
