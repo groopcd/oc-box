@@ -685,6 +685,10 @@ class Relay:
             raise DropError("protocol-output-limit")
         self.pending.extend(data)
 
+    def safe_to_inject(self):
+        """Respect the Kitty boundary when this client owns one."""
+        return self.output is None or self.output.safe_to_inject()
+
     def pending_output(self):
         if self.output is None:
             return b""
@@ -693,7 +697,7 @@ class Relay:
                 self.protocol.tick()
         except DropError:
             self.disable()
-        if not self.output.safe_to_inject():
+        if not self.safe_to_inject():
             return b""
         data = bytes(self.pending)
         self.pending.clear()

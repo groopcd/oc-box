@@ -267,12 +267,13 @@ compatible caches. See [Lifecycle output](#lifecycle-output) for transient
 progress and the final history result. The progress display distinguishes
 waiting for live activity to settle from copying history archives. A separate
 loading line covers blank TUI startup frames and disappears when OpenCode draws
-text. By default, supported terminals show a tiny oc-box cube PNG and other
-terminals use the `[/]` ASCII mark. Save `oc-box preferences --startup-logo ascii`
-for an existing workspace to use the ASCII mark even on a supported terminal.
-The launcher removes the image before forwarding native output, so it may
-appear only briefly.
-Pipes and `TERM=dumb` get neither.
+text. In interactive native launches, launcher progress and status lines carry
+an inline badge: a one-cell cube PNG on supported terminals, or the `[/]` ASCII
+mark elsewhere. Save `oc-box preferences --startup-logo ascii` for a registered
+workspace to always use the ASCII mark. Completed launcher lines are not erased
+at handoff. No badge is added to native UI or subprocess streams, credential
+prompts, or other commands such as `status`, `logs`, `web`, and `terminal`.
+Pipes and `TERM=dumb` receive neither badge nor padding.
 The container OpenCode version is verified against the host on every launch;
 exact upgrades and downgrades are supported, with no fallback to another release.
 With a V2 release supporting image previews, `--image-preview` enables prompt
@@ -2797,8 +2798,10 @@ Unsupported or ambiguous terminals, SSH and multiplexers use ASCII; pipes
 and `TERM=dumb` receive neither badge nor padding. Detection uses compatibility
 hints, not proof of the emulator. Completed launcher lines keep their badge;
 temporary progress clears at handoff. Badges are not added to native OpenCode's
-UI or output, passthrough subprocess output, masked input prompts, web, the
-manager, or terminal shell clients.
+UI or output, passthrough subprocess output, masked input prompts, or raw relay
+teardown diagnostics. This is native-launch presentation only: help, preferences,
+status and other informational commands, web, the manager, and terminal shell
+clients are not decorated.
 From a source checkout, `python3 tools/demo_startup_logo.py ascii` and
 `python3 tools/demo_startup_logo.py graphics` preview the badge with synthetic
 output, without launching a workspace or saving preferences.

@@ -1012,9 +1012,10 @@ def export_pass(box, data):
             # silently turn uncertain helper cleanup into an apparent success.
             original.history_source_cleanup_failed = True
             if __package__:
-                from . import lifecycle_output
+                from . import lifecycle_output, startup_output
             else:
                 import lifecycle_output
+                import startup_output
             message = (
                 "History export helper cleanup unverified. "
                 "Container data retained; retry with 'oc-box sync'."
@@ -1023,7 +1024,7 @@ def export_pass(box, data):
                 lifecycle_output.fixed_detail("warn", message)
             else:
                 with contextlib.suppress(OSError, ValueError):
-                    print(f"oc-box: {message}", file=sys.stderr)
+                    startup_output.line(f"oc-box: {message}", file=sys.stderr)
         else:
             if original is None and stream.failed:
                 raise stream.fail("history-command")

@@ -207,4 +207,7 @@ def line(text, *, file=None, flush=False):
             badge = _NONE
     if badge.cells:
         text = "\n".join(badge.wire + row if row else row for row in text.split("\n"))
-    print(text, file=stream, flush=flush)
+    if file is None:
+        print(text, flush=flush)
+    else:
+        print(text, file=file, flush=flush)

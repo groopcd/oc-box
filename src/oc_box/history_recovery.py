@@ -19,10 +19,17 @@ import threading
 import time
 
 if __package__:
-    from . import history_reader, lifecycle_output, workspace_control, workspace_service
+    from . import (
+        history_reader,
+        lifecycle_output,
+        startup_output,
+        workspace_control,
+        workspace_service,
+    )
 else:
     import history_reader
     import lifecycle_output
+    import startup_output
     import workspace_control
     import workspace_service
 
@@ -97,7 +104,7 @@ class Report:
 
 def announce_saved():
     with contextlib.suppress(OSError, ValueError):
-        print(
+        startup_output.line(
             "oc-box: Checked persisted history snapshots were synchronized after stopping the workspace. "
             "Execution was interrupted; completion notices or final results may be missing. "
             "Background work is not declared complete.",
@@ -135,7 +142,7 @@ def report_compatibility_refusal(reason):
     if lifecycle_output.concise():
         lifecycle_output.fixed_detail("warn", message)
     else:
-        print(f"oc-box: {message}", file=sys.stderr)
+        startup_output.line(f"oc-box: {message}", file=sys.stderr)
 
 
 class RecoveryError(ValueError):
@@ -419,7 +426,7 @@ def report_skipped(reasons):
     if lifecycle_output.concise():
         lifecycle_output.fixed_detail("debug", message)
     else:
-        print(f"oc-box: {message}", file=sys.stderr)
+        startup_output.line(f"oc-box: {message}", file=sys.stderr)
 
 
 def _command(box, arguments):
@@ -509,7 +516,7 @@ def recover(box, path, data, source):
             ):
                 raise RecoveryError("home-ownership")
             if not lifecycle_output.concise():
-                print(
+                startup_output.line(
                     "oc-box: Stopping the workspace before one persisted-history snapshot retry.",
                     file=sys.stderr,
                 )
@@ -606,12 +613,12 @@ def recover(box, path, data, source):
             announce_saved()
     else:
         if category == "snapshot-incomplete":
-            print(
+            startup_output.line(
                 "oc-box: Some persisted sessions remain unsettled. "
                 "Verified progress and prior archives for pending sessions are retained. "
                 "Execution was interrupted; background work is not declared complete.",
                 file=sys.stderr,
             )
-        print(f"oc-box: {failure_message}", file=sys.stderr)
+        startup_output.line(f"oc-box: {failure_message}", file=sys.stderr)
         report_compatibility_refusal(compatibility_reason)
     return saved
