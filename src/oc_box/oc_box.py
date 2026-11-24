@@ -2056,7 +2056,7 @@ def exec_command(data, command, *, interactive=False):
             container_cli(data, command[1:]) if "--version" not in command else command
         )
     guarded = runtime_safeguard.current()
-    if guarded:
+    if guarded and guarded.launching:
         command = runtime_safeguard.bound_command(command, guarded.record.digest)
         result.guarded_spawn = True
     if opencode_compat.major(data.get("opencode_version", "1.0.0")) == 2:

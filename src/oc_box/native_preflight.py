@@ -510,7 +510,8 @@ def fetch(version):
         # npm's Node fetch stack uses this allowlisted tunnel. Do not execute
         # lifecycle scripts, run Git, send audit requests or read any .npmrc.
         options = [
-            "npm", f"--registry=https://{REGISTRY}/", "--userconfig=/dev/null",
+            "npm", f"--registry=https://{REGISTRY}/",
+            f"--userconfig={os.environ['HOME']}/user.npmrc",
             "--globalconfig=/dev/null", "--cache=/tmp/npm-cache",
             f"--https-proxy={address}", f"--proxy={address}", "--noproxy=",
             "--strict-ssl=true", "--git=/bin/false", "--no-audit", "--no-fund",

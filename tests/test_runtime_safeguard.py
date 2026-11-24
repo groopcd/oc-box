@@ -371,3 +371,23 @@ class RuntimeSafeguardTests(unittest.TestCase):
         blocked = subprocess.run(command, capture_output=True, text=True, timeout=15)
         self.assertEqual(blocked.returncode, 126)
         self.assertEqual(blocked.stdout, "")
+
+    def test_live_install_is_scriptless_and_does_not_read_workspace_npm_config(self):
+        prefix = str(self.root / "install-prefix")
+        with (
+            patch.object(sys, "argv", ["<guarded installer>", prefix, NEW]),
+            patch.object(
+                subprocess, "run", return_value=subprocess.CompletedProcess([], 0)
+            ) as run,
+            self.assertRaises(SystemExit) as completed,
+        ):
+            exec(guard._INSTALL_SOURCE, {})
+        self.assertEqual(completed.exception.code, 0)
+        command = run.call_args.args[0]
+        self.assertIn("--ignore-scripts", command)
+        self.assertIn(f"@opencode/cli@{NEW}", command)
+        options = run.call_args.kwargs
+        self.assertEqual(options["cwd"], "/")
+        self.assertEqual(set(options["env"]), {"HOME", "PATH", "LANG"})
+        self.assertIn("--userconfig=" + options["env"]["HOME"] + "/user.npmrc", command)
+        self.assertIn("--globalconfig=/dev/null", command)

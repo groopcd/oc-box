@@ -46,6 +46,23 @@ _INCOMPATIBLE = {
     "build-plugin": "build-plugin-failed",
 }
 
+# npm rejects loading the same path for both config roles, even when it is
+# /dev/null. Use a fresh private HOME/user config and an independent global
+# config path, and never expand project or workspace .npmrc values here.
+_INSTALL_SOURCE = """
+import os, subprocess, sys, tempfile
+with tempfile.TemporaryDirectory(prefix="oc-box-native-install-") as home:
+    env = {"HOME": home, "PATH": "/opt/oc-box/runtime/bin:/usr/local/bin:/usr/bin:/bin", "LANG": "C.UTF-8"}
+    options = [
+        "npm", "install", "--global", "--force", "--ignore-scripts", "--prefix", sys.argv[1],
+        "--no-audit", "--no-fund", "--userconfig=" + home + "/user.npmrc",
+        "--globalconfig=/dev/null", "--git=/bin/false", "--registry=https://registry.npmjs.org",
+        "@opencode/cli@" + sys.argv[2],
+    ]
+    result = subprocess.run(options, cwd="/", env=env, stdin=subprocess.DEVNULL)
+    raise SystemExit(result.returncode)
+"""
+
 
 def release_key(version):
     match = _RELEASE.fullmatch(version) if isinstance(version, str) else None
@@ -672,27 +689,25 @@ def install_container(box, data):
     """Resolve the package without ever running npm's native postinstall."""
     scope = current()
     scope._unchanged(box)
-    box.podman(
-        "exec",
-        "--workdir",
-        "/",
-        scope.record.container,
-        "npm",
-        "install",
-        "--global",
-        "--force",
-        "--ignore-scripts",
-        "--prefix",
-        PREFIX,
-        "--no-audit",
-        "--no-fund",
-        "--userconfig=/dev/null",
-        "--globalconfig=/dev/null",
-        "--registry=https://registry.npmjs.org",
-        f"@opencode/cli@{scope.record.version}",
-        stdin=subprocess.DEVNULL,
-        timeout=600,
-        preparation="native-cli-install",
+    command = box.ContainerCommand(
+        [
+            "podman",
+            "exec",
+            "--workdir",
+            "/",
+            scope.record.container,
+            "python3",
+            "-I",
+            "-c",
+            _INSTALL_SOURCE,
+            PREFIX,
+            scope.record.version,
+        ],
+        box.maintenance_host_env(),
+    )
+    command.guarded_spawn = True
+    box.run(
+        command, stdin=subprocess.DEVNULL, timeout=600, preparation="native-cli-install"
     )
     if container_digest(box, data, materialize=True) != scope.record.digest:
         raise box.BoxError(
