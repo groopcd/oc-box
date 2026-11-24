@@ -25,6 +25,11 @@ import time
 import unicodedata
 import uuid
 
+# Older auto-updaters can exec this flat script directly, without the
+# installed wrapper's -B. Keep a pinned install immutable in both cases.
+if not __package__ and __name__ == "__main__":
+    sys.dont_write_bytecode = True
+
 if __package__:
     from . import (
         cli_help,
@@ -5756,5 +5761,22 @@ def entrypoint():
         return result
 
 
+def _installed_entrypoint():
+    if (
+        __package__
+        or PACKAGE.parent.name != "releases"
+        or _help_requested(sys.argv[1:])
+    ):
+        return entrypoint()
+    from install_ownership import installed_runtime_use, OwnershipError
+
+    try:
+        with installed_runtime_use(PACKAGE):
+            return entrypoint()
+    except OwnershipError as exc:
+        print(f"oc-box: {exc}", file=sys.stderr)
+        return 1
+
+
 if __name__ == "__main__":
-    sys.exit(entrypoint())
+    sys.exit(_installed_entrypoint())

@@ -7,6 +7,7 @@ the owning user's deliberate modification. A review is not an execution permit.
 from contextlib import contextmanager, ExitStack
 from dataclasses import dataclass
 from email.parser import BytesParser
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -20,7 +21,9 @@ else:
     import host_file_open_policy as layout
 
 
-INVENTORY = ".install-inventory-v1.json"
+INVENTORY = ".install-inventory-v2.json"
+UPGRADE_LOCK = ".upgrade.lock"
+USE_LOCK = ".install-use.lock"
 _LIMIT = 2 * 1024 * 1024
 _MAX_ENTRIES = 8192
 _MAX_DEPTH = 16
@@ -47,6 +50,8 @@ class FlatInstallPlan:
     release: Path
     artifacts: tuple[InstallArtifact, ...]
     anchors: tuple[tuple[int, ...], ...]
+    upgrade_lock: tuple[int, ...]
+    use_lock: tuple[int, ...]
 
 
 @dataclass(frozen=True)
@@ -56,6 +61,17 @@ class PackageInstallReview:
     manager: str
     prefix: Path
     version: str
+
+
+@dataclass(frozen=True)
+class _RuntimeLease:
+    pid: int
+    release: Path
+    fd: int
+    stamp: tuple[int, ...]
+
+
+_runtime_lease = None
 
 
 def _identity(info):
@@ -178,6 +194,75 @@ def _read_file(parent, name, mount, info, limit, *, mode=None):
         os.close(pinned)
 
 
+def _lock_info(parent, name, mount, *, private=False):
+    info = _inspect(parent, name, mount)
+    if (
+        not stat.S_ISREG(info.st_mode)
+        or info.st_size
+        or (private and stat.S_IMODE(info.st_mode) != 0o600)
+    ):
+        raise OwnershipError("An installation lock is unsafe.")
+    return info
+
+
+@contextmanager
+def _open_lock(parent, name, mount, info):
+    entry = os.open(name, _ENTRY, dir_fd=parent)
+    try:
+        if _mount(entry) != mount or _stamp(os.fstat(entry)) != _stamp(info):
+            raise OwnershipError("An installation lock changed.")
+        fd = os.open(f"/proc/self/fd/{entry}", os.O_RDONLY | os.O_CLOEXEC)
+        try:
+            if _mount(fd) != mount or _stamp(os.fstat(fd)) != _stamp(info):
+                raise OwnershipError("An installation lock changed.")
+            yield fd
+        finally:
+            os.close(fd)
+    finally:
+        os.close(entry)
+
+
+def _runtime_home(release):
+    suffix = (*layout.INSTALL_PATH.parts, "releases", release.name)
+    if release.is_absolute() and release.parts[-len(suffix) :] == suffix:
+        return release.parents[len(suffix) - 1]
+    return None
+
+
+@contextmanager
+def installed_runtime_use(release):
+    """Keep installed launchers pinned until they exit; no lock for source."""
+    global _runtime_lease
+    home = _runtime_home(release)
+    if home is None:
+        yield
+        return
+    with ExitStack() as stack:
+        try:
+            # Normal launch does not require the stricter uninstall ancestry
+            # or single-mount layout. Pin the runtime's actual lock regardless.
+            directory = os.open(release, _DIR)
+            stack.callback(os.close, directory)
+            mount = _mount(directory)
+            info = _lock_info(directory, USE_LOCK, mount, private=True)
+            fd = stack.enter_context(_open_lock(directory, USE_LOCK, mount, info))
+            fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            if _stamp(_lock_info(directory, USE_LOCK, mount, private=True)) != _stamp(
+                info
+            ):
+                raise OwnershipError("The installed release changed during launch.")
+        except (OSError, ValueError):
+            raise OwnershipError(
+                "The installed release is unavailable or being removed. Use the active launcher."
+            ) from None
+        previous = _runtime_lease
+        _runtime_lease = _RuntimeLease(os.getpid(), release, fd, _stamp(info))
+        try:
+            yield
+        finally:
+            _runtime_lease = previous
+
+
 def _names(fd):
     names = set()
     with os.scandir(fd) as entries:
@@ -208,15 +293,16 @@ def _artifact(parent, path, info, link=None):
     return InstallArtifact(path, _anchor(parent), _stamp(info), link)
 
 
-def _inventory_bytes(home, release, anchors, lock, receipt, artifacts):
+def _inventory_bytes(home, release, anchors, lock, upgrade, receipt, artifacts):
     return (
         json.dumps(
             {
-                "version": 1,
+                "version": 2,
                 "release": str(release),
                 # Mount IDs are rechecked at review but are not stable across boots.
                 "anchors": [anchor[:-1] for anchor in anchors],
                 "lock": _stamp(lock),
+                "upgrade": _stamp(upgrade),
                 "receipt": _identity(receipt),
                 "artifacts": {
                     str(item.path.relative_to(home)): [
@@ -264,9 +350,7 @@ def _snapshot(home, release, *, published=None, publish=None):
         pinned = stack.enter_context(
             _directory(releases, release.name, mount, private=True)
         )
-        lock = _inspect(root, layout.INSTALL_LOCK, mount)
-        if not stat.S_ISREG(lock.st_mode):
-            raise OwnershipError("The installation lock is unsafe.")
+        lock = _lock_info(root, layout.INSTALL_LOCK, mount)
         anchors = (_anchor(owner), _anchor(root), _anchor(releases), _anchor(pinned))
         current = f"releases/{release.name}"
         if recording:
@@ -274,6 +358,16 @@ def _snapshot(home, release, *, published=None, publish=None):
                 _identity(lock) != published[install / layout.INSTALL_LOCK]
             ):
                 raise OwnershipError("The staged release or installation lock changed.")
+            # Provision the existing updater protocol's lock only after any
+            # fresh-install enrollment, which tests for the prior absence of it.
+            try:
+                fd = os.open(
+                    UPGRADE_LOCK, _READ | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=root
+                )
+            except FileExistsError:
+                pass  # Existing locks are admitted only through the checks below.
+            else:
+                os.close(fd)
         else:
             try:
                 receipt = _inspect(pinned, INVENTORY, mount)
@@ -286,6 +380,8 @@ def _snapshot(home, release, *, published=None, publish=None):
             expected = json.loads(raw)["artifacts"]
             if not isinstance(expected, dict) or len(expected) > _MAX_ENTRIES:
                 raise OwnershipError("The release inventory is invalid.")
+        upgrade = _lock_info(root, UPGRADE_LOCK, mount)
+        use_lock = _lock_info(pinned, USE_LOCK, mount, private=True)
 
         def add(parent, path, info, link=None, *, output=False):
             item = _artifact(parent, path, info, link)
@@ -335,7 +431,7 @@ def _snapshot(home, release, *, published=None, publish=None):
                 raise OwnershipError("An installed manual or completion is unsafe.")
 
         names = _names(pinned)
-        top = set(aliases)
+        top = {*aliases, USE_LOCK}
         for feature in _EXTRAS:
             support = f"{feature}-support.json"
             if support in names:
@@ -388,7 +484,9 @@ def _snapshot(home, release, *, published=None, publish=None):
             visit(pinned, release / name, 1)
 
         def encode(marker):
-            data = _inventory_bytes(home, release, anchors, lock, marker, artifacts)
+            data = _inventory_bytes(
+                home, release, anchors, lock, upgrade, marker, artifacts
+            )
             if len(data) > _LIMIT:
                 raise OwnershipError("The release inventory exceeds its review limits.")
             return data
@@ -402,7 +500,13 @@ def _snapshot(home, release, *, published=None, publish=None):
             raise OwnershipError("The installation no longer matches its inventory.")
         artifacts.append(_artifact(pinned, release / INVENTORY, receipt))
         artifacts.append(_artifact(releases, release, os.fstat(pinned)))
-        return FlatInstallPlan(release, tuple(artifacts), (*anchors, _stamp(lock)))
+        return FlatInstallPlan(
+            release,
+            tuple(artifacts),
+            (*anchors, _stamp(lock)),
+            _stamp(upgrade),
+            _stamp(use_lock),
+        )
 
 
 def record_inventory(home, release, outputs, *, lock_fd, staged):

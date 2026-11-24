@@ -116,6 +116,7 @@ RUNTIME_FILES = (
     "workspace_identity.py",
     "installation.py",
     "install_ownership.py",
+    "install_removal.py",
     "updater.py",
     "update_channels.py",
     "package_updates.py",
@@ -358,6 +359,7 @@ def install(
         staged = release.lstat()
         activated = False
         try:
+            atomic_file(release / install_ownership.USE_LOCK, b"", 0o600, replace=False)
             for name in PROGRAM_FILES:
                 shutil.copyfile(source_file(source, name), release / name)
                 (release / name).chmod(0o644)
@@ -459,35 +461,35 @@ def install(
                 file_open_enabled = host_file_open_policy.record_fresh(
                     fresh, root_identity, lock_fd, release
                 )
-            install_ownership.record_inventory(
-                home, release, outputs, lock_fd=lock_fd, staged=staged
-            )
         finally:
             if not activated:
                 shutil.rmtree(release)
-    utility = shutil.which("install-info") or shutil.which(
-        "install-info", path="/usr/sbin:/sbin"
-    )
-    if utility:
-        try:
-            result = subprocess.run(
-                [utility, "--info-dir=" + str(info.parent), str(info)],
-                capture_output=True,
-                text=True,
-                timeout=15,
-            )
-            if result.returncode:
+        utility = shutil.which("install-info") or shutil.which(
+            "install-info", path="/usr/sbin:/sbin"
+        )
+        if utility:
+            try:
+                result = subprocess.run(
+                    [utility, "--info-dir=" + str(info.parent), str(info)],
+                    capture_output=True,
+                    text=True,
+                    timeout=15,
+                )
+                if result.returncode:
+                    print(
+                        "Note: Info index update failed; use 'info --file "
+                        + str(info)
+                        + "'."
+                    )
+            except (OSError, subprocess.TimeoutExpired):
                 print(
-                    "Note: Info index update failed; use 'info --file "
+                    "Note: Info index update unavailable; use 'info --file "
                     + str(info)
                     + "'."
                 )
-        except (OSError, subprocess.TimeoutExpired):
-            print(
-                "Note: Info index update unavailable; use 'info --file "
-                + str(info)
-                + "'."
-            )
+        install_ownership.record_inventory(
+            home, release, outputs, lock_fd=lock_fd, staged=staged
+        )
     print(f"Installed {binary} ({build['version']})")
     if file_open_enabled:
         print(
