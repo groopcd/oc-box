@@ -1,10 +1,13 @@
 """Provider-free Studio conversation smoke against unmodified OpenCode 2.4.1."""
 
 import argparse
+import json
 import os
 from pathlib import Path
+import socket
 import sys
 import tempfile
+from time import monotonic
 from types import SimpleNamespace
 from unittest.mock import patch
 from urllib.error import HTTPError
@@ -13,7 +16,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from smoke_session_sync_v2 import bounded, private_environment, require, seed
 
 from oc_box import oc_box as box, opencode_compat, opencode_v2_io, workspace_service
+from oc_box import web_admission, web_named_owner
 from oc_box import web_studio_conversation as studio
+from oc_box import web_studio_read as read
 
 
 def verify_refusal(callback):
@@ -22,6 +27,64 @@ def verify_refusal(callback):
     except studio.ConversationError:
         return
     require(False, "Studio accepted an out-of-scope conversation.")
+
+
+def verify_registered_read(launcher, data, connection, ident, sibling_id, expected):
+    owner = web_named_owner.OwnerIdentity(
+        data["id"],
+        "b" * 32,
+        data["container"],
+        connection["version"],
+        connection["url"],
+    )
+    binding = web_admission.WebBinding(
+        owner.workspace_id, owner.generation, "https://workspace.localhost"
+    )
+    admission = web_admission.BrowserAdmission(binding)
+    token = admission.issue(binding, principal="synthetic")
+    browser = admission.lookup(binding, token)
+    control, peer = socket.socketpair()
+    with control, peer:
+        lease = web_named_owner.VerifiedOwnerLease(
+            owner,
+            control,
+            data["container_project"],
+            data["home"],
+            connection["password"],
+            observe=lambda: owner,
+            connect_native=lambda *_: require(False, "Unexpected native relay."),
+        )
+        responses = []
+
+        def write(response, deadline, *, check):
+            check()
+            responses.append(json.loads(response.body))
+
+        for generation, selected in enumerate((ident, sibling_id)):
+            scope = read.ReadScope(owner, browser, selected, generation)
+            try:
+                read.respond(
+                    launcher,
+                    read.ReadRequest("GET", read.PATH + "?session=" + selected, b""),
+                    scope,
+                    lease=lease,
+                    admission=admission,
+                    binding=binding,
+                    observe=lambda _: scope,
+                    deadline=monotonic() + 6,
+                    write=write,
+                    interrupt=lambda: None,
+                    retire=lambda: True,  # Synthetic writer owns no stream.
+                )
+            except read.ReadError:
+                require(selected == sibling_id, "Registered Studio read failed.")
+            else:
+                require(selected == ident, "Registered Studio disclosed a sibling.")
+        require(responses == [expected], "Registered Studio projection differed.")
+        require(
+            admission.begin_revocation(binding, browser).wait_drained(0),
+            "Registered Studio worker did not drain.",
+        )
 
 
 def exercise(binary, root):
@@ -52,7 +115,7 @@ def exercise(binary, root):
     require(release == studio.NATIVE_VERSION, "Studio smoke requires native 2.4.1.")
     data = {
         "id": "a" * 32,
-        "container": "synthetic-no-podman",
+        "container": "c" * 64,  # Synthetic immutable ID; Podman is never invoked.
         "project": str(root / "different-host-project-path"),
         "container_project": str(project),
         "home": env["HOME"],
@@ -83,6 +146,23 @@ def exercise(binary, root):
             and not any("SYNTHETIC_PROVIDER" in name for name in command.environment),
             "Studio lost the providerless private exec boundary.",
         )
+        if arguments[-4] == studio._MANAGED_ARG:
+            # The managed host exec starts in '/'. Model Podman's --workdir
+            # before running the exact same sanitized Python command locally.
+            return box.ContainerCommand(
+                [
+                    sys.executable,
+                    "-I",
+                    "-S",
+                    "-B",
+                    "-c",
+                    "import os,sys; os.chdir(sys.argv[1]); os.execv(sys.argv[2], sys.argv[2:])",
+                    str(project),
+                    sys.executable,
+                    *command[offset + 2 :],
+                ],
+                command.environment,
+            )
         return box.ContainerCommand(
             [sys.executable, *command[offset + 2 :]], command.environment
         )
@@ -265,6 +345,10 @@ def exercise(binary, root):
                 },
                 "Native Studio projection differed from the expected ordered plain text.",
             )
+            with patch.dict(os.environ, {"SYNTHETIC_PROVIDER_API_KEY": "sentinel"}):
+                verify_registered_read(
+                    launcher, data, connection, ident, sibling_id, result
+                )
             require(
                 [native("GET", path) for path in paths] == before
                 and native("GET", "/api/session/active") == {"data": {}},

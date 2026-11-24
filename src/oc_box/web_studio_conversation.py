@@ -31,6 +31,11 @@ MAX_PARTS = 64
 WORKER_TIMEOUT = 4
 HOST_TIMEOUT = 6
 
+_MANAGED_ARG = "--managed-read"
+_START_READ = b"R"
+_READ_READY = b"Y"
+_READ_REFUSED = b"N"
+
 _BASE_MESSAGE = {"id", "type", "time", "metadata"}
 _MESSAGE_FIELDS = {
     "user": {"text", "files", "agents", "skills"},
@@ -437,11 +442,14 @@ def _request(port, authorization, path, budget):
         connection.close()
 
 
-def _worker(url, directory, ident):
+def _arm_worker():
     # Bound total execution, including a peer trickling HTTP headers or body.
     signal.signal(signal.SIGALRM, signal.SIG_DFL)
     signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGALRM})
     signal.setitimer(signal.ITIMER_REAL, WORKER_TIMEOUT)
+
+
+def _worker_output(url, directory, ident, check):
     origin, port = _endpoint(url)
     if os.getcwd() != _directory(directory):
         _refuse()
@@ -449,18 +457,52 @@ def _worker(url, directory, ident):
     if re.fullmatch(r"[A-Za-z0-9_-]{32,256}", password) is None:
         _refuse()
     token = base64.b64encode(("opencode:" + password).encode("ascii")).decode("ascii")
-    value = _conversation(
-        lambda path, limit: _request(port, "Basic " + token, path, limit),
-        origin,
-        directory,
-        ident,
-        (password, token),
-    )
+
+    def request(path, limit):
+        check()
+        return _request(port, "Basic " + token, path, limit)
+
+    value = _conversation(request, origin, directory, ident, (password, token))
     output = json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode(
         "utf-8"
     )
     if not 0 < len(output) <= MAX_OUTPUT_BYTES:
         _refuse()
+    check()
+    return output
+
+
+_WORKER_ERRORS = (
+    OSError,
+    ValueError,
+    TypeError,
+    HTTPException,
+    RecursionError,
+    OverflowError,
+)
+
+
+def _worker(*arguments):
+    _arm_worker()
+    if arguments[:1] == (_MANAGED_ARG,):
+        # A registered host may abandon startup without authorizing any
+        # native GET. Thereafter EOF or extra bytes refuse further GETs.
+        fd = sys.stdin.fileno()
+
+        def check():
+            if select.select([fd], [], [], 0)[0]:
+                _refuse()
+
+        try:
+            if os.read(fd, 1) != _START_READ:
+                _refuse()
+            output = _READ_READY + _worker_output(*arguments[1:], check=check)
+        except _WORKER_ERRORS:
+            # A fixed terminal record for a drained but unavailable read.
+            # Failure to deliver it (or hard-alarm death) is not drain proof.
+            output = _READ_REFUSED
+    else:
+        output = _worker_output(*arguments, check=lambda: None)
     sys.stdout.buffer.write(output)
     sys.stdout.buffer.flush()
 
@@ -546,8 +588,17 @@ def conversation(box, data, connection, ident, *, deadline=None):
 
     Return only sessionID/title/messages/hasEarlier, or raise ConversationError.
     Never give this callable a browser-supplied workspace, connection or path.
-    The caller must enforce lease/admission validity through response delivery.
+    This standalone call does not confirm browser-grant drain. For a registered
+    browser request use the managed bridge in web_studio_read instead.
     """
+    return _read_conversation(
+        box, data, connection, ident, deadline=deadline, bridge=_read_bridge
+    )
+
+
+def _read_conversation(
+    box, data, connection, ident, *, deadline, bridge, managed=False
+):
     try:
         end = time.monotonic() + HOST_TIMEOUT
         if deadline is not None:
@@ -586,12 +637,13 @@ def conversation(box, data, connection, ident, *, deadline=None):
                 "-B",
                 "-c",
                 Path(__file__).read_text(encoding="utf-8"),
+                *([_MANAGED_ARG] if managed else []),
                 url,
                 directory,
                 ident,
             ],
         )
-        value = _display_value(_read_bridge(command, end), ident, hidden)
+        value = _display_value(bridge(command, end), ident, hidden)
         _remaining(end)
         return value
     except ConversationError:
@@ -612,13 +664,6 @@ def conversation(box, data, connection, ident, *, deadline=None):
 if __name__ == "__main__":
     try:
         _worker(*sys.argv[1:])
-    except (
-        OSError,
-        ValueError,
-        TypeError,
-        HTTPException,
-        RecursionError,
-        OverflowError,
-    ):
+    except _WORKER_ERRORS:
         # No raw stdout/stderr failure or partial native body crosses the pipe.
         sys.exit(1)
