@@ -54,6 +54,12 @@ uses one loopback-only named relay per verified owner and refuses concurrent
 guest access to that owner unless independent admission is proven. Guest mode
 remains the default elsewhere.
 
+The unserved launcher preflight validates both supplied certificate pairs
+and binds the two fixed IPv4 loopback ports as one reservation. It does not
+listen, unlock the host vault, create a workspace, or publish a link. A second
+port failure releases both sockets. The socket pair does not establish
+browser trust, exclusive native owner admission, or a runnable HTTPS mode.
+
 The unserved named HTTPS transport takes ownership of one accepted connection,
 selects a validated TLS context and role by the actual IPv4 loopback endpoint,
 then checks that role's exact HTTP/1.1 method, route and origin. Before reading
