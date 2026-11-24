@@ -138,8 +138,11 @@ the compatibility fence through retirement and interrupted operations.
 
 Enrollment also needs a trusted browser entry and a separate local
 approval before atomically comparing and replacing the exact encrypted
-account store. The tested final reply gate only makes a proof eligible for
-review. It does not grant this approval or write the store. Select and
+account store. The final reply gate only makes a proof eligible for review.
+The [unserved host commit](web-enrollment-stage.md#unserved-foreground-host-commit)
+requires that proof, foreground terminal confirmation and an independently
+held exclusive scope. Its synthetic tests do not supply a production scope
+producer, enrollment route or host acceptance. Select and
 independently review the exact authentication artifacts, dependencies,
 licenses and applicable IPR before deployment or distribution. Native
 workspace/provider vault credentials stay on the host; named browser

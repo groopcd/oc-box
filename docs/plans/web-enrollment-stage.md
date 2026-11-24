@@ -1,7 +1,8 @@
 # Internal staged named enrollment
 
-This is the host coordinator contract only. It does not expose a route,
-install an artifact, select an account, change the store, or grant access.
+This is the unserved host coordinator contract. It does not expose a route,
+install an artifact, select an account, or grant access. Store publication
+goes through the separate foreground host commit primitive.
 
 The host chooses an exact `RegistrationReview` from the account store,
 independently authorizes its account and workspace scope, and reserves a
@@ -123,12 +124,52 @@ Transport-free ingress and CDP fixtures may exercise the provisional JSON but
 cannot later attach a socket or release a host result. Direct worker fixtures
 use `take_for_fixture()` for round-trip bytes only, with no reviewed result or
 CAS guard; neither synthetic path substitutes for checked HTTP delivery.
-Before persisting, the host still needs its local confirmation, owner
-exclusion/revocation and `commit_registration(..., current=result.current)`.
-The guard checks approval/claim liveness; it does not replace the store's
-locked comparison against the original ciphertext and review. Do not close
-or retire the approval before the guarded write; successful proof already
-closes the native workers without invalidating the host result.
+
+### Unserved foreground host commit
+
+The host foreground can call
+`web_enrollment_commit.commit_enrollment(approval, scope=held_scope)` once,
+only after checked reply delivery. Pass the original approval, not a result,
+reply, or callback that claims the browser succeeded. The required
+`HeldEnrollmentScope(approval, review, current)` binds the exact **approval
+and review objects**, not another browser proof, a review copy or a new
+selection of the username, store, operation, or workspace IDs. An attempt on
+the right approval before checked delivery retires it; a wrong approval or
+review cannot redeem or cancel it.
+
+The scope producer must independently verify every workspace in the review
+and retain exclusion through the result (including failures). That requires
+verified stopped/absent owners with restart excluded, or independently proved
+exclusive scope with conflicting admission fenced and affected browser grants
+revoked and drained. A disconnected socket, one stopped observation, ordinary
+attach, or an account-generation check is not that proof. There is no
+production scope producer, launcher integration, or HTTP binding for this
+primitive. Its mandatory `scope.current()` is a bounded, read-only recheck of
+an already held fence, not authority to unlock, stop, refresh credentials,
+retry, or enroll through a callback.
+Ordinary named sign-in teardown closes its bootstrap and invalidates claims;
+the stopped-owner variant would need a separate enrollment-only bootstrap
+lifetime rather than stopping the ordinary sign-in service after proof.
+
+The host's main thread displays the exact store path, username, operation,
+and full workspace scope on its controlling terminal. The operator must
+submit `ENROLL` or `RESET`, then enter the **host web account store**
+passphrase with reveal disabled. There is no programmatic secret input,
+browser password, provider vault, dashboard private input, or stdin fallback.
+Time spent in prompts does not extend claim or approval expiry. A denial,
+lost fence, expired claim, stale store or unverified write spends the
+attempt. Do not replay it or assume an unverified write did not happen.
+
+The eligibility and scope guards are rechecked through the existing
+`commit_registration` guard under its store lock. This does not replace the
+locked comparison against the original ciphertext and review, nor make
+approval cancellation a transaction with filesystem replacement. Do not
+retire the approval before the guarded write; eligibility already required
+the proof workers and writer to drain. The primitive retires the taken
+approval at the end; it does not release the external fence or establish
+native owner drain.
+
+### Approval retirement
 
 The owner calls `expire()` periodically and on bootstrap retirement. This
 fences stale work and initiates bounded worker teardown. `close()` permanently

@@ -523,9 +523,15 @@ class EnrollmentApproval:
         self._drain_closed()
         return None
 
-    def take_for_host(self):
-        """Take the original reviewed result once, only after checked delivery."""
+    def take_for_host(self, *, expected_review=None):
+        """Take the original reviewed result once, only after checked delivery.
+
+        A host commit attempt supplies its exact review. An early attempt for
+        that review retires it; a different review cannot consume it.
+        """
         with self._lock:
+            if expected_review is not None and self._review is not expected_review:
+                return None
             if (
                 self._http is not None
                 and self._current_locked("delivered")
@@ -539,6 +545,8 @@ class EnrollmentApproval:
                 self._phase = "taken"
                 self._review = self._record = None
                 return result
+            if expected_review is not None:
+                self._close_locked()
         self._drain_closed()
         return None
 
