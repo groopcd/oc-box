@@ -295,6 +295,13 @@ the absolute `account_store` path. Unknown fields, including password or
 secret fields, refuse. The profile read does not open the referenced files,
 choose artifacts, update profile files or authorize distribution.
 
+`run_named_client` is the foreground loop for a prepared named Studio
+client. It opens only the fixed, token-free workspace entry in a sanitized
+browser subprocess, or prints it for explicit opening. A caller must handle
+`NamedClientUndrained` with the original handle and owner held: routing this
+through ordinary cleanup that releases the owner would be unsafe. The
+launcher integration and its real host cancellation tests remain gated.
+
 A later LAN instance can use distinct existing sites and certificates under
 operator control. Isolated guest LAN tests can establish transport behavior
 using a synthetic private CA, without touching public DNS or requesting a

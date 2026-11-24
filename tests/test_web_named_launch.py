@@ -1,6 +1,7 @@
 """Verify host-side sequencing without a native service or real secrets."""
 
-from contextlib import ExitStack, contextmanager
+from contextlib import ExitStack, contextmanager, redirect_stdout
+import io
 import json
 import os
 from pathlib import Path
@@ -115,7 +116,11 @@ class PrepareNamedLaunchTests(unittest.TestCase):
         contexts = ExitStack()
         self.addCleanup(contexts.close)
         self.events = []
-        self.profile = SimpleNamespace(origins=object())
+        self.profile = SimpleNamespace(
+            origins=SimpleNamespace(
+                workspace=SimpleNamespace(value="https://workspace.ocbox-app.test:9444")
+            )
+        )
         self.assets = object()
         self.snapshot = web_accounts.AccountSnapshot(
             web_accounts.AccountStore(
@@ -303,3 +308,65 @@ class PrepareNamedLaunchTests(unittest.TestCase):
             launch.prepare_named_launch(self.inputs)
         self.assertEqual(self.events, [])
         self.reserve.assert_not_called()
+
+    def test_foreground_ctrl_c_drains_and_no_open_never_activates_a_browser(self):
+        prepared = launch.prepare_named_launch(self.inputs)
+        self.foreground.wait_stopped.side_effect = KeyboardInterrupt()
+        self.foreground.close.return_value = True
+        with (
+            patch.object(launch.subprocess, "run") as child,
+            redirect_stdout(io.StringIO()) as output,
+        ):
+            self.assertEqual(
+                launch.run_named_client(None, self.owner, prepared, no_open=True), 130
+            )
+        child.assert_not_called()
+        self.assertIn(self.foreground.start.return_value, output.getvalue())
+        self.assertNotIn("synthetic-store-passphrase", output.getvalue())
+        self.assertTrue(self.foreground.start.call_args.kwargs["studio"])
+        self.assertEqual(
+            self.events[-3:], ["snapshot-closed", "assets-closed", "reserve-closed"]
+        )
+
+    def test_named_client_preserves_all_resources_after_failed_drain(self):
+        prepared = launch.prepare_named_launch(self.inputs)
+        self.foreground.wait_stopped.side_effect = KeyboardInterrupt()
+        self.foreground.close.return_value = False
+        try:
+            with (
+                redirect_stdout(io.StringIO()),
+                self.assertRaises(launch.NamedClientUndrained),
+            ):
+                launch.run_named_client(None, self.owner, prepared, no_open=True)
+            self.foreground.close.assert_called_once()
+            self.assertEqual(
+                self.events, ["reserve", "assets", "host-prompt", "snapshot"]
+            )
+        finally:
+            self.foreground.close.return_value = True
+            self.assertTrue(prepared.close())
+
+    def test_browser_activation_passes_only_the_entry_url_over_stdin(self):
+        prepared = launch.prepare_named_launch(self.inputs)
+        self.foreground.wait_stopped.return_value = True
+        self.foreground.stop_reason = (
+            launch.web_named_site_lifecycle.StopReason.REQUESTED
+        )
+        self.foreground.close.return_value = True
+        box = SimpleNamespace(maintenance_host_env=lambda: {"PATH": "/usr/bin:/bin"})
+        with (
+            patch.dict(
+                os.environ,
+                {"OC_BOX_SYNTHETIC_TOKEN": "fixture secret", "DISPLAY": ":1"},
+            ),
+            patch.object(launch.subprocess, "run") as child,
+            redirect_stdout(io.StringIO()),
+        ):
+            self.assertEqual(
+                launch.run_named_client(box, self.owner, prepared, no_open=False), 0
+            )
+        invocation = child.call_args
+        self.assertNotIn(self.foreground.start.return_value, invocation.args[0])
+        self.assertEqual(invocation.kwargs["input"], self.foreground.start.return_value)
+        self.assertNotIn("OC_BOX_SYNTHETIC_TOKEN", invocation.kwargs["env"])
+        self.assertEqual(invocation.kwargs["env"]["DISPLAY"], ":1")
