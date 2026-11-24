@@ -33,9 +33,12 @@ _ID = "a" * 32
 _CONTAINER = "oc-box-" + _ID
 _HOME = "oc-box-home-" + _ID
 _CID = "9" * 64
+_UPPER = _GRAPH + "/overlay/" + "8" * 64 + "/diff"
+_CREATED = "2026-02-01T04:05:06.878654321Z"
 _EXPECTED = ((_CONTAINER, _HOME),)
 _INFO = ("info", "--format", "json")
 _PS = ("ps", "--all", "--quiet", "--no-trunc")
+_MOUNT_LIST = ("mount", "--format", "json")
 _VLS = ("volume", "ls", "--format", "{{.Name}}")
 _NLS = (
     "network",
@@ -70,12 +73,25 @@ class FixtureEngine:
                 "volumePath": _VOLUMES,
                 "graphDriverName": "overlay",
                 "transientStore": False,
+                "configFile": "/usr/share/containers/storage.conf",
+                "graphOptions": {},
             },
-            "version": {"Version": "6.1.4"},
+            "version": {"Version": "5.8.1"},
+            "plugins": {"volume": ["local"]},
         }
         self.container = {
             "Id": _CID,
             "Name": _CONTAINER,
+            "Created": _CREATED,
+            "Rootfs": "",
+            "Pod": "",
+            "Namespace": "",
+            "IsInfra": False,
+            "IsService": False,
+            "Driver": "overlay",
+            "GraphDriver": {"Name": "overlay", "Data": {"UpperDir": _UPPER}},
+            "Dependencies": [],
+            "HostConfig": {"RestartPolicy": {"Name": "no"}},
             "Config": {
                 "Labels": {
                     "io.oc-box.workspace": _ID,
@@ -89,25 +105,33 @@ class FixtureEngine:
                 "Running": False,
                 "Paused": False,
                 "Restarting": False,
+                "Dead": False,
                 "Pid": 0,
-                "ConmonPid": 0,
             },
-            "Mounts": [{"Source": "/private/project/PRIVATE_BIND_PATH"}],
+            "Mounts": [
+                {
+                    "Type": "bind",
+                    "Source": "/private/project/PRIVATE_BIND_PATH",
+                    "Destination": "/workspace",
+                    "Driver": "",
+                }
+            ],
         }
         self.volume = {
             "Driver": "local",
             "Scope": "local",
             "Name": _HOME,
-            "Anonymous": False,
             "Labels": {"io.oc-box.workspace": _ID},
             "Mountpoint": _VOLUMES + "/" + _HOME + "/_data",
-            "Options": None,
-            "StorageID": "",
+            "Options": {},
             "MountCount": 0,
-            "CreatedAt": "2026-02-01T04:05:06.878654321Z",
+            "CreatedAt": _CREATED,
         }
         self.contains_container = self.contains_volume = self.external = False
         self.networks = b"retained-net\n"
+        self.extra = ()
+        self.count_override = None
+        self.mounted = None
         self.bad_volume_mount = False
         self.override = {}
 
@@ -133,9 +157,24 @@ class FixtureEngine:
             value = self.override[cmd]
             return value() if callable(value) else value
         if cmd == _INFO:
-            return 0, json.dumps(self.info).encode()
+            payload = deepcopy(self.info)
+            count = self.count_override
+            if count is None:
+                count = int(self.contains_container) + len(self.extra)
+            payload["store"]["containerStore"] = {
+                "number": count,
+                "running": 0,
+                "paused": 0,
+                "stopped": count,
+            }
+            return 0, json.dumps(payload).encode()
+        containers = ((self.container,) if self.contains_container else ()) + self.extra
         if cmd == _PS or cmd == (*_PS, "--external"):
-            ids = _CID.encode() + b"\n" if self.contains_container else b""
+            # Keep the original listed ID available for mismatched inspect tests.
+            ids = ((_CID,) if self.contains_container else ()) + tuple(
+                row["Id"] for row in self.extra
+            )
+            ids = b"".join(ident.encode() + b"\n" for ident in ids)
             if cmd[-1] == "--external" and self.external:
                 ids += b"7" * 64 + b"\n"
             return 0, ids
@@ -143,8 +182,14 @@ class FixtureEngine:
             return 0, _HOME.encode() + b"\n" if self.contains_volume else b""
         if cmd == _NLS:
             return 0, self.networks
-        if cmd == ("container", "inspect", "--", _CID) and self.contains_container:
-            return 0, json.dumps([self.container]).encode()
+        if cmd == _MOUNT_LIST:
+            return (
+                (125, b"PRIVATE_NATIVE_OVERLAY_REFUSAL")
+                if self.mounted is None
+                else (0, json.dumps(self.mounted).encode())
+            )
+        if cmd[:3] == ("container", "inspect", "--"):
+            return 0, json.dumps(containers).encode()
         if cmd == ("volume", "inspect", "--", _HOME) and self.contains_volume:
             return 0, json.dumps([self.volume]).encode()
         if cmd == ("container", "exists", "--", _CONTAINER):
@@ -238,7 +283,138 @@ class InventoryTests(unittest.TestCase):
             self.assertEqual((volume.name, volume.mount_count), (_HOME, 2))
             self.assertEqual(volume.mountpoint.path, self.engine.volume["Mountpoint"])
             self.assertNotIn("PRIVATE_", repr(observed))
+            self.assertIsNone(container.mounted)
+            self.assertEqual(self.engine.commands.count(_MOUNT_LIST), 1)
+            self.assertEqual(
+                (container.conmon_pid, container.writable.path), (0, _UPPER)
+            )
+            self.assertNotIn("/private/project/PRIVATE_BIND_PATH", self.engine.pins)
             self.refused("populated-store-proof-unavailable", reader.inspect, _EXPECTED)
+
+    def test_captures_stopped_named_volume_consumers_with_zero_mount_count(self):
+        self.engine.contains_container = self.engine.contains_volume = True
+        foreign = deepcopy(self.engine.container)
+        foreign.update(
+            Id="7" * 64,
+            Name="foreign-stopped",
+            Dependencies=[_CID],
+            Mounts=[
+                {
+                    "Type": "volume",
+                    "Driver": "local",
+                    "Name": _HOME,
+                    "Source": self.engine.volume["Mountpoint"],
+                    "Destination": "/data",
+                    "SubPath": "nested",
+                },
+                {
+                    "Type": "bind",
+                    "Driver": "",
+                    "Source": self.engine.volume["Mountpoint"] + "/child",
+                    "Destination": "/alias",
+                },
+            ],
+        )
+        foreign["GraphDriver"]["Data"]["UpperDir"] = (
+            _GRAPH + "/overlay/" + "6" * 64 + "/diff"
+        )
+        foreign["Config"]["Labels"] = None
+        self.engine.extra = (foreign,)
+        self.engine.mounted = []
+        with self.engine.local() as (reader, _):
+            found = reader.scan(_EXPECTED)
+            old, owner = found.containers
+            self.assertEqual(old.dependencies, (owner.ident,))
+            self.assertEqual(old.volume_refs, ((_HOME, True),))
+            self.assertEqual(old.bind_entries, 1)
+            self.assertTrue(old.lexical_store_overlap)
+            self.assertFalse(owner.lexical_store_overlap)
+            self.assertEqual(owner.bind_entries, 1)
+            self.assertFalse(old.mounted)
+            self.assertEqual(found.volumes[0].mount_count, 0)
+            self.assertFalse(found.complete)
+            self.assertNotIn(foreign["Mounts"][1]["Source"], self.engine.pins)
+
+    def test_only_exact_operand_free_mount_report_can_prove_mounted_status(self):
+        self.engine.contains_container = True
+        row = {
+            "id": _CID,
+            "Names": [_CONTAINER],
+            "mountpoint": _UPPER.removesuffix("/diff") + "/merged",
+        }
+        self.engine.mounted = [row]
+        with self.engine.local() as (reader, _):
+            found = reader.scan(_EXPECTED)
+            self.assertTrue(found.containers[0].mounted)
+            self.assertEqual(self.engine.commands.count(_MOUNT_LIST), 2)
+            self.assertNotIn(row["mountpoint"], self.engine.pins)
+            for bad in (
+                [dict(row, id="f" * 64)],
+                [dict(row, Names=["replacement"])],
+                [dict(row, mountpoint="/PRIVATE_EXTERNAL")],
+                [{"id": _CID, "names": [_CONTAINER], "mountpoint": row["mountpoint"]}],
+            ):
+                self.engine.mounted = bad
+                self.refused("mount-catalog-unverified", reader.scan, _EXPECTED)
+            results = iter(
+                ((0, json.dumps([row]).encode()), (125, b"PRIVATE_UNAVAILABLE"))
+            )
+            self.engine.override[_MOUNT_LIST] = lambda: next(results)
+            self.refused("catalog-changed", reader.scan, _EXPECTED)
+
+    def test_invalid_missing_dependency_external_storage_and_incomplete_catalog_refuse(
+        self,
+    ):
+        self.engine.contains_container = True
+        normal = deepcopy(self.engine.container)
+        with self.engine.local() as (reader, _):
+            self.engine.count_override = 2
+            self.refused("catalog-changed", reader.scan, _EXPECTED)
+            self.engine.count_override = None
+            for evidence in (None, [_CID], ["7" * 64], ["prefix"]):
+                self.engine.container["Dependencies"] = evidence
+                self.refused("inspect-unverified", reader.scan, _EXPECTED)
+            self.engine.container = deepcopy(normal)
+            self.engine.container["GraphDriver"]["Data"]["UpperDir"] = (
+                "/PRIVATE_EXTERNAL"
+            )
+            self.refused("unsupported-container-storage", reader.scan, _EXPECTED)
+            self.engine.container = deepcopy(normal)
+            self.engine.container["Mounts"][0]["Type"] = "image"
+            self.refused("unsupported-container-storage", reader.scan, _EXPECTED)
+            self.engine.container = deepcopy(normal)
+            volume = {
+                "Type": "volume",
+                "Name": _HOME,
+                "Driver": "local",
+                "Source": self.engine.volume["Mountpoint"],
+                "Destination": "/data",
+            }
+            self.engine.container["Mounts"].append(volume)
+            self.refused("inspect-unverified", reader.scan, _EXPECTED)
+            volume["SubPath"] = "../outside"
+            self.refused("unsupported-container-storage", reader.scan, _EXPECTED)
+
+    def test_same_names_with_changed_creation_or_refcount_do_not_pass_second_inspect(
+        self,
+    ):
+        self.engine.contains_container = self.engine.contains_volume = True
+        initial = self.engine.volume
+        with self.engine.local() as (reader, _):
+            for changed in (
+                dict(initial, CreatedAt="2026-04-04T01:01:01Z"),
+                dict(initial, MountCount=1),
+            ):
+                results = iter(
+                    (
+                        (0, json.dumps([initial]).encode()),
+                        (0, json.dumps([changed]).encode()),
+                    )
+                )
+                self.engine.override[("volume", "inspect", "--", _HOME)] = lambda: next(
+                    results
+                )
+                self.refused("catalog-changed", reader.scan, _EXPECTED)
 
     def test_remote_and_ambiguous_environment_never_reach_engine(self):
         for key, value in (
@@ -283,8 +459,9 @@ class InventoryTests(unittest.TestCase):
             ("store", "graphRoot", "/elsewhere/storage"),
             ("store", "transientStore", None),
             ("store", "configFile", "/elsewhere/storage.conf"),
-            ("version", "Version", "6.1.4-dev"),
+            ("version", "Version", "5.8.1-dev"),
             ("version", "Version", "6.2.1"),
+            ("plugins", "volume", ["local", "PRIVATE_PLUGIN"]),
         ):
             with self.subTest(section=section, key=key):
                 self.engine.info = deepcopy(initial)
@@ -295,9 +472,10 @@ class InventoryTests(unittest.TestCase):
                     with self.engine.local():
                         self.fail("unexpected engine context")
         self.engine.info = initial
+        self.assertNotIn(_VLS, self.engine.commands)
         with self.engine.local() as (reader, _):
-            self.engine.info["version"]["Version"] = "6.2.0"
-            self.refused("engine-binding-changed", reader.scan, _EXPECTED)
+            self.engine.info["version"]["Version"] = "5.8.2"
+            self.refused("engine-profile-unverified", reader.scan, _EXPECTED)
 
     def test_store_pin_change_rejects_before_query_and_after_capture(self):
         with self.engine.local() as (reader, _):
@@ -355,6 +533,7 @@ class InventoryTests(unittest.TestCase):
                 ("MountCount", False),
                 ("StorageID", "external"),
                 ("Anonymous", True),
+                ("CreatedAt", "0001-01-01T00:00:00Z"),
             ):
                 with self.subTest(key=key):
                     self.engine.volume = {**initial, key: value}
@@ -381,7 +560,7 @@ class InventoryTests(unittest.TestCase):
             self.engine.container["Id"] = "a" * 64
             self.refused("inspect-unverified", reader.scan, _EXPECTED)
             self.engine.container = deepcopy(original)
-            del self.engine.container["State"]["ConmonPid"]
+            del self.engine.container["State"]["Pid"]
             self.refused("inspect-unverified", reader.scan, _EXPECTED)
             self.engine.override[("container", "inspect", "--", _CID)] = (
                 0,
@@ -475,6 +654,7 @@ class NativeSeamTests(unittest.TestCase):
                 b"[engine]\nremote = true\n",
                 b'[engine]\nactive_service = "PRIVATE_REMOTE"\n',
                 b'[engine]\nstatic_dir = "/PRIVATE_STORE"\n',
+                b'[engine.volume_plugins]\nexternal = "/PRIVATE_PLUGIN_SOCKET"\n',
                 b'[engine.service_destinations.named]\nuri = "PRIVATE_REMOTE"\n',
             ):
                 with patch.object(podman, "_read_pin", return_value=body):
@@ -570,6 +750,9 @@ class NativeSeamTests(unittest.TestCase):
             for args in (
                 ("--remote=false", "container", "rm", "--", _CID),
                 ("--remote=false", "system", "prune"),
+                ("--remote=false", "mount", "--all", "--format", "json"),
+                ("--remote=false", "mount", "--latest"),
+                ("--remote=false", "mount", _CID),
                 ("--remote=false", "container", "inspect", "--", "--all"),
                 ("--remote=false", "container", "inspect", "--", "short-id"),
                 ("--remote=true", *_INFO),

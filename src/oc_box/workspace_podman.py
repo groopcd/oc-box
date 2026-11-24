@@ -6,7 +6,7 @@ from Config.Mounts, a container status string, or a lexical source path.
 """
 
 from contextlib import ExitStack, contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import json
 import os
 from pathlib import Path
@@ -35,10 +35,10 @@ _SCAN_SECONDS = 45
 _COMMAND_SECONDS = 8
 _REAP_SECONDS = 2
 _PIN = os.O_PATH | os.O_NOFOLLOW | os.O_CLOEXEC
-# The repository's native fixture knows this StoreInfo configFile omission
-# only for these exact releases. Eligibility here is for read-only inspection;
-# none of the populated-store deletion contract is established by the label.
-_VERSIONS = ("6.1.4", "6.2.0")
+# Source profile: upstream Podman c6077f645788743258a1a749f8005b4fb3cbe533.
+# A packaged version is not attestation of an unmodified native binary.
+_VERSION = "5.8.1"
+_DEFAULT_STORAGE_CONF = "/usr/share/containers/storage.conf"
 _ROUTING_PREFIXES = (
     "CONTAINER_",
     "CONTAINERS_",
@@ -59,6 +59,7 @@ _ROUTING_NAMES = frozenset(
 )
 _INFO = ("info", "--format", "json")
 _PS = ("ps", "--all", "--quiet", "--no-trunc")
+_MOUNT_LIST = ("mount", "--format", "json")
 _VOLUMES = ("volume", "ls", "--format", "{{.Name}}")
 _NETWORKS = ("network", "ls", "--filter", "label=" + _LABEL, "--format", "{{.Name}}")
 _REASONS = frozenset(
@@ -74,6 +75,8 @@ _REASONS = frozenset(
         "malformed-engine-metadata",
         "catalog-unverified",
         "inspect-unverified",
+        "mount-catalog-unverified",
+        "unsupported-container-storage",
         "engine-binding-unverified",
         "engine-binding-changed",
         "engine-command-unverified",
@@ -117,6 +120,7 @@ class PodmanProfile:
 class ContainerObservation:
     ident: str
     name: str
+    created_at: str
     workspace_label: str | None
     managed: bool
     status: str
@@ -126,6 +130,14 @@ class ContainerObservation:
     pid: int
     conmon_pid: int
     mount_entries: int
+    bind_entries: int
+    lexical_store_overlap: bool
+    volume_refs: tuple[tuple[str, bool], ...]
+    dependencies: tuple[str, ...]
+    restart_policy: str
+    in_pod: bool
+    writable: review.StoragePath
+    mounted: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -253,7 +265,7 @@ def _no_overrides(home_config, uid):
         "/usr/share/containers/containers.conf.modules",
         "/usr/share/containers/containers.rootless.conf",
         "/usr/share/containers/containers.rootless.d",
-        "/usr/share/containers/storage.conf",
+        _DEFAULT_STORAGE_CONF,
         "/etc/containers/containers.conf",
         "/etc/containers/containers.conf.d",
         "/etc/containers/containers.conf.modules",
@@ -307,6 +319,7 @@ def _vendor_pin(stack, uid):
         or engine.get("remote", False) is not False
         or engine.get("active_service") not in (None, "")
         or engine.get("service_destinations") not in (None, {})
+        or engine.get("volume_plugins") not in (None, {})
         or any(
             engine.get(key) not in (None, "")
             for key in (
@@ -344,7 +357,7 @@ def _remaining(deadline):
 def _read_only_query(argv):
     if type(argv) is not tuple or not all(type(arg) is str for arg in argv):
         return False
-    if argv in (_INFO, _PS, (*_PS, "--external"), _VOLUMES, _NETWORKS):
+    if argv in (_INFO, _PS, (*_PS, "--external"), _VOLUMES, _NETWORKS, _MOUNT_LIST):
         return True
     if not 4 <= len(argv) <= _BATCH + 3 or argv[2] != "--":
         return False
@@ -472,52 +485,13 @@ def _labels(value):
     return owner, managed == "true"
 
 
-def _container(item):
-    name, state, config, mounts = (
-        item.get(key) for key in ("Name", "State", "Config", "Mounts")
-    )
-    if (
-        not review._matches(review._RESOURCE_NAME, name)
-        or type(state) is not dict
-        or type(config) is not dict
-        or type(mounts) is not list
-        or len(mounts) > review.MAX_MOUNTS
-        or any(type(mount) is not dict for mount in mounts)
-        or state.get("Status")
-        not in (
-            "configured",
-            "created",
-            "exited",
-            "stopped",
-            "running",
-            "paused",
-            "stopping",
-        )
-        or any(
-            type(state.get(key)) is not bool
-            for key in ("Running", "Paused", "Restarting")
-        )
-        or any(
-            type(state.get(key)) is not int or not 0 <= state[key] < 2**31
-            for key in ("Pid", "ConmonPid")
-        )
-        or "Labels" not in config
-    ):
-        _fail("inspect-unverified")
-    owner, managed = _labels(config["Labels"])
-    return ContainerObservation(
-        item["Id"],
-        name,
-        owner,
-        managed,
-        state["Status"],
-        state["Running"],
-        state["Paused"],
-        state["Restarting"],
-        state["Pid"],
-        state["ConmonPid"],
-        len(mounts),
-    )
+def _uint(value):
+    return type(value) is int and 0 <= value < 2**31
+
+
+def _creation_time(value):
+    # Go's zero time is not evidence that a persistent creation was recorded.
+    return review._valid_created(value) and not value.startswith("0001-")
 
 
 class _LocalInventory:
@@ -532,7 +506,7 @@ class _LocalInventory:
         self._thread = current_thread()
         self._latch = Lock()
         self._closed = False
-        self._profile = self._info(time.monotonic() + _COMMAND_SECONDS)
+        self._profile, _ = self._info(time.monotonic() + _COMMAND_SECONDS)
 
     @property
     def profile(self):
@@ -582,20 +556,34 @@ class _LocalInventory:
         info = _json(self._query(deadline, _SMALL, *_INFO)[1])
         if type(info) is not dict:
             _fail("engine-profile-unverified")
-        host, store, version = (info.get(key) for key in ("host", "store", "version"))
-        if not all(type(value) is dict for value in (host, store, version)):
+        host, store, version, plugins = (
+            info.get(key) for key in ("host", "store", "version", "plugins")
+        )
+        if not all(type(value) is dict for value in (host, store, version, plugins)):
             _fail("engine-profile-unverified")
         security = host.get("security")
-        native = version.get("Version")
+        counts = store.get("containerStore")
+        options = store.get("graphOptions")
         if (
             type(security) is not dict
             or security.get("rootless") is not True
             or host.get("serviceIsRemote") is not False
-            or type(native) is not str
-            or native not in _VERSIONS
+            or version.get("Version") != _VERSION
             or store.get("graphDriverName") != "overlay"
             or store.get("transientStore") is not False
-            or "configFile" in store
+            or store.get("configFile") != _DEFAULT_STORAGE_CONF
+            # Native volume ls calls Volume.Inspect before projecting its
+            # table, which would contact any configured volume plugin.
+            or plugins.get("volume") != ["local"]
+            or type(options) is not dict
+            or any(key.endswith("additionalImageStores") for key in options)
+            or type(counts) is not dict
+            or not all(
+                _uint(counts.get(k)) for k in ("number", "running", "paused", "stopped")
+            )
+            or counts["number"]
+            != counts["running"] + counts["paused"] + counts["stopped"]
+            or counts["number"] > _LIMIT
             or tuple(store.get(k) for k in ("graphRoot", "runRoot", "volumePath"))
             != tuple(pin.path for pin in self._roots)
         ):
@@ -606,9 +594,9 @@ class _LocalInventory:
         scope = review.EngineScope(True, False, *roots)
         if not review._storage_layout(scope):
             _fail("engine-profile-unverified")
-        return PodmanProfile(native, scope)
+        return PodmanProfile(_VERSION, scope), counts["number"]
 
-    def _catalogs(self, deadline):
+    def _catalogs(self, deadline, expected_containers):
         def ids(*extra):
             return _catalog(
                 self._query(deadline, _SMALL, *_PS, *extra)[1],
@@ -616,6 +604,8 @@ class _LocalInventory:
             )
 
         principal = ids()
+        if len(principal) != expected_containers:
+            _fail("catalog-changed")
         if ids("--external") != principal:
             _fail("external-container-store")
         volumes = _catalog(
@@ -628,6 +618,200 @@ class _LocalInventory:
         )
         return principal, volumes, networks
 
+    def _store_dir(self, path, root, refusal):
+        # Pin the parent and leaf without reading contents or crossing a mount
+        # boundary. Mount IDs, not st_dev alone, reject same-device binds.
+        with ExitStack() as stack:
+            dirs = tuple(
+                _pin(stack, directory, self._uid, owner=self._uid, directory=True)
+                for directory in (str(Path(path).parent), path)
+            )
+            parent, data = dirs
+            if (
+                any(
+                    pin.stamp[0] != root.stamp[0]
+                    or pin.stamp[2] != root.stamp[2]
+                    or pin.stamp[:2] == root.stamp[:2]
+                    for pin in dirs
+                )
+                or parent.stamp[:2] == data.stamp[:2]
+            ):
+                _fail(refusal)
+            data.recheck()
+            parent.recheck()
+        return review.StoragePath(path, data.stamp[:3])
+
+    def _writable(self, graph):
+        refusal = "unsupported-container-storage"
+        if (
+            type(graph) is not dict
+            or graph.get("Name") != "overlay"
+            or type(graph.get("Data")) is not dict
+        ):
+            _fail(refusal)
+        root = self._roots[0]
+        upper = graph["Data"].get("UpperDir")
+        prefix = root.path + "/overlay/"
+        if (
+            not review._path(upper)
+            or not upper.startswith(prefix)
+            or not upper.endswith("/diff")
+            or not review._matches(
+                review._ENGINE_ID, upper[len(prefix) : -len("/diff")]
+            )
+        ):
+            _fail(refusal)
+        # MergedDir may be mounted or absent and LowerDir belongs to images.
+        # Neither is opened or treated as a writable-layer identity.
+        return self._store_dir(upper, root, refusal)
+
+    def _container(self, item):
+        name, state, config, mounts, host, deps = (
+            item.get(k)
+            for k in (
+                "Name",
+                "State",
+                "Config",
+                "Mounts",
+                "HostConfig",
+                "Dependencies",
+            )
+        )
+        pod = item.get("Pod")
+        if (
+            not review._matches(review._RESOURCE_NAME, name)
+            or not _creation_time(item.get("Created"))
+            or not all(type(data) is dict for data in (state, config, host))
+            or type(mounts) is not list
+            or len(mounts) > review.MAX_MOUNTS
+            or type(deps) is not list
+            or len(deps) > review.MAX_MOUNTS
+            or not all(review._matches(review._ENGINE_ID, dep) for dep in deps)
+            or len(set(deps)) != len(deps)
+            or item["Id"] in deps
+            or state.get("Status")
+            not in (
+                "created",
+                "initialized",
+                "exited",
+                "stopped",
+                "running",
+                "paused",
+                "stopping",
+                "removing",
+            )
+            or any(
+                type(state.get(k)) is not bool
+                for k in ("Running", "Paused", "Restarting", "Dead")
+            )
+            or state["Dead"]
+            or not _uint(state.get("Pid"))
+            or not _uint(state.get("ConmonPid", 0))
+            or "Labels" not in config
+            or (pod != "" and not review._matches(review._ENGINE_ID, pod))
+            or any(type(item.get(k)) is not bool for k in ("IsInfra", "IsService"))
+            or item.get("Namespace") != ""
+            or item.get("Rootfs") != ""
+            or item.get("Driver") != "overlay"
+        ):
+            _fail("inspect-unverified")
+        restart = host.get("RestartPolicy")
+        if type(restart) is not dict or restart.get("Name") not in (
+            "no",
+            "on-failure",
+            "always",
+            "unless-stopped",
+        ):
+            _fail("inspect-unverified")
+        owner, managed = _labels(config["Labels"])
+        refs, destinations, binds, overlap = [], set(), 0, False
+        for mount in mounts:
+            if type(mount) is not dict:
+                _fail("inspect-unverified")
+            source, dest = mount.get("Source"), mount.get("Destination")
+            if (
+                not review._path(source)
+                or not review._path(dest)
+                or dest in destinations
+            ):
+                _fail("inspect-unverified")
+            destinations.add(dest)
+            kind, volume, subpath = (
+                mount.get("Type"),
+                mount.get("Name", ""),
+                mount.get("SubPath", ""),
+            )
+            if kind == "volume":
+                if (
+                    not review._matches(review._RESOURCE_NAME, volume)
+                    or mount.get("Driver") != "local"
+                    or type(subpath) is not str
+                    or (subpath and not review._path("/" + subpath))
+                    or source != self._roots[2].path + "/" + volume + "/_data"
+                ):
+                    _fail("unsupported-container-storage")
+                refs.append((volume, bool(subpath)))
+            elif (
+                kind == "bind" and mount.get("Driver") == "" and volume == subpath == ""
+            ):
+                binds += 1
+                overlap |= any(
+                    review._overlap(source, root.path) for root in self._roots
+                )
+            else:
+                _fail("unsupported-container-storage")
+        return ContainerObservation(
+            item["Id"],
+            name,
+            item["Created"],
+            owner,
+            managed,
+            state["Status"],
+            state["Running"],
+            state["Paused"],
+            state["Restarting"],
+            state["Pid"],
+            state.get("ConmonPid", 0),
+            len(mounts),
+            binds,
+            overlap,
+            tuple(sorted(refs)),
+            tuple(sorted(deps)),
+            restart["Name"],
+            bool(pod or item["IsInfra"] or item["IsService"]),
+            self._writable(item.get("GraphDriver")),
+        )
+
+    def _mounted(self, deadline, observations):
+        # In this exact native source, no operands/--all/--latest means
+        # reporting only. A host rootless overlay invocation can refuse;
+        # no namespace fallback, and refusal never means all unmounted.
+        if not observations:
+            return ()
+        code, raw = self._query(deadline, _SMALL, *_MOUNT_LIST, codes=(0, 125))
+        if code == 125:
+            return None
+        rows = _json(raw)
+        if type(rows) is not list or len(rows) > len(observations):
+            _fail("mount-catalog-unverified")
+        original = {item.ident: item.name for item in observations}
+        report = {}
+        for row in rows:
+            if type(row) is not dict or set(row) != {"id", "Names", "mountpoint"}:
+                _fail("mount-catalog-unverified")
+            ident, path = row["id"], row["mountpoint"]
+            if (
+                not review._matches(review._ENGINE_ID, ident)
+                or ident not in original
+                or ident in report
+                or row["Names"] != [original[ident]]
+                or not review._path(path)
+                or not any(path.startswith(root.path + "/") for root in self._roots[:2])
+            ):
+                _fail("mount-catalog-unverified")
+            report[ident] = path
+        return tuple(sorted(report.items()))
+
     def _volume(self, item):
         required = (
             "Name",
@@ -636,8 +820,6 @@ class _LocalInventory:
             "Labels",
             "Mountpoint",
             "Options",
-            "StorageID",
-            "Anonymous",
             "CreatedAt",
             "MountCount",
         )
@@ -649,38 +831,17 @@ class _LocalInventory:
         if (
             item["Driver"] != "local"
             or item["Scope"] != "local"
-            or item["Options"] not in (None, {})
-            or item["StorageID"] not in (None, "")
-            or item["Anonymous"] is not False
+            or item["Options"] != {}
+            or item.get("StorageID", "") != ""
+            or item.get("Anonymous", False) is not False
             or item["Mountpoint"] != path
-            or not review._valid_created(item["CreatedAt"])
+            or not _creation_time(item["CreatedAt"])
             or type(count) is not int
             or not 0 <= count < 2**31
         ):
             _fail("volume-proof-unavailable")
         owner, _ = _labels(item["Labels"])
-        # No recursive store traversal and no read of volume contents.
-        with ExitStack() as stack:
-            parent = _pin(
-                stack,
-                str(Path(path).parent),
-                self._uid,
-                owner=self._uid,
-                directory=True,
-            )
-            data = _pin(stack, path, self._uid, owner=self._uid, directory=True)
-            if (
-                any(
-                    pin.stamp[0] != root.stamp[0]
-                    or pin.stamp[2] != root.stamp[2]
-                    or pin.stamp[:2] == root.stamp[:2]
-                    for pin in (parent, data)
-                )
-                or parent.stamp[:2] == data.stamp[:2]
-            ):
-                _fail("volume-proof-unavailable")
-            data.recheck()
-            parent.recheck()
+        data = self._store_dir(path, root, "volume-proof-unavailable")
         return review.VolumeInspection(
             name,
             owner,
@@ -690,7 +851,7 @@ class _LocalInventory:
             True,
             False,
             item["CreatedAt"],
-            review.StoragePath(path, data.stamp[:3]),
+            data,
             count,
         )
 
@@ -740,22 +901,49 @@ class _LocalInventory:
             if self._closed:
                 _fail("engine-context-closed")
             deadline = time.monotonic() + _SCAN_SECONDS
-            if self._info(deadline) != self.profile:
+            profile, count = self._info(deadline)
+            if profile != self.profile:
                 _fail("engine-binding-changed")
-            before = self._catalogs(deadline)
-            containers = self._observations(
-                deadline, "container", before[0], "Id", _container
-            )
+            before = self._catalogs(deadline, count)
+
+            def containers_now():
+                return self._observations(
+                    deadline, "container", before[0], "Id", self._container
+                )
+
+            def volumes_now():
+                return self._observations(
+                    deadline, "volume", before[1], "Name", self._volume
+                )
+
+            containers = containers_now()
             if len({item.name for item in containers}) != len(containers):
                 _fail("inspect-unverified")
-            volumes = self._observations(
-                deadline, "volume", before[1], "Name", self._volume
-            )
+            volumes = volumes_now()
+            if any(
+                any(dep not in before[0] for dep in row.dependencies)
+                or any(volume not in before[1] for volume, _ in row.volume_refs)
+                for row in containers
+            ):
+                _fail("inspect-unverified")
+            mounted = self._mounted(deadline, containers)
             self._presence(deadline, names, containers, volumes)
-            if self._catalogs(deadline) != before:
+            if self._catalogs(deadline, count) != before:
                 _fail("catalog-changed")
-            if self._info(deadline) != self.profile:
+            if containers_now() != containers or volumes_now() != volumes:
+                _fail("catalog-changed")
+            if mounted is not None and self._mounted(deadline, containers) != mounted:
+                _fail("catalog-changed")
+            after_profile, after_count = self._info(deadline)
+            if after_profile != self.profile:
                 _fail("engine-binding-changed")
+            if after_count != count:
+                _fail("catalog-changed")
+            if mounted is not None:
+                mounted_ids = dict(mounted)
+                containers = tuple(
+                    replace(row, mounted=row.ident in mounted_ids) for row in containers
+                )
             return PodmanInventory(self.profile, containers, volumes, before[2])
         except InventoryError:
             raise

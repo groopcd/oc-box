@@ -97,18 +97,20 @@ stage is a standard persistent `overlay` store: `<HOME>/.local/share/containers/
 `podman info` can still update native runtime metadata; read-only here means
 the adapter dispatches no storage or lifecycle mutation command.
 
-The exact accepted evidence shapes are:
+The populated observation profile is now restricted to upstream Podman 5.8.1
+schema, not the earlier 6.x shape. The exact accepted evidence is:
 
 | Query | Required evidence |
 | --- | --- |
-| `info --format json` | JSON objects `host`, `store`, `version`; `host.security.rootless: true`, `host.serviceIsRemote: false`, `store.graphDriverName: "overlay"`, `store.transientStore: false`, exact `graphRoot`, `runRoot`, `volumePath`, and `version.Version` exactly `6.1.4` or `6.2.0`, with the known omission of `store.configFile`. The same profile must hold before and after a scan. |
-| `ps --all --quiet --no-trunc`, with and without `--external` | Identical unique full lowercase 64-hex ID catalogs. Any observed extra external object blocks the profile. |
-| Volume and workspace-labeled network lists | Unique canonical resource names, one per line. Both catalogs must match a second read. |
-| `container inspect` | A JSON array bound to the exact listed IDs, with canonical `Name`, explicit `Config.Labels`, a bounded `Mounts` array, known `State.Status`, boolean `Running`/`Paused`/`Restarting`, and integer `Pid`/`ConmonPid`. This is a state observation and count of mount entries, **not** a mounted-container or dependency proof. |
-| `volume inspect` | A JSON array bound to the listed names. Require explicit `Name`, `Labels`, `Driver`, `Scope`, `Anonymous`, `Options`, `StorageID`, `CreatedAt`, `Mountpoint` and `MountCount`. Only unconfigured, non-anonymous local volumes with a pinned canonical mountpoint and verified nonnegative count are observed. Omitted fields or other storage refuse; they are not defaulted to safe values. |
+| `info --format json` | Exact `version.Version: "5.8.1"`, rootless/non-remote metadata, persistent overlay and pinned canonical roots. Require `store.configFile` to name the built-in `/usr/share/containers/storage.conf` slot, independently checked absent by this no-override profile. Refuse configured volume plugins (`plugins.volume` must be exactly `["local"]`) and additional image stores. Agree on the profile and `store.containerStore.number` before and after a scan. |
+| `ps --all --quiet --no-trunc`, with and without `--external` | Identical unique full lowercase 64-hex ID catalogs, with their count corroborated by `info`. Extra/missing objects or an unresolved reference refuse. |
+| Volume and workspace-labeled network lists | Unique canonical resource names, one per line. Both catalogs must match a second read. Native volume list itself calls inspect on every listed volume, so plugin refusal precedes it. |
+| `container inspect` | Exact catalog IDs and creation stamps, canonical names, flags/PIDs and restart policy, explicit whole Libpod `Dependencies` and supported named-volume references including subpaths, plus a no-follow pinned overlay `UpperDir`. Omitted `ConmonPid` encodes zero in this exact schema; boolean/state fields are not a mounted-state oracle. Bind source strings are only checked for lexical overlap and are never opened or returned. |
+| `mount --format json` | No operands or other options. On success parse exact `id`, `Names`, `mountpoint` rows twice and join them to inspected IDs and names. Exit 125 leaves mounted state unknown, without retry or namespace fallback. It must not be interpreted as all unmounted. |
+| `volume inspect` | Exact names, explicit labels, driver/scope, empty options, canonical pinned `_data` directory, nonzero `CreatedAt` and nonnegative `MountCount`. Only the 5.8.1 `omitempty` fields `Anonymous` and `StorageID` can be absent, with their documented false/empty values. Zero mounts is not proof of no stopped consumers. |
 | Exact-name container/volume `exists` | Exit 0 or 1 must agree with the catalog, including absent names from the caller's review. Other codes and disagreements refuse. |
 
-Two matching catalogs are not an atomic snapshot. A bound reader permits no
+Two matching catalogs and projected inspections are not an atomic snapshot. A bound reader permits no
 overlapping queries; it uses serial batches of at most eight, at most 128
 entries per catalog, a 45-second scan budget and at most eight seconds per
 command. Output is capped at 64 KiB for small queries and 2 MiB per inspect
@@ -122,11 +124,12 @@ does not open project paths, native history, or volume contents.
 explicitly incomplete. `inspect()` supplies a complete `EngineSnapshot`
 only when both container catalogs and the volume catalog are empty and all
 requested names independently agree. It refuses to pass populated inventories
-to the removal planner. The repository has offline evidence of portions of
-these shapes, **not** native acceptance of the full schema or flags, including
-version-specific field omissions. No filesystem alias traversal or mounted
-container/dependency proof is fabricated. This adapter exposes no mutation
-transport; neither it nor the actor is a partial-release basis.
+to the removal planner. In particular, lexical disjointness of a bind string
+does not identify the backing object in the relevant mount namespace. The
+[pinned source audit and synthetic KVM diagnostic recipe](plans/uninstall-podman-diagnostic.md)
+explain remaining facts and how to measure them without printing raw replies.
+This adapter exposes no mutation transport; neither it nor the actor is a
+partial-release basis.
 
 ## Engine actor and outcome contract
 
