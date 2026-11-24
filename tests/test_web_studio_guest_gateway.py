@@ -109,9 +109,26 @@ class ManagedGatewayTests(GuestOwnerFixture, unittest.TestCase):
                     "script",
                 ),
                 ("/oc-box/studio/catalog", "same-origin", "same-origin", "empty"),
+                (" /oc-box/studio/catalog", "same-origin", "same-origin", "empty"),
+                (
+                    f"http://{authority}/oc-box/studio/catalog",
+                    "same-origin",
+                    "same-origin",
+                    "empty",
+                ),
             ):
                 with self.subTest(path=path):
                     self.assertEqual(read(path, site=site, mode=mode, dest=dest), b"")
+            self.assertEqual(
+                read(
+                    "/",
+                    site="same-origin",
+                    mode="navigate",
+                    dest="document",
+                    extra=b"X-OC-Box-Studio-App: fixture\r\n",
+                ),
+                b"",
+            )
             start.assert_not_called()
             self.assertTrue(relay.drain())
             self.assertFalse(self.owner.closing)

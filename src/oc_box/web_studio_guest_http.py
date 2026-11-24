@@ -48,6 +48,9 @@ _HEADERS = (
     + b"\r\n"
 )
 _NAMESPACES = (b"/oc-box/studio", b"/auth/oc-box-studio-guest")
+_PRIVATE_FIELDS = {
+    name.encode("ascii") for name in (ingress.APP, ingress.PAGE, ingress.GENERATION)
+}
 _SEND_STATUS = {
     web_studio_send.SendResult.QUEUED: (200, b'{"status":"queued"}'),
     web_studio_send.SendResult.REFUSED: (403, b'{"status":"refused"}'),
@@ -63,10 +66,25 @@ def _json(value, limit):
 
 
 def _claim(head):
-    segments = head.split(b"\r\n", 1)[0].split(b" ", 2)
+    # This is only a refusal/routing check. The exact parser still rejects
+    # unusual whitespace and non-origin-form requests; none of those forms
+    # may send guest headers to the native fallback when claiming our path.
+    line, *fields = head.split(b"\r\n")
+    if any(
+        field.partition(b":")[0].strip().lower() in _PRIVATE_FIELDS for field in fields
+    ):
+        return True
+    segments = line.split(None, 2)
     if len(segments) < 2:
         return False
-    path = segments[1].split(b"?", 1)[0]
+    target = segments[1].split(b"?", 1)[0]
+    if target[:8].lower().startswith((b"http://", b"https://")):
+        _, _, authority = target.partition(b"://")
+        _, boundary, path = authority.partition(b"/")
+        if not boundary:
+            return False
+        target = b"/" + path
+    path = target.split(b"#", 1)[0]
     return any(path == name or path.startswith(name + b"/") for name in _NAMESPACES)
 
 
