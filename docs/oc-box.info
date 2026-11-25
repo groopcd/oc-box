@@ -416,7 +416,9 @@ container starts during the replacement; guarded startup still has to
 pass.  The replacement keeps the saved cgroup limits and inherits
 Podman's current process limits rather than replaying values observed
 after the old container booted.  An explicit Podman ‘--ulimit’ on the
-source makes it ineligible.
+source makes it ineligible.  Containers changed outside oc-box (for
+example with ‘podman update --ulimit’) are not supported migration
+sources; those changes are not always detectable.
 
 If Podman confirms that the OS snapshot failed before the name switch
 and oc-box can still verify the original resources, you may separately
@@ -5465,20 +5467,20 @@ Node: Name769
 Node: Synopsis930
 Node: Description5291
 Node: Commands11111
-Node: Options157946
-Node: Lifecycle and persistence223558
-Node: Distribution images225858
-Node: Sessions and recovery230935
-Node: Devices and host permissions237520
-Node: Resource reports239866
-Node: Configuration and environment241977
-Node: Files253358
-Node: Exit status264268
-Node: Examples265676
-Node: Troubleshooting267815
-Node: Installation and manuals280307
-Node: Authors and license290497
-Node: See also291104
+Node: Options158107
+Node: Lifecycle and persistence223719
+Node: Distribution images226019
+Node: Sessions and recovery231096
+Node: Devices and host permissions237681
+Node: Resource reports240027
+Node: Configuration and environment242138
+Node: Files253519
+Node: Exit status264429
+Node: Examples265837
+Node: Troubleshooting267976
+Node: Installation and manuals280468
+Node: Authors and license290658
+Node: See also291265
 
 End Tag Table
 

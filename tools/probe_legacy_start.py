@@ -22,6 +22,7 @@ import tempfile
 _SOURCE = re.compile(r"oc-box-[0-9a-f]{32}\Z")
 _ID = re.compile(r"[0-9a-f]{64}\Z")
 _LABEL = "io.oc-box.rlimit-probe"
+_CONFIG_MARK = "io.oc-box.rlimit-probe-config"
 _WORKSPACE = "io.oc-box.workspace"
 _CMD = ["-c", "exec /bin/sleep infinity"]
 _ENV = frozenset(
@@ -38,7 +39,6 @@ _ENV = frozenset(
         "DBUS_SESSION_BUS_ADDRESS",
         "CONTAINERS_STORAGE_CONF",
         "CONTAINERS_CONF",
-        "CONTAINERS_CONF_OVERRIDE",
         "STORAGE_DRIVER",
         "STORAGE_OPTS",
     }
@@ -93,15 +93,30 @@ class Probe:
             "--remote=false",
             f"--default-mounts-file={empty / 'mounts'}",
             f"--hooks-dir={empty / 'hooks'}",
+            f"--cdi-spec-dir={empty / 'cdi'}",
         ]
         self.env = {key: value for key, value in os.environ.items() if key in _ENV}
         self.env["LC_ALL"] = "C"
+        self.override = empty / "containers-override.conf"
+        self.env["CONTAINERS_CONF_OVERRIDE"] = str(self.override)
         self.source = source
         self.token = secrets.token_hex(16)
         self.name = "ocbox-rlimit-probe-" + self.token
         self.id = None
         self.source_id = None
         self.attempted = False
+
+    def write_config(self):
+        # Clear inherited lists even if an earlier containers.conf opted in to
+        # append semantics. CDI devices can inject mounts/env during start,
+        # after an ordinary mount inspection has already reported an empty list.
+        with self.override.open("x", encoding="utf-8") as file:
+            file.write(
+                "[containers]\n"
+                "devices = [{append = false}]\n"
+                "volumes = [{append = false}]\n"
+                f'annotations = ["{_CONFIG_MARK}={self.token}", {{append = false}}]\n'
+            )
 
     def run(self, *args):
         return subprocess.run(
@@ -142,6 +157,7 @@ class Probe:
             and labels.get(_LABEL) == self.token
             and labels.get(_WORKSPACE) in (None, "")
             and labels.get("io.oc-box.managed") == "false"
+            and (config.get("Annotations") or {}).get(_CONFIG_MARK) == self.token
             and item["Image"].removeprefix("sha256:") == self.image
             and item.get("OCIRuntime") == self.runtime
             and item["Mounts"] == []
@@ -296,10 +312,15 @@ def main(argv=None):
     podman = shutil.which("podman")
     if not podman:
         parser.error("Podman was not found on PATH.")
+    if os.environ.get("CONTAINERS_CONF_OVERRIDE"):
+        parser.error(
+            "An existing containers.conf override is in use; the probe will not replace it."
+        )
     with tempfile.TemporaryDirectory(prefix="ocbox-rlimit-probe-") as directory:
         root = Path(directory)
         (root / "mounts").touch(mode=0o600)
         (root / "hooks").mkdir(mode=0o700)
+        (root / "cdi").mkdir(mode=0o700)
         probe = Probe(podman, root, args.container)
         code = 1
 
@@ -308,6 +329,7 @@ def main(argv=None):
 
         prior = signal.signal(signal.SIGTERM, interrupted)
         try:
+            probe.write_config()
             probe.boot()
             code = 0
         except Refusal as exc:
