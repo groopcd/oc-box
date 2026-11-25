@@ -124,6 +124,10 @@ only suppresses ambient device defaults; it must not replace an existing
 override. Test source/candidate mismatches, missing nodes, alternate
 permissions, and unchanged Reader restrictions. A harmless synthetic device
 fixture does not establish accelerator/GPU or host driver compatibility.
+Include a stopped OCI bundle with all four generated runtime file binds
+missing, and contrast the same names at another container's paths, dangling
+symlinks, and missing binds while running. Never remove real engine files
+to manufacture test evidence.
 
 For an already-fenced `rlimit type 6` failure, the optional
 `tools/probe_legacy_start.py --container NAME` diagnostic inspects the affected

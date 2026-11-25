@@ -1,6 +1,8 @@
 import copy
 import json
+import os
 from pathlib import Path
+import stat
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -12,7 +14,9 @@ NODES = ["/dev/accel/accel0", "/dev/dri/renderD128"]
 IDENT = "a" * 64
 ENGINE = {"PATH": "/usr/bin", "CONTAINERS_CONF": "/synthetic/local.conf"}
 GRAPH = Path("/synthetic/containers")
+RUN = Path("/synthetic/run-containers")
 BUNDLE = GRAPH / "overlay-containers" / IDENT / "userdata"
+RUNDIR = RUN / "overlay-containers" / IDENT / "userdata"
 
 
 class GuardedDevicesTests(unittest.TestCase):
@@ -54,7 +58,11 @@ class GuardedDevicesTests(unittest.TestCase):
     def verify(self, *, fresh=False, signature=(1, 2, 3)):
         storage = {
             "host": {"serviceIsRemote": False, "security": {"rootless": True}},
-            "store": {"graphRoot": str(GRAPH), "graphDriverName": "overlay"},
+            "store": {
+                "graphRoot": str(GRAPH),
+                "runRoot": str(RUN),
+                "graphDriverName": "overlay",
+            },
         }
 
         def respond(*args, **kwargs):
@@ -171,6 +179,108 @@ class GuardedDevicesTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(devices.DeviceError, "do not match"):
             self.verify()
+
+    def ephemeral_binds(self):
+        self.info["State"] = {
+            "Status": "exited",
+            "Running": False,
+            "Paused": False,
+            "Restarting": False,
+            "Pid": 0,
+            "ConmonPid": 0,
+        }
+        sources = {
+            "/etc/hostname": "hostname",
+            "/etc/hosts": "hosts",
+            "/etc/resolv.conf": "resolv.conf",
+            "/run/.containerenv": ".containerenv",
+        }
+        mounts = [
+            {"type": "bind", "source": str(RUNDIR / name), "destination": target}
+            for target, name in sources.items()
+        ]
+        self.oci["mounts"].extend(mounts)
+        return mounts
+
+    @staticmethod
+    def private_runtime_directory(_path):
+        return SimpleNamespace(st_mode=stat.S_IFDIR | 0o700, st_uid=os.geteuid())
+
+    def test_stopped_exact_podman_runtime_bind_files_may_be_absent(self):
+        self.ephemeral_binds()
+
+        def metadata(path):
+            if path.parent == RUNDIR:
+                raise FileNotFoundError
+            return self.private_runtime_directory(path)
+
+        with (
+            patch.object(devices.os, "stat", side_effect=FileNotFoundError),
+            patch.object(Path, "lstat", autospec=True, side_effect=metadata),
+        ):
+            self.assertEqual(len(self.verify()), 2)
+
+    def test_stopped_runtime_subdirectory_may_already_be_cleaned_up(self):
+        self.ephemeral_binds()
+
+        def metadata(path):
+            if path == RUNDIR:
+                raise FileNotFoundError
+            return self.private_runtime_directory(path)
+
+        with (
+            patch.object(devices.os, "stat", side_effect=FileNotFoundError),
+            patch.object(Path, "lstat", autospec=True, side_effect=metadata),
+        ):
+            self.assertEqual(len(self.verify()), 2)
+
+    def test_missing_bind_from_other_source_or_running_state_refuses(self):
+        mounts = self.ephemeral_binds()
+        with (
+            patch.object(devices.os, "stat", side_effect=FileNotFoundError),
+            patch.object(Path, "lstat", autospec=True, side_effect=FileNotFoundError),
+        ):
+            running = {
+                **self.info["State"],
+                "Running": True,
+                "Status": "running",
+                "Pid": 7,
+            }
+            saved = self.info["State"]
+            self.info["State"] = running
+            with self.assertRaisesRegex(devices.DeviceError, "non-device bind source"):
+                self.verify()
+            self.info["State"] = saved
+            mounts[0]["source"] = str(
+                RUNDIR.parent.parent / ("b" * 64) / "userdata/hostname"
+            )
+            with self.assertRaisesRegex(devices.DeviceError, "non-device bind source"):
+                self.verify()
+
+    def test_wrong_runtime_type_or_dangling_symlink_is_not_a_missing_engine_file(self):
+        mounts = self.ephemeral_binds()
+        for unsafe_path, mode in (
+            (RUNDIR, stat.S_IFLNK | 0o777),
+            (RUNDIR / "hostname", stat.S_IFLNK | 0o777),
+            (RUN, stat.S_IFDIR | 0o777),
+        ):
+            with self.subTest(path=unsafe_path):
+
+                def metadata(path):
+                    if path == unsafe_path:
+                        return SimpleNamespace(st_mode=mode, st_uid=os.geteuid())
+                    return self.private_runtime_directory(path)
+
+                with patch.object(Path, "lstat", autospec=True, side_effect=metadata):
+                    self.assertFalse(
+                        devices._missing_runtime_file(
+                            RUN,
+                            IDENT,
+                            self.info,
+                            mounts[0]["source"],
+                            mounts[0]["destination"],
+                        )
+                    )
 
     def test_missing_node_explains_how_to_recover_without_clearing_it(self):
         with patch.object(devices, "_node", side_effect=FileNotFoundError):

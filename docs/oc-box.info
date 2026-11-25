@@ -411,7 +411,11 @@ expansions, remaps, permission overrides, or CDI names.  No device or
 host policy is changed.  Reconnect any missing mapped device and retry
 with the saved settings; ‘oc-box status --table’ lists those settings.
 Guarded purge and ‘sync --persisted’ do not admit these device-backed
-workspaces.
+workspaces.  On a verified stopped container, Podman's own hostname,
+hosts, resolver, and container-environment runtime files may already
+have been cleaned up.  Missing files are tolerated only at that exact
+container's known runtime paths; a missing project mount, unknown bind
+source, or device node still refuses.
 
 New containers use an absolute ‘/bin/sleep’ path for their passive
 entrypoint.  The safeguard refuses older containers whose stored
@@ -5492,20 +5496,20 @@ Node: Name769
 Node: Synopsis930
 Node: Description5291
 Node: Commands11111
-Node: Options159742
-Node: Lifecycle and persistence225354
-Node: Distribution images227654
-Node: Sessions and recovery232731
-Node: Devices and host permissions239316
-Node: Resource reports241662
-Node: Configuration and environment243773
-Node: Files255154
-Node: Exit status266064
-Node: Examples267472
-Node: Troubleshooting269611
-Node: Installation and manuals282103
-Node: Authors and license292293
-Node: See also292900
+Node: Options160047
+Node: Lifecycle and persistence225659
+Node: Distribution images227959
+Node: Sessions and recovery233036
+Node: Devices and host permissions239621
+Node: Resource reports241967
+Node: Configuration and environment244078
+Node: Files255459
+Node: Exit status266369
+Node: Examples267777
+Node: Troubleshooting269916
+Node: Installation and manuals282408
+Node: Authors and license292598
+Node: See also293205
 
 End Tag Table
 

@@ -247,6 +247,10 @@ their checkout ownership distinct from unrelated source and flat installations.
   policy changes, broad mapping forms, or Reader eligibility expansion.
   Attach/relay/stop stay on the verified local engine, with stop independent
   of device availability. Synthetic device tests are not hardware acceptance.
+  Stopped inspection may tolerate only missing generated hostname/hosts/
+  resolver/containerenv binds at the exact container's verified Podman
+  run-root paths. Do not ignore other missing bind sources, missing device
+  nodes, symlinks, or missing evidence on a running container.
 - `history_recovery.py` / `history_reader.py` / `workspace_control.py`: one bounded
   persisted-history snapshot after audited live timeouts: shell-only on native
   2.2.6/2.2.7; shell/subagent on canonical stable 2.3.x. Never a live readiness
