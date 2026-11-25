@@ -1762,8 +1762,11 @@ If neither resource exists in the selected store, the review shows a
 metadata-only retirement; this does not prove absence in another store.
 
 Podman verification uses the local rootless Podman 6.2.0 overlay/SQLite profile
-with host Python 3.11 or later. Active or ambiguous workspaces, incomplete
-restores or conversions, and guarded workspaces with surviving resources are
+and host Python 3.11 or later with SQLite support. Standard configuration
+layers and drop-ins are supported when the native store and effective options can be
+verified; cleanup does not change those files. The store must already be
+initialized for the current host boot. Active or ambiguous workspaces,
+incomplete restores or conversions, and guarded workspaces with surviving resources are
 skipped. Additional labeled volumes and networks require individual inspection;
 images, shared caches and unrelated resources are never pruned. An unconfirmed
 removal stops the pass and keeps the remaining registration and resources for
@@ -1789,11 +1792,15 @@ images, networks, and unrelated workspaces stay intact. The original workspace
 registration and fence stay in place; this command neither resumes the workspace
 nor makes its project eligible for automatic re-creation.
 
-This recovery mode requires host Python 3.11 or later and the checked Podman
-6.2.0 rootless overlay/SQLite profile. It uses sealed copies of the engine and
-storage configuration and verifies the existing database. Merged configuration
-and overrides are not supported. The original container or a matching private
-home with a verified conversion receipt must identify the local store. An empty
+This recovery mode requires host Python 3.11 or later with SQLite support and
+the checked Podman 6.2.0 rootless overlay/SQLite profile. It uses sealed copies of the engine and
+storage configuration and verifies the existing database and boot marker
+before opening the store. Standard layered configuration uses the audited
+Podman lookup order and verifies the sealed store and options. Module and
+environment overrides, pre-exec hooks, custom event-log paths and unsupported
+merge forms still refuse. The original
+container or a matching private home with a verified conversion receipt must
+identify the local store. An empty
 store alone cannot establish that the resources were removed.
 
 Active, mounted, shared, or changed resources, pending conversions or restores,

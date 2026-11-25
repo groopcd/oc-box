@@ -258,6 +258,14 @@ their checkout ownership distinct from unrelated source and flat installations.
   place after verified resource disposal. Empty alternate storage does
   not establish absence; incomplete or unverified outcomes stop the
   pass and do not authorize a retry or startup.
+- `podman_config_layers.py`: only the checked local Podman 6.2.0 disposal
+  profile. Snapshot standard packaged/site/user configuration and drop-ins,
+  following its audited lookup and merge forms. Guarded disposal resolves
+  and pins concrete store paths, reads only the existing DBConfig row and
+  checks the current kernel boot marker before opening the native runtime.
+  Use the sealed options and explicit roots with native readback; never
+  initialize or refresh a missing runtime from disposal. Keep config values
+  private; unsupported overlays, overrides, and ambiguous routes refuse.
 - `stale_cleanup.py`: host-only `purge --cleanup` discovers registered
   paths with positively missing leaves on their original filesystem, not
   missing markers, missing containers or size-scan failures. Require one
