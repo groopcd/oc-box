@@ -28,6 +28,7 @@ RUNTIME_FILES = (
     "runtime_safeguard.py",
     "entrypoint_migration.py",
     "guarded_discard.py",
+    "stale_cleanup.py",
     "guarded_devices.py",
     "workspace_service.py",
     "web_attachments.py",

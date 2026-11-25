@@ -32,7 +32,8 @@ class PackagingTests(unittest.TestCase):
                     "-IB",
                     "-c",
                     "import sys; sys.path.insert(0, sys.argv[1]); "
-                    "import guarded_discard; assert guarded_discard.Engine",
+                    "import guarded_discard, stale_cleanup; "
+                    "assert stale_cleanup.disposal.Engine is guarded_discard.Engine",
                     str(target),
                 ],
                 capture_output=True,

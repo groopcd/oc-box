@@ -557,7 +557,7 @@ def safe_config(data):
     return result
 
 
-def activate_project(staging, destination, *, parent_fd=None):
+def activate_project(staging, destination, *, parent_fd=None, destination_fd=None):
     """Atomic Linux no-replace rename, even if an empty destination races us."""
     libc = ctypes.CDLL(None, use_errno=True)
     try:
@@ -575,9 +575,16 @@ def activate_project(staging, destination, *, parent_fd=None):
     ]
     rename.restype = ctypes.c_int
     parent = -100 if parent_fd is None else parent_fd
+    target_parent = parent if destination_fd is None else destination_fd
     source_name = staging if parent_fd is None else staging.name
-    target_name = destination if parent_fd is None else destination.name
-    if rename(parent, os.fsencode(source_name), parent, os.fsencode(target_name), 1):
+    target_name = (
+        destination
+        if parent_fd is None and destination_fd is None
+        else destination.name
+    )
+    if rename(
+        parent, os.fsencode(source_name), target_parent, os.fsencode(target_name), 1
+    ):
         raise BackupError(
             "Cannot activate restored project without overwrite; destination may have appeared or its filesystem lacks renameat2 support."
         )

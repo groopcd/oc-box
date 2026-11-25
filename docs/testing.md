@@ -152,6 +152,17 @@ job quiescence, a general Podman release profile, or atomic removal
 against concurrent direct Podman commands. Earlier fixture failures remain
 separate results.
 
+For `purge --cleanup`, the focused stale-cleanup tests cover batched stopped
+container/home removal, volume-only and metadata-only retirement, original
+archive bytes and import provenance, legacy retired-directory permissions,
+late resource appearance, active control/history ownership, and a stop request
+waiting across retirement. An initial disposable Podman 6.2.0 check refused
+the fixture's mount table when an unrelated container was running; nothing was
+removed. A later attempt was withheld by the VM memory guard before boot.
+The namespace parser and cleanup fences have offline regression coverage;
+these attempts do not constitute a native cleanup pass. Never use an existing
+real stale workspace as a destructive validation fixture.
+
 For an already-fenced `rlimit type 6` failure, the optional
 `tools/probe_legacy_start.py --container NAME` diagnostic inspects the affected
 container on its rootless Podman host and tests passive startup in a disposable

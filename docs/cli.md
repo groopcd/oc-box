@@ -1739,6 +1739,37 @@ is rejected before deleting any history or resources. Extra externally supplied
 mounts/volumes are not owned resources unless they bear this workspace's
 ownership label.
 
+For a host-wide review of stale registrations, use:
+
+```sh
+oc-box purge --cleanup
+```
+
+Only a missing project directory qualifies. A missing marker, a missing
+container, or an unknown project size does not. Cleanup verifies that the
+recorded project pathname is absent under an accessible parent with the
+recorded filesystem identity. A moved project or a disconnected bind mount on
+the same filesystem can also make that pathname absent. Verify the list, then
+type `CLEANUP` on the controlling host terminal to confirm the batch.
+No other selectors or purge options, including `--yes`, are accepted.
+
+Cleanup never starts or stops a container, opens OpenCode history, or performs
+a final sync. It removes only verified stopped containers and their unused
+private homes without force. **Unsynced conversations in a removed private home
+are lost.** Existing host sessions and recovery exports are retained. The whole
+registration moves intact to private `retired/ID/` metadata after verification.
+If neither resource exists in the selected store, the review shows a
+metadata-only retirement; this does not prove absence in another store.
+
+Podman verification uses the local rootless Podman 6.2.0 overlay/SQLite profile
+with host Python 3.11 or later. Active or ambiguous workspaces, incomplete
+restores or conversions, and guarded workspaces with surviving resources are
+skipped. Additional labeled volumes and networks require individual inspection;
+images, shared caches and unrelated resources are never pruned. An unconfirmed
+removal stops the pass and keeps the remaining registration and resources for
+inspection. Do not change the reviewed resources with other Podman or filesystem
+commands during cleanup.
+
 To deliberately discard a guarded or fenced workspace without attempting
 startup or final history sync, use:
 
@@ -3754,6 +3785,14 @@ history sync. Type `DISCARD WORKSPACE_ID` on the controlling terminal after
 reviewing the targets. The private home may contain unsynced conversations; the
 project, host archives, registration and original fence are preserved. See
 [purge](#purge) for the supported host profile and refusal conditions.
+
+### --cleanup
+
+Purge-only. Review all registered workspaces with missing project directories
+and clean up the verified stopped Podman remnants after typing `CLEANUP`. Do not
+combine this with a workspace selector or other options. Keeps existing host
+history and retires the registration intact without final sync. See
+[purge](#purge) for scope, supported hosts and exclusions.
 
 ## Lifecycle and persistence
 
