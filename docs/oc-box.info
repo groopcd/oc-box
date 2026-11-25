@@ -412,13 +412,18 @@ command and offers a one-time replacement.  Use ‘oc-box start
 replacement snapshots the installed container OS locally and retains the
 same workspace ID, project path, settings and private home volume
 (including conversations never synchronized to the host).  Neither
-container starts during the replacement; guarded startup still has to
-pass.  The replacement keeps the saved cgroup limits and inherits
-Podman's current process limits rather than replaying values observed
-after the old container booted.  An explicit Podman ‘--ulimit’ on the
-source makes it ineligible.  Containers changed outside oc-box (for
-example with ‘podman update --ulimit’) are not supported migration
-sources; those changes are not always detectable.
+container starts during staging.  The original stays stopped under a
+reserved name until the replacement's guarded passive boot and project
+mount access are verified.  Only then does oc-box remove the old
+container, without removing the private volume.  A failed or uncertain
+startup before that proof preserves both containers; it never falls back
+to running the old entrypoint.  This is not automatic in-place repair of
+an already-fenced workspace.  The replacement keeps the saved cgroup
+limits and inherits Podman's current process limits rather than
+replaying values observed after the old container booted.  An explicit
+Podman ‘--ulimit’ on the source makes it ineligible.  Containers changed
+outside oc-box (for example with ‘podman update --ulimit’) are not
+supported migration sources; those changes are not always detectable.
 
 If Podman confirms that the OS snapshot failed before the name switch
 and oc-box can still verify the original resources, you may separately
@@ -5467,20 +5472,20 @@ Node: Name769
 Node: Synopsis930
 Node: Description5291
 Node: Commands11111
-Node: Options158107
-Node: Lifecycle and persistence223719
-Node: Distribution images226019
-Node: Sessions and recovery231096
-Node: Devices and host permissions237681
-Node: Resource reports240027
-Node: Configuration and environment242138
-Node: Files253519
-Node: Exit status264429
-Node: Examples265837
-Node: Troubleshooting267976
-Node: Installation and manuals280468
-Node: Authors and license290658
-Node: See also291265
+Node: Options158482
+Node: Lifecycle and persistence224094
+Node: Distribution images226394
+Node: Sessions and recovery231471
+Node: Devices and host permissions238056
+Node: Resource reports240402
+Node: Configuration and environment242513
+Node: Files253894
+Node: Exit status264804
+Node: Examples266212
+Node: Troubleshooting268351
+Node: Installation and manuals280843
+Node: Authors and license291033
+Node: See also291640
 
 End Tag Table
 
