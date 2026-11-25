@@ -336,6 +336,8 @@ during the replacement; guarded startup still has to pass.
 The replacement keeps the saved cgroup limits and inherits Podman's current
 process limits rather than replaying values observed after the old container
 booted. An explicit Podman `--ulimit` on the source makes it ineligible.
+Containers changed outside oc-box (for example with `podman update --ulimit`)
+are not supported migration sources; those changes are not always detectable.
 
 If Podman confirms that the OS snapshot failed before the name switch and
 oc-box can still verify the original resources, you may separately approve

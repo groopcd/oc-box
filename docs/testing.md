@@ -107,7 +107,9 @@ container on its rootless Podman host and tests passive startup in a disposable
 container from the same local image. It uses no explicit process limits, real
 workspace mounts, network, vault, or OpenCode. It shows any startup error from
 the probe locally and removes only its verified resource. This is not a
-workspace repair or a full launcher acceptance test.
+workspace repair or a full launcher acceptance test. It disables host device
+defaults and CDI for the probe, and refuses an existing containers.conf
+override rather than replacing that selection.
 
 The npm upgrade fixture audits the generated public plugin SDK dependency tree at all
 reported severities before installing the resolved tree. An advisory or

@@ -2,6 +2,7 @@ import copy
 import json
 from pathlib import Path
 import subprocess
+import tempfile
 import unittest
 
 from tools import probe_legacy_start as probe
@@ -20,6 +21,7 @@ class Fixture(probe.Probe):
         self.scratch = None
         self.fail_start = False
         self.extra_mount = False
+        self.config_loaded = True
         self.source_info = {
             "Id": SOURCE_ID,
             "Name": SOURCE,
@@ -72,6 +74,9 @@ class Fixture(probe.Probe):
                     "Entrypoint": ["/bin/sh"],
                     "Cmd": probe._CMD,
                     "User": "0:0",
+                    "Annotations": {probe._CONFIG_MARK: self.token}
+                    if self.config_loaded
+                    else {},
                     "Labels": {
                         probe._LABEL: self.token,
                         "io.oc-box.managed": "false",
@@ -140,6 +145,27 @@ class ProbeTests(unittest.TestCase):
             engine.cleanup()
         self.assertNotIn(("start", SCRATCH_ID), engine.calls)
         self.assertNotIn(("container", "rm", SCRATCH_ID), engine.calls)
+
+    def test_device_defaults_are_replaced_and_cdi_path_is_private(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            diagnostic = probe.Probe("podman", root, SOURCE)
+            diagnostic.write_config()
+            self.assertIn(f"--cdi-spec-dir={root / 'cdi'}", diagnostic.command)
+            self.assertEqual(
+                diagnostic.env["CONTAINERS_CONF_OVERRIDE"], str(diagnostic.override)
+            )
+            config = diagnostic.override.read_text()
+            self.assertIn("devices = [{append = false}]", config)
+            self.assertIn("volumes = [{append = false}]", config)
+            self.assertIn(f"{probe._CONFIG_MARK}={diagnostic.token}", config)
+
+    def test_missing_override_receipt_refuses_before_start(self):
+        engine = Fixture()
+        engine.config_loaded = False
+        with self.assertRaises(probe.Refusal):
+            engine.boot()
+        self.assertNotIn(("start", SCRATCH_ID), engine.calls)
 
     def test_out_of_scope_original_is_only_inspected(self):
         engine = Fixture()
