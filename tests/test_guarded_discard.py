@@ -408,7 +408,7 @@ class GuardedDiscardTests(unittest.TestCase):
         original = b'[engine]\nstatic_dir = "/synthetic/original"\n'
         containers.write_bytes(original)
         storage.write_bytes(b'[storage]\ndriver = "overlay"\n')
-        env, static, fd = discard._engine_config(
+        env, static, fd, settings = discard._engine_config(
             self.stack,
             {
                 "CONTAINERS_CONF": str(containers),
@@ -417,6 +417,7 @@ class GuardedDiscardTests(unittest.TestCase):
         )
         containers.write_text('[engine]\nstatic_dir = "/synthetic/other"\n')
         self.assertEqual(static, "/synthetic/original")
+        self.assertEqual(settings[0]["static_dir"], "/synthetic/original")
         self.assertEqual(env["CONTAINERS_CONF"], "/proc/self/fd/0")
         self.assertEqual(env["CONTAINERS_STORAGE_CONF"], "/proc/self/fd/0")
         snapshot = Path(f"/proc/self/fd/{fd}")
@@ -476,12 +477,16 @@ class GuardedDiscardTests(unittest.TestCase):
             stamp = discard._database_stamp(stream.fileno(), os.fstat(stream.fileno()))
         engine.database_path = str(database)
         engine.database = (None, stamp)
+        boot = (stamp[0], stamp[1] + 10, stamp[2])
+        engine.alive = discard.SimpleNamespace(
+            path=str(self.root / "alive"), stamp=boot
+        )
         mountinfo = Path("/proc/self/mountinfo").read_text()
         with patch.object(engine, "read") as read:
-            read.return_value = json.dumps([stamp, home]) + "\n" + mountinfo
+            read.return_value = json.dumps([stamp, boot, home]) + "\n" + mountinfo
             engine.check_namespace(((str(self.home), home),))
             read.return_value = (
-                json.dumps([(stamp[0], stamp[1] + 1, stamp[2]), home])
+                json.dumps([(stamp[0], stamp[1] + 1, stamp[2]), boot, home])
                 + "\n"
                 + mountinfo
             )
