@@ -6,7 +6,6 @@ from __future__ import annotations
 import argparse
 import contextlib
 from contextvars import ContextVar
-from dataclasses import dataclass
 import fcntl
 import hashlib
 import io
@@ -155,13 +154,23 @@ _TTY_PROGRESS = ContextVar("oc_box_tty_progress", default=())
 _QUIET_SYNC_BINDING = ContextVar("oc_box_quiet_sync_binding", default=None)
 
 
-@dataclass
 class _QuietSyncBinding:
-    container: str
-    mounts: tuple
-    engine_env: dict
-    start_requested: bool = False
-    start_verified: bool = False
+    """Pass-local engine identity, also usable by flat launcher imports."""
+
+    __slots__ = (
+        "container",
+        "mounts",
+        "engine_env",
+        "start_requested",
+        "start_verified",
+    )
+
+    def __init__(self, container, mounts, engine_env):
+        self.container = container
+        self.mounts = mounts
+        self.engine_env = engine_env
+        self.start_requested = False
+        self.start_verified = False
 
 
 _DEBUG_ONLY_STAGES = frozenset(
