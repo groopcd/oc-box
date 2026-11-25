@@ -1817,7 +1817,12 @@ Keep the following boundaries when optimizing:
   an uncertain mutation or silently restart a failed optimized service.
 - Retain recovery's per-command admission, deadlines and source/destination
   scheduler/system-configuration checks. Ordinary performance work is not a
-  waiver of the verified-stop recovery boundary.
+  waiver of the verified-stop recovery boundary. Only a positive exact-patch
+  destination `--version` result for the currently admitted pinned host binary
+  may be reused inside one Reader export pass, with a fresh pin check and the
+  same descriptor/identity/digest and fenced environment. Still ask native for
+  the database path and run every system, store and runtime safety check for
+  each destination operation. Unpinned commands still probe every time.
 - Bound all helper lifetimes and private transport, reap owned children on every
   exit path, and print overall success only after successful cleanup.
 
@@ -1825,6 +1830,12 @@ Native tests must cover fresh independent readback, conflict/no-op detection,
 pending-neighbor progress and unchanged archive/checkpoint data. Process counts
 and elapsed times are useful measurements, not integrity or host-acceptance
 proofs. Rootless lifecycle acceptance remains host-only.
+
+The pinned destination version test counts top-level native invocations at the
+process boundary: 6 → 5 for one first import in its own eligible pass, and
+12 → 9 for one replacement in its own pass. This removes only repeated
+`--version` launches; it is not a wall-clock benchmark or a count of internal
+native subprocesses. A pass with no changed archives makes no destination calls.
 
 ##### Guarded-reader export transport reuse
 

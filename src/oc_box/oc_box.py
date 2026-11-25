@@ -1917,7 +1917,12 @@ def private_host_env(path, data):
     reader = history_reader.current()
     if reader is not None:
         env = history_reader.assert_host_safe(
-            sys.modules[__name__], path, data, env, reader.remaining
+            sys.modules[__name__],
+            path,
+            data,
+            env,
+            reader.remaining,
+            admission=runtime_safeguard.current(),
         )
     return env
 

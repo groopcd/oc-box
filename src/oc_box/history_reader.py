@@ -766,14 +766,24 @@ def _check_system_config():
         raise Refusal("system-config") from None
 
 
-def assert_host_safe(box, path, data, env, remaining):
+def _probe_host_version(box, executable, release, env, remaining):
+    version = box.run(
+        [executable, "--version"],
+        env=env,
+        capture=True,
+        private=True,
+        timeout=_budget(remaining, 10),
+    )
+    _check_version(version.stdout, release)
+
+
+def assert_host_safe(box, path, data, env, remaining, *, admission=None):
     """Fence a destination before native projection; never query a host service.
 
     ``debug paths db`` in supported native versions uses Global/databasePath
-    only, not service discovery or the database layer. ``path`` is deliberately
-    not used to reconstruct private_host_env (which would recurse).
+    only, not service discovery or the database layer. Only the exact version
+    of an admitted pinned binary may be reused, and only inside one export pass.
     """
-    del path
     try:
         if snapshot_profile(data.get("opencode_version")) is None:
             raise Refusal("unsupported-version")
@@ -789,14 +799,13 @@ def assert_host_safe(box, path, data, env, remaining):
                 Path(data_home) / "opencode", time.monotonic() + _budget(remaining, 1)
             )
         command = box.host_command(data, "debug", "paths", "db")
-        version = box.run(
-            [command[0], "--version"],
-            env=result_env,
-            capture=True,
-            private=True,
-            timeout=_budget(remaining, 10),
-        )
-        _check_version(version.stdout, data["opencode_version"])
+        stream = EXPORTS.get()
+        if stream is None:
+            _probe_host_version(box, command[0], release, result_env, remaining)
+        else:
+            stream.check_host_version(
+                path, command[0], release, result_env, remaining, admission
+            )
         result = box.run(
             command,
             env=result_env,
@@ -930,6 +939,57 @@ class _Exports:
         self.buffer = bytearray()
         self.sequence = 0
         self.failed = False
+        self._host_version_proof = None
+
+    def check_host_version(self, path, executable, release, env, remaining, admission):
+        proof = self._host_version_proof
+        fence = self.box.history_recovery.FENCE.get()
+        if admission is None or fence is None:
+            if proof is not None:
+                raise Refusal("host-database-probe")
+            _probe_host_version(self.box, executable, release, env, remaining)
+            return
+
+        # Admission is supplied by the host launcher, not by the remote worker,
+        # a binary pathname, or an earlier runtime enrollment version probe.
+        safeguard = self.box.runtime_safeguard
+        if (
+            type(admission) is not safeguard.Admission
+            or admission is not safeguard.current()
+            or type(admission.host) is not safeguard.HostBinary
+            or admission.path != path
+            or fence[0] != path
+            or CURRENT.get() is not self.reader
+        ):
+            raise Refusal("host-database-probe")
+        if release != self.version or release != admission.record.version:
+            raise Refusal("unsupported-version")
+        host = admission.host
+        if (
+            host.digest != admission.record.digest
+            or host.digest != fence[1].runtime_digest
+            or host.digest != self.reader._runtime_digest
+            or host.command(self.box) != executable
+        ):
+            raise Refusal("host-database-probe")
+        selector = (host.fd, host.identity, host.digest)
+        if proof is not None:
+            _budget(remaining, 10)
+            admitted, pinned, identity, version, fenced_env = proof
+            if release != version:
+                raise Refusal("unsupported-version")
+            if (
+                admission is not admitted
+                or host is not pinned
+                or selector != identity
+                or env != fenced_env
+            ):
+                raise Refusal("host-database-probe")
+            return
+        _probe_host_version(self.box, executable, release, env, remaining)
+        if host.command(self.box) != executable or admission.host is not host:
+            raise Refusal("host-database-probe")
+        self._host_version_proof = (admission, host, selector, release, dict(env))
 
     def fail(self, category):
         self.failed = True
@@ -1190,6 +1250,7 @@ def export_pass(box, data):
         raise
     finally:
         EXPORTS.reset(token)
+        stream._host_version_proof = None
         try:
             stream.close()
         except BaseException as cleanup:
