@@ -161,14 +161,18 @@ class _QuietSyncBinding:
         "container",
         "mounts",
         "engine_env",
+        "engine",
+        "overlap",
         "start_requested",
         "start_verified",
     )
 
-    def __init__(self, container, mounts, engine_env):
+    def __init__(self, container, mounts, engine_env, *, engine=None, overlap=None):
         self.container = container
         self.mounts = mounts
         self.engine_env = engine_env
+        self.engine = engine
+        self.overlap = overlap
         self.start_requested = False
         self.start_verified = False
 
@@ -889,7 +893,9 @@ def _json_byte_chunks(value):
 
 
 @contextlib.contextmanager
-def _atomic_json_file(path, *, binary=False, durable=False):
+def _atomic_json_file(
+    path, *, binary=False, durable=False, publish_gate=None, replace=True
+):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     tmp = path.with_name(path.name + "." + uuid.uuid4().hex + ".tmp")
@@ -902,7 +908,19 @@ def _atomic_json_file(path, *, binary=False, durable=False):
             if durable:
                 stream.flush()
                 os.fsync(stream.fileno())
-        tmp.replace(path)
+        if publish_gate is None and replace:
+            tmp.replace(path)
+        else:
+            # A guarded publisher stages and syncs its bytes before taking
+            # the stop-admission lock. Hold it only for publication.
+            with (
+                publish_gate() if publish_gate is not None else contextlib.nullcontext()
+            ):
+                if replace:
+                    tmp.replace(path)
+                else:
+                    os.link(tmp, path, follow_symlinks=False)
+                    tmp.unlink()
         if durable:
             fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
             try:
@@ -1026,6 +1044,10 @@ def run(argv, *, capture=False, check=True, private=False, preparation=None, **k
             else subprocess.run
         )
         guarded = runtime_safeguard.current()
+        if _bound_overlap() is not None and _history_overlap_engine_conflict():
+            raise BoxError(
+                "The bound history source cannot share another runtime engine."
+            )
         if (
             guarded
             and guarded.engine_env is not None
@@ -1061,6 +1083,30 @@ def run(argv, *, capture=False, check=True, private=False, preparation=None, **k
                 return history_recovery.run_admitted(
                     command, lambda: guarded.spawn(sys.modules[__name__]), **options
                 )
+
+        if command[:1] == ["podman"] and _QUIET_SYNC_BINDING.get() is not None:
+            native_invoke = invoke
+
+            def invoke(command, **options):
+                pins = bound_history_engine_options(command)
+                if pins and ("executable" in options or options.get("cwd") is not None):
+                    raise BoxError(
+                        "Conflicting engine selection for the bound history source."
+                    )
+                options = {**options, **pins}
+                if _bound_overlap() is not None:
+                    if (
+                        options.get("env")
+                        != _QUIET_SYNC_BINDING.get().engine.environment
+                    ):
+                        raise BoxError(
+                            "Invalid environment for the bound history source."
+                        )
+                    if command[1:2] == ["exec"]:
+                        return history_recovery.run_admitted(
+                            command, _bound_preparation_spawn, **options
+                        )
+                return native_invoke(command, **options)
 
         if capture:
             # Mainline OpenCode can truncate large exports when stdout is a
@@ -1139,6 +1185,60 @@ def podman(*args, **kwargs):
         # discovery selectors as admission and the optional quiet helper.
         kwargs["env"] = maintenance_host_env()
     return run(["podman", *args], **kwargs)
+
+
+def bound_history_engine_options(argv):
+    """Keep normal argv[0]; execute through the original live engine pin."""
+    binding = _QUIET_SYNC_BINDING.get()
+    if binding is None or binding.engine is None:
+        return {}
+    if binding.overlap is not None and _history_overlap_engine_conflict():
+        raise BoxError("The bound history source cannot share another runtime engine.")
+    if not argv or argv[0] != "podman":
+        raise BoxError("Invalid engine command for the bound history source.")
+    if __package__:
+        from .history_overlap_order import OverlapRefusal
+    else:
+        from history_overlap_order import OverlapRefusal
+    try:
+        return {"executable": binding.engine.command_path(), "cwd": "/"}
+    except OverlapRefusal:
+        raise BoxError(
+            "The bound history source engine changed or is unavailable."
+        ) from None
+
+
+def _bound_overlap():
+    binding = _QUIET_SYNC_BINDING.get()
+    return binding.overlap if binding is not None else None
+
+
+def _history_overlap_engine_conflict():
+    return (
+        runtime_safeguard.current() is not None
+        or history_reader.current() is not None
+        or history_recovery.FENCE.get() is not None
+        or workspace_service._DEVICE_LEASE.get() is not None
+    )
+
+
+@contextlib.contextmanager
+def _bound_preparation_spawn():
+    ownership = _bound_overlap()
+    if ownership is None:
+        raise BoxError("Missing owning history pass.")
+    ownership.check()
+    end = time.monotonic() + 1
+    try:
+        with workspace_control.admission(ownership.path, timeout=1):
+            ownership.check()
+            ownership.original.require_running(end)
+            ownership.check()
+            if time.monotonic() >= end:
+                raise BoxError("The bound history source admission expired.")
+            yield
+    except workspace_control.ControlError:
+        raise BoxError("The bound history source admission is unavailable.") from None
 
 
 def check_backend(*, env=None, feature="maintenance", local_only=False):
@@ -1745,7 +1845,13 @@ def start_container(path, data):
         )
     check_resource_controllers(data)
     binding = _QUIET_SYNC_BINDING.get()
-    if binding is not None:
+    overlap = _bound_overlap()
+    if overlap is not None:
+        overlap.check()
+        if data.get("ready") is not True or data.get("container") != binding.container:
+            raise BoxError("Invalid execution target for the bound history source.")
+        info = overlap.original.require_before_start(time.monotonic() + 5)
+    elif binding is not None:
         info = _inspect_sync_container(data, binding.container)
         if (
             data["container"] != binding.container
@@ -1770,7 +1876,18 @@ def start_container(path, data):
         for m in mounts
     ):
         raise BoxError("Container workspace mount does not match the host registry.")
-    if binding is not None:
+    if overlap is not None:
+        try:
+            info = overlap.original.start(
+                path,
+                overlap.stop_token,
+                lifetime=overlap.lifetime,
+                deadline=time.monotonic() + 20,
+            )
+            binding.start_verified = True
+        finally:
+            binding.start_requested = overlap.original.start_requested
+    elif binding is not None:
         binding.start_requested = True
         podman("start", binding.container, capture=True, private=True, timeout=20)
         _verify_quiet_sync_source(data, binding)
@@ -1916,6 +2033,10 @@ def session_state(path):
     )
 
 
+def host_archive_data_home():
+    return os.environ.get("XDG_DATA_HOME", str(Path.home() / ".local/share"))
+
+
 def host_cli_env(path):
     """Use the default host DB, without running global/project integrations."""
     env = os.environ.copy()
@@ -1933,9 +2054,7 @@ def host_cli_env(path):
             "OPENCODE_DISABLE_MODELS_FETCH": "1",
             "XDG_CONFIG_HOME": str(path.parent / "host-config"),
             "XDG_STATE_HOME": str(path.parent / "host-state"),
-            "XDG_DATA_HOME": os.environ.get(
-                "XDG_DATA_HOME", str(Path.home() / ".local/share")
-            ),
+            "XDG_DATA_HOME": host_archive_data_home(),
             "OPENCODE_CONFIG_CONTENT": json.dumps(
                 {
                     "$schema": "https://opencode.ai/config.json",
@@ -2252,6 +2371,8 @@ def maintenance_terminal(path, data):
 
 
 def exec_command(data, command, *, interactive=False, isolated_owner_env=None):
+    if _bound_overlap() is not None:
+        raise BoxError("Forwarded execution is unavailable in the bound history pass.")
     forwarded = container_env(data)
     live = workspace_service.live_connection()
     if live and live["workspace"] == data["id"]:
@@ -2851,6 +2972,10 @@ def prepare_runtime(
     image_preview_snapshot=None,
     history_only=False,
 ):
+    if _bound_overlap() is not None:
+        raise BoxError(
+            "Ordinary native preparation is unavailable in the bound history pass."
+        )
     # Owning launches carry the preflight bytes past credential prompts/reset;
     # never reopen that CLI input after resource removal.
     if image_preview and opencode_compat.major(version) != 2:
@@ -3193,30 +3318,33 @@ def run_v2_history(data, action, **settings):
     return result
 
 
+def _validated_v2_inventory(values, data):
+    if not isinstance(values, list):
+        raise BoxError("Invalid OpenCode 2.x session inventory.")
+    for item in values:
+        if (
+            not isinstance(item, dict)
+            or not valid_session_id(item.get("id"))
+            or not isinstance(item.get("location"), dict)
+            or opencode_compat.directory({"info": item}) != container_project(data)
+            or not isinstance(item.get("time"), dict)
+            or not isinstance(item["time"].get("updated"), (int, float))
+            or (
+                item.get("parentID") is not None
+                and not valid_session_id(item["parentID"])
+            )
+        ):
+            raise BoxError("Invalid OpenCode 2.x session inventory entry.")
+    if len({item["id"] for item in values}) != len(values):
+        raise BoxError("Duplicate OpenCode 2.x session inventory entry.")
+    return values
+
+
 def list_container_sessions(data):
     """V2's CLI lists roots only; use its paginated API for the full inventory."""
     if opencode_compat.major(data.get("opencode_version", "1.0.0")) == 2:
         result = run_v2_history(data, "sessions")
-        values = json.loads(result.stdout)
-        if not isinstance(values, list):
-            raise BoxError("Invalid OpenCode 2.x session inventory.")
-        for item in values:
-            if (
-                not isinstance(item, dict)
-                or not valid_session_id(item.get("id"))
-                or not isinstance(item.get("location"), dict)
-                or opencode_compat.directory({"info": item}) != container_project(data)
-                or not isinstance(item.get("time"), dict)
-                or not isinstance(item["time"].get("updated"), (int, float))
-                or (
-                    item.get("parentID") is not None
-                    and not valid_session_id(item["parentID"])
-                )
-            ):
-                raise BoxError("Invalid OpenCode 2.x session inventory entry.")
-        if len({item["id"] for item in values}) != len(values):
-            raise BoxError("Duplicate OpenCode 2.x session inventory entry.")
-        return values
+        return _validated_v2_inventory(json.loads(result.stdout), data)
     result = run(
         exec_command(
             data, [CONTAINER_OPENCODE, "--pure", "session", "list", "--format", "json"]
@@ -3227,9 +3355,15 @@ def list_container_sessions(data):
     return json.loads(result.stdout or "[]")
 
 
-def refresh_sessions(path, data):
-    values = list_container_sessions(data)
+def refresh_sessions(path, data, *, inventory=None):
     v2 = opencode_compat.major(data.get("opencode_version", "1.0.0")) == 2
+    if inventory is not None and not v2:
+        raise BoxError("A checked native inventory requires OpenCode 2.x.")
+    values = (
+        list_container_sessions(data)
+        if inventory is None
+        else _validated_v2_inventory(inventory, data)
+    )
     roots = [
         item
         for item in values
@@ -3709,7 +3843,12 @@ def verify_host_archive(path, data, archived):
         private=True,
         timeout=60,
     )
-    imported = json.loads(result.stdout)
+    _verify_host_projection(path, archived, json.loads(result.stdout))
+
+
+def _verify_host_projection(path, archived, imported):
+    """Compare independent native readback without issuing a writer operation."""
+    ident = archived["info"]["id"]
     validate_session_export(imported, ident)
     source_time = archived["info"].get("time", {})
     idle = source_time.get("idle")
@@ -3760,7 +3899,44 @@ def _announce_history_synced(*, recovered=False):
         )
 
 
-def sync_sessions(path, data, *, announce=True):
+def _overlap_journal_profile(data):
+    return "ordinary-create-" + str(data.get("opencode_version", "unknown"))
+
+
+def _require_resolved_history_write(path, data):
+    """Even serial sync may not overwrite or skip an uncertain host operation."""
+    if __package__:
+        from . import history_write_intent
+    else:
+        import history_write_intent
+    try:
+        found = False
+        for name in (
+            history_write_intent.PENDING_NAME,
+            history_write_intent.RECEIPT_NAME,
+        ):
+            try:
+                path.with_name(name).lstat()
+            except FileNotFoundError:
+                continue
+            found = True
+        if not found:
+            return
+        with history_write_intent.Journal(
+            path, data["id"], profile=_overlap_journal_profile(data)
+        ) as journal:
+            if journal.load() is not None:
+                raise BoxError(
+                    "A previous host history write is unresolved; independent destination "
+                    "verification is required before syncing. Existing history was retained."
+                )
+    except (OSError, KeyError, history_write_intent.JournalError):
+        raise BoxError(
+            "Cannot verify the previous host history write; no archive was synchronized."
+        ) from None
+
+
+def sync_sessions(path, data, *, announce=True, first_overlap=None):
     started = time.monotonic()
     source_mode = (
         "post-stop-reader"
@@ -3777,8 +3953,14 @@ def sync_sessions(path, data, *, announce=True):
     if report is not None:
         report.phase = None
     try:
-        with history_reader.export_pass(sys.modules[__name__], data):
-            populated = _sync_sessions(path, data, started, source_mode, counts)
+        _require_resolved_history_write(path, data)
+        with (
+            history_reader.export_pass(sys.modules[__name__], data),
+            contextlib.ExitStack() as stack,
+        ):
+            populated = _sync_sessions(
+                path, data, started, source_mode, counts, first_overlap, stack
+            )
     except BaseException as exc:
         reason = _history_failure_reason(exc)
         if report is not None and reason == "cleanup-unverified":
@@ -3884,18 +4066,214 @@ def _write_history_archive(path, archived, checkpoint):
     return verified
 
 
-def _sync_sessions(path, data, started, source_mode, counts):
+def _create_guarded_history_archive(
+    path,
+    state,
+    route,
+    archived,
+    target,
+    staged,
+    ahead,
+    destination,
+    journal,
+):
+    if __package__:
+        from . import (
+            history_overlap_order,
+            history_overlap_transaction,
+            history_write_intent,
+        )
+    else:
+        import history_overlap_order
+        import history_overlap_transaction
+        import history_write_intent
+
+    if type(destination) is not history_overlap_transaction.DestinationCreate:
+        raise history_overlap_order.OverlapRefusal("destination-binding")
+    verified = None
+
+    def readback(selected, digest):
+        nonlocal verified
+        imported = destination.readback(selected)
+        _verify_host_projection(path, archived, imported)
+        # Compare actual native messages and understood metadata in archive
+        # representation. The independent comparator above checked fields that
+        # native rebinding changes rather than pretending they round-trip raw.
+        native_info = imported["info"]
+        info = dict(archived["info"])
+        for key in ("title", "agent", "model", "cost", "tokens", "metadata"):
+            if key in info:
+                info[key] = native_info.get(key, {} if key == "metadata" else None)
+        normalized = {**archived, "info": info, "messages": imported["messages"]}
+        observed = hashlib.sha256()
+        for chunk in _json_byte_chunks(normalized):
+            observed.update(chunk)
+        verified = observed.hexdigest()
+        return verified == digest
+
+    def publish_archive(candidate):
+        with _atomic_json_file(
+            target,
+            binary=True,
+            durable=True,
+            replace=False,
+            publish_gate=destination.publish_gate,
+        ) as output:
+            candidate.write_to(output)
+        if not _archive_matches_checkpoint(target, candidate.digest, candidate.size):
+            raise history_overlap_order.OverlapRefusal("destination-archive")
+
+    def checkpoint(selected, digest):
+        updated = {
+            **state,
+            "synced": {**state.get("synced", {}), selected.source: digest},
+            "host_sessions": {
+                **state.get("host_sessions", {}),
+                selected.source: selected.archive,
+            },
+        }
+        payload = (json.dumps(updated, indent=2) + "\n").encode()
+        checkpoint_path = session_file(path)
+        with _atomic_json_file(
+            checkpoint_path,
+            binary=True,
+            durable=True,
+            publish_gate=destination.publish_gate,
+        ) as output:
+            output.write(payload)
+        if not _archive_matches_checkpoint(
+            checkpoint_path, hashlib.sha256(payload).hexdigest(), len(payload)
+        ):
+            raise history_overlap_order.OverlapRefusal("destination-checkpoint")
+        state.update(updated)
+        return updated["synced"][selected.source]
+
+    def retire(intent, published):
+        proof = history_write_intent.VerifiedCheckpoint(
+            intent.operation_id,
+            intent.workspace_id,
+            intent.profile,
+            intent.source_id,
+            intent.archive_id,
+            verified,
+            published,
+        )
+        with destination.publish_gate():
+            journal.retire(intent, proof)
+        return True
+
+    reservation_started = False
+
+    def reserve(selected, digest):
+        nonlocal reservation_started
+        with destination.publish_gate():
+            reservation_started = True
+            return journal.reserve_create(selected.source, selected.archive, digest)
+
+    operations = history_overlap_transaction.AtomicFirstImport(
+        reserve,
+        ahead.before_serial_destination,
+        destination.create,
+        readback,
+        publish_archive,
+        checkpoint,
+        retire,
+    )
+    try:
+        return history_overlap_transaction.create_candidate_once(
+            route, staged, operations
+        )
+    except BaseException as error:
+        if reservation_started:
+            error.history_write_intent_unresolved = True
+        raise
+
+
+def _sync_sessions(path, data, started, source_mode, counts, first_overlap, stack):
     report = history_recovery.REPORT.get()
     if report is not None:
         report.phase = "source inventory"
     detailed = not lifecycle_output.concise()
     phase = time.monotonic() if detailed else None
-    state = refresh_sessions(path, data)
+    if first_overlap is None:
+        state = refresh_sessions(path, data)
+        ahead = routes = None
+    else:
+        if __package__:
+            from . import (
+                history_overlap_archive,
+                history_overlap_order,
+                history_overlap_transaction,
+                history_write_intent,
+            )
+        else:
+            import history_overlap_archive
+            import history_overlap_order
+            import history_overlap_transaction
+            import history_write_intent
+        binding = _QUIET_SYNC_BINDING.get()
+        if (
+            type(first_overlap) is not history_overlap_transaction.FirstPass
+            or data.get("opencode_version") not in opencode_v2_io.HISTORY_SOURCE_24
+            or source_mode != "private-endpoint"
+            or history_reader.current() is not None
+            or history_recovery.FENCE.get() is not None
+            or runtime_safeguard.current() is not None
+            or workspace_service.LIFECYCLE_LOCK.get() is None
+            or workspace_service.quiet_history_source() is None
+            or binding is None
+            or not binding.start_verified
+            or data["container"] != binding.container
+        ):
+            raise history_overlap_order.OverlapRefusal("pass-binding")
+        journal = stack.enter_context(
+            history_write_intent.Journal(
+                path, data["id"], profile=_overlap_journal_profile(data)
+            )
+        )
+        if journal.load() is not None:
+            raise history_overlap_order.OverlapRefusal("destination-intent")
+        state = first_overlap.inventory(path, data)
+        if (
+            type(state) is not dict
+            or type(state.get("sessions")) is not list
+            or len(state["sessions"]) > 10000
+        ):
+            raise history_overlap_order.OverlapRefusal("inventory-binding")
+        if state.get("synced") or state.get("host_sessions"):
+            raise history_overlap_order.OverlapRefusal("create-only-pass")
+        routes = {
+            sid: history_overlap_order.Route(
+                sid, archive_id(data["id"] + "-v2", sid, "ses")
+            )
+            for sid in state.get("sessions", [])
+            if valid_session_id(sid)
+        }
+        if len(routes) != len(state.get("sessions", [])):
+            raise history_overlap_order.OverlapRefusal("inventory-binding")
+        ahead = stack.enter_context(
+            history_overlap_order.OrderedOverlap(
+                routes.values(),
+                read=first_overlap.read,
+                begin=first_overlap.begin,
+                receive=first_overlap.receive,
+                cancel=first_overlap.cancel,
+                pending_error=HistoryPending,
+            )
+        )
     inventory_seconds = time.monotonic() - phase if detailed else 0
     source_seconds = archive_seconds = destination_seconds = 0
     counts["sessions"] = len(state.get("sessions", []))
     archives = path.parent / "history"
     archives.mkdir(exist_ok=True, mode=0o700)
+    if ahead is not None:
+        info = archives.lstat()
+        if (
+            not stat.S_ISDIR(info.st_mode)
+            or info.st_uid != os.geteuid()
+            or stat.S_IMODE(info.st_mode) != 0o700
+        ):
+            raise history_overlap_order.OverlapRefusal("unverified-private-destination")
     pending = []
     for ident in state.get("sessions", []):
         if not valid_session_id(ident):
@@ -3904,7 +4282,11 @@ def _sync_sessions(path, data, started, source_mode, counts):
         if report is not None:
             report.phase = "source export"
         try:
-            exported = export_container_session(data, ident)
+            exported = (
+                ahead.take(routes[ident])
+                if ahead is not None
+                else export_container_session(data, ident)
+            )
         except HistoryPending as exc:
             # Keep this session's last good archives and continue with the rest.
             pending.append(str(exc))
@@ -3914,6 +4296,12 @@ def _sync_sessions(path, data, started, source_mode, counts):
             if detailed:
                 source_seconds += time.monotonic() - phase
         counts["exported"] += 1
+        if ahead is not None:
+            validate_session_export(exported, ident)
+            if not opencode_compat.native(exported) or opencode_compat.directory(
+                exported
+            ) != container_project(data):
+                raise history_overlap_order.OverlapRefusal("source-binding")
         counts["interrupted"] += bool(exported.get(opencode_v2_io.INTERRUPTED))
         if report is not None:
             report.phase = "private archive"
@@ -3924,6 +4312,46 @@ def _sync_sessions(path, data, started, source_mode, counts):
         del exported
         target = archives / (archived["info"]["id"] + ".json")
         checkpoint = state.setdefault("synced", {}).get(ident)
+        if ahead is not None:
+            route = routes[ident]
+            if (
+                not opencode_compat.native(archived)
+                or route.archive != archived["info"]["id"]
+                or checkpoint is not None
+                or os.path.lexists(target)
+            ):
+                raise history_overlap_order.OverlapRefusal(
+                    "unverified-private-destination"
+                )
+            with history_overlap_archive.sealed_candidate(
+                _json_byte_chunks(archived)
+            ) as staged:
+                if detailed:
+                    now = time.monotonic()
+                    archive_seconds += now - phase
+                    phase = now
+                destination = first_overlap.destination(
+                    path,
+                    data,
+                    route,
+                    archived,
+                    target,
+                )
+                _create_guarded_history_archive(
+                    path,
+                    state,
+                    route,
+                    archived,
+                    target,
+                    staged,
+                    ahead,
+                    destination,
+                    journal,
+                )
+            counts["updated"] += 1
+            if detailed:
+                destination_seconds += time.monotonic() - phase
+            continue
         digest = _write_history_archive(target, archived, checkpoint)
         if detailed:
             now = time.monotonic()
@@ -4013,6 +4441,7 @@ def _history_failure_reason(error):
     reader = getattr(error, "history_reader_category", None)
     if (
         getattr(error, "history_source_cleanup_failed", False)
+        or getattr(error, "history_destination_cleanup_failed", False)
         or history_recovery.local_cleanup_unverified(error)
         or reader in ("cleanup-failed", "history-cleanup")
     ):
@@ -4064,7 +4493,8 @@ def _report_history_result(report, *, recovered, error):
         level, outcome = "error", "failure"
         retry = (
             "before any retry."
-            if report.manual and report.recovery_attempted
+            if (report.manual and report.recovery_attempted)
+            or getattr(error, "history_write_intent_unresolved", False)
             else "before retrying with 'oc-box sync'."
         )
         message = (
@@ -4102,7 +4532,13 @@ def _report_history_result(report, *, recovered, error):
                 " Check for an oc-box update first; update OpenCode if necessary. "
                 "Do not reset or downgrade workspace state."
             )
-        if quiet_refused:
+        if getattr(error, "history_write_intent_unresolved", False):
+            message = (
+                f"{status}: {detail}.{guidance} "
+                "A native write intent may remain unresolved. Prior data retained; "
+                "independently verify the destination before any retry."
+            )
+        elif quiet_refused:
             message = (
                 f"{status}: the private history source refused ({source_refusal}). "
                 "Container data retained; standalone export was not retried. "
@@ -4364,7 +4800,123 @@ def _capture_quiet_sync_binding(data):
     return _QuietSyncBinding(info["Id"], mounts, engine_env)
 
 
+class _HistoryOverlapOwnership:
+    def __init__(self, path, lock, lifetime, stop_token, original, host):
+        self.path, self.lock, self.lifetime = path, lock, lifetime
+        self.stop_token, self.original, self.host = stop_token, original, host
+        self.closed = False
+
+    def check(self):
+        try:
+            if (
+                self.closed
+                or workspace_service.LIFECYCLE_LOCK.get() is not self.lock
+                or _history_overlap_engine_conflict()
+                or not workspace_control.unchanged(self.path, self.stop_token)
+            ):
+                raise BoxError("The bound history source admission changed.")
+        except workspace_control.ControlError:
+            raise BoxError(
+                "The bound history source admission is unavailable."
+            ) from None
+
+
+def _require_ordinary_overlap_workspace(path, data):
+    """Do not let the private handoff bypass the public guarded entry checks."""
+    migration = runtime_safeguard.entrypoint_migration
+    if data.get("devices") or any(
+        field in data
+        for field in (migration.FIELD, migration.RETIRE, migration.RECEIPT)
+    ):
+        raise BoxError("The bound first history pass requires an ordinary workspace.")
+    if read_json(path) != data:
+        raise BoxError(
+            "The workspace registration changed; no history source was started."
+        )
+    if runtime_safeguard.load(sys.modules[__name__], path) is not None:
+        raise BoxError(
+            "The bound first history pass cannot bypass guarded runtime enrollment."
+        )
+
+
+@contextlib.contextmanager
+def _bind_first_history_sync(path, data):
+    """Private owning admission for qualification; not selected by the CLI."""
+    if __package__:
+        from . import (
+            history_overlap_engine,
+            history_overlap_writer,
+            history_write_intent,
+        )
+    else:
+        import history_overlap_engine
+        import history_overlap_writer
+        import history_write_intent
+
+    lock = workspace_service.LIFECYCLE_LOCK.get()
+    if (
+        type(lock) is not tuple
+        or len(lock) != 2
+        or lock[0] != path
+        or _QUIET_SYNC_BINDING.get() is not None
+        or _history_overlap_engine_conflict()
+        or workspace_service.live_connection() is not None
+        or data.get("opencode_version") not in opencode_v2_io.HISTORY_SOURCE_24
+        or data.get("ready") is not True
+        or data.get("podman_args")
+        or data.get("devices")
+        or data.get("restore_incomplete")
+    ):
+        raise BoxError(
+            "This workspace is not eligible for the bound first history pass."
+        )
+    _require_ordinary_overlap_workspace(path, data)
+    token = workspace_control.capture(path)
+    state = session_state(path)
+    if state.get("synced") or state.get("host_sessions"):
+        raise BoxError("An existing history checkpoint requires serial sync.")
+    with history_write_intent.Journal(
+        path, data["id"], profile=_overlap_journal_profile(data)
+    ) as journal:
+        if journal.load() is not None:
+            raise BoxError(
+                "An unresolved native write requires independent destination inspection."
+            )
+    with contextlib.ExitStack() as lifetime:
+        host = lifetime.enter_context(
+            runtime_safeguard.pinned_host(sys.modules[__name__])
+        )
+        if not history_overlap_writer.supports(host, data["opencode_version"]):
+            raise BoxError(
+                "The stock host executable is not eligible for the bound history pass."
+            )
+        engine = lifetime.enter_context(
+            history_overlap_engine.pin_local_witness_engine(maintenance_host_env())
+        )
+        original = history_overlap_engine.Original(
+            sys.modules[__name__], engine, data, time.monotonic() + 5
+        )
+        ownership = _HistoryOverlapOwnership(
+            path, lock, lifetime, token, original, host
+        )
+        ownership.check()
+        try:
+            yield _QuietSyncBinding(
+                original.container,
+                original.mounts,
+                dict(engine.environment),
+                engine=engine,
+                overlap=ownership,
+            )
+        finally:
+            ownership.closed = True
+
+
 def _verify_quiet_sync_source(data, binding):
+    if binding.overlap is not None:
+        binding.overlap.check()
+        binding.overlap.original.require_running(time.monotonic() + 5)
+        return
     info = _inspect_sync_container(data, binding.container)
     if not history_recovery.verified_container_state(info, running=True):
         raise BoxError(
@@ -4410,12 +4962,37 @@ def _stop_quiet_sync_source(data):
         )
 
 
-def launch_environment(path, data, args, *, image_preview_snapshot=None):
+def launch_environment(
+    path, data, args, *, image_preview_snapshot=None, _first_history=None
+):
     version = getattr(args, "_opencode_release", None)
-    if version is None:
+    if _first_history is not None:
+        if (
+            type(_first_history) is not _QuietSyncBinding
+            or type(_first_history.overlap) is not _HistoryOverlapOwnership
+            or _first_history.overlap.path != path
+            or _first_history.overlap.original._data != data
+            or _first_history.start_requested
+            or version not in (None, data.get("opencode_version"))
+            or any(
+                getattr(args, flag, False)
+                for flag in (
+                    "runtime_guard",
+                    "convert_legacy_container",
+                    "rebuild_legacy_container",
+                )
+            )
+        ):
+            raise BoxError("Invalid ownership for the bound first history pass.")
+        _first_history.overlap.check()
+        _require_ordinary_overlap_workspace(path, data)
+        version = data["opencode_version"]
+    elif version is None:
         with loading_stage("Checking OpenCode version", stage="version"):
             version = detect_opencode_release()
     if args.command == "sync" and getattr(args, "persisted", False):
+        if _first_history is not None:
+            raise BoxError("Persisted sync cannot use the bound first history pass.")
         return _launch_persisted_sync(path, data, version)
     validate_host_file_open(args, version, data)
     if getattr(args, "host_drop", None) is True:
@@ -4448,6 +5025,8 @@ def launch_environment(path, data, args, *, image_preview_snapshot=None):
             for name in os.environ
         )
     )
+    if _first_history is not None and (not quiet_24_candidate or args.import_session):
+        raise BoxError("Invalid ownership for the bound first history pass.")
     if guarded:
         guarded.begin(sys.modules[__name__], data)
     if data.get("opencode_version") != version:
@@ -4461,7 +5040,9 @@ def launch_environment(path, data, args, *, image_preview_snapshot=None):
     recovered = False
     history_started = False
     manual_populated = False
-    quiet_binding = _capture_quiet_sync_binding(data) if quiet_24_candidate else None
+    quiet_binding = _first_history or (
+        _capture_quiet_sync_binding(data) if quiet_24_candidate else None
+    )
     manual_source = (
         {**data, "container": quiet_binding.container} if quiet_binding else None
     )
@@ -4510,39 +5091,66 @@ def launch_environment(path, data, args, *, image_preview_snapshot=None):
                     "bootstrap": False,
                 }
                 atomic_json(path, data, durable=True)
-        with loading_stage(
-            "Preparing OpenCode and syncing configuration", stage="configuration"
-        ):
-            prepare_runtime(
-                path,
-                manual_source or data,
-                version,
-                **({"history_only": True} if args.command == "sync" else {}),
-                **(
-                    {
-                        "image_preview": True,
-                        "image_preview_snapshot": image_preview_snapshot,
-                    }
-                    if effective_image_preview(args)
-                    else {}
-                ),
-            )
+        if _first_history is None:
+            with loading_stage(
+                "Preparing OpenCode and syncing configuration", stage="configuration"
+            ):
+                prepare_runtime(
+                    path,
+                    manual_source or data,
+                    version,
+                    **({"history_only": True} if args.command == "sync" else {}),
+                    **(
+                        {
+                            "image_preview": True,
+                            "image_preview_snapshot": image_preview_snapshot,
+                        }
+                        if effective_image_preview(args)
+                        else {}
+                    ),
+                )
+        # A first-pass admission is for an already provisioned exact runtime.
+        # Its isolated lease checks native and store identity before any service.
         if args.command == "sync":
             history_started = True
             report.attempted = True
             if quiet_binding is not None:
                 _verify_quiet_sync_source(manual_source, quiet_binding)
             with loading_stage("Syncing session history", stage="history-sync"):
-                with (
-                    workspace_service.history_source(
+                if _first_history is not None:
+                    if __package__:
+                        from . import history_overlap_pass
+                    else:
+                        import history_overlap_pass
+                    scope = history_overlap_pass.open_first_pass(
+                        sys.modules[__name__],
+                        path,
+                        manual_source,
+                        binding=quiet_binding,
+                        original=quiet_binding.overlap.original,
+                        host=quiet_binding.overlap.host,
+                        stop_token=quiet_binding.overlap.stop_token,
+                        deadline=time.monotonic() + 600,
+                    )
+                elif not guarded and opencode_compat.major(version) == 2:
+                    scope = workspace_service.history_source(
                         sys.modules[__name__],
                         manual_source or data,
                         **({"stopped_source": True} if manual_source else {}),
                     )
-                    if not guarded and opencode_compat.major(version) == 2
-                    else contextlib.nullcontext()
-                ):
-                    sync_sessions(path, manual_source or data, announce=False)
+                else:
+                    scope = contextlib.nullcontext()
+                with scope as first:
+                    sync_sessions(
+                        path,
+                        manual_source or data,
+                        announce=False,
+                        **(
+                            {"first_overlap": first}
+                            if _first_history is not None
+                            else {}
+                        ),
+                    )
                     manual_closing_source = True
                 manual_closing_source = False
                 manual_populated = bool(session_state(path).get("sessions"))
@@ -4657,7 +5265,7 @@ def launch_environment(path, data, args, *, image_preview_snapshot=None):
                 report.reason = "cleanup-unverified"
             elif report.reason != "cleanup-unverified":
                 report.reason = _history_failure_reason(exc)
-        if history_started and not concise:
+        if history_started and not concise and _first_history is None:
             startup_output.line(
                 "oc-box: Container data retained. Retry with 'oc-box sync'.",
                 file=sys.stderr,
@@ -4671,7 +5279,11 @@ def launch_environment(path, data, args, *, image_preview_snapshot=None):
             ):
                 try:
                     with loading_stage("Stopping container", stage="shutdown"):
-                        if manual_source is not None:
+                        if _first_history is not None:
+                            quiet_binding.overlap.original.stop(
+                                path, deadline=time.monotonic() + 8
+                            )
+                        elif manual_source is not None:
                             _stop_quiet_sync_source(manual_source)
                             if not quiet_binding.start_verified:
                                 raise BoxError(
@@ -4680,7 +5292,20 @@ def launch_environment(path, data, args, *, image_preview_snapshot=None):
                         else:
                             stop_container(cleanup_data)
                 except BaseException as exc:
-                    error = exc
+                    preserve = (
+                        _first_history is not None
+                        and error is not None
+                        and (
+                            isinstance(error, (KeyboardInterrupt, SystemExit))
+                            or not isinstance(exc, (KeyboardInterrupt, SystemExit))
+                        )
+                    )
+                    if not preserve:
+                        error = exc
+                    elif error is not exc:
+                        error.history_source_cleanup_failed = True
+                        if isinstance(error, SystemExit) and error.code in (None, 0):
+                            error.code = 1
                     report.reason = "cleanup-unverified"
                     if not report.attempted:
                         lifecycle_output.record(
@@ -4690,8 +5315,10 @@ def launch_environment(path, data, args, *, image_preview_snapshot=None):
                             reason="cleanup-unverified",
                             outcome="failure",
                         )
-                        if concise and isinstance(exc, (BoxError, OSError, ValueError)):
-                            exc.history_outcome_reported = True
+                        if concise and isinstance(
+                            error, (BoxError, OSError, ValueError)
+                        ):
+                            error.history_outcome_reported = True
                         with contextlib.suppress(OSError, ValueError):
                             startup_output.line(
                                 "oc-box: Workspace shutdown could not be verified. "
@@ -4700,10 +5327,14 @@ def launch_environment(path, data, args, *, image_preview_snapshot=None):
                             )
                     elif not concise:
                         startup_output.line(
-                            "oc-box: Container data retained. Retry with 'oc-box sync'.",
+                            "oc-box: Shutdown could not be verified. "
+                            "Inspect the workspace before any retry."
+                            if _first_history is not None
+                            else "oc-box: Container data retained. Retry with 'oc-box sync'.",
                             file=sys.stderr,
                         )
-                    raise
+                    if not preserve:
+                        raise
             elif cleanup_data is not data:
                 try:
                     with (

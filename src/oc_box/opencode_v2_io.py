@@ -6,6 +6,7 @@ memory/pipes; a fresh --stdio server never elects or modifies a shared service.
 
 import base64
 import contextlib
+import hashlib
 from http.client import HTTPConnection
 import json
 import math
@@ -811,6 +812,7 @@ HISTORY_SOURCE_ERRORS = frozenset(
         "startup-timeout",
         "lease-timeout",
         "lease-ended",
+        "scratch-unverified",
         "control",
         "cleanup-failed",
     )
@@ -1184,6 +1186,114 @@ def _history_source_payload(deadline):
     return bytes(payload)
 
 
+@contextlib.contextmanager
+def _history_source_environment(settings, guards, exact, retirement):
+    binding = settings.get("scratch_binding")
+    release = settings["version"]
+    if binding is None:
+        with guards["_remote_environment"](
+            settings["home"], **({"version": release} if exact else {})
+        ) as (root, env):
+            yield root, env, str(Path(root) / "version-data") if exact else None
+        return
+    binding = {key: value for key, value in binding.items() if key != "stock_digest"}
+    scratch = {"__name__": "oc_box_volume_scratch"}
+    exec(settings["scratch_source"], scratch)
+    try:
+        with scratch["volume_scratch"](
+            binding, verify_retired=lambda: retirement["verified"]
+        ) as owned:
+            root, selectors, probe_data = owned.locations()
+            env = guards["fence_environment"](
+                {**selectors, "PATH": guards["PATH"], "LANG": "C.UTF-8"},
+                version=release,
+            )
+            try:
+                yield root / "work", env, probe_data
+            finally:
+                # The native cwd may use the private scratch while live.
+                # Restore the wrapper cwd before owned cleanup.
+                os.chdir("/")
+    except scratch["ScratchRefusal"] as failure:
+        raise HistorySourceError(
+            "cleanup-failed"
+            if getattr(failure, "history_source_cleanup_failed", False)
+            else "scratch-unverified"
+        ) from None
+    except Exception as failure:
+        if getattr(failure, "history_source_cleanup_failed", False):
+            raise HistorySourceError("cleanup-failed") from None
+        raise
+
+
+@contextlib.contextmanager
+def _pinned_history_source_binary(binary, digest, deadline):
+    """For the guarded pass, verify stock bytes before any native execution."""
+    if digest is None:
+        yield binary, lambda: None
+        return
+    fd = None
+    try:
+        if type(digest) is not str or re.fullmatch(r"[a-f0-9]{64}", digest) is None:
+            raise HistorySourceError("identity")
+        fd = os.open(binary, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC)
+        info = os.fstat(fd)
+        before = (
+            _source_stat_identity(info),
+            info.st_size,
+            info.st_mtime_ns,
+            info.st_ctime_ns,
+        )
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_mode & (0o022 | stat.S_ISUID | stat.S_ISGID)
+            or not info.st_mode & 0o111
+            or not 1 <= info.st_size <= 512 * 1024 * 1024
+            or os.pread(fd, 4, 0) != b"\x7fELF"
+        ):
+            raise HistorySourceError("identity")
+        actual = hashlib.sha256()
+        offset = 0
+        while offset < info.st_size:
+            _deadline_timeout(deadline)
+            part = os.pread(fd, min(1024 * 1024, info.st_size - offset), offset)
+            if not part:
+                raise HistorySourceError("identity")
+            actual.update(part)
+            offset += len(part)
+        if actual.hexdigest() != digest:
+            raise HistorySourceError("identity")
+
+        def recheck():
+            try:
+                after = os.fstat(fd)
+                now = (
+                    _source_stat_identity(after),
+                    after.st_size,
+                    after.st_mtime_ns,
+                    after.st_ctime_ns,
+                )
+                if now != before:
+                    raise HistorySourceError("identity")
+            except OSError:
+                raise HistorySourceError("identity") from None
+
+        recheck()
+        _deadline_timeout(deadline)
+    except OSError:
+        if fd is not None:
+            os.close(fd)
+        raise HistorySourceError("identity") from None
+    except BaseException:
+        if fd is not None:
+            os.close(fd)
+        raise
+    try:
+        yield f"/proc/{os.getpid()}/fd/{fd}", recheck
+    finally:
+        os.close(fd)
+
+
 def history_source_lease(binary):
     """Container-only optional quiet source; never a recovery Reader or owner.
 
@@ -1200,9 +1310,13 @@ def history_source_lease(binary):
     if len(payload) > HISTORY_SOURCE_MAX_PAYLOAD or not payload.endswith(b"\n"):
         raise HistorySourceError("payload")
     settings = json.loads(payload)
+    fields = {"guards", "version", "home"}
     if (
         not isinstance(settings, dict)
-        or set(settings) != {"guards", "version", "home"}
+        or (
+            set(settings) != fields
+            and set(settings) != fields | {"scratch_binding", "scratch_source"}
+        )
         or type(settings["version"]) is not str
         or settings["version"] not in HISTORY_SOURCE_SUPPORTED
         or not isinstance(settings["guards"], str)
@@ -1212,6 +1326,14 @@ def history_source_lease(binary):
         or "\0" in settings["home"]
     ):
         raise HistorySourceError("payload")
+    if "scratch_binding" in settings and (
+        settings["version"] not in HISTORY_SOURCE_24
+        or type(settings["scratch_binding"]) is not dict
+        or settings["scratch_binding"].get("version") != settings["version"]
+        or settings["scratch_binding"].get("home") != settings["home"]
+        or type(settings["scratch_source"]) is not str
+    ):
+        raise HistorySourceError("scratch-unverified")
     descriptor = require_control_pipe()
     guards = {"__name__": "oc_box_source_guards"}
     exec(settings["guards"], guards)
@@ -1243,9 +1365,23 @@ def history_source_lease(binary):
         return
     # Clear create-time secrets before *any* native command. Reuse only the
     # stdlib guard/environment helpers, not Reader's verified-stop lifetime.
-    with guards["_remote_environment"](
-        settings["home"], **({"version": release} if exact else {})
-    ) as (root, env):
+    retirement = {"verified": True}
+    binding = settings.get("scratch_binding", {})
+    if "stock_digest" in binding and (
+        type(binding["stock_digest"]) is not str
+        or re.fullmatch(r"[a-f0-9]{64}", binding["stock_digest"]) is None
+    ):
+        raise HistorySourceError("identity")
+    with (
+        _pinned_history_source_binary(
+            binary, binding.get("stock_digest"), startup_deadline
+        ) as (binary, recheck_binary),
+        _history_source_environment(settings, guards, exact, retirement) as (
+            root,
+            env,
+            probe_data,
+        ),
+    ):
         os.chdir(root)
         os.environ.clear()
         os.environ.update(env)
@@ -1258,16 +1394,17 @@ def history_source_lease(binary):
             if not stat.S_ISREG(info.st_mode) or info.st_mode & 0o022:
                 raise HistorySourceError("identity")
             executable = _source_stat_identity(info)
+        recheck_binary()
+        retirement["verified"] = False
         version = subprocess.run(
             [binary, "--version"],
             # Version attestation itself cannot see the ordinary source store.
-            env=(
-                {**env, "XDG_DATA_HOME": str(root / "version-data")} if exact else env
-            ),
+            env=({**env, "XDG_DATA_HOME": probe_data} if exact else env),
             capture_output=True,
             text=True,
             timeout=_deadline_timeout(startup_deadline, 10),
         )
+        retirement["verified"] = True
         try:
             if version.returncode:
                 raise HistorySourceError("unsupported-version")
@@ -1296,6 +1433,8 @@ def history_source_lease(binary):
                 return
         exit_info = {}
         _deadline_timeout(startup_deadline)
+        recheck_binary()
+        retirement["verified"] = False
         with server(
             binary,
             exit_info=exit_info,
@@ -1316,7 +1455,10 @@ def history_source_lease(binary):
             ):
                 raise HistorySourceError("activity")
             _deadline_timeout(startup_deadline)
-            write_control_record(descriptor, {"endpoint": request.endpoint})
+            ready = {"endpoint": request.endpoint}
+            if "scratch_binding" in settings:
+                ready["source"] = {"pid": request.child_pid, "cwd": str(root)}
+            write_control_record(descriptor, ready)
             lease_deadline = time.monotonic() + 600
             while request.alive():
                 if time.monotonic() >= lease_deadline:
@@ -1346,6 +1488,7 @@ def history_source_lease(binary):
                 raise HistorySourceError("activity")
         if exit_info != {"code": 0, "forced": False}:
             raise HistorySourceError("cleanup-failed")
+        retirement["verified"] = True
         if exact:
             history_source_database(
                 guards, database, deadline=final_deadline, **database_options
