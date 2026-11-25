@@ -5468,6 +5468,11 @@ def parser():
     result.add_argument(
         "-y", "--yes", action="store_true", help="skip purge confirmation"
     )
+    result.add_argument(
+        "--discard-guarded",
+        action="store_true",
+        help="discard a stopped guarded workspace without startup or final history sync (requires typed confirmation)",
+    )
     log_config.add_launch_arguments(result)
     return result
 
@@ -5899,6 +5904,26 @@ def _stop_v2(path, data):
 
 
 def _main_command(args, argv):
+    if getattr(args, "discard_guarded", False):
+        baseline = vars(parser().parse_args(["purge"]))
+        allowed = {"command", "workspace", "discard_guarded"}
+        if (
+            args.command != "purge"
+            or not args.workspace
+            or any(
+                name not in allowed and value != baseline.get(name)
+                for name, value in vars(args).items()
+            )
+        ):
+            raise BoxError(
+                "Use 'oc-box purge --workspace WORKSPACE_ID --discard-guarded' "
+                "with no other options; typed confirmation cannot be skipped."
+            )
+        if __package__:
+            from . import guarded_discard
+        else:
+            import guarded_discard
+        return guarded_discard.discard(sys.modules[__name__], args.workspace)
     if getattr(args, "persisted", False) and (
         args.command != "sync"
         or args.status

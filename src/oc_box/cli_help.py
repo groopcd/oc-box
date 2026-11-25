@@ -108,7 +108,7 @@ _OPTION_GROUPS = {
     ),
     "terminal": ("Terminal mode", ("maintenance",)),
     "status": ("Output", ("json", "table")),
-    "purge": ("Removal options", ("delete_sessions", "all", "yes")),
+    "purge": ("Removal options", ("delete_sessions", "all", "yes", "discard_guarded")),
     "credentials": (
         "Credential policy",
         ("credential_mode", "env_secret", "vault_secret", "clear_credentials"),
@@ -179,6 +179,7 @@ _COMMAND_NOTES = {
     "purge": (
         _WORKSPACE_NOTE,
         "Without deletion flags, keep project files and host session archives.",
+        "Guarded disposal requires the full workspace ID and typed terminal confirmation.",
     ),
     "credentials": (
         _WORKSPACE_NOTE,
