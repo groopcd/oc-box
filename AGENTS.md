@@ -258,6 +258,18 @@ their checkout ownership distinct from unrelated source and flat installations.
   place after verified resource disposal. Empty alternate storage does
   not establish absence; incomplete or unverified outcomes stop the
   pass and do not authorize a retry or startup.
+- `stale_cleanup.py`: host-only `purge --cleanup` discovers registered
+  paths with positively missing leaves on their original filesystem, not
+  missing markers, missing containers or size-scan failures. Require one
+  fresh typed review of the batch and recheck each subject under its locks.
+  Remove only exact stopped canonical containers and unused private homes
+  on the verified local store; never start, stop, sync, access native history,
+  prune, or force-remove. Incomplete restores/conversions and surviving guarded
+  resources stay active; a metadata-only retirement describes absence in the selected
+  store, not proof about every store. Move the registry intact without
+  overwriting retired evidence; never read or rewrite its archives. Stop intent
+  creation/publication and retirement share a short gate independent of
+  admission and history ownership; do not make explicit stop wait for history.
 - `history_recovery.py` / `history_reader.py` / `workspace_control.py`: one bounded
   persisted-history snapshot after audited live timeouts: shell-only on native
   2.2.6/2.2.7; shell/subagent on canonical stable 2.3.x. Never a live readiness

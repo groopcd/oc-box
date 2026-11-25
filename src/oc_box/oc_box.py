@@ -851,24 +851,22 @@ def run_native_tui(
         ) from None
 
 
-def state_root():
-    return (
-        Path(
-            os.environ.get(
-                "OC_BOX_STATE_HOME",
-                str(
-                    Path(
-                        os.environ.get(
-                            "XDG_STATE_HOME", str(Path.home() / ".local/state")
-                        )
-                    )
-                    / "oc-box"
-                ),
-            )
+def _state_path():
+    return Path(
+        os.environ.get(
+            "OC_BOX_STATE_HOME",
+            str(
+                Path(
+                    os.environ.get("XDG_STATE_HOME", str(Path.home() / ".local/state"))
+                )
+                / "oc-box"
+            ),
         )
-        .expanduser()
-        .resolve()
-    )
+    ).expanduser()
+
+
+def state_root():
+    return _state_path().resolve()
 
 
 def _json_byte_chunks(value):
@@ -6105,6 +6103,11 @@ def parser():
         action="store_true",
         help="discard a stopped guarded workspace without startup or final history sync (requires typed confirmation)",
     )
+    result.add_argument(
+        "--cleanup",
+        action="store_true",
+        help="review and clean up stopped workspaces whose project directories are gone",
+    )
     log_config.add_launch_arguments(result)
     return result
 
@@ -6536,6 +6539,19 @@ def _stop_v2(path, data):
 
 
 def _main_command(args, argv):
+    if getattr(args, "cleanup", False):
+        baseline = vars(parser().parse_args(["purge"]))
+        if args.command != "purge" or any(
+            name not in ("command", "cleanup") and value != baseline.get(name)
+            for name, value in vars(args).items()
+        ):
+            raise BoxError("Use 'oc-box purge --cleanup' with no other options.")
+        if __package__:
+            from . import stale_cleanup
+        else:
+            import stale_cleanup
+
+        return stale_cleanup.cleanup(sys.modules[__name__])
     if getattr(args, "discard_guarded", False):
         baseline = vars(parser().parse_args(["purge"]))
         allowed = {"command", "workspace", "discard_guarded"}

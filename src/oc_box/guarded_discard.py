@@ -42,6 +42,7 @@ _LIMIT = 128
 _BYTES = workspace_podman._INSPECT
 _MOUNTINFO_BYTES = 1024 * 1024
 _MOUNT_ESCAPE = re.compile(rb"\\(040|011|012|134)")
+_NET_NAMESPACE = re.compile(rb"net:\[[0-9]{1,20}\]")
 _CONFIG_LIMIT = 256 * 1024
 _MUTATION_SECONDS = 180
 _PROFILE = "6.2.0"
@@ -127,15 +128,29 @@ def _parse_mounts(raw):
     )
     result = {}
     for line in raw.split(b"\n")[:-1]:
-        fields = line.split(b" - ", 1)[0].split()
+        before, separator, after = line.partition(b" - ")
+        fields = before.split()
+        filesystem = after.split()
+        _require(
+            separator and len(fields) >= 6 and len(filesystem) >= 3,
+            "The host mount table is invalid.",
+        )
         mount = int(fields[0])
         major, minor = (int(value) for value in fields[2].split(b":"))
         _require(
             mount > 0 and mount not in result, "The host mount table is ambiguous."
         )
+        # A live Podman network can pin an nsfs object. Its kernel root is
+        # net:[inode], not a backing pathname. Retain the mountpoint for
+        # nested-mount checks; it must not share the storage device.
+        root = (
+            None
+            if filesystem[0] == b"nsfs" and _NET_NAMESPACE.fullmatch(fields[3])
+            else _mount_path(fields[3])
+        )
         result[mount] = (
             os.makedev(major, minor),
-            _mount_path(fields[3]),
+            root,
             _mount_path(fields[4]),
         )
     return result
@@ -152,12 +167,18 @@ def _check_mount_backing(mounts, path, anchor):
     # Mount IDs (not st_dev) bind the open path to this mountinfo row.
     # The kernel can report a distinct st_dev for a filesystem subtree.
     _require(
-        location.is_relative_to(point),
+        root is not None and location.is_relative_to(point),
         "The original workspace storage mount could not be verified.",
     )
     backing = root / location.relative_to(point)
     for ident, (other_device, other_root, other_point) in mounts.items():
         if ident == anchor:
+            continue
+        if other_root is None:
+            _require(
+                other_device != device and not other_point.is_relative_to(location),
+                "A namespace mount overlaps the workspace storage.",
+            )
             continue
         # A namespace may stack a bind of the store over its original
         # location. A covering record already projecting the same leaf to
@@ -560,7 +581,7 @@ class Engine:
             type(observed) is list and len(observed) == len(subject),
             "Podman did not verify the storage in its namespace.",
         )
-        mounts = _parse_mounts(raw.encode("utf-8"))
+        mounts = _parse_mounts(raw.encode("utf-8")) if targets else None
         for index, ((path, expected), stamp) in enumerate(zip(subject, observed)):
             _require(
                 type(stamp) is list
@@ -602,6 +623,22 @@ class Engine:
             "The exact Podman selector did not agree with the inventory.",
         )
 
+    def labeled_networks(self, ident):
+        _require(
+            re.fullmatch(r"[a-f0-9]{32}", ident), "The network selector is invalid."
+        )
+        return workspace_podman._catalog(
+            self.read(
+                "network",
+                "ls",
+                "--filter",
+                f"label=io.oc-box.workspace={ident}",
+                "--format",
+                "{{.Name}}",
+            ).encode("utf-8"),
+            _VOLUME,
+        )
+
     def remove(self, kind, target):
         # Both selectors are taken from the rechecked in-memory plan, never
         # raw user argv. Do not retry an uncertain acknowledgement.
@@ -633,7 +670,7 @@ class Plan:
     other_resources: tuple
 
 
-def _old_container(data, guard, rows):
+def _old_container(data, container_id, rows):
     name = data["container"]
     _require(
         all(
@@ -646,7 +683,7 @@ def _old_container(data, guard, rows):
     targets = [
         row
         for row in rows
-        if row["Id"] == guard.container
+        if row["Id"] == container_id
         or row["Name"] == name
         or (row["Config"].get("Labels") or {}).get("io.oc-box.workspace") == data["id"]
     ]
@@ -656,7 +693,7 @@ def _old_container(data, guard, rows):
     row = targets[0]
     labels = row["Config"]["Labels"]
     _require(
-        row["Id"] == guard.container
+        (container_id is None or row["Id"] == container_id)
         and row["Name"] == name
         and labels.get("io.oc-box.workspace") == data["id"]
         and labels.get("io.oc-box.managed") == "true",
@@ -742,7 +779,7 @@ def _local_volume(volume, base):
     return directory, mount
 
 
-def _volume(data, scope, volume, selected, known):
+def _volume(data, scope, volume, selected, known, *, stale=False):
     name = data["home_volume"]
     base = Path(scope[2][0])
     directory = base / name
@@ -770,7 +807,9 @@ def _volume(data, scope, volume, selected, known):
                 item[0] == scope[2][1][0] and item[2] == scope[2][1][2]
                 for item in (stamp, parent)
             )
-            and (selected is not None or receipt is not None or known == binding)
+            and (
+                stale or selected is not None or receipt is not None or known == binding
+            )
             and (receipt is None or list(stamp[:2]) == receipt["volume"]),
             "The original private home filesystem identity could not be verified.",
         )
@@ -785,7 +824,17 @@ def _volume(data, scope, volume, selected, known):
         return binding
 
 
-def _other_consumers(data, guard, rows, volume_rows, selected, targets, scope):
+def _other_consumers(
+    data,
+    container_id,
+    rows,
+    volume_rows,
+    selected,
+    targets,
+    scope,
+    *,
+    missing_bind=None,
+):
     name = data["home_volume"]
     for volume in volume_rows:
         if volume["Name"] == name:
@@ -802,7 +851,7 @@ def _other_consumers(data, guard, rows, volume_rows, selected, targets, scope):
         if row is selected:
             continue
         _require(
-            guard.container not in (row.get("Dependencies") or []),
+            container_id not in (row.get("Dependencies") or []),
             "Another container depends on the selected container.",
         )
         other = _writable(scope, row)
@@ -826,7 +875,18 @@ def _other_consumers(data, guard, rows, volume_rows, selected, targets, scope):
                     source == "/" or _absolute(source),
                     "An overlapping mount could not be ruled out.",
                 )
-                resolved = os.path.realpath(source, strict=True)
+                try:
+                    resolved = os.path.realpath(source, strict=True)
+                except FileNotFoundError:
+                    if (
+                        kind != "bind"
+                        or missing_bind is None
+                        or not missing_bind(row, item)
+                    ):
+                        raise
+                    # The stale-cleanup caller proved genuine absence through
+                    # an unchanged, non-symlink parent. Still check overlap.
+                    resolved = source
                 _require(
                     not any(
                         workspace_uninstall._overlap(resolved, path) for path in targets
@@ -852,23 +912,34 @@ def _registered(box, path, ident):
     return registration, data, guard
 
 
-def _plan(box, path, ident, engine, *, observe=None, reviewed=None):
-    if observe is None:
-        observe = lambda: workspace_control.disposal_observation(path)
-    registration, data, guard = _registered(box, path, ident)
-    control = observe()
-    _require(
-        not workspace_service.controller_running(box, data),
-        "A workspace controller is still present. Exit it before disposal.",
-    )
+@dataclass(frozen=True)
+class Resources:
+    scope: tuple
+    container: tuple | None
+    volume: tuple | None
+    other_resources: tuple
+
+
+def _review_resources(
+    box,
+    registration,
+    data,
+    engine,
+    container_id,
+    *,
+    reviewed=None,
+    stale=False,
+    missing_bind=None,
+):
+    """Review canonical objects using the bound local engine, without mutations."""
     scope = engine.scope()
     containers, volumes = engine.catalog("container"), engine.catalog("volume")
     rows = engine.inspect("container", containers)
-    selected = _old_container(data, guard, rows)
-    _require(
-        workspace_identity.same_project(data, Path(registration.project)),
-        "The original project directory identity could not be verified.",
-    )
+    selected = _old_container(data, container_id, rows)
+    if selected is not None:
+        container_id = selected["Id"]
+    elif container_id is None and reviewed is not None and reviewed.container:
+        container_id = reviewed.container[0]
     name = registration.home_volume
     # Native LookupVolume falls back to unique prefixes even without --force.
     # Never leave a pre-existing prefix neighbor as a possible rm target.
@@ -880,13 +951,23 @@ def _plan(box, path, ident, engine, *, observe=None, reviewed=None):
     )
     volume_rows = engine.inspect("volume", volumes)
     volume = next((row for row in volume_rows if row["Name"] == name), None)
-    engine.exists("container", guard.container, present=selected is not None)
+    if stale:
+        _require(
+            not any(
+                row["Name"] != name
+                and (row.get("Labels") or {}).get("io.oc-box.workspace") == data["id"]
+                for row in volume_rows
+            ),
+            "The workspace has additional labeled volumes; inspect it separately.",
+        )
+    if container_id is not None:
+        engine.exists("container", container_id, present=selected is not None)
     engine.exists(
         "container", registration.container_name, present=selected is not None
     )
     engine.exists("volume", name, present=volume is not None)
     _require(
-        selected is not None or volume is not None or reviewed is not None,
+        stale or selected is not None or volume is not None or reviewed is not None,
         "Neither original resource could bind this Podman store. An empty store cannot establish disposal.",
     )
     if reviewed is not None:
@@ -901,22 +982,39 @@ def _plan(box, path, ident, engine, *, observe=None, reviewed=None):
             "Container removal did not verify absence of the old writable layer.",
         )
     home = _volume(
-        data, scope, volume, selected, reviewed.volume if reviewed is not None else None
+        data,
+        scope,
+        volume,
+        selected,
+        reviewed.volume if reviewed is not None else None,
+        stale=stale,
     )
     home_directory = str(Path(scope[2][0]) / name)
     targets = (home_directory,) + (
         ((writable or original_layer)[0],) if (writable or original_layer) else ()
     )
-    mounts = _mounts()
+    metadata_only = stale and selected is None and home is None
     namespace_targets = []
-    if writable is not None:
-        _exclusive_storage(mounts, writable[0], writable[1])
-        namespace_targets.append((writable[0], writable[1]))
-    if home is not None:
-        _exclusive_storage(mounts, home_directory, home[3])
-        namespace_targets.append((home_directory, home[3]))
+    if not metadata_only:
+        mounts = _mounts()
+        if writable is not None:
+            _exclusive_storage(mounts, writable[0], writable[1])
+            namespace_targets.append((writable[0], writable[1]))
+        if home is not None:
+            _exclusive_storage(mounts, home_directory, home[3])
+            namespace_targets.append((home_directory, home[3]))
     engine.check_namespace(namespace_targets)
-    _other_consumers(data, guard, rows, volume_rows, selected, targets, scope)
+    if not metadata_only:
+        _other_consumers(
+            data,
+            container_id,
+            rows,
+            volume_rows,
+            selected,
+            targets,
+            scope,
+            missing_bind=missing_bind,
+        )
     # Protect the project (including its marker), registry/evidence, and the
     # native host store. Keep them out of even the parent's engine trees, so
     # auxiliary container metadata removal cannot intersect those paths.
@@ -927,21 +1025,16 @@ def _plan(box, path, ident, engine, *, observe=None, reviewed=None):
             not any(workspace_uninstall._overlap(real, root) for root, _ in scope[:2]),
             "The project, registration or host history overlaps the Podman store.",
         )
-    mounted = engine.mounted(rows)
-    _require(
-        guard.container not in mounted,
-        "The selected container is still mounted in the local Podman store.",
-    )
+    if not metadata_only:
+        _require(
+            container_id not in engine.mounted(rows),
+            "The selected container is still mounted in the local Podman store.",
+        )
     _require(
         engine.catalog("container") == containers
         and engine.catalog("volume") == volumes
         and engine.scope() == scope,
         "Podman resources changed during the disposal review.",
-    )
-    _require(
-        _registered(box, path, ident) == (registration, data, guard)
-        and observe() == control,
-        "The registration or stop intent changed during review.",
     )
     subject = None
     if selected is not None:
@@ -953,17 +1046,46 @@ def _plan(box, path, ident, engine, *, observe=None, reviewed=None):
             state.get("FinishedAt"),
             writable,
         )
-    return Plan(
-        registration,
-        guard,
-        control,
+    return Resources(
         scope,
         subject,
         home,
         (
-            tuple(item for item in containers if item != guard.container),
+            tuple(item for item in containers if item != container_id),
             tuple(item for item in volumes if item != name),
         ),
+    )
+
+
+def _plan(box, path, ident, engine, *, observe=None, reviewed=None):
+    if observe is None:
+        observe = lambda: workspace_control.disposal_observation(path)
+    registration, data, guard = _registered(box, path, ident)
+    control = observe()
+    _require(
+        not workspace_service.controller_running(box, data),
+        "A workspace controller is still present. Exit it before disposal.",
+    )
+    _require(
+        workspace_identity.same_project(data, Path(registration.project)),
+        "The original project directory identity could not be verified.",
+    )
+    resources = _review_resources(
+        box, registration, data, engine, guard.container, reviewed=reviewed
+    )
+    _require(
+        _registered(box, path, ident) == (registration, data, guard)
+        and observe() == control,
+        "The registration or stop intent changed during review.",
+    )
+    return Plan(
+        registration,
+        guard,
+        control,
+        resources.scope,
+        resources.container,
+        resources.volume,
+        resources.other_resources,
     )
 
 

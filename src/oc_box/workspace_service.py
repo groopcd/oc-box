@@ -64,11 +64,12 @@ while readers:
 """
 
 
-def socket_path(box, data):
+def socket_path(box, data, *, create=True):
     root = Path(os.environ.get("XDG_RUNTIME_DIR", tempfile.gettempdir())) / (
         "oc-box-live-" + str(os.getuid())
     )
-    root.mkdir(mode=0o700, exist_ok=True)
+    if create:
+        root.mkdir(mode=0o700, exist_ok=True)
     info = root.lstat()
     if (
         not stat.S_ISDIR(info.st_mode)
@@ -736,8 +737,13 @@ def quiet_history_source():
     return _QUIET_HISTORY_SOURCE.get()
 
 
-def controller_running(box, data):
-    address = socket_path(box, data)
+def controller_running(box, data, *, create_runtime=True):
+    try:
+        address = socket_path(box, data, create=create_runtime)
+    except FileNotFoundError:
+        if not create_runtime:
+            return False
+        raise
     with socket.socket(socket.AF_UNIX) as stream:
         stream.settimeout(0.5)
         try:

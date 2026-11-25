@@ -205,6 +205,7 @@ def check_archives(directory):
             "oc-box-mark.png",
             "workspace_control.py",
             "guarded_discard.py",
+            "stale_cleanup.py",
             *_HISTORY_OVERLAP_RUNTIME,
             "history_reader.py",
             "history_recovery.py",

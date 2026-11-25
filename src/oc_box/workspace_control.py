@@ -32,6 +32,7 @@ _DIRECTORY = "control"
 _MARKER = "history-stop.json"
 _ADMISSION = "admission.lock"
 _WRITER = "marker.lock"
+_RETIREMENT_GATE = ".stop-retirement.lock"
 _READY = b"1\n"
 _DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 _MAX_MARKER_BYTES = 256
@@ -196,6 +197,42 @@ def _flock(fd, deadline):
             return
         except (BlockingIOError, InterruptedError):
             _pause(deadline)
+
+
+def _acquire_retirement_gate(path, timeout):
+    with _errors(), _workspace_directory(path) as directory:
+        try:
+            fd = _open_file(directory, _RETIREMENT_GATE, write=True)
+        except FileNotFoundError:
+            try:
+                fd = _open_file(directory, _RETIREMENT_GATE, write=True, create=True)
+            except FileExistsError:
+                fd = _open_file(directory, _RETIREMENT_GATE, write=True)
+        try:
+            _flock(fd, time.monotonic() + timeout)
+            if os.fstat(fd).st_size != 0:
+                raise ControlError("unsafe-control")
+            # A caller may have opened the old directory or lock before a
+            # retirement and then waited. Reopen the active pathname now.
+            with _workspace_directory(path) as current:
+                old, new = os.fstat(directory), os.fstat(current)
+                if (old.st_dev, old.st_ino) != (new.st_dev, new.st_ino):
+                    raise ControlError("unsafe-control")
+                _same_file(current, _RETIREMENT_GATE, fd)
+            return fd
+        except BaseException:
+            os.close(fd)
+            raise
+
+
+@contextmanager
+def retirement_gate(path, *, timeout=_WRITER_TIMEOUT):
+    """Serialize retirement with stop intent, including creation of control."""
+    fd = _acquire_retirement_gate(path, timeout)
+    try:
+        yield
+    finally:
+        os.close(fd)
 
 
 @contextmanager
@@ -394,7 +431,11 @@ def capture(path):
 
 def request_stop(path):
     """Publish and return a fresh opaque token without acquiring admission."""
-    with _errors(), _control(path, create=True) as (directory, created):
+    with (
+        retirement_gate(path),
+        _errors(),
+        _control(path, create=True) as (directory, created),
+    ):
         if created:
             return _initialize(directory)
         with _writer(directory):
