@@ -259,7 +259,7 @@ def run(binary, release):
                         "Leased checked export failed.",
                     )
                     require(
-                        box.archive_session(json.loads(result.stdout), data)
+                        box.archive_session(json.loads(result.stdout)["data"], data)
                         == expected[ident],
                         "Leased archive differs from standalone.",
                     )
@@ -331,7 +331,7 @@ def run(binary, release):
                 )
                 require(
                     result.returncode == 0
-                    and box.archive_session(json.loads(result.stdout), data)
+                    and box.archive_session(json.loads(result.stdout)["data"], data)
                     == expected[IDS[0]],
                     "Pending history prevented progress on an unrelated settled session.",
                 )

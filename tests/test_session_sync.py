@@ -923,6 +923,96 @@ class SessionSyncTests(unittest.TestCase):
         self.assertIn("cursor=last%2F%2B", calls[1])
         self.assertNotIn("order=", calls[1])
 
+    def test_quiet_export_wire_keeps_only_the_fully_checked_value(self):
+        message = {**self.user("msg_user"), "text": "línea 🧪"}
+        unfinished = self.stale("msg_unfinished")
+        ident = "ses_root"
+        export = {"info": self.session(ident), "messages": [message]}
+        wire = json.dumps(
+            {"data": export}, ensure_ascii=False, separators=(",", ":")
+        ).encode()
+        for case in (
+            "direct",
+            "large",
+            "other-envelope-fields",
+            "duplicate-keys",
+            "not-utf8",
+            "omitted",
+            "pending",
+            "changed",
+        ):
+            with self.subTest(case=case):
+                projected = [message]
+                body = wire
+                if case == "other-envelope-fields":
+                    body = wire[:-1] + b',"unexpected":"not passed to host"}'
+                elif case == "duplicate-keys":
+                    body = wire.replace(
+                        b'"messages":', b'"messages":[{"ignored":1}],"messages":', 1
+                    )
+                elif case == "not-utf8":
+                    body = wire.decode().encode("utf-16")
+                elif case == "omitted":
+                    projected.insert(0, unfinished)
+                elif case == "pending":
+                    projected.append(unfinished)
+                elif case == "changed":
+                    projected = [{**message, "text": "different"}]
+                calls = []
+
+                def request(method, route, *, raw=False):
+                    self.assertEqual(method, "GET")
+                    calls.append(route)
+                    if route.endswith("/export"):
+                        self.assertTrue(raw)
+                        return v2._read_quiet_wire(body)
+                    self.assertFalse(raw)
+                    if route == "/api/session/active":
+                        return {"data": {}}
+                    return {"data": projected, "cursor": {}}
+
+                cap = 1 if case == "large" else 16 * 1024 * 1024
+                with patch.object(v2, "_QUIET_EXPORT_WIRE_LIMIT", cap):
+                    if case in ("pending", "changed"):
+                        with self.assertRaises(v2.FixedError) as refused:
+                            v2._quiet_export_wire(request, ident)
+                        self.assertEqual(
+                            str(refused.exception),
+                            v2.UNSETTLED if case == "pending" else v2.CHANGED,
+                        )
+                        self.assertEqual(len(calls), 1 if case == "pending" else 2)
+                        continue
+                    result = v2._quiet_export_wire(request, ident)
+                expected = export
+                if case == "omitted":
+                    expected = {**export, v2.INTERRUPTED: {"assistant": 1}}
+                    self.assertEqual(calls[-1], "/api/session/active")
+                self.assertEqual(json.loads(result), {"data": expected})
+                self.assertEqual(result == body, case == "direct")
+
+    def test_quiet_export_envelope_cannot_skip_host_identity_validation(self):
+        ident = "ses_root"
+        payload = {"info": self.session(ident), "messages": [self.user("msg_user")]}
+        for value in (
+            payload,
+            {"data": payload, "extra": True},
+            {
+                "data": {**payload, "info": self.session("ses_other")},
+            },
+        ):
+            with self.subTest(value=value):
+                result = self.result(value)
+                result.quiet_export_envelope = True
+                with (
+                    patch.object(box, "run_v2_history", return_value=result),
+                    self.assertRaises(box.BoxError),
+                ):
+                    box.export_container_session(self.data, ident)
+        result = self.result({"data": payload})
+        result.quiet_export_envelope = True
+        with patch.object(box, "run_v2_history", return_value=result):
+            self.assertEqual(box.export_container_session(self.data, ident), payload)
+
     def test_checked_export_refuses_unsettled_or_changing_history(self):
         messages = [
             {"id": "msg_assistant", "type": "assistant", "time": {"created": 1}},

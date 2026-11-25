@@ -210,6 +210,37 @@ def _deadline_http(parsed, method, path, data, headers, deadline, *, max_body=No
         connection.close()
 
 
+_QUIET_EXPORT_WIRE_LIMIT = 16 * 1024 * 1024
+
+
+def _read_quiet_wire(body):
+    """Return parsed native data and only an eligible original UTF-8 body."""
+    # Do not forward bytes for hidden/ignored keys or non-UTF-8 encodings.
+    # Keep the prior JSON projection as the fallback.
+    if (
+        not body
+        or len(body) > _QUIET_EXPORT_WIRE_LIMIT
+        or not body.startswith(b'{"data":')
+    ):
+        return (json.loads(body) if body else None), b""
+    try:
+        text = body.decode("utf-8")
+    except UnicodeError:
+        return json.loads(body), b""
+    duplicate = False
+
+    def object_from_pairs(pairs):
+        nonlocal duplicate
+        value = dict(pairs)
+        duplicate |= len(value) != len(pairs)
+        return value
+
+    value = json.loads(text, object_pairs_hook=object_from_pairs)
+    if not isinstance(value, dict) or set(value) != {"data"}:
+        return value, b""
+    return value, b"" if duplicate else body
+
+
 def endpoint_request(endpoint):
     """Use a private loopback endpoint without persisting its credentials."""
     address, password = endpoint["url"], endpoint["password"]
@@ -230,9 +261,11 @@ def endpoint_request(endpoint):
     auth = "Basic " + base64.b64encode(("opencode:" + password).encode()).decode()
     opener = build_opener(ProxyHandler({}))
 
-    def request(method, path, data=None, *, deadline=None, max_body=None):
+    def request(method, path, data=None, *, deadline=None, max_body=None, raw=False):
         headers = {"Authorization": auth, "Content-Type": "application/json"}
         encoded = json.dumps(data).encode() if data is not None else None
+        if raw and (deadline is not None or max_body is not None):
+            raise FixedError(READINESS)
         if deadline is not None:
             if max_body is not None:
                 return _deadline_http(
@@ -249,7 +282,9 @@ def endpoint_request(endpoint):
         )
         with opener.open(req, timeout=60) as response:
             body = response.read()
-            return json.loads(body) if body else None
+            if not raw:
+                return json.loads(body) if body else None
+            return _read_quiet_wire(body)
 
     request.endpoint = {"url": address, "password": password}
     return request
@@ -392,7 +427,7 @@ def verified_web_sessions(request, members):
     return verified
 
 
-def checked_export(request, ident):
+def checked_export(request, ident, *, export_request=None):
     """Native export filters unsettled messages; never accept that as full history.
 
     A running shell/compaction, or an unfinished assistant with nothing settled
@@ -444,7 +479,7 @@ def checked_export(request, ident):
         cursors.add(cursor)
     if trailing_unfinished:
         raise FixedError(UNSETTLED)
-    response = request(
+    response = (request if export_request is None else export_request)(
         "GET", "/api/experimental/session/" + quote(ident, safe="") + "/export"
     )
     if not isinstance(response, dict) or not isinstance(response.get("data"), dict):
@@ -461,6 +496,25 @@ def checked_export(request, ident):
             raise FixedError(UNSETTLED)
         exported = {**exported, INTERRUPTED: {"assistant": omitted}}
     return exported
+
+
+def _quiet_export_wire(request, ident):
+    """Keep the native JSON only if it represents exactly the checked result."""
+    wire, native_value = b"", None
+
+    def read_export(method, path):
+        nonlocal wire, native_value
+        response, raw = request(method, path, raw=True)
+        if raw:
+            wire, native_value = raw, response["data"]
+        return response
+
+    checked = checked_export(request, ident, export_request=read_export)
+    if wire and checked is native_value:
+        return wire
+    # An interrupted-count annotation changes the object; do not emit the
+    # original bytes, or any unrelated fields in a native response envelope.
+    return json.dumps({"data": checked}, separators=(",", ":")).encode("utf-8")
 
 
 def _wait_exact_child(child, timeout):
@@ -1509,7 +1563,8 @@ def main(argv):
     ):
         settings = json.load(sys.stdin)
         endpoint = settings.get("endpoint")
-        if action.startswith("quiet-history-"):
+        quiet = action.startswith("quiet-history-")
+        if quiet:
             if not isinstance(endpoint, dict) or set(endpoint) != {"url", "password"}:
                 raise FixedError(ENDPOINT)
             action = action.removeprefix("quiet-history-")
@@ -1518,6 +1573,12 @@ def main(argv):
             if endpoint is not None
             else server(binary)
         ) as request:
+            if quiet and action == "export":
+                sys.stdout.buffer.write(
+                    _quiet_export_wire(request, settings["session"])
+                )
+                sys.stdout.buffer.flush()
+                return
             value = (
                 session_inventory(request, settings["directory"])
                 if action == "sessions"
