@@ -2385,6 +2385,59 @@ def validate_image_preview(version):
     return image_preview_cli_config()
 
 
+def _config_archive_paths(source):
+    if not source.is_dir():
+        return
+    excluded = (".git", "node_modules")
+    available = [source]
+    python = sys.version_info[:2]
+    legacy_glob = python < (3, 12)
+    if legacy_glob:
+        import errno
+
+        vanished = {errno.ENOENT, errno.ENOTDIR, errno.EBADF, errno.ELOOP}
+    while available:
+        directory = available.pop()
+        # Match pathlib's scan-error handling on supported Python versions.
+        # In 3.12 it ignores open errors, but not errors during iteration.
+        opened = False
+        try:
+            with os.scandir(directory) as scan:
+                opened = True
+                entries = list(scan)
+        except OSError as error:
+            if (legacy_glob and not isinstance(error, PermissionError)) or (
+                opened and python == (3, 12)
+            ):
+                raise
+            continue
+        # The archive filter will follow links to files, as before.
+        yield from (
+            directory / entry.name for entry in entries if entry.name not in excluded
+        )
+        directories = []
+        for entry in entries:
+            skip = entry.name in excluded
+            if skip and not legacy_glob:
+                continue
+            try:
+                # 3.10 probes target type but still never descends into a link.
+                descend = (
+                    entry.is_dir() and not entry.is_symlink()
+                    if python == (3, 10)
+                    else entry.is_dir(follow_symlinks=False)
+                )
+            except OSError as error:
+                if legacy_glob and isinstance(error, PermissionError):
+                    break  # Older glob ends descent in this directory.
+                if legacy_glob and error.errno not in vanished:
+                    raise
+                continue
+            if descend and not skip:
+                directories.append(directory / entry.name)
+        available.extend(reversed(directories))
+
+
 def config_archive(
     data, *, image_preview=False, image_preview_snapshot=None, history_only=False
 ):
@@ -2492,11 +2545,10 @@ def config_archive(
             info.mode = mode
             archive.addfile(info, io.BytesIO(content))
 
-        for file in sorted(source.rglob("*")) if source.is_dir() else []:
+        for file in sorted(_config_archive_paths(source)):
             relative = file.relative_to(source)
             if (
-                any(part in ("node_modules", ".git") for part in relative.parts)
-                or (image_preview and relative.parts[0] == "cli.json")
+                (image_preview and relative.parts[0] == "cli.json")
                 or not file.is_file()
                 or relative == Path("AGENTS.md")
                 or (file.name.startswith("service") and file.suffix == ".json")
