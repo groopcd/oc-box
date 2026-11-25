@@ -3,6 +3,7 @@
 import json
 import os
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -226,6 +227,46 @@ class PreviewAdmissionTests(unittest.TestCase):
             },
         )
         self.assertNotIn(self.connection["password"], " ".join(command))
+
+    def test_guarded_preview_worker_rechecks_mounts_on_same_local_engine(self):
+        pinned = {"PATH": "/usr/bin", "CONTAINERS_CONF": "/synthetic/approved.conf"}
+        self.connection["_runtime_container"] = self.container_id
+        self.connection["_runtime_digest"] = "c" * 64
+        with (
+            patch.object(file_preview, "client_incompatibility", return_value=None),
+            patch.object(
+                file_preview, "client_binding", return_value=(self.container_id, {})
+            ),
+            patch.object(
+                file_preview, "host_export_mounts", return_value=("/initial",)
+            ),
+            patch.object(file_preview_host, "readiness_reason", return_value=None),
+        ):
+            command = self.command(engine_env=pinned)
+        pinned["CONTAINERS_CONF"] = "/synthetic/wrong.conf"
+        with (
+            patch.object(
+                box, "podman", return_value=SimpleNamespace(returncode=0, stdout="")
+            ) as engine,
+            patch.object(file_preview_host, "open_artifact") as open_artifact,
+            ThreadPoolExecutor(max_workers=1) as pool,
+        ):
+            future = pool.submit(command.preview_host_open, "png", "synthetic")
+            with self.assertRaises(file_preview_host.PreviewError):
+                future.result(timeout=3)
+        engine.assert_called_once_with(
+            "--remote=false",
+            "ps",
+            "--all",
+            "--quiet",
+            "--no-trunc",
+            capture=True,
+            check=False,
+            private=True,
+            timeout=4,
+            env={"PATH": "/usr/bin", "CONTAINERS_CONF": "/synthetic/approved.conf"},
+        )
+        open_artifact.assert_not_called()
 
     def test_refuses_alias_wrong_type_or_shadowed_mounts_without_failing_tui(self):
         mounts = self.info["Mounts"]

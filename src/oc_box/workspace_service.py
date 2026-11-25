@@ -571,8 +571,13 @@ def client_command(
     force_tty=False,
     ui_owner=False,
     file_preview=False,
+    engine_env=None,
 ):
-    """No host pass_env, auth refresh, profiles, or vault unlock on attach."""
+    """No host pass_env, auth refresh, profiles, or vault unlock on attach.
+
+    An explicit engine environment comes from this process's verified owner,
+    not from a connection reply or a rendering worker's ambient environment.
+    """
     safeguard = getattr(box, "runtime_safeguard", None)
     guarded = safeguard.current() if safeguard else None
     guarded_container = (
@@ -584,7 +589,17 @@ def client_command(
     image_preview = connection.get("image_preview", False)
     if type(image_preview) is not bool:
         raise box.BoxError("Invalid private workspace image-preview setting.")
-    pinned = getattr(guarded, "engine_env", None)
+    active_engine = getattr(guarded, "engine_env", None)
+    if engine_env is not None and (
+        not guarded_container
+        or not guarded_digest
+        or (active_engine is not None and engine_env != active_engine)
+    ):
+        raise box.BoxError("Private workspace client lost its local engine binding.")
+    pinned = active_engine if active_engine is not None else engine_env
+    # Keep a providerless engine snapshot for worker calls; the client token
+    # belongs only to the native subprocess, not to host mount inspection.
+    pinned = pinned.copy() if pinned is not None else None
     env = pinned.copy() if pinned is not None else box.maintenance_host_env()
     env["OPENCODE_PASSWORD"] = connection["password"]
     command = [
@@ -657,8 +672,9 @@ def client_command(
             )
             if reason is not None:
                 preview.report_unavailable(reason)
+            engine_options = {"engine_env": pinned} if pinned is not None else {}
             verified = (
-                preview.client_binding(box, data, connection)
+                preview.client_binding(box, data, connection, **engine_options)
                 if reason is None
                 else None
             )
@@ -673,7 +689,7 @@ def client_command(
                 if reason is None:
                     refusals = []
                     sources = preview.host_export_mounts(
-                        box, data, container, refusals=refusals
+                        box, data, container, refusals=refusals, **engine_options
                     )
                     reason = (
                         (refusals[0] if refusals else "mount-inventory-unverified")
@@ -685,7 +701,9 @@ def client_command(
                     names[preview.ROOTS] = json.dumps(mounts)
 
                     def preview_host_open(kind, candidate):
-                        sources = preview.host_export_mounts(box, data, container)
+                        sources = preview.host_export_mounts(
+                            box, data, container, **engine_options
+                        )
                         if sources is None:
                             raise file_preview_host.PreviewError(
                                 "host-mounts-unverified",
@@ -736,7 +754,7 @@ def client_command(
     return result
 
 
-def tab_inventory(box, data, connection, *, timeout=4):
+def tab_inventory(box, data, connection, *, timeout=4, engine_env=None):
     """Read admission metadata through the existing providerless client only."""
     if connection.get("workspace") != data["id"]:
         raise box.BoxError("Native tab inventory does not match the workspace.")
@@ -755,6 +773,7 @@ def tab_inventory(box, data, connection, *, timeout=4):
             "sessions",
             box.CONTAINER_OPENCODE,
         ],
+        **({"engine_env": engine_env} if engine_env is not None else {}),
     )
     result = box.run(
         command,
@@ -1222,6 +1241,7 @@ class Owner:
         self._named_control = None
         self._guest_stop_token = guest_stop_token
         self._guest_proof = None
+        self._engine_env = None
 
     def __enter__(self):
         box = self.box
@@ -1231,6 +1251,10 @@ class Owner:
         guest = self._guest_stop_token is not None
         safeguard = getattr(box, "runtime_safeguard", None)
         guarded = safeguard.current() if safeguard else None
+        pinned = getattr(guarded, "engine_env", None)
+        # Request threads do not inherit Admission. Keep only the verified
+        # Podman environment on this owner, never in the lease reply.
+        self._engine_env = pinned.copy() if pinned is not None else None
         if named and guarded:
             # These startup envelopes were verified separately. Do not waive
             # either exact readiness check to let one masquerade as the other.
@@ -1490,15 +1514,20 @@ class Owner:
         if self.data.get("opencode_version") not in native_tabs.AUTO_RESUME_RELEASES:
             return previous
         try:
+            engine_options = (
+                {"engine_env": self._engine_env} if self._engine_env is not None else {}
+            )
             with history_recovery.budget(4):
                 snapshot = native_tabs.inspect(
-                    self.box, self.data, connection=self.connection
+                    self.box, self.data, connection=self.connection, **engine_options
                 )
                 if snapshot.status == "invalid" or (
                     snapshot.status == "valid" and not snapshot.tabs
                 ):
                     return None
-                inventory = tab_inventory(self.box, self.data, self.connection)
+                inventory = tab_inventory(
+                    self.box, self.data, self.connection, **engine_options
+                )
                 return native_tabs.revalidate(
                     snapshot,
                     inventory,

@@ -271,7 +271,7 @@ def _decode(value):
     )
 
 
-def inspect(box, data, *, connection, timeout=2):
+def inspect(box, data, *, connection, timeout=2, engine_env=None):
     """Probe through the existing providerless client transport, never a service.
 
     ``connection`` is mandatory: Owner.handle threads do not inherit CONNECTION.
@@ -316,6 +316,7 @@ def inspect(box, data, *, connection, timeout=2):
                     }
                 ),
             ],
+            **({"engine_env": engine_env} if engine_env is not None else {}),
         )
         result = box.run(
             command, capture=True, private=True, check=False, timeout=timeout

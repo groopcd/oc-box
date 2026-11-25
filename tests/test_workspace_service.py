@@ -1106,6 +1106,7 @@ class WorkspaceServiceTests(unittest.TestCase):
             "State": {"Running": True},
             "Mounts": [{"Source": str(project), "Destination": str(project)}],
         }
+        self.inspect_tabs = box.native_tabs.inspect
         tabs = patch.object(
             box.native_tabs,
             "inspect",
@@ -2041,6 +2042,85 @@ class WorkspaceServiceTests(unittest.TestCase):
             self.assertTrue(exited.is_set())
         self.assertFalse(owner.address.exists())
         self.assertIsNone(service.live_connection())
+
+    def test_owner_socket_thread_keeps_pinned_engine_for_both_tab_reads(self):
+        owner = service.Owner(box, self.path, self.data)
+        pinned = {
+            "PATH": os.environ["PATH"],
+            "CONTAINERS_CONF": "/synthetic/local.conf",
+        }
+        container = "b" * 64
+        scope = SimpleNamespace(
+            record=SimpleNamespace(
+                container=container, digest="c" * 64, version="2.2.6"
+            ),
+            engine_env=pinned.copy(),
+            spawn=lambda _box: contextlib.nullcontext(),
+        )
+        setup = (
+            "import json,sys; print(json.dumps("
+            + repr(self.connection)
+            + "),flush=True); sys.stdin.read()"
+        )
+        seen = []
+
+        def metadata(command, **_kwargs):
+            seen.append((box.runtime_safeguard.current(), command))
+            reply = (
+                {"status": "missing", "tabs": [], "scope": "cwd", "reason": "absent"}
+                if len(seen) == 1
+                else [
+                    {
+                        "id": "ses_shared",
+                        "location": {"directory": self.data["project"]},
+                        "time": {"updated": 1},
+                    }
+                ]
+            )
+            return SimpleNamespace(returncode=0, stdout=json.dumps(reply))
+
+        token = box.runtime_safeguard._ACTIVE.set(scope)
+        try:
+            with (
+                patch.object(
+                    box,
+                    "exec_command",
+                    return_value=box.ContainerCommand(
+                        [sys.executable, "-I", "-S", "-c", setup], pinned
+                    ),
+                ),
+                patch.object(service, "confirm_guarded_owner"),
+                patch.object(box.native_tabs, "inspect", self.inspect_tabs),
+                patch.object(box, "run", side_effect=metadata),
+                owner,
+            ):
+                owner.publish("ses_shared")
+                scope.engine_env["CONTAINERS_CONF"] = "/synthetic/wrong.conf"
+                with socket.socket(socket.AF_UNIX) as peer:
+                    peer.settimeout(4)
+                    peer.connect(str(owner.address))
+                    peer.sendall(
+                        json.dumps(
+                            {"action": "info", "workspace": self.data["id"]}
+                        ).encode()
+                        + b"\n"
+                    )
+                    reply = service.read_control(peer)
+                self.assertEqual(reply["session"], "ses_shared")
+                self.assertNotIn("CONTAINERS_CONF", repr(reply))
+                self.assertNotIn(pinned["CONTAINERS_CONF"], repr(reply))
+        finally:
+            box.runtime_safeguard._ACTIVE.reset(token)
+        self.assertEqual(len(seen), 2)
+        for ambient, command in seen:
+            self.assertIsNone(ambient)
+            self.assertEqual(command[:3], ["podman", "--remote=false", "exec"])
+            self.assertIn(container, command)
+            self.assertNotIn(self.connection["password"], " ".join(command))
+            self.assertEqual(
+                command.environment,
+                {**pinned, "OPENCODE_PASSWORD": self.connection["password"]},
+            )
 
     def test_info_refresh_holds_only_a_temporary_metadata_lease(self):
         owner = service.Owner(box, self.path, self.data)

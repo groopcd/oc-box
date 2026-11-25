@@ -103,6 +103,18 @@ verified passive boot and mount access, then retires only that original ID.
 It does not run native OpenCode, baseline installation, or a full launcher
 lifecycle. Never substitute a real project or backup for the synthetic data.
 
+For the full migration gate, use a separate fresh rootless Podman 6.2/runc
+guest with pinned native OpenCode 2.4.0 and 2.4.1 binaries. Verify refusal
+without consent, the parked original through passive startup, authenticated
+replacement readiness, preserved and newly synchronized history, and clean
+stop. Exercise the separately approved rebuild with a single injected
+snapshot failure but real baseline installation. A distinct failed mount
+probe should stop only the candidate and leave retirement unauthorized. The
+focused Reader and owner-worker regressions use a synthetic nondefault Podman
+store selector and check that all subprocesses retain it without leaking it
+through the owner socket. Those regressions do not replace the exact-source
+host migration and history gates.
+
 For an already-fenced `rlimit type 6` failure, the optional
 `tools/probe_legacy_start.py --container NAME` diagnostic inspects the affected
 container on its rootless Podman host and tests passive startup in a disposable
