@@ -316,13 +316,22 @@ versions and fixed refusal category, not private output.
 
 Guarded admission currently requires the official native host executable with
 the same bytes as the verified container artifact and a standard stopped
-container/home pair on a glibc-based catalog distribution. Alpine, script shims,
-custom devices and custom Podman arguments are not supported. Only owning `start`
+container/home pair on a glibc-based catalog distribution. Alpine, script shims
+and custom Podman arguments are not supported. Only owning `start`
 admits a changed version. Guarded `web`,
 `sync` and plain history-preserving `purge` use the already verified runtime;
 `reset`, maintenance and `start --import-session` are unavailable on guarded
 workspaces. An existing private owner still serves additional clients without
 starting a preflight or refreshing its credentials.
+
+A guarded launch can keep already registered plain accelerator and render
+character devices (`/dev/accel/accelN` and `/dev/dri/renderDN`) when local
+rootless Podman can verify both the saved and effective bindings. It requires
+an overlay store and `podman generate spec` support. The paths must be direct
+nodes, not aliases, directory expansions, remaps, permission overrides, or CDI
+names. No device or host policy is changed. Reconnect any missing mapped device
+and retry with the saved settings; `oc-box status --table` lists those settings.
+Guarded purge and `sync --persisted` do not admit these device-backed workspaces.
 
 New containers use an absolute `/bin/sleep` path for their passive entrypoint.
 The safeguard refuses older containers whose stored entrypoint would look up
@@ -338,6 +347,14 @@ Only then does oc-box remove the old container, without removing the private
 volume. A failed or uncertain startup before that proof preserves both
 containers; it never falls back to running the old entrypoint. This is not
 automatic in-place repair of an already-fenced workspace.
+For eligible device-backed replacements, the same saved paths are verified
+against the stopped source and the replacement; ambient default devices are not
+replayed. The exact device-node identities are bound through cutover. If a
+device is re-enumerated during that process, a retry does not silently substitute
+it. An additional in-container check verifies character-node visibility and
+basic access before retiring the original; it does not exercise the driver.
+An existing `CONTAINERS_CONF_OVERRIDE` prevents this scoped
+replacement when oc-box cannot preserve the configured policy.
 The replacement keeps the saved cgroup limits and inherits Podman's current
 process limits rather than replaying values observed after the old container
 booted. An explicit Podman `--ulimit` on the source makes it ineligible.
@@ -356,7 +373,8 @@ only from a verified intermediate state. Do not reset, purge, or downgrade to
 bypass a refusal. Back up important data first.
 
 In-place replacement does not rebind containers already enrolled in a
-runtime floor, nonstandard resources, or custom devices/Podman arguments.
+runtime floor or allow nonstandard resources, unsupported device mappings,
+or custom Podman arguments.
 Preserve those through a full backup if replacement is unavailable. Ordinary
 unguarded startup of existing containers is unchanged. A verified,
 already-running guarded owner can still accept clients; attaching does not

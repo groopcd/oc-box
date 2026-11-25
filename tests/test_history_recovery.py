@@ -1309,6 +1309,23 @@ for line in sys.stdin:
         self.assertIn("oc-box sync", self.output.getvalue())
         self.assertNotIn("snapshots were synchronized", self.output.getvalue())
 
+    def test_saved_devices_do_not_admit_a_guarded_reader(self):
+        reasons = []
+        data = {**self.data, "devices": ["/dev/accel/accel0"]}
+        with patch.object(recovery, "passive_workspace_mounts") as mounts:
+            self.assertIsNone(
+                recovery.capture(
+                    box,
+                    data,
+                    self.info,
+                    self.token,
+                    runtime_digest="a" * 64,
+                    refusal=reasons.append,
+                )
+            )
+        self.assertEqual(reasons, ["guarded-devices"])
+        mounts.assert_not_called()
+
     def test_capture_is_optional_and_never_uses_new_resource_operations(self):
         cases = (
             ({"ready": False}, "workspace-not-ready"),

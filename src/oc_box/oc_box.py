@@ -1141,7 +1141,7 @@ def podman(*args, **kwargs):
     return run(["podman", *args], **kwargs)
 
 
-def check_backend(*, env=None, feature="maintenance"):
+def check_backend(*, env=None, feature="maintenance", local_only=False):
     try:
         dependencies.require(feature)
     except dependencies.DependencyError as exc:
@@ -1151,6 +1151,7 @@ def check_backend(*, env=None, feature="maintenance"):
             "Run oc-box as your regular user, without sudo (rootless Podman is required)."
         )
     result = podman(
+        *(("--remote=false",) if local_only else ()),
         "info",
         "--format",
         "{{.Host.Security.Rootless}}",
@@ -1861,7 +1862,7 @@ def install_baseline(data, *, guarded=None):
         )
 
 
-def stop_container(data, *, env=None):
+def stop_container(data, *, env=None, local_only=False):
     guarded = runtime_safeguard.current()
     migration = runtime_safeguard.entrypoint_migration
     if migration.RETIRE in data:
@@ -1881,9 +1882,20 @@ def stop_container(data, *, env=None):
     if guarded is not None:
         data = {**data, "container": guarded.record.container}
     options = {"env": env} if env is not None else {}
-    info = inspect_owned(data, **options)
+    if local_only:
+        info = inspect_owned(data, local_only=True, **options)
+    else:
+        info = inspect_owned(data, **options)
     if info and info["State"]["Running"]:
-        podman("stop", "--time", "10", data["container"], capture=True, **options)
+        podman(
+            *(("--remote=false",) if local_only else ()),
+            "stop",
+            "--time",
+            "10",
+            data["container"],
+            capture=True,
+            **options,
+        )
 
 
 def session_file(path):
@@ -5838,12 +5850,33 @@ def _stop_selected(path, data, *, admitted=False):
         )
         return
     elif record:
-        info = inspect_owned(data)
+        if data.get("devices"):
+            # Stop the same owned object even when a device has disappeared.
+            env = migration.engine_environment(sys.modules[__name__])
+            migration.require_local_engine(sys.modules[__name__], env)
+            info = inspect_owned(data, local_only=True, env=env)
+        else:
+            env = None
+            info = inspect_owned(data)
         if not info or info.get("Id") != record.container:
             raise BoxError(
                 "The guarded container identity changed; no substitute was stopped."
             )
         data = {**data, "container": record.container}
+        if env is not None:
+            stop_container(data, env=env, local_only=True)
+            final = inspect_owned(data, local_only=True, env=env)
+            if (
+                not final
+                or final.get("Id") != record.container
+                or not migration._stopped(
+                    final, ("created", "configured", "exited", "stopped")
+                )
+            ):
+                raise BoxError(
+                    "Could not verify the guarded device workspace stopped on its local engine."
+                )
+            return
     stop_container(data)
 
 
@@ -6311,6 +6344,19 @@ def _main_command(args, argv):
             )
     web_selection = None
     web_attach_only = False
+    stop_selection = None
+    stop_engine = None
+    if args.command == "stop":
+        stop_selection = find_workspace(args.project, args.workspace)
+        path, selected = stop_selection
+        if (
+            selected
+            and selected.get("devices")
+            and runtime_safeguard.load(sys.modules[__name__], path) is not None
+        ):
+            stop_engine = runtime_safeguard.entrypoint_migration.engine_environment(
+                sys.modules[__name__]
+            )
     if args.command == "web":
         web_selection = find_workspace(args.project, args.workspace)
         _, selected = web_selection
@@ -6325,7 +6371,9 @@ def _main_command(args, argv):
     with loading_stage("Checking rootless Podman", stage="backend"):
         check_backend(
             **(
-                {"env": maintenance_host_env()}
+                {"env": stop_engine, "local_only": True}
+                if stop_engine is not None
+                else {"env": maintenance_host_env()}
                 if args.command == "terminal" or getattr(args, "persisted", False)
                 else {}
             ),
@@ -6341,6 +6389,8 @@ def _main_command(args, argv):
     path, data = (
         web_selection
         if web_selection is not None
+        else stop_selection
+        if stop_selection is not None
         else find_workspace(
             args.project, args.workspace, allow_identity_change=args.command == "repair"
         )

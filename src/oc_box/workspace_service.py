@@ -39,6 +39,7 @@ else:
     import startup_output
 
 CONNECTION = contextvars.ContextVar("oc_box_v2_connection")
+_DEVICE_LEASE = contextvars.ContextVar("oc_box_device_lease_engine", default=None)
 _QUIET_HISTORY_SOURCE = contextvars.ContextVar(
     "oc_box_quiet_history_source", default=None
 )
@@ -614,9 +615,16 @@ def _validate_workspace_identity(box, path, data):
         raise box.BoxError("Workspace identity changed; refusing live session access.")
 
 
-def validate_workspace(box, path, data):
+def validate_workspace(box, path, data, *, engine_env=None):
     _validate_workspace_identity(box, path, data)
-    info = box.inspect_owned(data, env=box.maintenance_host_env())
+    info = box.inspect_owned(
+        data,
+        **(
+            {"local_only": True, "env": engine_env}
+            if engine_env is not None
+            else {"env": box.maintenance_host_env()}
+        ),
+    )
     if not info or not info["State"].get("Running") or info["State"].get("Paused"):
         raise box.BoxError(
             "Workspace is not running; start it before attaching a client."
@@ -629,6 +637,25 @@ def validate_workspace(box, path, data):
         raise box.BoxError(
             "Container workspace mount does not match the host registry."
         )
+
+
+def _borrowed_device_engine(data, container):
+    binding = _DEVICE_LEASE.get()
+    if binding is not None and binding[:2] == (data["id"], container):
+        return binding[2]
+    return None
+
+
+@contextlib.contextmanager
+def _device_engine_scope(data, container, environment):
+    if environment is None:
+        yield
+        return
+    token = _DEVICE_LEASE.set((data["id"], container, environment.copy()))
+    try:
+        yield
+    finally:
+        _DEVICE_LEASE.reset(token)
 
 
 def client_command(
@@ -660,6 +687,8 @@ def client_command(
     if type(image_preview) is not bool:
         raise box.BoxError("Invalid private workspace image-preview setting.")
     active_engine = getattr(guarded, "engine_env", None)
+    if active_engine is None:
+        active_engine = _borrowed_device_engine(data, guarded_container)
     if engine_env is not None and (
         not guarded_container
         or not guarded_digest
@@ -667,6 +696,10 @@ def client_command(
     ):
         raise box.BoxError("Private workspace client lost its local engine binding.")
     pinned = active_engine if active_engine is not None else engine_env
+    if data.get("devices") and guarded_container and pinned is None:
+        raise box.BoxError(
+            "Private workspace client lost its local device engine binding."
+        )
     # Keep a providerless engine snapshot for worker calls; the client token
     # belongs only to the native subprocess, not to host mount inspection.
     pinned = pinned.copy() if pinned is not None else None
@@ -1777,8 +1810,17 @@ def _attach_control(box, path, data, *, named=None):
     Borrowers must not close it, read additional replies, or treat a same-user
     PID and connected descriptor as proof of the native owner's generation.
     """
+    safeguard = getattr(box, "runtime_safeguard", None)
+    engine_env = None
     if named is None:
-        validate_workspace(box, path, data)
+        if safeguard and data.get("devices"):
+            engine_env = safeguard.client_engine(box, path, data)
+        validate_workspace(
+            box,
+            path,
+            data,
+            **({"engine_env": engine_env} if engine_env is not None else {}),
+        )
     stream = socket.socket(socket.AF_UNIX)
     try:
         stream.settimeout(5)
@@ -1794,9 +1836,14 @@ def _attach_control(box, path, data, *, named=None):
             connection = named.exchange(stream, peer_pid)
         else:
             connection = _legacy_attachment(box, data, stream)
-            safeguard = getattr(box, "runtime_safeguard", None)
             if safeguard:
-                safeguard.bind_client(box, path, data, connection)
+                engine_env = safeguard.bind_client(
+                    box,
+                    path,
+                    data,
+                    connection,
+                    **({"engine_env": engine_env} if engine_env is not None else {}),
+                )
     except (OSError, ValueError) as exc:
         stream.close()
         if named is not None:
@@ -1808,7 +1855,10 @@ def _attach_control(box, path, data, *, named=None):
         stream.close()
         raise
     try:
-        yield AttachedControl(connection, stream, peer_pid)
+        with _device_engine_scope(
+            data, connection.get("_runtime_container"), engine_env
+        ):
+            yield AttachedControl(connection, stream, peer_pid)
     finally:
         stream.close()
 
@@ -1842,13 +1892,14 @@ def attach(box, path, data):
         yield attached.connection
 
 
-def relay_command(box, data, port):
+def relay_command(box, data, port, *, engine_env=None, container=None):
     return box.ContainerCommand(
         [
             "podman",
+            *(("--remote=false",) if engine_env is not None else ()),
             "exec",
             "-i",
-            data["container"],
+            container or data["container"],
             "/usr/bin/env",
             "-i",
             "PATH=/usr/bin:/bin",
@@ -1857,7 +1908,7 @@ def relay_command(box, data, port):
             PROXY,
             str(port),
         ],
-        box.maintenance_host_env(),
+        engine_env.copy() if engine_env is not None else box.maintenance_host_env(),
     )
 
 
@@ -2099,6 +2150,26 @@ class Gateway:
         self.capacity = threading.BoundedSemaphore(32)
         self.listener = None
         self._listener_proof = None
+        self._device_relay = {}
+        container = (
+            connection.get("_runtime_container")
+            if isinstance(connection, dict)
+            else None
+        )
+        if data.get("devices") and container is not None:
+            safeguard = getattr(box, "runtime_safeguard", None)
+            guarded = safeguard.current() if safeguard else None
+            environment = getattr(guarded, "engine_env", None)
+            if environment is None:
+                environment = _borrowed_device_engine(data, container)
+            if environment is None:
+                raise box.BoxError(
+                    "Private workspace relay lost its local device engine binding."
+                )
+            self._device_relay = {
+                "engine_env": environment.copy(),
+                "container": container,
+            }
 
     def _reserve_listener(self, *, probe_only=False, managed=False):
         """Bind the actual gateway socket, not the disposable port preflight."""
@@ -2174,10 +2245,17 @@ class Gateway:
 
     def forward(self, stream):
         child = None
-        with stream:
+        with (
+            _device_engine_scope(
+                self.data,
+                self._device_relay.get("container"),
+                self._device_relay.get("engine_env"),
+            ),
+            stream,
+        ):
             try:
                 port = urlparse(self.connection["url"]).port
-                command = relay_command(self.box, self.data, port)
+                command = relay_command(self.box, self.data, port, **self._device_relay)
                 child = subprocess.Popen(
                     command,
                     env=command.environment,

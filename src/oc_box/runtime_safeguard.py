@@ -19,6 +19,7 @@ import tempfile
 if __package__:
     from . import (
         entrypoint_migration,
+        guarded_devices,
         history_recovery,
         lifecycle_output,
         native_preflight,
@@ -27,6 +28,7 @@ if __package__:
     from . import opencode_compat, startup_output, workspace_control, workspace_identity
 else:
     import entrypoint_migration
+    import guarded_devices
     import history_recovery
     import lifecycle_output
     import native_preflight
@@ -342,11 +344,14 @@ def _inspect(box, path, data, *, running, attach_only=False, engine_env=None):
         current_path, _ = box.find_workspace(project)
         if current_path != path or not workspace_identity.same_project(data, project):
             raise ValueError
+        saved = guarded_devices.paths(data)
+        if saved and engine_env is None:
+            engine_env = entrypoint_migration.engine_environment(box)
         options = {"env": engine_env} if engine_env is not None else {}
         staged = entrypoint_migration.RETIRE in data
-        prefix = ("--remote=false",) if staged else ()
+        prefix = ("--remote=false",) if staged or saved else ()
         info = box.inspect_owned(
-            data, **({"local_only": True} if staged else {}), **options
+            data, **({"local_only": True} if prefix else {}), **options
         )
         if (
             not isinstance(info, dict)
@@ -373,6 +378,17 @@ def _inspect(box, path, data, *, running, attach_only=False, engine_env=None):
             )
         ):
             raise ValueError
+        devices = (
+            guarded_devices.verify(
+                box,
+                data,
+                info,
+                engine_env,
+                fresh=staged and entrypoint_migration.fresh_replacement(data, info),
+            )
+            if saved
+            else ()
+        )
         validate_mounts = (
             history_recovery.live_attachment_mounts
             if attach_only
@@ -408,7 +424,9 @@ def _inspect(box, path, data, *, running, attach_only=False, engine_env=None):
             )
         ):
             raise ValueError
-        return info["Id"], signature
+        return (info["Id"], signature, devices) if devices else (info["Id"], signature)
+    except guarded_devices.DeviceError as exc:
+        raise box.BoxError(str(exc)) from None
     except (
         OSError,
         AttributeError,
@@ -526,7 +544,9 @@ class Admission:
     def start(self, box, data):
         try:
             staged = entrypoint_migration.RETIRE in data
-            prefix = ("--remote=false",) if staged else ()
+            saved = guarded_devices.paths(data)
+            local = staged or bool(saved)
+            prefix = ("--remote=false",) if local else ()
             engine_options = self._engine_options()
             mount_env = (
                 self.engine_env
@@ -566,7 +586,7 @@ class Admission:
                 )
                 info = box.inspect_owned(
                     {**data, "container": self.record.container},
-                    **({"local_only": True} if staged else {}),
+                    **({"local_only": True} if local else {}),
                     **engine_options,
                 )
                 self.require_live(box, data, running=True)
@@ -604,6 +624,39 @@ class Admission:
             )
             command.guarded_spawn = True
             box.run(command, capture=True, private=True, timeout=30)
+            if saved:
+                # Check the passive runtime identity can see and access the
+                # nodes, without opening them or asking the driver for I/O.
+                device_check = box.ContainerCommand(
+                    [
+                        "podman",
+                        *prefix,
+                        "exec",
+                        "--workdir",
+                        "/",
+                        "--user",
+                        "0:0",
+                        self.record.container,
+                        "/bin/sh",
+                        "-c",
+                        'for node; do test -c "$node" && test -r "$node" '
+                        '&& test -w "$node" || exit 1; done',
+                        "oc-box",
+                        *saved,
+                    ],
+                    mount_env,
+                )
+                device_check.guarded_spawn = True
+                result = box.run(
+                    device_check, capture=True, private=True, timeout=30, check=False
+                )
+                if result.returncode:
+                    suffix = (
+                        " This attempt did not retire the original." if staged else ""
+                    )
+                    raise box.BoxError(
+                        f"{guarded_devices.DeviceError('access')}{suffix}"
+                    )
             if entrypoint_migration.RETIRE in data:
                 with workspace_control.admission(self.path):
                     self._unchanged(box)
@@ -671,7 +724,17 @@ def bound_command(arguments, digest):
     ]
 
 
-def bind_client(box, path, data, connection):
+def client_engine(box, path, data):
+    """Select the local device-backed store before verifying a live client."""
+    if not data.get("devices") or load(box, path) is None:
+        return None
+    guarded = current()
+    if guarded is not None and guarded.path == path and guarded.engine_env is not None:
+        return guarded.engine_env.copy()
+    return entrypoint_migration.engine_environment(box)
+
+
+def bind_client(box, path, data, connection, *, engine_env=None):
     if entrypoint_migration.RETIRE in data:
         raise box.BoxError(entrypoint_migration.RETIRE_PENDING)
     # These are host-private execution selectors, never trusted from the
@@ -680,19 +743,29 @@ def bind_client(box, path, data, connection):
     connection.pop("_runtime_digest", None)
     record = load(box, path)
     if record is None:
-        return
+        return None
+    if data.get("devices") and engine_env is None:
+        engine_env = client_engine(box, path, data)
     if (
         not record.ready
         or record.version != connection.get("version")
         or record.volume != data.get("home_volume")
         or record.container
-        != _inspect(box, path, data, running=True, attach_only=True)[0]
+        != _inspect(
+            box,
+            path,
+            data,
+            running=True,
+            attach_only=True,
+            **({"engine_env": engine_env} if engine_env is not None else {}),
+        )[0]
     ):
         raise box.BoxError(
             "The live lease does not match the guarded runtime and private resources."
         )
     connection["_runtime_container"] = record.container
     connection["_runtime_digest"] = record.digest
+    return engine_env
 
 
 @contextlib.contextmanager
@@ -722,19 +795,54 @@ def admit(
             "This operation is unavailable on a runtime-guarded workspace. "
             "Use guarded start or sync with the admitted version, or back up the workspace."
         )
-    if (
-        data.get("ready") is not True
-        or data.get("restore_incomplete")
-        or data.get("podman_args")
-        or data.get("devices")
-        or data.get("distro") == "alpine"
-        or getattr(args, "podman_arg", None)
-        or getattr(args, "device", None)
-        or getattr(args, "import_session", None)
-    ):
+    if data.get("restore_incomplete"):
         raise box.BoxError(
-            "The runtime safeguard requires an existing stopped V2 workspace with standard resources."
+            "This workspace has an incomplete restore. Preserve it and restore the "
+            "original backup to a fresh destination before using the guarded runtime."
         )
+    if data.get("ready") is not True:
+        raise box.BoxError(
+            "Guarded startup requires a workspace that completed setup. Inspect "
+            "'oc-box status --table' and preserve the existing workspace before retrying."
+        )
+    if data.get("distro") == "alpine":
+        raise box.BoxError(
+            "Guarded OpenCode upgrades do not support Alpine. Back up this workspace "
+            "and use a separate workspace on a supported distribution for the new runtime."
+        )
+    if getattr(args, "import_session", None):
+        raise box.BoxError(
+            "Guarded startup cannot import a host session as part of this launch. "
+            "Retry without --import-session."
+        )
+    if getattr(args, "device", None) or getattr(args, "clear_devices", False):
+        raise box.BoxError(
+            "Guarded startup cannot change registered device mappings. Retry without "
+            "--device or --clear-devices to keep the current mappings."
+        )
+    if getattr(args, "podman_arg", None) or getattr(args, "clear_podman_args", False):
+        raise box.BoxError(
+            "Guarded startup cannot change registered Podman options. Retry without "
+            "--podman-arg or --clear-podman-args."
+        )
+    if data.get("podman_args"):
+        raise box.BoxError(
+            "Guarded startup cannot verify this workspace's saved custom Podman options. "
+            "Inspect 'oc-box status --table'; preserve the existing workspace and use "
+            "a separate standard workspace if those options are not needed."
+        )
+    try:
+        saved = guarded_devices.paths(data)
+        if saved:
+            if command == "purge" or getattr(args, "persisted", False):
+                raise box.BoxError(
+                    "This guarded operation requires a workspace without device mappings. "
+                    "Keep the mappings; ordinary guarded startup and live history sync are separate."
+                )
+            if retirement_env is None:
+                retirement_env = entrypoint_migration.engine_environment(box)
+    except guarded_devices.DeviceError as exc:
+        raise box.BoxError(str(exc)) from None
     baseline = (
         previous.version if previous is not None else data.get("opencode_version")
     )
@@ -823,6 +931,8 @@ def admit(
         raise box.BoxError(str(exc)) from None
     if converting:
         retirement_env = entrypoint_migration.engine_environment(box)
+        if saved and "CONTAINERS_CONF_OVERRIDE" in retirement_env:
+            raise box.BoxError(str(guarded_devices.DeviceError("override")))
         entrypoint_migration.consent(box, args, data)
     with pinned_host(box) as host:
         version = _host_release(box, host)
