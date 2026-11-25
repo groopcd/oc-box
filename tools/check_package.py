@@ -253,6 +253,8 @@ def check_archives(directory):
             "tui_app.py",
             "tui_clipboard.py",
             "tui_backend.py",
+            "tui_limits.py",
+            "tui_limit_apply.py",
             "tui_status.py",
             "tui_settings.py",
             "tui_logs.py",

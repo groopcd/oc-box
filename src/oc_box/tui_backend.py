@@ -1,4 +1,4 @@
-"""Framework-independent dashboard queries. No owning launch or resource edits."""
+"""Framework-independent dashboard queries and explicit host-side actions."""
 
 from __future__ import annotations
 
@@ -294,6 +294,14 @@ class DashboardBackend:
         )
         item = report["workspaces"][0]
         return {key: item[key] for key in ("workspace_id", "container_id", "storage")}
+
+    def apply_live_limits(self, draft, *, read_only, demo):
+        if __package__:
+            from . import tui_limit_apply
+        else:
+            import tui_limit_apply
+
+        tui_limit_apply.apply(self.box, draft, read_only=read_only, demo=demo)
 
     def collect(self, *, scan_storage=False):
         workspaces = self.inventory()

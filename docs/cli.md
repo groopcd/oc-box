@@ -1302,7 +1302,8 @@ from every section without connecting to a native source.
 Browsing does not create/start a workspace, take lifecycle
 ownership, reset, sync, refresh credentials or unlock the vault. `--read-only`
 disables native session mutation, backup creation/restore, workspace
-removal and terminal control/input. Explicit backup inspection remains available.
+removal, live CPU/memory updates and terminal control/input. Explicit backup
+inspection remains available.
 `--demo` is a
 synthetic-only preview with fixed CPU/RAM/storage readings that also permits
 execution inside a container: no host services, actual registry/log access or
@@ -1372,6 +1373,23 @@ Raw report data and totals are unchanged. Full details/mounts remain in an
 expandable section, initially collapsed. Host readings and monitoring settings
 remain available with no current workspace.
 
+For a selected running workspace, **−** / **+** by the CPU and RAM readings
+stage limit changes in half-core and 1 GiB steps. A bracketed value is the staged
+quota in cores or the staged memory limit in GiB; usage bars still show the
+current limits. Select **Apply** next to **Scan sizes** to clear the draft and
+apply both changes together in the background, without leaving the dashboard.
+It is disabled with no changes, in demo or read-only mode, or for an ineligible
+workspace. Unknown and unlimited values cannot be adjusted. Changing workspace
+or observing a different baseline discards the draft.
+
+Apply uses local rootless Podman and verifies the same running container on
+cgroup v2. It does not restart the container or update saved oc-box settings.
+Podman may retain the new limit if that same container is stopped and started;
+recreating it uses the saved settings. Lowering memory can interrupt workloads.
+If a competing operation or container exit prevents verification after
+submission, check the actual limits before trying again; there is no automatic
+retry or rollback.
+
 The workspace table uses only supplied project/state/CPU/RAM data and explicit
 private-home scan results. Stopped/unknown readings are not fabricated zeros.
 The retained-activity card shows existing oc-box journal categories only; it does
@@ -1409,10 +1427,10 @@ favorites, retained logs or the CLI-selected safety mode. Revert/Escape discards
 Apply changes only allowlisted dashboard preferences **for this session**, with
 no persistence or logging. Search text is never persisted. These preferences cannot
 weaken `--read-only`, modify OpenCode `cli.json` or host settings, or change
-workspace resources or credentials. Live CPU/RAM limit edits, storage quotas,
-resizes and graphroot/runroot moves are deferred to a separate project. Existing
-explicit CLI `reset` remains outside the manager; there is no `podman update`
-action, resource-control RPC or resource-editing service extension.
+workspace resources or credentials. Live CPU/RAM updates are a separate explicit
+action in Status. Storage quotas, resizes and graphroot/runroot moves remain
+deferred. Explicit CLI `reset` remains outside the manager; there is no
+resource-control RPC or resource-editing service extension.
 
 The Monitoring refresh field accepts any whole number from 1 to 60 seconds,
 default 1. Invalid or blank entries show inline feedback and apply none of the
