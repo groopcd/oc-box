@@ -101,6 +101,14 @@ legacy PATH-shadow command never runs during replacement or subsequent boot.
 It does not run native OpenCode, baseline installation, or a full launcher
 lifecycle. Never substitute a real project or backup for the synthetic data.
 
+For an already-fenced `rlimit type 6` failure, the optional
+`tools/probe_legacy_start.py --container NAME` diagnostic inspects the affected
+container on its rootless Podman host and tests passive startup in a disposable
+container from the same local image. It uses no explicit process limits, real
+workspace mounts, network, vault, or OpenCode. It shows any startup error from
+the probe locally and removes only its verified resource. This is not a
+workspace repair or a full launcher acceptance test.
+
 The npm upgrade fixture audits the generated public plugin SDK dependency tree at all
 reported severities before installing the resolved tree. An advisory or
 failed audit fails the job and therefore blocks PyPI publication through the

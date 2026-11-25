@@ -364,6 +364,13 @@ class Engine:
             ),
             "unexpected-conversion-command",
         )
+        if args[0] == "create":
+            require(
+                not any(
+                    arg == "--ulimit" or arg.startswith("--ulimit=") for arg in args
+                ),
+                "inherited-process-limits-replayed",
+            )
         if args[0] == "commit":
             source, tag = args[-2:]
             require(HEX.fullmatch(source), "commit-source-id")

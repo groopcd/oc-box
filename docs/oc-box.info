@@ -413,7 +413,10 @@ replacement snapshots the installed container OS locally and retains the
 same workspace ID, project path, settings and private home volume
 (including conversations never synchronized to the host).  Neither
 container starts during the replacement; guarded startup still has to
-pass.
+pass.  The replacement keeps the saved cgroup limits and inherits
+Podman's current process limits rather than replaying values observed
+after the old container booted.  An explicit Podman ‘--ulimit’ on the
+source makes it ineligible.
 
 If Podman confirms that the OS snapshot failed before the name switch
 and oc-box can still verify the original resources, you may separately
@@ -5462,20 +5465,20 @@ Node: Name769
 Node: Synopsis930
 Node: Description5291
 Node: Commands11111
-Node: Options157714
-Node: Lifecycle and persistence223326
-Node: Distribution images225626
-Node: Sessions and recovery230703
-Node: Devices and host permissions237288
-Node: Resource reports239634
-Node: Configuration and environment241745
-Node: Files253126
-Node: Exit status264036
-Node: Examples265444
-Node: Troubleshooting267583
-Node: Installation and manuals280075
-Node: Authors and license290265
-Node: See also290872
+Node: Options157946
+Node: Lifecycle and persistence223558
+Node: Distribution images225858
+Node: Sessions and recovery230935
+Node: Devices and host permissions237520
+Node: Resource reports239866
+Node: Configuration and environment241977
+Node: Files253358
+Node: Exit status264268
+Node: Examples265676
+Node: Troubleshooting267815
+Node: Installation and manuals280307
+Node: Authors and license290497
+Node: See also291104
 
 End Tag Table
 

@@ -145,12 +145,22 @@ def initialized_volume(volume):
         os.close(fd)
 
 
-def no_copy_binding(data, info):
+def _create_argv(info):
     argv = info["Config"].get("CreateCommand")
+    if (
+        type(argv) is list
+        and 0 < len(argv) <= 256
+        and all(type(value) is str for value in argv)
+    ):
+        return argv
+    return None
+
+
+def no_copy_binding(data, info):
+    argv = _create_argv(info)
     binding = f"{data['home_volume']}:{data['home']}:rw,nocopy"
     return (
-        type(argv) is list
-        and len(argv) <= 256
+        argv is not None
         and sum(
             1
             for option, value in zip(argv, argv[1:])
@@ -160,25 +170,11 @@ def no_copy_binding(data, info):
     )
 
 
-def _limits(host):
-    # A configured replacement has not yet inherited Podman's process
-    # defaults. Reapply the source's observed standard limits explicitly so
-    # the fresh and previously booted objects can be compared before cutover.
-    limits = host.get("Ulimits") or []
-    _require(type(limits) is list and len(limits) <= 2)
-    result = {}
-    for row in limits:
-        _require(type(row) is dict and set(row) == {"Name", "Soft", "Hard"})
-        name = row["Name"].lower().removeprefix("rlimit_")
-        soft, hard = row["Soft"], row["Hard"]
-        _require(
-            name in ("nofile", "nproc")
-            and name not in result
-            and all(type(value) is int and 0 <= value < 2**63 for value in (soft, hard))
-            and soft <= hard
-        )
-        result[name] = f"{name}={soft}:{hard}"
-    return sorted(result.values())
+def _inherits_process_limits(info):
+    argv = _create_argv(info)
+    return argv is not None and not any(
+        option == "--ulimit" or option.startswith("--ulimit=") for option in argv
+    )
 
 
 def replacement_matches(data, info):
@@ -334,6 +330,7 @@ class Conversion:
             and not item.get("IsService")
             and not item.get("Rootfs")
             and len(item["Mounts"]) == 2
+            and _inherits_process_limits(item)
         )
         check = (
             history_recovery.legacy_migration_mounts
@@ -369,8 +366,12 @@ class Conversion:
                 for variable in config["Env"]
             )
         )
-        options = [host.get(key) for key in _OPTIONS]
-        options.append(_limits(host))
+        # A previously booted container can report inherited process limits
+        # that a freshly created one does not. Replaying those observations as
+        # overrides can ask a rootless OCI runtime to raise its own hard limit.
+        # Leave inheritance to Podman. The saved cgroup limits still match,
+        # and a pending transaction from the old profile stays unadoptable.
+        options = ["inherit-process-limits", *(host.get(key) for key in _OPTIONS)]
         options.append(sorted(item.get("EffectiveCaps") or ()))
         return (
             item,
@@ -601,7 +602,6 @@ class Conversion:
                     {**self.data, "container": stage, "image": record["image"]},
                     self.data["project"],
                     conversion=record["token"],
-                    ulimits=_limits(source[0]["HostConfig"]),
                 )
             )
             source, candidate = self._observe(record)

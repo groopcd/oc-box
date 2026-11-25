@@ -333,6 +333,9 @@ The replacement snapshots the installed container OS locally and retains the
 same workspace ID, project path, settings and private home volume (including
 conversations never synchronized to the host). Neither container starts
 during the replacement; guarded startup still has to pass.
+The replacement keeps the saved cgroup limits and inherits Podman's current
+process limits rather than replaying values observed after the old container
+booted. An explicit Podman `--ulimit` on the source makes it ineligible.
 
 If Podman confirms that the OS snapshot failed before the name switch and
 oc-box can still verify the original resources, you may separately approve
