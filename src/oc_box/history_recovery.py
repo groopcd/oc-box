@@ -648,6 +648,10 @@ def recover(box, path, data, source, *, already_stopped=False):
             raise RecoveryError("invalid-container")
         if workspace_service.live_connection() is not None:
             raise RecoveryError("old-connection")
+        # box.run keeps the transition and cleanup on this local engine when
+        # pinned. Pass the same binding to the Reader's direct subprocesses.
+        guarded = box.runtime_safeguard.current()
+        engine_env = guarded.engine_env if guarded is not None else None
         with workspace_control.admission(path, timeout=5), budget(TRANSITION_BUDGET):
             _unchanged(path, source)
             _inspect(box, path, data, source, running=not already_stopped)
@@ -701,7 +705,11 @@ def recover(box, path, data, source, *, already_stopped=False):
         ):
             _unchanged(path, source)
             with history_reader.Reader(
-                box, pinned, remaining=remaining, runtime_digest=source.runtime_digest
+                box,
+                pinned,
+                remaining=remaining,
+                runtime_digest=source.runtime_digest,
+                engine_env=engine_env,
             ) as reader:
                 reader.assert_idle()
                 _unchanged(path, source)

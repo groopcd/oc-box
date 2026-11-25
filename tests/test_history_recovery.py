@@ -85,7 +85,11 @@ class HistoryRecoveryTests(unittest.TestCase):
         self.assertEqual(options["env"], box.maintenance_host_env())
         self.assertGreater(options["timeout"], 0)
         self.assertLessEqual(options["timeout"], 20)
-        args = command[1:]
+        return subprocess.CompletedProcess(
+            command, 0, json.dumps(self.resource_response(command[1:])), ""
+        )
+
+    def resource_response(self, args):
         if args == ["container", "inspect", self.ident]:
             self.record("inspect-running" if self.running else "inspect-stopped")
             info = copy.deepcopy(self.info)
@@ -119,7 +123,7 @@ class HistoryRecoveryTests(unittest.TestCase):
             value = None
         else:
             self.fail("Unexpected recovery resource operation.")
-        return subprocess.CompletedProcess(command, 0, json.dumps(value), "")
+        return value
 
     def recover(self, *, sync=None):
         with (
@@ -513,6 +517,132 @@ class HistoryRecoveryTests(unittest.TestCase):
         )
         self.assertNotIn("normal host OpenCode database", self.output.getvalue())
         workspace_control.require_certain(self.path)
+
+    def test_guarded_recovery_binds_every_reader_spawn_to_the_transition_engine(self):
+        digest = "d" * 64
+        self.source = recovery.capture(
+            box, self.data, self.info, self.token, runtime_digest=digest
+        )
+        engine = {
+            "HOME": str(self.root / "engine-home"),
+            "PATH": "/usr/bin",
+            "XDG_RUNTIME_DIR": str(self.root / "engine-runtime"),
+            "CONTAINERS_CONF": str(self.root / "containers.conf"),
+            "CONTAINERS_STORAGE_CONF": str(self.root / "private-storage.conf"),
+        }
+        guard = box.runtime_safeguard
+        scope = guard.Admission(
+            path=self.path,
+            host=None,
+            previous=None,
+            record=guard.native_runtime_guard.Record(
+                self.ident, self.data["home_volume"], "2.2.7", digest, True
+            ),
+            resources=(self.ident, self.source.mount_signature),
+            stop_token=self.token,
+            transition=False,
+            launching=False,
+            engine_env=engine.copy(),
+        )
+        password = "synthetic-reader-" + "x" * 32
+        endpoint = {"url": "http://127.0.0.1:23456", "password": password}
+        popen = subprocess.Popen
+
+        def fake_podman(command, *, env, **options):
+            self.assertEqual(command[:2], ["podman", "--remote=false"])
+            args = command[2:]
+            if args[0] != "exec":
+                self.assertEqual(env, engine)
+                program = f"print({json.dumps(self.resource_response(args))!r})"
+            else:
+                self.assertIsNotNone(recovery.ADMITTED.get())
+                self.assertEqual(args[:4], ["exec", "-i", "--workdir", "/"])
+                self.assertIn(digest, args)
+                self.assertNotIn(password, " ".join(command))
+                if "lease" in args:
+                    self.record("lease")
+                    self.assertEqual(env, engine)
+                    self.assertEqual(args[4], self.ident)
+                    program = (
+                        f"import sys; sys.stdin.readline(); "
+                        f"print({json.dumps(endpoint)!r}, flush=True); sys.stdin.read()"
+                    )
+                else:
+                    self.assertEqual(
+                        args[4:7], ["--env", "OPENCODE_PASSWORD", self.ident]
+                    )
+                    self.assertEqual(env, {**engine, "OPENCODE_PASSWORD": password})
+                    if "/api/session/active" in args:
+                        self.record("idle")
+                        program = """print('{"data":{}}')"""
+                    elif "history-worker" in args:
+                        self.record("worker")
+                        handshake = json.dumps(
+                            {"protocol": box.opencode_v2_io.HISTORY_WORKER_PROTOCOL}
+                        )
+                        program = f"""import json, sys
+sys.stdin.readline()
+print({handshake!r}, flush=True)
+for line in sys.stdin:
+    print(json.dumps({{"id": json.loads(line)["id"], "size": 2}}))
+    print("[]", end="", flush=True)
+"""
+                    else:
+                        self.assertIn("sessions", args)
+                        self.record("one-shot")
+                        program = 'import sys; sys.stdin.read(); print("[]")'
+            # Use local Python only after checking the actual Podman argv/env.
+            return popen([sys.executable, "-I", "-S", "-c", program], env={}, **options)
+
+        def synchronize(_path, data, *, announce):
+            self.assertFalse(announce)
+            self.assertEqual(box.run_v2_history(data, "sessions").stdout, "[]\n")
+            with recovery.history_reader.export_pass(box, data):
+                self.assertEqual(box.run_v2_history(data, "sessions").stdout, "[]")
+                self.assertEqual(
+                    box.run_v2_history(data, "export", session="ses_one").stdout, "[]"
+                )
+
+        with (
+            patch.object(guard, "current", return_value=scope),
+            patch.dict(
+                os.environ,
+                {
+                    "CONTAINERS_STORAGE_CONF": str(self.root / "ambient-storage.conf"),
+                    "CONTAINER_HOST": "ssh://example.invalid",
+                    "OPENCODE_PASSWORD": "synthetic-ambient-password",
+                    "OPENCODE_AUTH_CONTENT": "synthetic-ambient-auth",
+                    "ANTHROPIC_API_KEY": "synthetic-provider-key",
+                    "CUSTOM_SECRET": "synthetic-custom-secret",
+                },
+            ),
+            patch.object(subprocess, "Popen", side_effect=fake_podman),
+            patch.object(box, "sync_sessions", side_effect=synchronize),
+            contextlib.redirect_stderr(self.output),
+        ):
+            self.assertTrue(recovery.recover(box, self.path, self.data, self.source))
+        self.assertEqual(
+            self.calls,
+            [
+                "inspect-running",
+                "volume",
+                "stop",
+                "inspect-stopped",
+                "start",
+                "inspect-running",
+                "lease",
+                "idle",
+                "idle",
+                "one-shot",
+                "worker",
+                "idle",
+                "idle",
+                "stop",
+                "inspect-stopped",
+            ],
+        )
+        self.assertEqual(scope.engine_env, engine)
+        self.assertFalse(self.running)
 
     def test_history_wait_reports_only_after_recovery_and_final_stop(self):
         cases = {
