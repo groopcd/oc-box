@@ -153,6 +153,42 @@ class SessionSyncTests(unittest.TestCase):
             observed["messages"][1]["metadata"], source["messages"][1]["metadata"]
         )
 
+    def test_sync_archive_fast_copy_preserves_v1_payload_and_bytes(self):
+        source = {
+            "info": {
+                "id": "ses_parent",
+                "directory": str(self.project),
+                "parentID": "ses_other",
+                "permission": {"edit": "allow"},
+                "title": "Original",
+            },
+            "messages": [
+                {
+                    "info": {
+                        "id": "msg_first",
+                        "sessionID": "ses_parent",
+                        "role": "user",
+                    },
+                    "parts": [
+                        {
+                            "id": "prt_first",
+                            "sessionID": "ses_parent",
+                            "messageID": "msg_first",
+                            "type": "text",
+                            "text": "é 🧪",
+                        }
+                    ],
+                }
+            ],
+        }
+        before = copy.deepcopy(source)
+        expected = box.archive_session(before, self.data)
+        observed = box.archive_session(source, self.data, copy_payload=False)
+        self.assertEqual(source, before)
+        self.assertEqual(json.dumps(observed, indent=2), json.dumps(expected, indent=2))
+        observed["messages"][0]["parts"][0]["text"] = "different"
+        self.assertEqual(source, before)
+
     def test_quiet_source_refusal_reports_only_validated_reason(self):
         for reason in ("queued-work", "private-unknown-value"):
             error = box.BoxError("private-native-error")
@@ -1407,6 +1443,90 @@ class SessionSyncTests(unittest.TestCase):
             r"elapsed=\d+\.\ds\.",
         )
         self.assertIn("Session history synced", output.getvalue())
+
+    def test_admitted_quiet_read_failure_keeps_prior_archive_and_does_not_replay(self):
+        sessions = ["ses_saved", "ses_failed", "ses_later"]
+        before = {"info": self.session("ses_failed"), "messages": []}
+        archives = self.path.parent / "history"
+        failed_archive = box.archive_session(before, self.data)
+        failed_path = archives / (failed_archive["info"]["id"] + ".json")
+        old_digest = box.atomic_json(failed_path, failed_archive, checksum=True)
+        old_bytes = failed_path.read_bytes()
+        binding = box._QuietSyncBinding(
+            self.data["container"], (), {"PATH": "/usr/bin"}
+        )
+        binding.start_verified = True
+        connection = {
+            "workspace": self.data["id"],
+            "url": "http://127.0.0.1:1234",
+            "password": "synthetic-test-password",
+        }
+        for failure in ("redirect", "timeout"):
+            with self.subTest(failure=failure):
+                box.atomic_json(
+                    box.session_file(self.path),
+                    {"sessions": sessions, "synced": {"ses_failed": old_digest}},
+                )
+                requests = []
+                source = Mock()
+                source.read_command.side_effect = lambda _data, action: [
+                    "quiet",
+                    action,
+                ]
+
+                def run(command, **kwargs):
+                    if command[:1] == ["quiet"]:
+                        if command[1] == "sessions":
+                            return self.result(
+                                [self.session(ident) for ident in sessions]
+                            )
+                        ident = json.loads(kwargs["input"])["session"]
+                        requests.append(ident)
+                        if ident == "ses_failed":
+                            if failure == "timeout":
+                                raise box.BoxError(
+                                    "test timeout"
+                                ) from subprocess.TimeoutExpired(command, 180)
+                            return subprocess.CompletedProcess(
+                                command, 2, "", v2.MARKER + v2.ENDPOINT + "\n"
+                            )
+                        return self.result(
+                            {"data": {"info": self.session(ident), "messages": []}}
+                        )
+                    self.assertIn("import", command)
+                    return self.result(None)
+
+                output = io.StringIO()
+                token = box._QUIET_SYNC_BINDING.set(binding)
+                try:
+                    with (
+                        patch.object(
+                            workspace_service,
+                            "live_connection",
+                            return_value=connection,
+                        ),
+                        patch.object(
+                            workspace_service,
+                            "quiet_history_source",
+                            return_value=source,
+                        ),
+                        patch.object(box, "run", side_effect=run),
+                        patch.object(box, "exec_command") as ordinary,
+                        patch.object(box, "verify_host_archive") as verify,
+                        contextlib.redirect_stdout(output),
+                        self.assertRaises(box.BoxError),
+                    ):
+                        box.sync_sessions(self.path, self.data)
+                finally:
+                    box._QUIET_SYNC_BINDING.reset(token)
+                ordinary.assert_not_called()
+                verify.assert_called_once()
+                self.assertEqual(requests, sessions[:2])
+                state = box.session_state(self.path)
+                self.assertEqual(set(state["synced"]), set(sessions[:2]))
+                self.assertEqual(state["synced"]["ses_failed"], old_digest)
+                self.assertEqual(failed_path.read_bytes(), old_bytes)
+                self.assertNotIn("Session history synced", output.getvalue())
 
     def test_manual_repeat_keeps_pending_checkpoint_and_repairs_only_local_copies(self):
         args = SimpleNamespace(

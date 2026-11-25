@@ -17,7 +17,12 @@ from unittest.mock import Mock, patch
 from urllib.parse import parse_qs, urlparse
 
 from oc_box import history_reader as reader, history_recovery, oc_box as box
-from oc_box import lifecycle_output, workspace_control, workspace_service
+from oc_box import (
+    lifecycle_output,
+    opencode_v2_io,
+    workspace_control,
+    workspace_service,
+)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -31,13 +36,23 @@ class Handler(BaseHTTPRequestHandler):
         if self.headers.get("Authorization") != self.server.authorization:
             self.send_error(403)
             return
+        if route.path in self.server.redirects:
+            status, target = self.server.redirects[route.path]
+            self.send_response(status)
+            self.send_header("Location", target)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
         if route.path == "/api/session":
             value = {
                 "data": [s["info"] for s in self.server.sessions.values()],
                 "cursor": {},
             }
         elif route.path.endswith("/message"):
-            messages = self.server.sessions[pieces[3]]["messages"]
+            messages = (
+                self.server.projected_prefix
+                + self.server.sessions[pieces[3]]["messages"]
+            )
             offset = 100 if parse_qs(route.query).get("cursor") else 0
             value = {
                 "data": messages[offset : offset + 100],
@@ -95,7 +110,8 @@ class HistoryExportsTests(unittest.TestCase):
         self.server.authorization = (
             "Basic " + base64.b64encode(b"opencode:synthetic-worker-password").decode()
         )
-        self.server.calls, self.server.sessions = [], {}
+        self.server.calls, self.server.sessions, self.server.redirects = [], {}, {}
+        self.server.projected_prefix = []
         self.lease = reader.Reader(box, self.data, remaining=lambda: self.remaining)
         self.lease.connection = self.connection
         self.lease.child = SimpleNamespace(poll=lambda: None)
@@ -106,6 +122,140 @@ class HistoryExportsTests(unittest.TestCase):
         ):
             token = variable.set(value)
             self.addCleanup(variable.reset, token)
+
+    def test_quiet_bridge_refuses_redirects_from_inventory_projection_export_and_activity(
+        self,
+    ):
+        ident = "ses_quiet"
+        unsettled = {
+            "id": "msg_superseded",
+            "type": "assistant",
+            "time": {"created": 1},
+        }
+        source = (box.PACKAGE / "opencode_v2_io.py").read_text()
+        endpoint = {key: self.connection[key] for key in ("url", "password")}
+        projection = f"/api/session/{ident}/message"
+        export = f"/api/experimental/session/{ident}/export"
+        for path, action, code in (
+            ("/api/session", "sessions", 301),
+            (projection, "export", 302),
+            (export, "export", 303),
+            (export, "export", 304),
+            (export, "export", 307),
+            ("/api/session/active", "export", 308),
+        ):
+            for target in (
+                "/untrusted",
+                f"http://localhost:{self.server.server_port}/untrusted",
+            ):
+                with self.subTest(path=path, code=code, target=target):
+                    self.server.calls.clear()
+                    self.server.redirects = {path: (code, target)}
+                    self.server.sessions[ident] = self.export(ident)
+                    # The superseded turn is absent from the export, so the
+                    # final activity check also uses the no-redirect opener.
+                    self.server.projected_prefix = (
+                        [unsettled] if path == "/api/session/active" else []
+                    )
+                    result = self.quiet_client(source, endpoint, action, ident)
+                    self.assertEqual(result.returncode, 2)
+                    self.assertFalse(result.stdout)
+                    self.assertEqual(
+                        opencode_v2_io.fixed_message(result.stderr),
+                        opencode_v2_io.ENDPOINT,
+                    )
+                    self.assertEqual(urlparse(self.server.calls[-1]).path, path)
+                    self.assertNotIn("/untrusted", self.server.calls)
+
+    def quiet_client(self, source, endpoint, action, ident):
+        return subprocess.run(
+            [
+                sys.executable,
+                "-I",
+                "-S",
+                "-c",
+                source,
+                "quiet-history-" + action,
+                "/must-not-start-native",
+            ],
+            env={"PATH": os.defpath, "LANG": "C.UTF-8"},
+            input=json.dumps(
+                {
+                    "directory": str(self.project),
+                    "endpoint": endpoint,
+                    "session": ident,
+                }
+            ),
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+
+    def test_quiet_redirect_retains_verified_checkpoint_without_replaying(self):
+        sessions = {
+            ident: self.export(ident)
+            for ident in ("ses_verified", "ses_refused", "ses_not_reached")
+        }
+        self.server.sessions = sessions
+        self.server.redirects = {
+            "/api/experimental/session/ses_refused/export": (302, "/untrusted")
+        }
+        self.data["opencode_version"] = "2.4.1"
+        box.atomic_json(self.path, self.data)
+        endpoint = {key: self.connection[key] for key in ("url", "password")}
+        source = (box.PACKAGE / "opencode_v2_io.py").read_text()
+
+        def read_command(_data, action):
+            return ["quiet-history-" + action]
+
+        def run(command, **kwargs):
+            if command[0].startswith("quiet-history-"):
+                return self.quiet_client(
+                    source,
+                    endpoint,
+                    command[0].removeprefix("quiet-history-"),
+                    json.loads(kwargs["input"]).get("session"),
+                )
+            self.assertIn("import", command)
+            imports.append(command)
+            return subprocess.CompletedProcess(command, 0)
+
+        imports = []
+        binding = box._QuietSyncBinding(self.data["container"], (), {})
+        binding.start_verified = True
+        for variable, value in (
+            (reader.CURRENT, None),
+            (box._QUIET_SYNC_BINDING, binding),
+        ):
+            token = variable.set(value)
+            self.addCleanup(variable.reset, token)
+        with (
+            patch.object(
+                workspace_service,
+                "quiet_history_source",
+                return_value=SimpleNamespace(read_command=read_command),
+            ),
+            patch.object(box, "exec_command") as ordinary,
+            patch.object(box, "private_host_env", return_value={}),
+            patch.object(box, "run", side_effect=run),
+            patch.object(box, "verify_host_archive") as host_verify,
+            contextlib.redirect_stdout(io.StringIO()) as output,
+            self.assertRaisesRegex(box.BoxError, "Invalid private OpenCode") as refused,
+        ):
+            box.sync_sessions(self.path, self.data)
+        self.assertTrue(refused.exception.history_contract_refusal)
+        ordinary.assert_not_called()
+        host_verify.assert_called_once()
+        self.assertEqual(len(imports), 1)
+        self.assertEqual(set(box.session_state(self.path)["synced"]), {"ses_verified"})
+        self.assertEqual(len(list((self.path.parent / "history").glob("*.json"))), 1)
+        self.assertFalse(
+            any(
+                "untrusted" in item or "not_reached" in item
+                for item in self.server.calls
+            )
+        )
+        self.assertNotIn("Session history synced", output.getvalue())
 
     def local_command(self, arguments):
         # Replace only the container transport; keep Reader's command allowlist
