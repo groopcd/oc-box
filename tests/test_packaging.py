@@ -68,6 +68,29 @@ class PackagingTests(unittest.TestCase):
                     installation.source_file(APP, name), APP / "src/oc_box" / name
                 )
 
+    def test_flat_install_can_import_the_private_overlap_pass(self):
+        with tempfile.TemporaryDirectory() as name:
+            home = Path(name)
+            with contextlib.redirect_stdout(io.StringIO()):
+                installation.install(APP, home=home)
+            flat = (home / ".local/share/oc-box/current").resolve(strict=True)
+            self.assertTrue((flat / "guarded_devices.py").is_file())
+            fatal = subprocess.run(
+                [
+                    sys.executable,
+                    "-B",
+                    "-c",
+                    "import oc_box, history_overlap_pass; "
+                    "assert callable(oc_box._bind_first_history_sync)",
+                ],
+                cwd=flat,
+                env={"HOME": name, "PATH": "/usr/bin:/bin"},
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+            self.assertEqual(fatal.returncode, 0, fatal.stderr)
+
     def test_archive_validation_requires_sync_runtime_docs_and_regressions(self):
         build = {
             "version": "1.7.1.dev0+gabcdef0",
@@ -149,6 +172,8 @@ class PackagingTests(unittest.TestCase):
                     "build-info.json",
                     "distribution.json",
                     "workspace_control.py",
+                    "guarded_devices.py",
+                    "workspace_podman.py",
                     "history_overlap_archive.py",
                     "history_overlap_binding.py",
                     "history_overlap_domains.py",
@@ -283,6 +308,10 @@ class PackagingTests(unittest.TestCase):
                     "tests/smoke_ui_state_v2.py",
                     "docs/ui-state.md",
                     "src/oc_box/workspace_control.py",
+                    *(
+                        "src/oc_box/" + module
+                        for module in check_package._HISTORY_OVERLAP_RUNTIME
+                    ),
                     "src/oc_box/history_reader.py",
                     "src/oc_box/history_recovery.py",
                     "tests/test_private_memory.py",
