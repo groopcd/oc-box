@@ -4011,9 +4011,10 @@ def _history_compatibility_refusal(error):
 
 def _history_failure_reason(error):
     reader = getattr(error, "history_reader_category", None)
-    if getattr(error, "history_source_cleanup_failed", False) or reader in (
-        "cleanup-failed",
-        "history-cleanup",
+    if (
+        getattr(error, "history_source_cleanup_failed", False)
+        or history_recovery.local_cleanup_unverified(error)
+        or reader in ("cleanup-failed", "history-cleanup")
     ):
         return "cleanup-unverified"
     if isinstance(error, (KeyboardInterrupt, SystemExit)):

@@ -233,6 +233,72 @@ def run_admitted(command, gate, **options):
     stable mutex through Popen prevents a later process from starting after an
     ordered stop, without holding stop behind an entire large-history command.
     """
+
+    @contextlib.contextmanager
+    def defer_sigint():
+        # A Python SIGINT can land after fork but before Popen returns its
+        # handle. Defer that handler briefly without changing the child's
+        # inherited signal mask or a caller's SIG_IGN disposition.
+        handler = signal.getsignal(signal.SIGINT)
+        pending = []
+
+        def remember(number, frame):
+            if not pending:
+                pending.append((number, frame))
+
+        def deliver():
+            if pending:
+                handler(*pending.pop())
+
+        if threading.current_thread() is threading.main_thread() and callable(handler):
+            signal.signal(signal.SIGINT, remember)
+            try:
+                yield deliver
+            finally:
+                signal.signal(signal.SIGINT, handler)
+        else:
+            yield deliver
+
+    def retire_local(child):
+        clean = False
+        try:
+            # Do not let a second Ctrl-C skip the bounded local cleanup or
+            # replace the refusal/interrupt that made it necessary.
+            with defer_sigint():
+                try:
+                    deadline = time.monotonic() + 5
+                    pid, status = os.waitpid(child.pid, os.WNOHANG)
+                    if pid == 0 and signal.getsignal(signal.SIGCHLD) == signal.SIG_DFL:
+                        # The unreaped direct child still owns this new
+                        # session's PID. Never signal after losing the wait.
+                        with contextlib.suppress(OSError):
+                            os.killpg(child.pid, signal.SIGKILL)
+                    while pid == 0:
+                        left = deadline - time.monotonic()
+                        if left <= 0:
+                            break
+                        time.sleep(min(left, 0.025))
+                        pid, status = os.waitpid(child.pid, os.WNOHANG)
+                    if pid == child.pid and (
+                        os.WIFEXITED(status) or os.WIFSIGNALED(status)
+                    ):
+                        child.returncode = os.waitstatus_to_exitcode(status)
+                        clean = True
+                finally:
+                    # Do not wait for EOF from an inherited pipe. Only Popen's
+                    # own pipe handles appear here, never caller-owned files.
+                    for stream in (child.stdin, child.stdout, child.stderr):
+                        if stream is not None:
+                            try:
+                                stream.close()
+                            except BaseException:
+                                clean = False
+        except BaseException:
+            # In particular, Popen.wait/poll can synthesize exit zero on
+            # ECHILD. Only an observed terminal waitpid status is proof here.
+            return False
+        return clean
+
     data = options.pop("input", None)
     timeout = options.pop("timeout", None)
     if data is not None:
@@ -240,16 +306,28 @@ def run_admitted(command, gate, **options):
             raise ValueError("stdin and input cannot be combined")
         options["stdin"] = subprocess.PIPE
     options["start_new_session"] = True
-    with gate():
-        child = subprocess.Popen(command, **options)
+    child = None
+    spawning = False
     try:
+        with gate():
+            with defer_sigint() as pending:
+                spawning = True
+                child = subprocess.Popen(command, **options)
+                spawning = False
+            pending()
         output, errors = child.communicate(input=data, timeout=timeout)
-    except BaseException:
-        if child.poll() is None:
-            with contextlib.suppress(OSError):
-                os.killpg(child.pid, signal.SIGKILL)
-        with contextlib.suppress(OSError, subprocess.SubprocessError):
-            child.communicate(timeout=5)
+    except BaseException as original:
+        if (child is not None and not retire_local(child)) or (
+            spawning and isinstance(original, (KeyboardInterrupt, SystemExit))
+        ):
+            with contextlib.suppress(BaseException):
+                original.history_local_cleanup_failed = True
+            with contextlib.suppress(BaseException):
+                startup_output.line(
+                    "oc-box: Local command cleanup could not be verified; "
+                    "this does not establish remote cleanup.",
+                    file=sys.stderr,
+                )
         raise
     return subprocess.CompletedProcess(command, child.returncode, output, errors)
 
@@ -422,6 +500,16 @@ def capture(box, data, info, token, *, refusal=None, runtime_digest=None):
     return Source(info["Id"], token, signature, runtime_digest)
 
 
+def local_cleanup_unverified(error):
+    """Keep local wait uncertainty across the launcher's fixed exception wrapper."""
+    return bool(
+        getattr(error, "history_local_cleanup_failed", False)
+        or getattr(
+            getattr(error, "__cause__", None), "history_local_cleanup_failed", False
+        )
+    )
+
+
 def exit_retry_eligible(box, data, failure):
     """Route one archival attempt, never authorize live reads or normal startup.
 
@@ -429,6 +517,8 @@ def exit_retry_eligible(box, data, failure):
     On 2.4 a request that failed after the normal quiet gate must have failed
     at a positively known source boundary, not while mutating the destination.
     """
+    if local_cleanup_unverified(failure):
+        return False
     profile = history_reader.snapshot_profile(data.get("opencode_version"))
     if profile == history_reader.SNAPSHOT_24 and (
         getattr(failure, "history_compatibility_category", None) is not None
@@ -725,8 +815,10 @@ def recover(box, path, data, source, *, already_stopped=False):
         reader_reason = getattr(exc, "history_reader_category", None)
         if isinstance(reader_reason, str) and reader_reason in COMPATIBILITY_REFUSALS:
             compatibility_reason = reader_reason
-        if getattr(exc, "history_source_cleanup_failed", False) or (
-            report is not None and report.reason == "cleanup-unverified"
+        if (
+            getattr(exc, "history_source_cleanup_failed", False)
+            or local_cleanup_unverified(exc)
+            or (report is not None and report.reason == "cleanup-unverified")
         ):
             category = "cleanup-unverified"
         elif isinstance(exc, RecoveryError):
