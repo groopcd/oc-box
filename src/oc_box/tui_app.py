@@ -456,6 +456,7 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
         self._refreshing = self._logging = self._session_busy = self._terminal_busy = (
             False
         )
+        self._storage_scanning = False
         self._last_report = self._last_logs = 0
         self._rendered_logs = None
         self._log_scope_versions = dict.fromkeys(
@@ -501,7 +502,6 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
         self._log_lock = threading.Lock()
         self._podman_log_lock = threading.Lock()
         self._operation_lock = threading.Lock()
-        self._storage_lock = threading.Lock()
         self._pending_lock = threading.Lock()
         self._pending_cancel = None
         self._pending_connection = None
@@ -600,7 +600,9 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
                                         id="status-summary",
                                         markup=False,
                                     )
-                                yield Button("Scan sizes", id="scan-storage")
+                                yield Button(
+                                    "Scan sizes", id="scan-storage", disabled=True
+                                )
                         with Vertical(id="activity-card", classes="card"):
                             yield Static("RETAINED ACTIVITY", classes="card-title")
                             yield Static(
@@ -1446,6 +1448,7 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
     def _render_workspace(self):
         self._render_management()
         item = self._workspace()
+        self._render_scan_button("#scan-storage", available=item is not None)
         self._render_context()
         self._update_monitor("#full-diagnostics", item)
         if not item:
@@ -1668,10 +1671,25 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
         elif action == "terminal-disconnect":
             self.query_one(NativeTerminal).disconnect()
 
-    @work(thread=True, group="storage", exit_on_error=False)
+    def _render_scan_button(self, selector, *, available):
+        button = self.query_one(selector, Button)
+        button.disabled = self._storage_scanning or not available
+        label = "Running…" if self._storage_scanning else "Scan sizes"
+        if button.label.plain != label:
+            button.label = label
+
+    def _set_storage_scanning(self, scanning):
+        self._storage_scanning = scanning
+        self._render_workspace()
+
     def scan_storage(self, workspace):
-        if not workspace or not self._storage_lock.acquire(blocking=False):
+        if not workspace or self._storage_scanning:
             return
+        self._set_storage_scanning(True)
+        return self._scan_storage(workspace)
+
+    @work(thread=True, group="storage", exit_on_error=False)
+    def _scan_storage(self, workspace):
         try:
             item = self.backend.scan_storage(workspace)
             if self.is_running:
@@ -1683,7 +1701,8 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
                     "Storage scan unavailable; cached sizes are retained. Live metrics and log search remain independent.",
                 )
         finally:
-            self._storage_lock.release()
+            if self.is_running:
+                self.call_from_thread(self._set_storage_scanning, False)
 
     def _apply_storage(self, scanned):
         item = next(
