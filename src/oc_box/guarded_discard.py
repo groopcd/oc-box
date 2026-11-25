@@ -507,6 +507,7 @@ def _verify_database_metadata(database, expected):
         and all(value in ("", wanted) for value, wanted in zip(rows[0][3:], expected)),
         "The existing Podman database config does not match the reviewed store.",
     )
+    return rows[0][7]
 
 
 class Engine:
@@ -568,7 +569,7 @@ class Engine:
                 self.database[1][::2] == self.roots[0][1][::2],
                 "The Podman database crosses a storage boundary.",
             )
-            _verify_database_metadata(
+            stored_driver = _verify_database_metadata(
                 self.database_path, (static, temp, graph, runtime, "overlay", volume)
             )
             try:
@@ -611,7 +612,11 @@ class Engine:
                 f"--runroot={runtime}",
                 f"--volumepath={volume}",
                 f"--tmpdir={temp}",
-                "--storage-driver=overlay",
+                # Native SQLite validation substitutes the configured default
+                # for an empty stored driver. Forcing overlay here can make
+                # libpod reject a legitimate automatic-driver store before
+                # opening it. Scope still requires actual overlay before use.
+                *(("--storage-driver=overlay",) if stored_driver else ()),
                 *_storage_options(options),
                 "--transient-store=false",
                 "--namespace=",
