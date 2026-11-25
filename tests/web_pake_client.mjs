@@ -295,6 +295,11 @@ test("actual abort during synchronous work gates progress at the next checkpoint
 test("refuses noncanonical or unbound start replies before proof", async t => {
   const vector = vectors[0];
   const body = JSON.parse(vector.start.body);
+  // Insert a second key at the opening of this known JSON object. A parser
+  // that silently accepts duplicates sees the same values as the valid reply.
+  assert.ok(vector.start.body.startsWith("{"));
+  const duplicateKey = '{"ke2":"ignored",' + vector.start.body.slice(1);
+  assert.deepEqual(JSON.parse(duplicateKey), body);
   const cases = {
     "HTTP refusal with diagnostic body": { status: 403, text: SECRET },
     "redirected reply": { redirected: true },
@@ -308,7 +313,7 @@ test("refuses noncanonical or unbound start replies before proof", async t => {
     },
     "short stream": { text: "{}", headers: new Headers(vector.start.headers) },
     "non-ASCII bytes": { text: vector.start.body.replace("ke2", "ké2") },
-    "duplicate property": { text: vector.start.body.replace("{", '{"ke2":"ignored",') },
+    "duplicate property": { text: duplicateKey },
     "extra field": { text: JSON.stringify({ ...body, password: SECRET }) },
     "noncanonical JSON": { text: JSON.stringify(body, null, 2) },
     "wrong type": { text: JSON.stringify({ ...body, ke2: [body.ke2] }) },
