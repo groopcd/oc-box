@@ -123,6 +123,8 @@ class LiveLimitStatusTests(unittest.IsolatedAsyncioTestCase):
             children = list(apply.parent.children)
             self.assertIs(children[children.index(scan) + 1], apply)
             self.assertTrue(apply.disabled)
+            idle_outline = apply.styles.border
+            self.assertTrue(all(style[0] == "round" for style in idle_outline))
 
             _, baseline_cpu, _, baseline_ram = self.resource_rows(app)
             self.assertIn("50% of quota", baseline_cpu.plain)
@@ -148,6 +150,7 @@ class LiveLimitStatusTests(unittest.IsolatedAsyncioTestCase):
             cpu, cpu_bar, ram, ram_bar = self.resource_rows(app)
             self.assertIn("4 CPUs quota [4.5]", cpu.plain)
             self.assertIn("2.0 GiB / 8.0 GiB [7]", ram.plain)
+            self.assertEqual(apply.styles.border, idle_outline)
             for staged, baseline in ((cpu_bar, baseline_cpu), (ram_bar, baseline_ram)):
                 self.assertEqual(staged.plain, baseline.plain)
                 self.assertEqual(

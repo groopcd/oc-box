@@ -298,6 +298,46 @@ class ApplyTests(unittest.TestCase):
         self.assertNotIn("PRIVATE_DATA", str(caught.exception))
         self.assertEqual(self.engine.calls, [])
 
+    def test_desktop_search_paths_are_preserved_without_forwarding_other_environment(
+        self,
+    ):
+        source = {
+            "XDG_CONFIG_DIRS": "/etc/xdg:/usr/etc/xdg",
+            "XDG_DATA_DIRS": "/usr/local/share:/usr/share",
+            "OTHER_VALUE": "not forwarded",
+        }
+        box = SimpleNamespace(maintenance_host_env=lambda: {"PATH": "/usr/bin"})
+        with patch.dict(os.environ, source, clear=True):
+            self.assertEqual(
+                live._local_environment(box),
+                {
+                    "PATH": "/usr/bin",
+                    **{key: source[key] for key in live._XDG_SEARCH_DIRS},
+                },
+            )
+        for key in (
+            "CONTAINER_HOST",
+            "DOCKER_HOST",
+            "CONTAINERS_STORAGE_CONF",
+            "STORAGE_DRIVER",
+        ):
+            with self.subTest(key=key):
+                with patch.dict(
+                    os.environ, {**source, key: "test-override"}, clear=True
+                ):
+                    with self.assertRaises(tui_limits.LimitError) as caught:
+                        live._local_environment(box)
+                self.assertEqual(caught.exception.reason, "engine-selectors")
+
+    def test_desktop_search_path_requires_absolute_entries(self):
+        box = SimpleNamespace(maintenance_host_env=lambda: {})
+        with patch.dict(
+            os.environ, {"XDG_DATA_DIRS": "/usr/share:relative"}, clear=True
+        ):
+            with self.assertRaises(tui_limits.LimitError) as caught:
+                live._local_environment(box)
+        self.assertEqual(caught.exception.reason, "engine-selectors")
+
     def test_ordinary_launcher_stop_waits_for_the_live_update_gate(self):
         real_gate = workspace_control.live_limit_gate
         waiting = threading.Event()
