@@ -376,12 +376,14 @@ class DashboardInteractionTests(unittest.IsolatedAsyncioTestCase):
             def __init__(self):
                 self.entered, self.finish = threading.Event(), threading.Event()
                 self.samples = 0
+                self.scans = []
 
             def collect(self, *, scan_storage=False):
                 self.samples += 1
                 return super().collect(scan_storage=scan_storage)
 
             def scan_storage(self, workspace):
+                self.scans.append(workspace)
                 self.entered.set()
                 self.finish.wait(5)
                 return super().scan_storage(workspace)
@@ -390,7 +392,12 @@ class DashboardInteractionTests(unittest.IsolatedAsyncioTestCase):
         app = DashboardApp(backend, read_only=True, demo=True)
         async with app.run_test(size=(120, 40)) as pilot:
             await self.settle(app, pilot)
-            app.scan_storage(app.selected)
+            status = app.query_one("#scan-storage", Button)
+            storage = app.query_one("#storage-scan", Button)
+            status.scroll_visible(animate=False)
+            await pilot.pause()
+            self.assertFalse(status.disabled)
+            await pilot.click(status)
             try:
                 for _ in range(100):
                     await pilot.pause(0.01)
@@ -403,13 +410,21 @@ class DashboardInteractionTests(unittest.IsolatedAsyncioTestCase):
                     if backend.samples >= 2:
                         break
                 self.assertGreaterEqual(backend.samples, 2)
-                self.assertTrue(app._storage_lock.locked())
+                for button in (status, storage):
+                    self.assertEqual(button.label.plain, "Running…")
+                    self.assertTrue(button.disabled)
+                self.assertIsNone(app.scan_storage(app.selected))
                 app.query_one("#log-search", Input).value = "ready"
                 await pilot.pause()
                 self.assertEqual(len(app.logs.search(app.log_query)), 1)
             finally:
                 backend.finish.set()
             await self.settle(app, pilot)
+            self.assertEqual(backend.scans, [app.selected])
+            self.assertEqual(status.label.plain, "Scan sizes")
+            self.assertFalse(status.disabled)
+            self.assertEqual(storage.label.plain, "Scan sizes")
+            self.assertTrue(storage.disabled)  # demo scope stays disabled
             self.assertEqual(app._workspace()["storage"]["project_bytes"], 2 * 1024**3)
             self.assertTrue(app._workspace().get("storage_sampled_at"))
 

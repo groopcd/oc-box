@@ -1566,17 +1566,19 @@ second** refresh interval, default **1 second**, and an auto-refresh
 control.  Cheap metrics are batched; slow queries never overlap or queue
 refreshes, so cadence is best-effort rather than an exact timing
 guarantee.  Expensive allocated storage scans remain a separate manual
-action for the selected workspace.  Native session inventories still
-require manual Connect/refresh.  An animated indicator and source/stage
-label remain visible while connecting or loading an inventory.  Connect
-is disabled until the bounded request finishes; Cancel or a source
-change visibly cancels its result without automatically connecting a
-replacement.  Existing rows remain available during refresh.  Their
-rows, selection and scroll position are not rebuilt by background
-status, log or storage refreshes.  Use Connect / refresh (or ‘r’ on an
-already-connected Sessions tab) to fetch a new snapshot.  Explicit
-filters/project selection and session actions can update the displayed
-rows.
+action for the selected workspace.  In Status and Storage, **Scan
+sizes** shows **Running…** while a scan is in progress.  Both buttons
+are disabled until it finishes; live metrics and log search remain
+available.  Native session inventories still require manual
+Connect/refresh.  An animated indicator and source/stage label remain
+visible while connecting or loading an inventory.  Connect is disabled
+until the bounded request finishes; Cancel or a source change visibly
+cancels its result without automatically connecting a replacement.
+Existing rows remain available during refresh.  Their rows, selection
+and scroll position are not rebuilt by background status, log or storage
+refreshes.  Use Connect / refresh (or ‘r’ on an already-connected
+Sessions tab) to fetch a new snapshot.  Explicit filters/project
+selection and session actions can update the displayed rows.
 
 All preferences appear directly in the Settings tab, without an extra
 window or duplicate monitoring controls.  The categorized inline form
@@ -5589,20 +5591,20 @@ Node: Name769
 Node: Synopsis930
 Node: Description5291
 Node: Commands11111
-Node: Options163917
-Node: Lifecycle and persistence230448
-Node: Distribution images232748
-Node: Sessions and recovery237825
-Node: Devices and host permissions244410
-Node: Resource reports246756
-Node: Configuration and environment248867
-Node: Files260248
-Node: Exit status271158
-Node: Examples272566
-Node: Troubleshooting274705
-Node: Installation and manuals287197
-Node: Authors and license297387
-Node: See also297994
+Node: Options164097
+Node: Lifecycle and persistence230628
+Node: Distribution images232928
+Node: Sessions and recovery238005
+Node: Devices and host permissions244590
+Node: Resource reports246936
+Node: Configuration and environment249047
+Node: Files260428
+Node: Exit status271338
+Node: Examples272746
+Node: Troubleshooting274885
+Node: Installation and manuals287377
+Node: Authors and license297567
+Node: See also298174
 
 End Tag Table
 

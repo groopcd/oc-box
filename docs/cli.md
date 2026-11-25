@@ -1382,8 +1382,10 @@ Status and followed logs share an adjustable **whole-number 1–60 second**
 refresh interval, default **1 second**, and an auto-refresh control. Cheap metrics
 are batched; slow queries never overlap or queue refreshes, so cadence is
 best-effort rather than an exact timing guarantee. Expensive allocated storage
-scans remain a separate manual action for the selected workspace. Native session
-inventories still require manual Connect/refresh.
+scans remain a separate manual action for the selected workspace. In Status and
+Storage, **Scan sizes** shows **Running…** while a scan is in progress. Both
+buttons are disabled until it finishes; live metrics and log search remain
+available. Native session inventories still require manual Connect/refresh.
 An animated indicator and source/stage label remain visible while connecting or
 loading an inventory. Connect is disabled until the bounded request finishes;
 Cancel or a source change visibly cancels its result without automatically

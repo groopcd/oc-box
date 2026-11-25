@@ -1,6 +1,8 @@
+import asyncio
 import contextlib
 import importlib.util
 from pathlib import Path
+import threading
 from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
@@ -128,6 +130,58 @@ class ManagementInteractionTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertTrue(app.query_one("#storage-purge", Button).disabled)
             self.assertTrue(app.query_one("#storage-scan", Button).disabled)
+
+    async def test_storage_scan_failure_restores_buttons_without_enabling_host_scope(
+        self,
+    ):
+        started, release = threading.Event(), threading.Event()
+
+        def fail_scan(workspace):
+            started.set()
+            release.wait(5)
+            raise RuntimeError("synthetic backend failure")
+
+        app = DashboardApp(MetadataDemo(), read_only=True)
+        with patch.object(app.backend, "scan_storage", side_effect=fail_scan) as scan:
+            async with app.run_test(size=(120, 40)) as pilot:
+                await self.settle(app, pilot)
+                app._management_records = (
+                    SimpleNamespace(
+                        workspace_id=app.selected,
+                        project="/synthetic/project",
+                        distro="debian",
+                    ),
+                )
+                app._render_management()
+                app.action_tab("storage")
+                await pilot.pause()
+                status = app.query_one("#scan-storage", Button)
+                storage = app.query_one("#storage-scan", Button)
+                scope = app.query_one("#storage-scope", Select)
+                self.assertFalse(storage.disabled)
+                try:
+                    await pilot.click(storage)
+                    self.assertTrue(await asyncio.to_thread(started.wait, 3))
+                    scan.assert_called_once_with(app.selected)
+                    for button in (status, storage):
+                        self.assertEqual(button.label.plain, "Running…")
+                        self.assertTrue(button.disabled)
+                    scope.value = "host"
+                    await pilot.pause()
+                    self.assertEqual(storage.label.plain, "Running…")
+                finally:
+                    release.set()
+                await self.settle(app, pilot)
+                self.assertIn(
+                    "Storage scan unavailable", str(app.query_one("#notice").render())
+                )
+                for button in (status, storage):
+                    self.assertEqual(button.label.plain, "Scan sizes")
+                self.assertFalse(status.disabled)
+                self.assertTrue(storage.disabled)
+                scope.value = "workspace"
+                await pilot.pause()
+                self.assertFalse(storage.disabled)
 
     async def test_all_workspace_inventory_does_not_authorize_bulk_removal(self):
         app = DashboardApp(MetadataDemo(), demo=True)

@@ -166,7 +166,7 @@ class StoragePanel(Vertical):
                 markup=False,
             )
             with Horizontal(classes="management-tools"):
-                yield Button("Scan sizes", id="storage-scan")
+                yield Button("Scan sizes", id="storage-scan", disabled=True)
                 yield Button(
                     "Delete selected session…",
                     id="storage-session-delete",
@@ -574,8 +574,9 @@ class ManagementActions:
                 self.query_one("#storage-purge", Button).disabled = (
                     self.read_only or self.demo or scope == "host" or not rows
                 )
-                self.query_one("#storage-scan", Button).disabled = (
-                    self.demo or scope == "host" or not rows
+                self._render_scan_button(
+                    "#storage-scan",
+                    available=not self.demo and scope != "host" and bool(rows),
                 )
 
     def _management_target(self, prefix):
