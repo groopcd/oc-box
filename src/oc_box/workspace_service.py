@@ -101,7 +101,16 @@ class HistorySource:
     identified, clean preflight opt-outs can return to ordinary sync.
     """
 
-    def __init__(self, box, data, *, stopped_source=False):
+    def __init__(
+        self,
+        box,
+        data,
+        *,
+        stopped_source=False,
+        scratch_binding=None,
+        engine_spawn=None,
+        spawn_admission=None,
+    ):
         if __package__:
             from .opencode_v2_io import HISTORY_SOURCE_24
         else:
@@ -111,10 +120,15 @@ class HistorySource:
         release = self.data.get("opencode_version")
         self.exact = type(release) is str and release in HISTORY_SOURCE_24
         self.stopped_source = stopped_source
+        self._scratch_binding = scratch_binding
+        self._engine_spawn = engine_spawn
+        self._spawn_admission = spawn_admission
+        self.source_scope = None
         self.child = self.errors = self.error_file = self.token = None
         self.connection = None
         self._source_code = None
         self._lifecycle_lock = None
+        self._spawning = False
         self.started = False
         self.fallback = False
 
@@ -141,6 +155,16 @@ class HistorySource:
         if self.child.returncode is None:
             _wait_exact_child(self.child, timeout)
         return self.child.returncode
+
+    def _poll(self):
+        if self._scratch_binding is None:
+            return self.child.poll()
+        # Popen.poll() can cache a synthetic zero on ECHILD. The scoped
+        # protocol must carry a real wait status, including on early exit.
+        try:
+            return self._wait(0)
+        except subprocess.TimeoutExpired:
+            return None
 
     def command(self):
         if __package__:
@@ -201,7 +225,7 @@ class HistorySource:
             or self.box.container_project(data) != self.box.container_project(self.data)
         ):
             raise self.fail("source")
-        if self.child is None or self.child.poll() is not None:
+        if self.child is None or self._poll() is not None:
             raise self.fail("lease-ended")
         # An authenticated endpoint request needs no discovery roots or forwarded
         # settings. Do not launch an environment trampoline or pass credentials as
@@ -229,6 +253,44 @@ class HistorySource:
             ],
             self.box.maintenance_host_env(),
         )
+
+    def overlap_command(self, data, attempt):
+        """One READY/GO export worker, after independently bound scratch admission."""
+        if __package__:
+            from .history_overlap_io import SourceAttempt
+        else:
+            from history_overlap_io import SourceAttempt
+        if (
+            self._scratch_binding is None
+            or self.source_scope is None
+            or type(attempt) is not SourceAttempt
+            or attempt.container_id != self.data["container"]
+        ):
+            raise self.fail("source")
+        command = self.read_command(data, "export")
+        # Both texts are trusted launcher resources, not settings sent from
+        # the container. The attempt token binds the protocol, not the native
+        # endpoint credential (which still arrives only via private stdin).
+        launcher = (
+            "import sys, types\n"
+            "bridge = types.ModuleType('oc_box_overlap_bridge')\n"
+            "guest = types.ModuleType('oc_box_overlap_guest')\n"
+            "sys.modules[bridge.__name__] = bridge\n"
+            "sys.modules[guest.__name__] = guest\n"
+            "exec(sys.argv[2], bridge.__dict__)\n"
+            "exec(sys.argv[3], guest.__dict__)\n"
+            "try:\n"
+            "    guest.supervise(sys.argv[1], bridge)\n"
+            "except Exception:\n"
+            "    sys.exit(2)\n"
+        )
+        command[-3:] = [
+            launcher,
+            attempt.token,
+            self._source_code,
+            (self.box.PACKAGE / "history_overlap_guest.py").read_text(),
+        ]
+        return command
 
     def _write(self, payload, deadline):
         descriptor = self.child.stdin.fileno()
@@ -263,6 +325,47 @@ class HistorySource:
                     return category
         return "startup-failed"
 
+    def _exact_exit(self, code, *, startup_failed, preflight):
+        if __package__:
+            from . import opencode_v2_io as bridge
+        else:
+            import opencode_v2_io as bridge
+
+        # A reaped wrapper alone is not acknowledgement: require strict EOF,
+        # with neither extra control bytes nor an inherited open pipe.
+        if (
+            code not in (0, 2)
+            or not self.child.stdout
+            or not select.select([self.child.stdout], [], [], 0)[0]
+            or os.read(self.child.stdout.fileno(), 1)
+        ):
+            raise self.fail("cleanup-failed")
+        self.error_file.seek(0)
+        report = self.error_file.read(MAX_CONTROL + 1)
+        marker = bridge.HISTORY_SOURCE_MARKER.encode()
+        if code == 0:
+            if (
+                # The scoped guest returns zero only after a normal readiness
+                # or fallback path and successful scratch removal. Zero alone
+                # after an unrecognized/missing startup record is not proof.
+                self._scratch_binding is not None and (startup_failed or report)
+            ) or marker + b"cleanup-failed" in report.splitlines():
+                raise self.fail("cleanup-failed")
+            return None
+        if startup_failed and preflight:
+            # The trusted guest emits exactly this terminal status and fixed
+            # refusal only after unwinding the scratch context (if entered).
+            # ScratchCleanupUncertain replaces the original category there.
+            for category in bridge.HISTORY_SOURCE_ERRORS - {
+                "cleanup-failed",
+                "control",
+                "lease-ended",
+                "lease-timeout",
+            }:
+                if report == marker + category.encode() + b"\n":
+                    return category
+        raise self.fail("cleanup-failed")
+
     def __enter__(self):
         if __package__:
             from . import history_reader, opencode_v2_io as bridge
@@ -273,6 +376,8 @@ class HistorySource:
         if self.started:
             raise self.fail("reuse")
         self.started = True
+        output = bytearray()
+        ready = False
         try:
             self._lifecycle_lock = LIFECYCLE_LOCK.get()
             if self.exact and (
@@ -297,34 +402,52 @@ class HistorySource:
                 or "\0" in self.data["home"]
             ):
                 raise self.fail("source")
-            payload = (
-                json.dumps(
-                    {
-                        "guards": (self.box.PACKAGE / "history_reader.py").read_text(),
-                        "version": self.data["opencode_version"],
-                        "home": self.data["home"],
-                    }
-                ).encode()
-                + b"\n"
-            )
+            settings = {
+                "guards": (self.box.PACKAGE / "history_reader.py").read_text(),
+                "version": self.data["opencode_version"],
+                "home": self.data["home"],
+            }
+            if self._scratch_binding is not None:
+                if (
+                    not self.exact
+                    or type(self._scratch_binding) is not dict
+                    or self._scratch_binding.get("home") != settings["home"]
+                    or self._scratch_binding.get("version") != settings["version"]
+                ):
+                    raise self.fail("scratch-unverified")
+                settings["scratch_binding"] = self._scratch_binding
+                settings["scratch_source"] = (
+                    self.box.PACKAGE / "history_volume_scratch.py"
+                ).read_text()
+            payload = json.dumps(settings).encode() + b"\n"
             if len(payload) > bridge.HISTORY_SOURCE_MAX_PAYLOAD:
                 raise self.fail("payload")
             command = self.command()
             self.errors = self.box.captured_output(private=True)
             self.error_file = self.errors.__enter__()
-            self.child = subprocess.Popen(
-                command,
-                env=command.environment,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=self.error_file,
-                start_new_session=True,
+            spawn_options = (
+                self._engine_spawn(command) if self._engine_spawn is not None else {}
             )
+            with (
+                self._spawn_admission()
+                if self._spawn_admission is not None
+                else contextlib.nullcontext()
+            ):
+                self._spawning = True
+                self.child = subprocess.Popen(
+                    command,
+                    env=command.environment,
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=self.error_file,
+                    start_new_session=True,
+                    **spawn_options,
+                )
+                self._spawning = False
             # Child startup alarm is 45s, leaving time for its native cleanup
             # before this wrapper's independent hard deadline.
             deadline = time.monotonic() + 60
             self._write(payload, deadline)
-            output = bytearray()
             while b"\n" not in output:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
@@ -335,10 +458,14 @@ class HistorySource:
                     )
                     if not chunk:
                         self._wait(min(1, remaining))
-                        raise self.fail(self._category())
+                        raise self.fail(
+                            "startup-failed" if self.exact else self._category()
+                        )
                     output.extend(chunk)
-                elif self.child.poll() is not None:
-                    raise self.fail(self._category())
+                elif self._poll() is not None:
+                    raise self.fail(
+                        "startup-failed" if self.exact else self._category()
+                    )
                 if len(output) > MAX_CONTROL:
                     raise self.fail("startup-response")
             line, trailing = output.split(b"\n", 1)
@@ -361,29 +488,65 @@ class HistorySource:
                 self.shutdown()
                 self.fallback = True
                 return None
-            if set(response) != {"endpoint"} or set(response["endpoint"]) != {
+            expected = (
+                {"endpoint"}
+                if self._scratch_binding is None
+                else {"endpoint", "source"}
+            )
+            if set(response) != expected or set(response["endpoint"]) != {
                 "url",
                 "password",
             }:
                 raise self.fail("startup-response")
             endpoint = validate_endpoint(response["endpoint"])
-            if self.child.poll() is not None:
-                raise self.fail(self._category())
+            if self._scratch_binding is not None:
+                source = response["source"]
+                if (
+                    type(source) is not dict
+                    or set(source) != {"pid", "cwd"}
+                    or type(source["pid"]) is not int
+                    or not 1 <= source["pid"] < 2**31
+                    or type(source["cwd"]) is not str
+                    or source["cwd"].rsplit("/", 2)[0] != self.data["home"]
+                    or not source["cwd"].endswith("/work")
+                    or re.fullmatch(
+                        r"\.oc-box-quiet-history-[a-f0-9]{32}",
+                        source["cwd"].rsplit("/", 2)[-2],
+                    )
+                    is None
+                ):
+                    raise self.fail("scratch-unverified")
+                # Not authority: host-side acquisition must independently
+                # match this PID/cwd to the original engine and volume.
+                self.source_scope = source
+            ready = True
+            if self._poll() is not None:
+                raise self.fail("startup-failed" if self.exact else self._category())
             self.connection = {**endpoint, "workspace": self.data["id"]}
             self.token = CONNECTION.set(self.connection)
             return self.connection
         except BaseException as error:
-            self._shutdown_preserving(
+            interrupted = isinstance(error, (KeyboardInterrupt, SystemExit))
+            refusal = self._shutdown_preserving(
                 error,
-                startup_failed=not isinstance(error, (KeyboardInterrupt, SystemExit)),
+                startup_failed=not ready if self.exact else not interrupted,
+                preflight=not output,
             )
-            if isinstance(error, (KeyboardInterrupt, SystemExit, self.box.BoxError)):
+            if interrupted:
+                raise
+            if (
+                refusal is not None
+                and getattr(error, "history_source_category", "startup-failed")
+                == "startup-failed"
+            ):
+                raise self.fail(refusal) from None
+            if isinstance(error, self.box.BoxError):
                 raise
             raise self.fail("startup-failed") from None
 
-    def _shutdown_preserving(self, original, *, startup_failed=False):
+    def _shutdown_preserving(self, original, *, startup_failed=False, preflight=False):
         try:
-            self.shutdown(startup_failed=startup_failed)
+            return self.shutdown(startup_failed=startup_failed, preflight=preflight)
         except BaseException:
             if isinstance(original, (KeyboardInterrupt, SystemExit)):
                 # The original interruption remains authoritative, including
@@ -400,9 +563,14 @@ class HistorySource:
             # Preserve identity, never let uncertain cleanup become exit zero.
             error.code = 1
 
-    def shutdown(self, *, startup_failed=False):
-        failed = False
+    def shutdown(self, *, startup_failed=False, preflight=False):
+        # An interruption during Popen can prevent receiving a handle even
+        # though the scoped guest may have been launched.
+        failed = (
+            self._scratch_binding is not None and self._spawning and self.child is None
+        )
         interruption = None
+        refusal = None
 
         def caught(error):
             nonlocal failed, interruption
@@ -437,19 +605,15 @@ class HistorySource:
                         except BaseException as error:
                             caught(error)
                         code = None
-                    failed = failed or (code != 0 and not startup_failed)
-                    if self.exact and code == 0:
+                    if self.exact and not failed:
                         try:
-                            # A reaped wrapper alone is not acknowledgement:
-                            # no trailing readiness or still-open writer.
-                            if (
-                                not self.child.stdout
-                                or not select.select([self.child.stdout], [], [], 0)[0]
-                                or os.read(self.child.stdout.fileno(), 1)
-                            ):
-                                failed = True
+                            refusal = self._exact_exit(
+                                code, startup_failed=startup_failed, preflight=preflight
+                            )
                         except BaseException as error:
                             caught(error)
+                    elif not self.exact:
+                        failed = failed or (code != 0 and not startup_failed)
                 finally:
                     if self.child.stdout:
                         try:
@@ -458,6 +622,7 @@ class HistorySource:
                             caught(error)
                     self.child = None
         finally:
+            self._spawning = False
             if self.token is not None:
                 try:
                     CONNECTION.reset(self.token)
@@ -465,6 +630,7 @@ class HistorySource:
                     caught(error)
                 self.token = None
             self.connection = None
+            self.source_scope = None
             self._source_code = self._lifecycle_lock = None
             if self.error_file is not None:
                 try:
@@ -477,6 +643,7 @@ class HistorySource:
             raise interruption
         if failed:
             raise self.fail("cleanup-failed")
+        return refusal
 
     def __exit__(self, kind, value, traceback):
         if self.fallback:
@@ -484,7 +651,7 @@ class HistorySource:
         try:
             ended = kind is None and (
                 self.child is None
-                or self.child.poll() is not None
+                or self._poll() is not None
                 or bool(select.select([self.child.stdout], [], [], 0)[0])
             )
         except BaseException as error:
@@ -496,7 +663,15 @@ class HistorySource:
 
 
 @contextlib.contextmanager
-def history_source(box, data, *, stopped_source=False):
+def history_source(
+    box,
+    data,
+    *,
+    stopped_source=False,
+    scratch_binding=None,
+    engine_spawn=None,
+    spawn_admission=None,
+):
     """Lease an ordinary source; 2.4 requires the caller's verified pre-start stop."""
     if __package__:
         from . import history_reader, history_recovery, opencode_v2_io
@@ -514,6 +689,14 @@ def history_source(box, data, *, stopped_source=False):
         or type(version) is not str
         or version not in opencode_v2_io.HISTORY_SOURCE_SUPPORTED
     ):
+        if (
+            scratch_binding is not None
+            or engine_spawn is not None
+            or spawn_admission is not None
+        ):
+            raise box.BoxError(
+                "Private history source lease failed (scratch-unverified)."
+            )
         yield live
         return
     if version in opencode_v2_io.HISTORY_SOURCE_24:
@@ -521,9 +704,24 @@ def history_source(box, data, *, stopped_source=False):
         if stopped_source is not True or (
             safeguard is not None and safeguard.current() is not None
         ):
+            if (
+                scratch_binding is not None
+                or engine_spawn is not None
+                or spawn_admission is not None
+            ):
+                raise box.BoxError(
+                    "Private history source lease failed (scratch-unverified)."
+                )
             yield None
             return
-    source = HistorySource(box, data, stopped_source=stopped_source)
+    source = HistorySource(
+        box,
+        data,
+        stopped_source=stopped_source,
+        scratch_binding=scratch_binding,
+        engine_spawn=engine_spawn,
+        spawn_admission=spawn_admission,
+    )
     with source as connection:
         token = _QUIET_HISTORY_SOURCE.set(
             source if source.exact and connection is not None else None

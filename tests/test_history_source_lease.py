@@ -504,6 +504,153 @@ class LeaseTests(unittest.TestCase):
         self.addCleanup(value.dispose)
         return value
 
+    def test_explicit_volume_scratch_scope_stays_out_of_connection_metadata(self):
+        data = {**DATA, "opencode_version": "2.4.1"}
+        self.box.container_project = lambda _: "/synthetic/project"
+        scratch = {"version": "2.4.1", "home": data["home"]}
+        scope = {
+            "pid": 42,
+            "cwd": data["home"] + "/.oc-box-quiet-history-" + "a" * 32 + "/work",
+        }
+        child = self.child({"endpoint": ENDPOINT, "source": scope})
+        calls = []
+
+        def bind(command):
+            calls.append("engine options")
+            return {"executable": "/proc/123/fd/4", "cwd": "/"}
+
+        pin = Mock(side_effect=bind)
+
+        @contextlib.contextmanager
+        def admission():
+            calls.append("gate")
+            yield
+            calls.append("release gate")
+
+        def spawn(*args, **kwargs):
+            calls.append("spawn")
+            return child
+
+        token = service.LIFECYCLE_LOCK.set(object())
+        self.addCleanup(service.LIFECYCLE_LOCK.reset, token)
+        with (
+            patch.object(service.subprocess, "Popen", side_effect=spawn) as popen,
+            patch.object(service.HistorySource, "_poll", return_value=None),
+            patch.object(
+                service.HistorySource,
+                "_wait",
+                side_effect=lambda timeout: child.wait(timeout=timeout),
+            ),
+            service.history_source(
+                self.box,
+                data,
+                stopped_source=True,
+                scratch_binding=scratch,
+                engine_spawn=pin,
+                spawn_admission=admission,
+            ) as live,
+        ):
+            lease = service.quiet_history_source()
+            self.assertEqual(lease.source_scope, scope)
+            self.assertEqual(set(live), {"url", "password", "workspace"})
+            self.assertEqual(calls, ["engine options", "gate", "spawn", "release gate"])
+            self.assertEqual(popen.call_count, 1)
+            self.assertEqual(popen.call_args.kwargs["executable"], "/proc/123/fd/4")
+            self.assertEqual(popen.call_args.kwargs["cwd"], "/")
+            pin.assert_called_once_with(popen.call_args.args[0])
+            from oc_box.history_overlap_io import SourceAttempt
+
+            attempt = SourceAttempt(data["container"], "synthetic-generation")
+            command = lease.overlap_command(data, attempt)
+            self.assertEqual(command[-3], attempt.token)
+            self.assertIn("guest.supervise", command[-4])
+            self.assertNotIn(ENDPOINT["password"], repr(command))
+            self.assertNotIn(ENDPOINT["password"], repr(command.environment))
+            with self.assertRaisesRegex(BoxError, "source"):
+                lease.overlap_command(
+                    data, SourceAttempt("f" * 64, "another-generation")
+                )
+        self.assertIsNone(lease.source_scope)
+        settings = json.loads(child.stdin.saved)
+        self.assertEqual(settings["scratch_binding"], scratch)
+        self.assertIn("volume_scratch", settings["scratch_source"])
+
+    def test_scoped_cleanup_tracks_interruption_inside_spawn_but_not_refused_gate(self):
+        data = {**DATA, "opencode_version": "2.4.1"}
+        scratch = {"version": "2.4.1", "home": data["home"]}
+        token = service.LIFECYCLE_LOCK.set(object())
+        self.addCleanup(service.LIFECYCLE_LOCK.reset, token)
+        refused = BoxError("fixed-gate-refusal")
+
+        @contextlib.contextmanager
+        def reject():
+            pin.assert_called_once()
+            raise refused
+            yield
+
+        pin = Mock(return_value={"executable": "/proc/123/fd/4", "cwd": "/"})
+        with (
+            patch.object(service.subprocess, "Popen") as popen,
+            self.assertRaises(BoxError) as raised,
+        ):
+            with service.history_source(
+                self.box,
+                data,
+                stopped_source=True,
+                scratch_binding=scratch,
+                engine_spawn=pin,
+                spawn_admission=reject,
+            ):
+                self.fail("A refused final gate reached the caller.")
+        popen.assert_not_called()
+        self.assertIs(raised.exception, refused)
+        self.assertFalse(hasattr(refused, "history_source_cleanup_failed"))
+
+        for original, exit_code in (
+            (KeyboardInterrupt(), None),
+            (SystemExit(0), 1),
+            (SystemExit(7), 7),
+        ):
+            with (
+                self.subTest(
+                    kind=type(original).__name__, code=getattr(original, "code", None)
+                ),
+                patch.object(
+                    service.subprocess, "Popen", side_effect=original
+                ) as popen,
+                self.assertRaises(type(original)) as raised,
+            ):
+                with service.history_source(
+                    self.box, data, stopped_source=True, scratch_binding=scratch
+                ):
+                    self.fail("An interrupted spawn reached the caller.")
+            popen.assert_called_once()
+            self.assertIs(raised.exception, original)
+            self.assertTrue(original.history_source_cleanup_failed)
+            if isinstance(original, SystemExit):
+                self.assertEqual(original.code, exit_code)
+            self.assertIsNone(service.live_connection())
+
+    def test_explicit_scratch_never_substitutes_an_existing_owner_or_legacy_scope(self):
+        data = {**DATA, "opencode_version": "2.4.1"}
+        scratch = {"version": "2.4.1", "home": data["home"]}
+        with patch.object(service.subprocess, "Popen") as popen:
+            with self.assertRaisesRegex(BoxError, "scratch-unverified"):
+                with service.history_source(self.box, data, scratch_binding=scratch):
+                    self.fail("An unverified stopped source was admitted")
+            token = service.CONNECTION.set({**ENDPOINT, "workspace": data["id"]})
+            try:
+                with self.assertRaisesRegex(BoxError, "scratch-unverified"):
+                    with service.history_source(
+                        self.box, data, stopped_source=True, scratch_binding=scratch
+                    ):
+                        self.fail(
+                            "The existing owner was substituted for a scratch scope"
+                        )
+            finally:
+                service.CONNECTION.reset(token)
+            popen.assert_not_called()
+
     def test_exact_read_client_uses_only_bound_engine_and_private_stdin(self):
         data = {**DATA, "opencode_version": "2.4.1", "project": "/synthetic/project"}
         child = self.child()
@@ -780,6 +927,179 @@ sys.exit(int(status))
                 if expected is not None:
                     self.assertEqual(check.exception.history_source_category, expected)
                     self.assertNotIn("private-sentinel", str(check.exception))
+
+    def test_scoped_real_wrapper_startup_cleanup_requires_terminal_evidence(self):
+        script = """
+import sys
+from pathlib import Path
+wire, report, status, scratch, remove, wait = sys.argv[1:]
+sys.stdin.buffer.readline()
+scratch = Path(scratch)
+scratch.mkdir()
+if wire:
+    sys.stdout.write(wire)
+    sys.stdout.flush()
+if wire.endswith("\\n") or wait == "True":
+    sys.stdin.buffer.read()
+if remove == "True":
+    scratch.rmdir()
+if report:
+    print(report, file=sys.stderr, end="", flush=True)
+sys.exit(int(status))
+"""
+        self.box.captured_output = oc_box.captured_output
+        token = service.LIFECYCLE_LOCK.set(object())
+        self.addCleanup(service.LIFECYCLE_LOCK.reset, token)
+        data = {**DATA, "opencode_version": "2.4.1"}
+        scratch_binding = {"version": "2.4.1", "home": data["home"]}
+        marker = bridge.HISTORY_SOURCE_MARKER
+        cleanup = marker + "cleanup-failed\n"
+        refusal = marker + "unsupported-version\n"
+        fallback = '{"fallback":"queued-work"}\n'
+        ready = (
+            json.dumps(
+                {
+                    "endpoint": ENDPOINT,
+                    "source": {
+                        "pid": 42,
+                        "cwd": data["home"]
+                        + "/.oc-box-quiet-history-"
+                        + "a" * 32
+                        + "/work",
+                    },
+                }
+            )
+            + "\n"
+        )
+        cases = (
+            ("ready-clean", ready, "", 0, True, None),
+            ("ready-failed", ready, cleanup, 2, False, "cleanup-failed"),
+            ("fallback-clean", fallback, "", 0, True, None),
+            ("fallback-failed", fallback, cleanup, 2, False, "cleanup-failed"),
+            ("clean-refusal", "", refusal, 2, True, "unsupported-version"),
+            ("unclean-refusal", "", cleanup, 2, False, "cleanup-failed"),
+            (
+                "contradictory-refusal",
+                "",
+                cleanup + refusal,
+                2,
+                False,
+                "cleanup-failed",
+            ),
+            ("wrong-status", "", refusal, 7, False, "cleanup-failed"),
+            ("missing-readiness", "", "", 0, False, "cleanup-failed"),
+            (
+                "malformed-readiness",
+                "{not-json}\n",
+                cleanup,
+                2,
+                False,
+                "cleanup-failed",
+            ),
+            ("malformed-zero", "{not-json}\n", "", 0, False, "cleanup-failed"),
+            ("partial-readiness", "{", refusal, 2, False, "cleanup-failed"),
+            ("conflicting-zero", fallback, cleanup, 0, False, "cleanup-failed"),
+            ("timeout", "", cleanup, 2, False, "cleanup-failed"),
+            ("interrupted", "", cleanup, 2, False, KeyboardInterrupt()),
+            ("clean-interruption", "", refusal, 2, True, SystemExit(0)),
+        )
+        with tempfile.TemporaryDirectory(prefix="history-source-proof-") as root:
+            for name, wire, report, status, remove, expected in cases:
+                with self.subTest(case=name), contextlib.ExitStack() as stack:
+                    scratch = Path(root) / name
+                    command = self.box.ContainerCommand(
+                        [
+                            sys.executable,
+                            "-I",
+                            "-S",
+                            "-c",
+                            script,
+                            wire,
+                            report,
+                            str(status),
+                            str(scratch),
+                            str(remove),
+                            str(name == "timeout"),
+                        ],
+                        {"PATH": os.defpath},
+                    )
+                    stack.enter_context(
+                        patch.object(
+                            service.HistorySource, "command", return_value=command
+                        )
+                    )
+                    if name == "timeout":
+                        write = service.HistorySource._write
+                        real_clock = service.time.monotonic
+                        expire = []
+
+                        def send(lease, payload, deadline):
+                            write(lease, payload, deadline)
+                            expire.append(deadline + 1)
+
+                        stack.enter_context(
+                            patch.object(service.HistorySource, "_write", send)
+                        )
+                        stack.enter_context(
+                            patch.object(
+                                service,
+                                "time",
+                                SimpleNamespace(
+                                    monotonic=lambda: (
+                                        expire.pop() if expire else real_clock()
+                                    )
+                                ),
+                            )
+                        )
+                    if isinstance(expected, BaseException):
+                        write = service.HistorySource._write
+
+                        def interrupted(lease, payload, deadline):
+                            write(lease, payload, deadline)
+                            raise expected
+
+                        stack.enter_context(
+                            patch.object(service.HistorySource, "_write", interrupted)
+                        )
+                        check = self.assertRaises(type(expected))
+                    elif expected is not None:
+                        check = self.assertRaisesRegex(BoxError, rf"\({expected}\)")
+                    else:
+                        check = contextlib.nullcontext()
+                    with check:
+                        with service.history_source(
+                            self.box,
+                            data,
+                            stopped_source=True,
+                            scratch_binding=scratch_binding,
+                        ) as connection:
+                            if name.startswith("ready-"):
+                                self.assertIsNotNone(connection)
+                            elif name == "fallback-clean":
+                                self.assertIsNone(connection)
+                            else:
+                                self.fail("An ambiguous startup reached the caller.")
+                    self.assertIsNone(service.live_connection())
+                    self.assertIsNone(service.quiet_history_source())
+                    self.assertEqual(scratch.is_dir(), not remove)
+                    if isinstance(expected, BaseException):
+                        self.assertIs(check.exception, expected)
+                        self.assertEqual(
+                            getattr(expected, "history_source_cleanup_failed", False),
+                            not remove,
+                        )
+                        if isinstance(expected, SystemExit):
+                            self.assertEqual(expected.code, 0)
+                    elif expected is not None:
+                        self.assertEqual(
+                            check.exception.history_source_category, expected
+                        )
+                        self.assertEqual(
+                            getattr(
+                                check.exception, "history_source_cleanup_failed", False
+                            ),
+                            expected == "cleanup-failed",
+                        )
 
     def test_only_known_prestartup_fallbacks_allow_original_path(self):
         for category in bridge.HISTORY_SOURCE_FALLBACKS:

@@ -426,14 +426,28 @@ def mark_uncertain(path):
     start exception, interruption, timeout or unverifiable result leaves the
     fence set: do not call finish_transition for those outcomes.
     """
+    _mark_uncertain(path, baseline=None)
+
+
+def mark_uncertain_if_current(path, baseline):
+    """Reserve start only for this still-certain token, under the intent writer."""
+    if not isinstance(baseline, str) or not _TOKEN.fullmatch(baseline):
+        raise ControlError("invalid-baseline")
+    return _mark_uncertain(path, baseline=baseline)
+
+
+def _mark_uncertain(path, *, baseline):
     with _errors(), _control(path, create=False) as (directory, _):
         with _writer(directory):
             _validate_locks(directory)
             previous = _read_marker(directory)
+            if baseline is not None and _certain(previous) != baseline:
+                return False
             if not previous["uncertain"]:
                 _publish(
                     directory, previous["token"], uncertain=True, previous=previous
                 )
+            return True
 
 
 def finish_transition(path):
