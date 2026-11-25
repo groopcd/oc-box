@@ -1228,9 +1228,10 @@ def export_pass(box, data):
 class Reader:
     """One unregistered private native lease; never retry the same instance."""
 
-    def __init__(self, box, data, *, remaining, runtime_digest=None):
+    def __init__(self, box, data, *, remaining, runtime_digest=None, engine_env=None):
         self.box, self.data, self.remaining = box, dict(data), remaining
         self._runtime_digest = runtime_digest
+        self._engine_env = None if engine_env is None else dict(engine_env)
         self.child = self.errors = self.error_file = None
         self.connection = None
         self.tokens = []
@@ -1298,8 +1299,15 @@ class Reader:
         return self._helper_command("command", args)
 
     def _container_command(self, arguments):
-        env = self.box.maintenance_host_env()
-        command = ["podman", "exec", "-i", "--workdir", "/"]
+        # Lease and worker spawns bypass box.run, so build the same engine-bound
+        # command here for those spawns and for the fenced one-shot clients.
+        if self._engine_env is None:
+            env = self.box.maintenance_host_env()
+            command = ["podman"]
+        else:
+            env = self._engine_env.copy()
+            command = ["podman", "--remote=false"]
+        command.extend(["exec", "-i", "--workdir", "/"])
         if self.connection is not None:
             env = {**env, "OPENCODE_PASSWORD": self.connection["password"]}
             command.extend(["--env", "OPENCODE_PASSWORD"])
