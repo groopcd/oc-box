@@ -260,13 +260,26 @@ class LayeredPodmanConfigTests(unittest.TestCase):
             )
             sql.commit()
         original = db.read_bytes()
-        discard._verify_database_metadata(str(db), expected)
+        self.assertEqual(
+            discard._verify_database_metadata(str(db), expected), "overlay"
+        )
         with self.assertRaisesRegex(discard.Refused, "does not match"):
             discard._verify_database_metadata(
                 str(db), (expected[0], "/synthetic/other", *expected[2:])
             )
         self.assertEqual(db.read_bytes(), original)
         self.assertEqual(tuple(self.root.glob("db.sql*")), (db,))
+        with contextlib.closing(sqlite3.connect(db)) as sql:
+            sql.execute("UPDATE DBConfig SET GraphDriver = ''")
+            sql.commit()
+        automatic = db.read_bytes()
+        self.assertEqual(discard._verify_database_metadata(str(db), expected), "")
+        self.assertEqual(db.read_bytes(), automatic)
+        with contextlib.closing(sqlite3.connect(db)) as sql:
+            sql.execute("UPDATE DBConfig SET GraphDriver = 'vfs'")
+            sql.commit()
+        with self.assertRaisesRegex(discard.Refused, "does not match"):
+            discard._verify_database_metadata(str(db), expected)
 
     def test_pre_open_profile_refuses_unbound_options_and_event_paths(self):
         env = {**self.env, "XDG_RUNTIME_DIR": str(self.root / "run")}
