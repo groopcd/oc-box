@@ -584,9 +584,15 @@ def client_command(
     image_preview = connection.get("image_preview", False)
     if type(image_preview) is not bool:
         raise box.BoxError("Invalid private workspace image-preview setting.")
-    env = box.maintenance_host_env()
+    pinned = getattr(guarded, "engine_env", None)
+    env = pinned.copy() if pinned is not None else box.maintenance_host_env()
     env["OPENCODE_PASSWORD"] = connection["password"]
-    command = ["podman", "exec", "-i"]
+    command = [
+        "podman",
+        *(("--remote=false",) if pinned is not None else ()),
+        "exec",
+        "-i",
+    ]
     # An embedded client has its own local PTY even when the dashboard's
     # Python stdio isn't a TTY (e.g. headless terminal protocol fixtures).
     if force_tty or (interactive and sys.stdin.isatty() and sys.stdout.isatty()):

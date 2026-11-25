@@ -666,9 +666,9 @@ def make_backup(box, args, *, interaction=None, reviewed_workspace=None):
                 raise BackupError("Reviewed workspace changed; open a new review.")
             box.check_backend(env=crypto.environment(), feature="backup")
             revalidate_review()
-        if entrypoint_migration.FIELD in data or entrypoint_migration.needs_bootstrap(
+        if entrypoint_migration.in_progress(
             data
-        ):
+        ) or entrypoint_migration.needs_bootstrap(data):
             raise BackupError(
                 "Legacy container replacement is not ready for backup. "
                 "Finish the verified replacement and baseline setup first."

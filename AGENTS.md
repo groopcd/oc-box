@@ -228,6 +228,11 @@ their checkout ownership distinct from unrelated source and flat installations.
   only the old writable OS layer. Never start the old command, replace the
   volume, call purge, relax runtime floors or rely on an unverified partial
   switch. Keep name changes recoverable by exact IDs and durable intent.
+  Keep the original stopped and parked through positively verified passive
+  startup and access to both mounts. Only then authorize exact-ID retirement;
+  never use the parked container for startup or clear uncertainty to retry it.
+  Keep the same verified local engine selection through the owning launch
+  and cleanup, including after clearing the retirement marker.
 - `history_recovery.py` / `history_reader.py` / `workspace_control.py`: one bounded
   persisted-history snapshot after audited live timeouts: shell-only on native
   2.2.6/2.2.7; shell/subagent on canonical stable 2.3.x. Never a live readiness

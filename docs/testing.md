@@ -98,6 +98,8 @@ injected nonzero snapshot result followed by a separately approved OS rebuild.
 The fixture checks the unchanged project and private volume identity, SQLite
 bytes and mapped ownership, the different OS-layer outcomes, and that the
 legacy PATH-shadow command never runs during replacement or subsequent boot.
+It checks that the original stays stopped until the replacement passes
+verified passive boot and mount access, then retires only that original ID.
 It does not run native OpenCode, baseline installation, or a full launcher
 lifecycle. Never substitute a real project or backup for the synthetic data.
 
