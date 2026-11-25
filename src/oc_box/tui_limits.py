@@ -18,6 +18,32 @@ LIMIT_MESSAGES = {
     "unsupported": "Live limits not updated: a matching local rootless Podman container and its cgroup limits could not be verified.",
     "unverified": "Live limit update could not be verified. Limits may have changed; refresh Status and check the container before staging again. No automatic retry ran.",
 }
+LIMIT_MESSAGES.update(
+    {
+        reason: f"Live limits not updated ({reason}): {message}"
+        for reason, message in {
+            "host-scope": "Use the normal unprivileged Linux host session.",
+            "engine-selectors": "A Podman or Docker engine environment override is present; no substitute engine was used.",
+            "engine-binary": "The local Podman executable could not be pinned and verified.",
+            "engine-info": "The local Podman engine could not report a valid configuration.",
+            "engine-capabilities": "The selected engine did not establish local rootless Podman with cgroup v2 and supported storage.",
+            "graph-root": "The selected Podman graph root could not be verified.",
+            "run-root": "The selected Podman run root could not be verified.",
+            "volume-root": "The selected Podman volume root could not be verified.",
+            "engine-scope": "The Podman store configuration changed during verification.",
+            "workspace-record": "The selected workspace registration or runtime guard could not be verified.",
+            "transition-lock": "The workspace update lock could not be verified.",
+            "container-inspect": "The selected local container could not be inspected.",
+            "volume-inspect": "The selected private home volume could not be inspected.",
+            "container-witness": "The running container and its owned mounts could not be verified.",
+            "cgroup-path": "Podman did not report a cgroup path bound to the exact container.",
+            "process-identity": "The container process generation could not be verified.",
+            "cgroup-access": "The kernel cgroup files could not be opened or read safely.",
+            "cgroup-controllers": "CPU, memory, or swap limits were unavailable in the container's cgroup.",
+            "podman-limits": "Podman did not report all CPU, memory, and swap settings in the expected format.",
+        }.items()
+    }
+)
 
 
 class LimitError(ValueError):
