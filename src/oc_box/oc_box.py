@@ -891,6 +891,11 @@ def _json_byte_chunks(value):
 @contextlib.contextmanager
 def _atomic_json_file(path, *, binary=False, durable=False):
     path = Path(path)
+    if (
+        path.name == "workspace.json"
+        and runtime_safeguard.entrypoint_migration.durable_registry(value)
+    ):
+        durable = True
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     tmp = path.with_name(path.name + "." + uuid.uuid4().hex + ".tmp")
     try:
@@ -1022,6 +1027,27 @@ def run(argv, *, capture=False, check=True, private=False, preparation=None, **k
         guarded = runtime_safeguard.current()
         if (
             guarded
+            and guarded.engine_env is not None
+            and command
+            and Path(command[0]).name == "podman"
+        ):
+            if isinstance(argv, ContainerCommand):
+                environment = kwargs.get("env") or {}
+                if command[1:2] != ["--remote=false"] or any(
+                    environment.get(key) != value
+                    for key, value in guarded.engine_env.items()
+                ):
+                    raise BoxError(
+                        "Guarded Podman command lost its local engine binding."
+                    )
+            else:
+                # Direct inspection, preparation and cleanup—including after
+                # retirement clears its registry marker—stay on the pinned store.
+                if command[1:2] != ["--remote=false"]:
+                    command.insert(1, "--remote=false")
+                kwargs["env"] = guarded.engine_env
+        if (
+            guarded
             and guarded.launching
             and history_recovery.FENCE.get() is None
             and (
@@ -1134,7 +1160,9 @@ def check_backend(*, env=None, feature="maintenance"):
         raise BoxError("Podman is not operating rootlessly.")
 
 
-def check_resource_controllers(data, *, cgroup_root=Path("/sys/fs/cgroup"), uid=None):
+def check_resource_controllers(
+    data, *, cgroup_root=Path("/sys/fs/cgroup"), uid=None, engine_env=None
+):
     """Check the user manager, not kernel-global controller availability.
 
     On openSUSE the kernel supports memory/cpu but a vendor drop-in clears
@@ -1151,7 +1179,12 @@ def check_resource_controllers(data, *, cgroup_root=Path("/sys/fs/cgroup"), uid=
     except FileNotFoundError:
         # Non-systemd layouts: ask Podman about its effective controllers.
         result = podman(
-            "info", "--format", "{{json .Host.CgroupControllers}}", capture=True
+            *(("--remote=false",) if engine_env is not None else ()),
+            "info",
+            "--format",
+            "{{json .Host.CgroupControllers}}",
+            capture=True,
+            **({"env": engine_env} if engine_env is not None else {}),
         )
         controllers = json.loads(result.stdout)
         if not isinstance(controllers, list) or not all(
@@ -1406,13 +1439,21 @@ def refresh_workspace_identity(path, data):
         atomic_json(path, data)
 
 
-def inspect_owned(data, *, env=None):
+def inspect_owned(data, *, env=None, local_only=False):
     options = {"env": env} if env is not None else {}
+    prefix = ("--remote=false",) if local_only else ()
     result = podman(
-        "container", "inspect", data["container"], capture=True, check=False, **options
+        *prefix,
+        "container",
+        "inspect",
+        data["container"],
+        capture=True,
+        check=False,
+        **options,
     )
     if result.returncode:
         exists = podman(
+            *prefix,
             "container",
             "exists",
             data["container"],
@@ -1769,9 +1810,11 @@ def install_baseline(data, *, guarded=None):
     def command(*args, **kwargs):
         if not guarded:
             return podman(*args, **kwargs)
+        pinned = guarded.engine_env
         invocation = ContainerCommand(
             [
                 "podman",
+                *(("--remote=false",) if pinned is not None else ()),
                 "exec",
                 "--workdir",
                 "/",
@@ -1779,7 +1822,7 @@ def install_baseline(data, *, guarded=None):
                 "PATH=/usr/sbin:/usr/bin:/sbin:/bin",
                 *args[1:],
             ],
-            os.environ.copy(),
+            pinned.copy() if pinned is not None else os.environ.copy(),
         )
         invocation.guarded_spawn = True
         return run(invocation, **kwargs)
@@ -1819,6 +1862,21 @@ def install_baseline(data, *, guarded=None):
 
 def stop_container(data, *, env=None):
     guarded = runtime_safeguard.current()
+    migration = runtime_safeguard.entrypoint_migration
+    if migration.RETIRE in data:
+        if guarded is None:
+            raise BoxError(migration.RETIRE_PENDING)
+        try:
+            with workspace_control.admission(guarded.path, timeout=15):
+                migration.stop_staged(
+                    sys.modules[__name__],
+                    data,
+                    env=guarded.engine_env if guarded.engine_env is not None else env,
+                    guarded_candidate=guarded.record.container,
+                )
+        except workspace_control.ControlError as exc:
+            raise BoxError(str(exc)) from None
+        return
     if guarded is not None:
         data = {**data, "container": guarded.record.container}
     options = {"env": env} if env is not None else {}
@@ -2187,6 +2245,8 @@ def exec_command(data, command, *, interactive=False, isolated_owner_env=None):
         forwarded["OPENCODE_PASSWORD"] = live["password"]
     isolated_owner = isolated_owner_env is not None
     binding = _QUIET_SYNC_BINDING.get()
+    guarded = runtime_safeguard.current()
+    pinned = guarded.engine_env if guarded is not None else None
     if binding is not None and (interactive or data["container"] != binding.container):
         raise BoxError("Invalid execution target for the bound history source.")
     if isolated_owner and (
@@ -2197,13 +2257,18 @@ def exec_command(data, command, *, interactive=False, isolated_owner_env=None):
     ):
         raise BoxError("Invalid isolated Studio owner execution.")
     environment = (
-        isolated_owner_env.copy()
+        pinned.copy()
+        if pinned is not None
+        else isolated_owner_env.copy()
         if isolated_owner
         else maintenance_host_env()
         if binding is not None
         else os.environ.copy()
     )
-    result = ContainerCommand(["podman", "exec", "-i"], environment)
+    result = ContainerCommand(
+        ["podman", *(("--remote=false",) if pinned is not None else ()), "exec", "-i"],
+        environment,
+    )
     if interactive and sys.stdin.isatty() and sys.stdout.isatty():
         result.append("-t")
     result.extend(["--workdir", container_project(data)])
@@ -2227,7 +2292,7 @@ def exec_command(data, command, *, interactive=False, isolated_owner_env=None):
     }
     for key, value in forwarded.items():
         if (
-            binding is not None
+            (binding is not None or pinned is not None)
             and key not in container_only
             and (
                 key in environment
@@ -2240,6 +2305,8 @@ def exec_command(data, command, *, interactive=False, isolated_owner_env=None):
         ):
             raise BoxError(
                 "A forwarded setting overlaps the bound history source engine environment."
+                if binding is not None
+                else "A forwarded setting overlaps the bound Podman engine environment."
             )
         if isolated_owner and key in isolated_owner_env and key not in container_only:
             raise BoxError("Studio owner engine and workspace environments overlap.")
@@ -2259,7 +2326,6 @@ def exec_command(data, command, *, interactive=False, isolated_owner_env=None):
         command = (
             container_cli(data, command[1:]) if "--version" not in command else command
         )
-    guarded = runtime_safeguard.current()
     if guarded:
         command = runtime_safeguard.bound_command(command, guarded.record.digest)
         if guarded.launching:
@@ -5506,8 +5572,12 @@ def credentials_command(args):
                 or args.clear_credentials
             ):
                 migration = runtime_safeguard.entrypoint_migration
-                if migration.FIELD in data:
-                    raise BoxError(migration.PENDING)
+                if migration.in_progress(data):
+                    raise BoxError(
+                        migration.RETIRE_PENDING
+                        if migration.RETIRE in data
+                        else migration.PENDING
+                    )
                 selected = credentials.configure(
                     data,
                     mode=args.credential_mode,
@@ -5746,15 +5816,27 @@ def _validate_web_release(args, version):
             raise BoxError(web_attachments.UNVERIFIED_RELEASE)
 
 
-def _stop_selected(path, data):
+def _stop_selected(path, data, *, admitted=False):
     selected, current = find_workspace(None, data["id"])
     if selected != path or not current:
         raise BoxError("The workspace registration changed; no substitute was stopped.")
-    if runtime_safeguard.entrypoint_migration.FIELD in current:
-        raise BoxError(runtime_safeguard.entrypoint_migration.PENDING)
+    migration = runtime_safeguard.entrypoint_migration
+    if migration.FIELD in current:
+        raise BoxError(migration.PENDING)
     data = current
     record = runtime_safeguard.load(sys.modules[__name__], path)
-    if record:
+    if migration.RETIRE in data:
+        if not admitted:
+            raise BoxError(
+                "Staged replacement stop was not admitted; no substitute was stopped."
+            )
+        migration.stop_staged(
+            sys.modules[__name__],
+            data,
+            guarded_candidate=record.container if record is not None else None,
+        )
+        return
+    elif record:
         info = inspect_owned(data)
         if not info or info.get("Id") != record.container:
             raise BoxError(
@@ -5762,6 +5844,24 @@ def _stop_selected(path, data):
             )
         data = {**data, "container": record.container}
     stop_container(data)
+
+
+def _stop_v2(path, data):
+    stopped = False
+    try:
+        # Publish before inspecting the independent runtime sidecar. A pending
+        # replacement must never cancel a stop request.
+        workspace_control.request_stop(path)
+        with workspace_control.admission(path, timeout=45):
+            _stop_selected(path, data, admitted=True)
+            stopped = True
+            workspace_control.require_certain(path)
+    except workspace_control.ControlError as exc:
+        # Preserve ordinary best-effort stop, but never dispatch a staged
+        # stop without admission or repeat an already completed stop.
+        if not stopped:
+            _stop_selected(path, data)
+        raise BoxError(str(exc)) from None
 
 
 def _main_command(args, argv):
@@ -6287,24 +6387,13 @@ def _main_command(args, argv):
         if opencode_compat.major(data.get("opencode_version", "1.0.0")) == 1:
             _stop_selected(path, data)
         else:
-            try:
-                # Publish before inspecting the independent runtime sidecar.
-                # Its pending/ready replacement must never cancel stop intent.
-                workspace_control.request_stop(path)
-                with workspace_control.admission(path, timeout=45):
-                    _stop_selected(path, data)
-                    workspace_control.require_certain(path)
-            except workspace_control.ControlError as exc:
-                # Still honor stop as far as possible, but never claim an ordered
-                # successful stop if startup/control state could not be fenced.
-                _stop_selected(path, data)
-                raise BoxError(str(exc)) from None
+            _stop_v2(path, data)
         print("Container stopped; files, packages, and conversations retained.")
         return 0
     if (
         args.command in ("start", "terminal", "web")
         and opencode_compat.major(data.get("opencode_version", "1.0.0")) == 2
-        and runtime_safeguard.entrypoint_migration.FIELD not in data
+        and not runtime_safeguard.entrypoint_migration.in_progress(data)
     ):
         if args.command == "terminal" and not args.maintenance:
             with workspace_service.attach(
@@ -6465,6 +6554,10 @@ def _locked_workspace_command(path, data, args, launch_context, image_preview_sn
     )
     if pending and (args.command != "start" or not explicit):
         raise BoxError(migration.PENDING)
+    if migration.RETIRE in data:
+        migration.retirement_target(sys.modules[__name__], data)
+        if args.command != "start":
+            raise BoxError(migration.RETIRE_PENDING)
     record = (
         runtime_safeguard.load(sys.modules[__name__], path)
         if args.command in ("start", "reset", "sync", "web", "terminal", "purge")
@@ -6493,6 +6586,7 @@ def _locked_workspace_command(path, data, args, launch_context, image_preview_sn
         return _launch_persisted_sync(path, data, version)
     guard = (
         record is not None
+        or migration.RETIRE in data
         or getattr(args, "runtime_guard", False)
         or explicit
         or (
