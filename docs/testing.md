@@ -163,6 +163,24 @@ The namespace parser and cleanup fences have offline regression coverage;
 these attempts do not constitute a native cleanup pass. Never use an existing
 real stale workspace as a destructive validation fixture.
 
+The layered-configuration follow-up reproduced the old refusal with actual
+packaged and synthetic user drop-ins on signed Fedora Podman 6.2.0. The final
+synthetic VM run passed eight checks, including refusal of an uninitialized
+store without refreshing it, exact stopped-container and volume-only cleanup,
+metadata-only retirement, wrong-phrase refusal, and preservation of a running
+markerless workspace, host archive, historical fence and unrelated resources.
+Editing a synthetic layer at confirmation did not redirect the sealed store.
+The same runtime snapshot passed six explicit-profile guarded-disposal
+regressions. Both guests were reaped and their defined VM storage removed.
+The runtime snapshot SHA-256 was
+`794b01eb40b88553dd02dd630cdbae140cce03a37a122b34642cfd77c452aca2`;
+the report hashes were
+`7c2a75848ae53aa1a5f7527eb915136242fe7254bcd2856bb427399a3532066f`
+and `aea5fa0fbd59c8629f4747e1f4e5466eeb8540db9675a1a89ec6e9965a375b6f`.
+The earlier seven-check prototype pass does not replace the initialized-store
+gate. This is native synthetic coverage, not acceptance on an existing
+openSUSE or user-configured store.
+
 For an already-fenced `rlimit type 6` failure, the optional
 `tools/probe_legacy_start.py --container NAME` diagnostic inspects the affected
 container on its rootless Podman host and tests passive startup in a disposable

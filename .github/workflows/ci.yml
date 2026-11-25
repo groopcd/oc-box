@@ -15,7 +15,9 @@ env:
 jobs:
   test:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    # Keep time for the build and isolated installation checks after the full
+    # Python 3.10 regression suite on slower hosted runners.
+    timeout-minutes: 35
     strategy:
       fail-fast: false
       matrix:
