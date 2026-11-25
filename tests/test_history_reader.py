@@ -1524,6 +1524,19 @@ class ReaderTests(unittest.TestCase):
                 self.assertEqual(child.timeouts, [10])
                 self.box.run.side_effect = None
 
+    def test_reader_exit_keeps_primary_failure_and_marks_unverified_cleanup(self):
+        lease = reader.Reader(self.box, DATA, remaining=lambda: 2)
+        for error in (BoxError("synthetic pending"), KeyboardInterrupt()):
+            with (
+                self.subTest(error=type(error).__name__),
+                patch.object(
+                    lease, "shutdown", side_effect=BoxError("cleanup-failed")
+                ) as close,
+            ):
+                self.assertIsNone(lease.__exit__(type(error), error, None))
+            self.assertTrue(error.history_source_cleanup_failed)
+            close.assert_called_once_with()
+
     def test_startup_error_whitelist_hides_all_private_native_output(self):
         for category in ("schedule-present", "schedule-schema", "private-sentinel"):
             with self.subTest(category=category):

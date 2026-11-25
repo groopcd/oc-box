@@ -1,13 +1,14 @@
 """One fenced persisted-history pass after a verified whole-container stop.
 
 This never settles native jobs, resumes execution, creates resources, refreshes
-configuration or authorizes a live export. The original owner must already have
-refused and closed. A verified container stop is the old-producer boundary.
+configuration or authorizes a live export. Automatic recovery requires the
+original owner to have refused and closed. Explicit persisted sync requires
+an already-stopped source. A verified container stop is the old-producer boundary.
 """
 
 import contextlib
 import contextvars
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import json
 import math
 import re
@@ -105,6 +106,11 @@ class Report:
     interrupted: bool = False
     omitted_interrupted_assistants: bool = False
     reason: str | None = None
+    manual: bool = False
+    pending_sessions: int = 0
+    updated_sessions: int = 0
+    unchanged_sessions: int = 0
+    phase: str | None = None
 
 
 def announce_saved():
@@ -257,6 +263,7 @@ class Source:
     stop_token: str
     mount_signature: tuple
     runtime_digest: str | None = None
+    strict_resources: bool = False
 
 
 def _signature(box, data, info, *, attach_only=False, migration_source=False):
@@ -526,20 +533,28 @@ def _inspect(box, path, data, source, *, running):
         or passive_workspace_mounts(box, data, info) != source.mount_signature
     ):
         raise RecoveryError("container-changed")
-    state = info.get("State")
-    if (
-        not isinstance(state, dict)
-        or state.get("Running") is not running
-        or state.get("Paused", False) is not False
-        or state.get("Restarting", False) is not False
-        or type(state.get("Pid")) is not int
-        or (state["Pid"] <= 0 if running else state["Pid"] != 0)
-        or state.get("Status")
-        not in (("running",) if running else ("exited", "stopped"))
-        or (not running and state.get("ConmonPid", 0) != 0)
-    ):
+    if not verified_container_state(info, running=running):
         raise RecoveryError("unexpected-container-state")
+    if source.strict_resources and (
+        len(info["Mounts"]) != 2 or info["HostConfig"].get("Devices") not in (None, [])
+    ):
+        raise RecoveryError("mounts")
     return info
+
+
+def verified_container_state(info, *, running):
+    """Use positive process/state evidence, not just a false Running value."""
+    state = info.get("State") if isinstance(info, dict) else None
+    return (
+        isinstance(state, dict)
+        and state.get("Running") is running
+        and state.get("Paused", False) is False
+        and state.get("Restarting", False) is False
+        and type(state.get("Pid")) is int
+        and (state["Pid"] > 0 if running else state["Pid"] == 0)
+        and state.get("Status") in (("running",) if running else ("exited", "stopped"))
+        and (running or state.get("ConmonPid", 0) == 0)
+    )
 
 
 def _unchanged(path, source):
@@ -552,7 +567,67 @@ def _stop(box, path, data, source):
     _inspect(box, path, data, source, running=False)
 
 
-def recover(box, path, data, source):
+def stopped_source(box, path, data, version, *, guarded=None):
+    """Capture a stopped source without running ordinary preparation or startup."""
+    if (
+        version != data.get("opencode_version")
+        or history_reader.snapshot_profile(version) is None
+    ):
+        raise box.BoxError(
+            "Persisted history requires matching, supported host and workspace OpenCode "
+            "versions. No workspace was started; do not reset or downgrade to bypass this check."
+        )
+    if data.get("devices"):
+        raise box.BoxError(
+            "Persisted history requires standard resources without custom devices. "
+            "No workspace was started."
+        )
+    try:
+        # Admission never creates missing control files. Capture can initialize
+        # a legitimately absent state, but refuses established uncertainty.
+        token = guarded.stop_token if guarded else workspace_control.capture(path)
+        with workspace_control.admission(path, timeout=5), budget(TRANSITION_BUDGET):
+            response = json.loads(
+                _command(box, ["container", "inspect", data["container"]]).stdout
+            )
+            if not isinstance(response, list) or len(response) != 1:
+                raise RecoveryError("invalid-container")
+            refusals = []
+            source = capture(
+                box,
+                data,
+                response[0],
+                token,
+                refusal=refusals.append,
+                runtime_digest=guarded.record.digest if guarded else None,
+            )
+            if source is None:
+                raise RecoveryError(refusals[0] if refusals else "source-unavailable")
+            if guarded and (
+                source.container_id != guarded.record.container
+                or data.get("home_volume") != guarded.record.volume
+                or version != guarded.record.version
+                or not guarded.record.ready
+                or (source.container_id, source.mount_signature) != guarded.resources
+            ):
+                raise RecoveryError("container-changed")
+            source = replace(source, strict_resources=True)
+            _unchanged(path, source)
+            _inspect(box, path, data, source, running=False)
+            return source
+    except RecoveryError as error:
+        raise box.BoxError(
+            f"Persisted history preflight refused ({error.reason}). "
+            "No workspace was started; preserve the container and private home."
+        ) from None
+    except (box.BoxError, OSError, ValueError, KeyError, subprocess.SubprocessError):
+        raise box.BoxError(
+            "Persisted history could not verify the existing stopped container and "
+            "control state. No workspace was started; preserve the container and private home."
+        ) from None
+
+
+def recover(box, path, data, source, *, already_stopped=False):
     """Return whether checked persisted history and recovery cleanup completed.
 
     Caller keeps the lifecycle lock and original client result. All mutations
@@ -561,6 +636,7 @@ def recover(box, path, data, source):
     """
     category, saved, transitioned = "unavailable", False, False
     compatibility_reason = None
+    transition_verified = False
     pinned = {**data, "container": source.container_id}
     started = time.monotonic()
     report = REPORT.get()
@@ -568,11 +644,13 @@ def recover(box, path, data, source):
         # A previous live pass must not supply the Reader's population result.
         report.populated = None
     try:
+        if already_stopped and not source.strict_resources:
+            raise RecoveryError("invalid-container")
         if workspace_service.live_connection() is not None:
             raise RecoveryError("old-connection")
         with workspace_control.admission(path, timeout=5), budget(TRANSITION_BUDGET):
             _unchanged(path, source)
-            _inspect(box, path, data, source, running=True)
+            _inspect(box, path, data, source, running=not already_stopped)
             volumes = json.loads(
                 _command(box, ["volume", "inspect", data["home_volume"]]).stdout
             )
@@ -583,16 +661,25 @@ def recover(box, path, data, source):
                 or not isinstance(volumes[0].get("Labels"), dict)
                 or volumes[0]["Labels"].get(box.LABEL) != data["id"]
                 or volumes[0].get("Mountpoint") != source.mount_signature[2]
+                or (
+                    source.strict_resources
+                    and (
+                        volumes[0].get("Name") != data["home_volume"]
+                        or volumes[0].get("Driver") != "local"
+                        or volumes[0].get("Options") not in (None, {})
+                    )
+                )
             ):
                 raise RecoveryError("home-ownership")
-            if not lifecycle_output.concise():
+            if not already_stopped and not lifecycle_output.concise():
                 startup_output.line(
                     "oc-box: Stopping the workspace before one persisted-history snapshot retry.",
                     file=sys.stderr,
                 )
-            _stop(box, path, data, source)
-            if report is not None:
-                report.interrupted = True
+            if not already_stopped:
+                _stop(box, path, data, source)
+                if report is not None:
+                    report.interrupted = True
             _unchanged(path, source)
             # A failed/timed-out start has an indeterminate engine outcome. Fence
             # future recovery and successful explicit-stop claims before releasing
@@ -602,6 +689,7 @@ def recover(box, path, data, source):
             _command(box, ["start", source.container_id])
             _inspect(box, path, data, source, running=True)
             workspace_control.finish_transition(path)
+            transition_verified = True
             _unchanged(path, source)
         with (
             budget(SNAPSHOT_BUDGET),
@@ -650,6 +738,18 @@ def recover(box, path, data, source):
                     _stop(box, path, data, source)
             except (box.BoxError, OSError, ValueError, subprocess.SubprocessError):
                 saved, category = False, "cleanup-unverified"
+                if report is not None:
+                    report.reason = "cleanup-unverified"
+            except BaseException:
+                if report is not None:
+                    report.reason = "cleanup-unverified"
+                raise
+            if already_stopped and not transition_verified:
+                # Seeing a stopped container now does not resolve a possibly
+                # still-pending engine start. Its persistent fence stays set.
+                saved, category = False, "cleanup-unverified"
+                if report is not None:
+                    report.reason = "cleanup-unverified"
 
     reason = None
     if not saved:
@@ -680,6 +780,9 @@ def recover(box, path, data, source):
     failure_message = (
         f"Automatic persisted-history snapshot unavailable ({category}). "
         "Container data retained; retry with 'oc-box sync'."
+        if not already_stopped
+        else f"Persisted history snapshot unavailable ({category}). "
+        "Container data retained; ordinary startup was not attempted."
     )
     if lifecycle_output.concise():
         if not saved:
@@ -690,10 +793,15 @@ def recover(box, path, data, source):
             announce_saved()
     else:
         if category == "snapshot-incomplete":
+            interruption = (
+                "Earlier interrupted work is not declared complete."
+                if already_stopped
+                else "Execution was interrupted; background work is not declared complete."
+            )
             startup_output.line(
                 "oc-box: Some persisted sessions remain unsettled. "
                 "Verified progress and prior archives for pending sessions are retained. "
-                "Execution was interrupted; background work is not declared complete.",
+                + interruption,
                 file=sys.stderr,
             )
         startup_output.line(f"oc-box: {failure_message}", file=sys.stderr)

@@ -333,7 +333,7 @@ def load(box, path):
         raise box.BoxError(str(exc)) from None
 
 
-def _inspect(box, path, data, *, running, attach_only=False):
+def _inspect(box, path, data, *, running, attach_only=False, engine_env=None):
     """Keep the guarded operation on the same passive, ordinary resources."""
     try:
         if attach_only and running is not True:
@@ -342,7 +342,8 @@ def _inspect(box, path, data, *, running, attach_only=False):
         current_path, _ = box.find_workspace(project)
         if current_path != path or not workspace_identity.same_project(data, project):
             raise ValueError
-        info = box.inspect_owned(data)
+        options = {"env": engine_env} if engine_env is not None else {}
+        info = box.inspect_owned(data, **options)
         if (
             not isinstance(info, dict)
             or not _HASH.fullmatch(info["Id"])
@@ -371,7 +372,12 @@ def _inspect(box, path, data, *, running, attach_only=False):
         signature = validate_mounts(box, data, info)
         volumes = json.loads(
             box.podman(
-                "volume", "inspect", data["home_volume"], capture=True, timeout=15
+                "volume",
+                "inspect",
+                data["home_volume"],
+                capture=True,
+                timeout=15,
+                **options,
             ).stdout
         )
         if (
@@ -592,7 +598,9 @@ def bind_client(box, path, data, connection):
 
 
 @contextlib.contextmanager
-def admit(box, path, data, args, previous, *, prepare_replacement=None):
+def admit(
+    box, path, data, args, previous, *, prepare_replacement=None, engine_env=None
+):
     """Run before the vault/readiness path; the caller holds the workspace lock."""
     command = args.command
     requested = getattr(args, "convert_legacy_container", False)
@@ -640,7 +648,13 @@ def admit(box, path, data, args, previous, *, prepare_replacement=None):
         resources = None
     else:
         try:
-            resources = _inspect(box, path, data, running=False)
+            resources = _inspect(
+                box,
+                path,
+                data,
+                running=False,
+                **({"engine_env": engine_env} if engine_env is not None else {}),
+            )
         except box.BoxError as exc:
             if command != "start" or not getattr(exc, "legacy_entrypoint", False):
                 raise

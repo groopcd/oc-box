@@ -16,7 +16,16 @@ from unittest.mock import Mock, patch
 
 from oc_box import history_reader, history_recovery
 from oc_box import opencode_v2_io as bridge, workspace_service as service
-from test_history_reader import BoxError, ENDPOINT, FakeChild, SCHEMA, fake_box
+from test_history_reader import (
+    AUTOMATION_SCHEMA,
+    BoxError,
+    ENDPOINT,
+    FakeChild,
+    JOB_SCHEMA,
+    KV_SCHEMA,
+    SCHEMA,
+    fake_box,
+)
 
 
 DATA = {
@@ -33,6 +42,18 @@ SCHEMAS = (
     "CREATE TABLE session_inbox (id TEXT PRIMARY KEY, session_id TEXT, delivery TEXT)",
     "CREATE TABLE session_v2 (id TEXT PRIMARY KEY, time_suspended INTEGER, "
     "time_compacting INTEGER, time_busy INTEGER, time_idle INTEGER)",
+)
+SCHEMAS_24 = (
+    AUTOMATION_SCHEMA,
+    JOB_SCHEMA,
+    KV_SCHEMA,
+    "CREATE TABLE machine (id TEXT PRIMARY KEY, key TEXT, time_created INTEGER NOT NULL)",
+    "CREATE TABLE session_inbox (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, "
+    "type TEXT NOT NULL, payload TEXT NOT NULL, delivery TEXT NOT NULL, "
+    "enqueued_seq INTEGER NOT NULL, time_created INTEGER NOT NULL)",
+    "CREATE TABLE session_v2 (id TEXT PRIMARY KEY, time_suspended INTEGER, "
+    "time_compacting INTEGER, time_busy INTEGER, time_idle INTEGER, "
+    "resume_attempts INTEGER NOT NULL DEFAULT 0)",
 )
 
 
@@ -283,6 +304,187 @@ class DatabaseTests(unittest.TestCase):
                 self.database.with_suffix(".linked").unlink(missing_ok=True)
 
 
+class Database24Tests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix="history-source-24-")
+        self.addCleanup(temporary.cleanup)
+        self.database = Path(temporary.name) / "source.db"
+        self.guards = {**vars(history_reader), "_check_system_config": Mock()}
+
+    def create(self):
+        self.database.unlink(missing_ok=True)
+        with contextlib.closing(sqlite3.connect(self.database)) as connection:
+            for schema in SCHEMAS_24:
+                connection.execute(schema)
+
+    def update(self, statement):
+        with (
+            contextlib.closing(sqlite3.connect(self.database)) as connection,
+            connection,
+        ):
+            connection.execute(statement)
+
+    def check(self, version="2.4.0", **options):
+        return bridge.history_source_database(
+            self.guards, self.database, version=version, **options
+        )
+
+    def test_exact_profiles_and_empty_durable_state(self):
+        self.assertEqual(bridge.HISTORY_SOURCE_24, {"2.4.0", "2.4.1"})
+        self.create()
+        self.update("INSERT INTO session_v2 (id,time_idle,time_busy) VALUES ('s',2,1)")
+        before = self.database.read_bytes()
+        for release in bridge.HISTORY_SOURCE_24:
+            with self.subTest(release=release):
+                self.assertIsNone(self.check(release))
+        self.assertEqual(self.database.read_bytes(), before)
+
+    def test_r24_default_guard_never_treats_durable_work_as_quiet(self):
+        cases = (
+            (
+                "INSERT INTO automation (id,project_id,directory,name,trigger,tz,action,"
+                "status,time_created,time_updated) VALUES ('a','p','/p','a','{}',"
+                "'UTC','{}','paused',1,1)",
+                "schedule-present",
+            ),
+            (
+                "INSERT INTO job (notification_id,id,session_id,kind,status,recovery,"
+                "time_created,time_updated) VALUES ('n','j','s','unknown','completed',"
+                "'invalid',1,1)",
+                "job-kind",
+            ),
+            ("INSERT INTO kv VALUES ('job.background/x','{}',1,1)", "legacy-jobs"),
+            (
+                "INSERT INTO session_inbox VALUES ('q','s','user','{}','queue',1,1)",
+                "queue-metadata",
+            ),
+            (
+                "INSERT INTO session_v2 (id,time_busy,time_idle) VALUES ('s',2,1)",
+                "execution-present",
+            ),
+            (
+                "INSERT INTO session_v2 (id,time_suspended) VALUES ('s',1)",
+                "execution-present",
+            ),
+            (
+                "INSERT INTO session_v2 (id,time_compacting) VALUES ('s',1)",
+                "execution-present",
+            ),
+            (
+                "INSERT INTO session_v2 (id,resume_attempts) VALUES ('s',1)",
+                "execution-present",
+            ),
+            (
+                "INSERT INTO session_v2 (id,resume_attempts) VALUES ('s','invalid')",
+                "execution-schema",
+            ),
+            ("INSERT INTO kv VALUES ('video:x','{}',1,1)", "video-state"),
+            ("INSERT INTO kv VALUES ('video-leader','{}',1,1)", "video-state"),
+            ("INSERT INTO machine VALUES ('m',NULL,1)", "machine-state"),
+            ("ALTER TABLE session_inbox ADD COLUMN future TEXT", "execution-schema"),
+            ("ALTER TABLE machine ADD COLUMN future TEXT", "machine-schema"),
+            ("ALTER TABLE automation RENAME TO schedule", "schedule-schema"),
+        )
+        for statement, category in cases:
+            with self.subTest(category=category):
+                self.create()
+                self.update(statement)
+                before = self.database.read_bytes()
+                with self.assertRaisesRegex(bridge.HistorySourceError, f"^{category}$"):
+                    self.check()
+                self.assertEqual(self.database.read_bytes(), before)
+
+    def test_malformed_sidecars_legacy_journal_and_expired_blobs_are_not_opened(self):
+        self.create()
+        for suffix in ("-wal", "-shm", "-journal"):
+            with self.subTest(suffix=suffix):
+                sidecar = self.database.with_name(self.database.name + suffix)
+                if suffix == "-journal":
+                    sidecar.touch()
+                else:
+                    sidecar.symlink_to(self.database)
+                with (
+                    patch.object(bridge.sqlite3, "connect") as connect,
+                    self.assertRaisesRegex(
+                        bridge.HistorySourceError, "^database-unsafe$"
+                    ),
+                ):
+                    self.check()
+                connect.assert_not_called()
+                sidecar.unlink()
+        blobs = self.database.with_name("blobs")
+        blobs.mkdir()
+        old = blobs / "blob_old"
+        old.touch()
+        os.utime(old, (1, 1))
+        with self.assertRaisesRegex(bridge.HistorySourceError, "^blob-state$"):
+            self.check()
+        self.assertTrue(old.is_file())
+
+    def test_committed_queue_in_wal_is_visible_and_cross_phase_binding_is_enforced(
+        self,
+    ):
+        self.create()
+        self.update("INSERT INTO session_v2 (id) VALUES ('ses_x')")
+        with contextlib.closing(sqlite3.connect(self.database)) as writer:
+            writer.execute("PRAGMA journal_mode=WAL")
+            writer.execute("PRAGMA wal_autocheckpoint=0")
+            writer.execute(
+                "INSERT INTO session_inbox VALUES "
+                "('msg_x','ses_x','user','{\"text\":\"synthetic\"}','queue',1,1)"
+            )
+            writer.commit()
+            with self.assertRaisesRegex(bridge.HistorySourceError, "^queued-work$"):
+                self.check()
+            self.assertEqual(self.check(preflight=True), "queued-work")
+        original = bridge._source_stat_identity(self.database.stat())
+        self.database.rename(self.database.with_suffix(".old"))
+        self.create()
+        with self.assertRaisesRegex(bridge.HistorySourceError, "^database-unsafe$"):
+            self.check(expected=original)
+
+    def test_only_known_preflight_disqualifiers_allow_fallback(self):
+        self.assertEqual(self.check(preflight=True), "database-missing")
+        stray = self.database.with_name(self.database.name + "-wal")
+        stray.touch()
+        with self.assertRaisesRegex(bridge.HistorySourceError, "^database-unsafe$"):
+            self.check(preflight=True)
+        stray.unlink()
+        self.create()
+        self.update(
+            "INSERT INTO session_v2 (id,time_busy,time_idle) VALUES ('ses_x',2,1)"
+        )
+        before = self.database.read_bytes()
+        self.assertEqual(self.check(preflight=True), "execution-present")
+        with self.assertRaisesRegex(bridge.HistorySourceError, "^execution-present$"):
+            self.check()
+        self.assertEqual(self.database.read_bytes(), before)
+
+    def test_foreign_jobs_duplicate_or_unrecognized_queue_payloads_do_not_opt_out(self):
+        self.create()
+        self.update(
+            "INSERT INTO job (notification_id,id,session_id,kind,status,recovery,"
+            "time_created,time_updated) VALUES ('msg_x','shell_x','ses_foreign',"
+            '\'shell\',\'completed\',\'{"kind":"shell","sessionID":"ses_foreign",'
+            '"shellID":"shell_x","command":"true"}\',1,1)'
+        )
+        with self.assertRaisesRegex(bridge.HistorySourceError, "^job-metadata$"):
+            self.check(preflight=True)
+        self.update("DELETE FROM job")
+        self.update("INSERT INTO session_v2 (id) VALUES ('ses_x')")
+        for payload in ('{"text":"x","text":"y"}', '{"text":"x","unknown":true}'):
+            with self.subTest(payload=payload):
+                self.update("DELETE FROM session_inbox")
+                self.update(
+                    "INSERT INTO session_inbox VALUES "
+                    f"('msg_q','ses_x','user','{payload}','queue',1,1)"
+                )
+                with self.assertRaisesRegex(
+                    bridge.HistorySourceError, "^queue-metadata$"
+                ):
+                    self.check(preflight=True)
+
+
 class LeaseTests(unittest.TestCase):
     def setUp(self):
         self.box = fake_box()
@@ -366,6 +568,101 @@ class LeaseTests(unittest.TestCase):
                     ) as selected:
                         self.assertIsNone(selected)
             popen.assert_not_called()
+
+    def test_r24_selection_is_exact_explicit_locked_and_pinned(self):
+        data = {**DATA, "opencode_version": "2.4.1"}
+        with patch.object(service.subprocess, "Popen") as popen:
+            for version in (None, "2.4.0", "2.4.1", "2.4.2", "2.4.1+modified"):
+                for stopped in (False, 1):
+                    with service.history_source(
+                        self.box,
+                        {**data, "opencode_version": version},
+                        stopped_source=stopped,
+                    ) as selected:
+                        self.assertIsNone(selected)
+            with service.history_source(
+                self.box, {**data, "opencode_version": "2.4.2"}, stopped_source=True
+            ) as selected:
+                self.assertIsNone(selected)
+            with self.assertRaisesRegex(BoxError, "source-not-stopped"):
+                with service.history_source(self.box, data, stopped_source=True):
+                    self.fail("An unlocked source must not start.")
+            token = service.LIFECYCLE_LOCK.set(object())
+            try:
+                with self.assertRaisesRegex(BoxError, r"\(source\)"):
+                    with service.history_source(
+                        self.box,
+                        {**data, "container": "mutable-name"},
+                        stopped_source=True,
+                    ):
+                        self.fail("A mutable selector must not start.")
+                self.box.runtime_safeguard = SimpleNamespace(current=lambda: object())
+                with service.history_source(
+                    self.box, data, stopped_source=True
+                ) as selected:
+                    self.assertIsNone(selected)
+            finally:
+                service.LIFECYCLE_LOCK.reset(token)
+            popen.assert_not_called()
+
+    def test_r24_real_bridge_requires_clean_eof_before_lease_or_fallback(self):
+        script = """
+import sys
+control, trailing, status = sys.argv[1:]
+sys.stdin.buffer.readline()
+print(control, flush=True)
+sys.stdin.buffer.read()
+if trailing:
+    print(trailing, flush=True)
+sys.exit(int(status))
+"""
+        self.box.captured_output = lambda **_: tempfile.TemporaryFile()
+        token = service.LIFECYCLE_LOCK.set(object())
+        self.addCleanup(service.LIFECYCLE_LOCK.reset, token)
+        data = {**DATA, "opencode_version": "2.4.0"}
+        for response, trailing, code, expected in (
+            ({"endpoint": ENDPOINT}, "", 0, None),
+            ({"endpoint": ENDPOINT}, "private-sentinel", 0, "cleanup-failed"),
+            ({"fallback": "queued-work"}, "", 0, None),
+            ({"fallback": "queued-work"}, "private-sentinel", 0, "cleanup-failed"),
+            ({"fallback": "queued-work"}, "", 2, "cleanup-failed"),
+            ({"fallback": "schedule-present"}, "", 0, "startup-response"),
+        ):
+            with self.subTest(expected=expected):
+                command = self.box.ContainerCommand(
+                    [
+                        sys.executable,
+                        "-I",
+                        "-S",
+                        "-c",
+                        script,
+                        json.dumps(response),
+                        trailing,
+                        str(code),
+                    ],
+                    {"PATH": os.defpath},
+                )
+                check = (
+                    contextlib.nullcontext()
+                    if expected is None
+                    else self.assertRaisesRegex(BoxError, expected)
+                )
+                with patch.object(
+                    service.HistorySource, "command", return_value=command
+                ):
+                    with check:
+                        with service.history_source(
+                            self.box, data, stopped_source=True
+                        ) as connection:
+                            if "fallback" in response:
+                                self.assertIsNone(connection)
+                            else:
+                                self.assertIsNotNone(connection)
+                            self.assertIs(service.live_connection(), connection)
+                self.assertIsNone(service.live_connection())
+                if expected is not None:
+                    self.assertEqual(check.exception.history_source_category, expected)
+                    self.assertNotIn("private-sentinel", str(check.exception))
 
     def test_only_known_prestartup_fallbacks_allow_original_path(self):
         for category in bridge.HISTORY_SOURCE_FALLBACKS:

@@ -93,21 +93,48 @@ class HistorySource:
     """Pass-local unregistered quiet source, never the post-stop Reader.
 
     The caller must retain its normal exclusive workspace lifecycle lock.
-    Unsupported/incompatible sources opt out *before* native service creation.
-    Startup/cleanup uncertainty is fatal, never an instruction to replay sync.
+    2.4 additionally requires a verified stopped origin. Only positively
+    identified, clean preflight opt-outs can return to ordinary sync.
     """
 
-    def __init__(self, box, data):
+    def __init__(self, box, data, *, stopped_source=False):
+        if __package__:
+            from .opencode_v2_io import HISTORY_SOURCE_24
+        else:
+            from opencode_v2_io import HISTORY_SOURCE_24
+
         self.box, self.data = box, dict(data)
+        release = self.data.get("opencode_version")
+        self.exact = type(release) is str and release in HISTORY_SOURCE_24
+        self.stopped_source = stopped_source
         self.child = self.errors = self.error_file = self.token = None
         self.connection = None
         self.started = False
         self.fallback = False
 
     def fail(self, category):
-        return self.box.BoxError(
+        error = self.box.BoxError(
             "Private history source lease failed (" + category + ")."
         )
+        if self.exact:
+            error.history_source_category = category
+            if category == "cleanup-failed":
+                error.history_source_cleanup_failed = True
+        return error
+
+    def _wait(self, timeout):
+        if not self.exact:
+            return self.child.wait(timeout=timeout)
+        if __package__:
+            from .opencode_v2_io import _wait_exact_child
+        else:
+            from opencode_v2_io import _wait_exact_child
+
+        # Refuse a synthetic Popen zero (e.g. ECHILD). A previously observed
+        # exit is already a startup/protocol failure, never live lease proof.
+        if self.child.returncode is None:
+            _wait_exact_child(self.child, timeout)
+        return self.child.returncode
 
     def command(self):
         if __package__:
@@ -115,6 +142,13 @@ class HistorySource:
         else:
             import history_reader
 
+        source = (self.box.PACKAGE / "opencode_v2_io.py").read_text()
+        if self.exact:
+            if __package__:
+                from .web_named_native_profile import named_native_worker_source
+            else:
+                from web_named_native_profile import named_native_worker_source
+            source = named_native_worker_source(source)
         return self.box.ContainerCommand(
             [
                 "podman",
@@ -131,7 +165,7 @@ class HistorySource:
                 "-I",
                 "-S",
                 "-c",
-                (self.box.PACKAGE / "opencode_v2_io.py").read_text(),
+                source,
                 "history-source",
                 self.box.CONTAINER_OPENCODE,
             ],
@@ -182,12 +216,21 @@ class HistorySource:
             raise self.fail("reuse")
         self.started = True
         try:
+            if self.exact and (
+                self.stopped_source is not True or LIFECYCLE_LOCK.get() is None
+            ):
+                raise self.fail("source-not-stopped")
+            if self.exact and signal.getsignal(signal.SIGCHLD) != signal.SIG_DFL:
+                raise self.fail("startup-failed")
             if (
                 not isinstance(self.data.get("id"), str)
                 or not re.fullmatch(r"[a-f0-9]{32}", self.data["id"])
                 or not isinstance(self.data.get("container"), str)
                 or not re.fullmatch(
-                    r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", self.data["container"]
+                    r"[a-f0-9]{64}"
+                    if self.exact
+                    else r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}",
+                    self.data["container"],
                 )
                 or not isinstance(self.data.get("home"), str)
                 or not self.data["home"].startswith("/")
@@ -232,7 +275,7 @@ class HistorySource:
                         self.child.stdout.fileno(), MAX_CONTROL + 1 - len(output)
                     )
                     if not chunk:
-                        self.child.wait(timeout=min(1, remaining))
+                        self._wait(min(1, remaining))
                         raise self.fail(self._category())
                     output.extend(chunk)
                 elif self.child.poll() is not None:
@@ -240,11 +283,21 @@ class HistorySource:
                 if len(output) > MAX_CONTROL:
                     raise self.fail("startup-response")
             line, trailing = output.split(b"\n", 1)
-            response = json.loads(line)
+            response = (
+                bridge.named_native_json(line) if self.exact else json.loads(line)
+            )
             if trailing or not isinstance(response, dict):
                 raise self.fail("startup-response")
             if set(response) == {"fallback"}:
-                if response["fallback"] not in bridge.HISTORY_SOURCE_FALLBACKS:
+                fallbacks = (
+                    bridge.HISTORY_SOURCE_24_FALLBACKS
+                    if self.exact
+                    else bridge.HISTORY_SOURCE_FALLBACKS
+                )
+                if (
+                    type(response["fallback"]) is not str
+                    or response["fallback"] not in fallbacks
+                ):
                     raise self.fail("startup-response")
                 self.shutdown()
                 self.fallback = True
@@ -311,7 +364,7 @@ class HistorySource:
                         except BaseException as error:
                             caught(error)
                     try:
-                        code = self.child.wait(timeout=20)
+                        code = self._wait(20)
                     except BaseException as error:
                         caught(error)
                         try:
@@ -321,11 +374,23 @@ class HistorySource:
                         except BaseException as error:
                             caught(error)
                         try:
-                            self.child.wait(timeout=5)
+                            self._wait(5)
                         except BaseException as error:
                             caught(error)
                         code = None
                     failed = failed or (code != 0 and not startup_failed)
+                    if self.exact and code == 0:
+                        try:
+                            # A reaped wrapper alone is not acknowledgement:
+                            # no trailing readiness or still-open writer.
+                            if (
+                                not self.child.stdout
+                                or not select.select([self.child.stdout], [], [], 0)[0]
+                                or os.read(self.child.stdout.fileno(), 1)
+                            ):
+                                failed = True
+                        except BaseException as error:
+                            caught(error)
                 finally:
                     if self.child.stdout:
                         try:
@@ -371,8 +436,8 @@ class HistorySource:
 
 
 @contextlib.contextmanager
-def history_source(box, data):
-    """Optional manual-sync optimization; existing owners/recovery stay intact."""
+def history_source(box, data, *, stopped_source=False):
+    """Lease an ordinary source; 2.4 requires the caller's verified pre-start stop."""
     if __package__:
         from . import history_reader, history_recovery, opencode_v2_io
     else:
@@ -381,15 +446,24 @@ def history_source(box, data):
         import opencode_v2_io
 
     live = live_connection()
+    version = data.get("opencode_version")
     if (
         live is not None
         or history_reader.current() is not None
         or history_recovery.FENCE.get() is not None
-        or data.get("opencode_version") not in opencode_v2_io.HISTORY_SOURCE_SUPPORTED
+        or type(version) is not str
+        or version not in opencode_v2_io.HISTORY_SOURCE_SUPPORTED
     ):
         yield live
         return
-    with HistorySource(box, data) as connection:
+    if version in opencode_v2_io.HISTORY_SOURCE_24:
+        safeguard = getattr(box, "runtime_safeguard", None)
+        if stopped_source is not True or (
+            safeguard is not None and safeguard.current() is not None
+        ):
+            yield None
+            return
+    with HistorySource(box, data, stopped_source=stopped_source) as connection:
         yield connection
 
 

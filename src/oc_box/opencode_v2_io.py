@@ -29,6 +29,7 @@ if __package__:
     from .web_named_native_profile import (
         named_native_info,
         named_native_json,
+        named_native_port,
         named_native_supports,
     )
 elif globals().get("__spec__") is not None:
@@ -38,6 +39,7 @@ elif globals().get("__spec__") is not None:
     from web_named_native_profile import (
         named_native_info,
         named_native_json,
+        named_native_port,
         named_native_supports,
     )
 
@@ -479,7 +481,15 @@ def _wait_exact_child(child, timeout):
 
 
 @contextlib.contextmanager
-def server(binary, *, exit_info=None, startup_deadline=None, strict_reap=False):
+def server(
+    binary,
+    *,
+    exit_info=None,
+    startup_deadline=None,
+    strict_reap=False,
+    exact_history_source=False,
+):
+    strict_reap = strict_reap or exact_history_source
     if startup_deadline is not None:
         _deadline_timeout(startup_deadline)
     if strict_reap and signal.getsignal(signal.SIGCHLD) != signal.SIG_DFL:
@@ -511,10 +521,24 @@ def server(binary, *, exit_info=None, startup_deadline=None, strict_reap=False):
                     else min(0.1, _deadline_timeout(deadline))
                 )
                 if select.select([child.stdout], [], [], wait)[0]:
-                    output.extend(os.read(child.stdout.fileno(), 4096))
-                if len(output) > 65536:
+                    chunk = os.read(child.stdout.fileno(), 4096)
+                    if exact_history_source and not chunk:
+                        raise HistorySourceError("identity")
+                    output.extend(chunk)
+                if len(output) > (4096 if exact_history_source else 65536):
                     raise FixedError(READINESS)
-            address = json.loads(output.split(b"\n", 1)[0])["url"]
+            line, trailing = output.split(b"\n", 1)
+            if exact_history_source:
+                try:
+                    record = named_native_json(line)
+                    if trailing or type(record) is not dict or record.keys() != {"url"}:
+                        raise HistorySourceError("identity")
+                    address = record["url"]
+                    named_native_port(address)
+                except ValueError:
+                    raise HistorySourceError("identity") from None
+            else:
+                address = json.loads(line)["url"]
             request = endpoint_request({"url": address, "password": password})
             request.alive = lambda: child.poll() is None
             # Private within this worker; never trust a requested or
@@ -532,7 +556,10 @@ def server(binary, *, exit_info=None, startup_deadline=None, strict_reap=False):
                 else:
                     _deadline_timeout(deadline)
                     status = request(
-                        "GET", "/api/experimental/migration/v1", deadline=deadline
+                        "GET",
+                        "/api/experimental/migration/v1",
+                        deadline=deadline,
+                        **({"max_body": 8192} if exact_history_source else {}),
                     )
                     _deadline_timeout(deadline)
                 if not isinstance(status, dict):
@@ -552,8 +579,14 @@ def server(binary, *, exit_info=None, startup_deadline=None, strict_reap=False):
             yield request
         finally:
             forced = False
+            clean_control = not exact_history_source or child.poll() is None
             if child.stdin:
-                child.stdin.close()
+                try:
+                    child.stdin.close()
+                except OSError:
+                    if not exact_history_source:
+                        raise
+                    clean_control = False
 
             # For the proof variant, a returncode already cached by poll()
             # means the server was gone at/ before EOF. The caller cannot
@@ -573,11 +606,33 @@ def server(binary, *, exit_info=None, startup_deadline=None, strict_reap=False):
                     forced = True
                     os.killpg(child.pid, signal.SIGKILL)
                     wait()
+                if exact_history_source:
+                    # The stock native child sends exactly one line on its
+                    # control pipe, then closes it on retiring via stdin EOF.
+                    clean_control = (
+                        clean_control
+                        and not forced
+                        and child.returncode == 0
+                        and bool(select.select([child.stdout], [], [], 0)[0])
+                        and os.read(child.stdout.fileno(), 1) == b""
+                    )
+                    try:
+                        os.killpg(child.pid, 0)
+                    except ProcessLookupError:
+                        pass
+                    else:
+                        clean_control = False
+            except (OSError, subprocess.SubprocessError):
+                if exact_history_source:
+                    raise HistorySourceError("cleanup-failed") from None
+                raise
             finally:
                 if child.stdout:
                     child.stdout.close()
             if exit_info is not None:
                 exit_info.update(code=child.returncode, forced=forced)
+            if not clean_control:
+                raise HistorySourceError("cleanup-failed")
 
 
 def seed_database():
@@ -643,7 +698,8 @@ def refresh_credentials(binary, entries):
                 )
 
 
-HISTORY_SOURCE_SUPPORTED = frozenset(("2.3.0",))
+HISTORY_SOURCE_24 = frozenset(("2.4.0", "2.4.1"))
+HISTORY_SOURCE_SUPPORTED = HISTORY_SOURCE_24 | {"2.3.0"}
 HISTORY_SOURCE_MAX_PAYLOAD = 131072
 HISTORY_SOURCE_MARKER = "oc-box-history-source: "
 HISTORY_SOURCE_FALLBACKS = frozenset(
@@ -655,16 +711,36 @@ HISTORY_SOURCE_FALLBACKS = frozenset(
         "execution-present",
     )
 )
+# Scheduler rows remain a refusal: this profile validates the table layout,
+# not the action/trigger records needed to positively identify a safe opt-out.
+HISTORY_SOURCE_24_FALLBACKS = HISTORY_SOURCE_FALLBACKS - {"schedule-present"}
 HISTORY_SOURCE_ERRORS = frozenset(
     (
         "payload",
+        "database-missing",
         "database-unsafe",
         "database-invalid",
         "schedule-schema",
+        "schedule-present",
         "system-config",
         "job-schema",
+        "job-metadata",
+        "job-kind",
+        "job-limit",
+        "legacy-jobs",
+        "jobs-present",
+        "queued-work",
+        "queue-metadata",
+        "execution-present",
         "execution-schema",
+        "video-state",
+        "machine-schema",
+        "machine-state",
+        "blob-state",
+        "host-service-state",
+        "deadline",
         "unsupported-version",
+        "identity",
         "activity",
         "startup-timeout",
         "lease-timeout",
@@ -683,31 +759,106 @@ class HistorySourceError(ValueError):
         super().__init__(self.category)
 
 
-def history_source_database(guards, database, *, deadline=None):
+def _source_stat_identity(info):
+    return (info.st_dev, info.st_ino, info.st_uid, info.st_mode, info.st_nlink)
+
+
+def _history_source_24_paths(guards, database, deadline):
+    """Check the audited blob root before following any SQLite sidecar path."""
+    guards["_check_24_blobs"](database.parent, deadline)
+    sides = False
+    for suffix in ("-wal", "-shm", "-journal"):
+        try:
+            info = database.with_name(database.name + suffix).lstat()
+        except FileNotFoundError:
+            continue
+        sides = True
+        if (
+            suffix == "-journal"
+            or not stat.S_ISREG(info.st_mode)
+            or info.st_uid != os.getuid()
+            or info.st_nlink != 1
+            or info.st_mode & 0o022
+        ):
+            raise HistorySourceError("database-unsafe")
+    return sides
+
+
+_SOURCE_ABSENT = object()
+
+
+def _history_source_24_queue_known(connection):
+    # Only the audited persisted user/queue envelope can opt out to legacy
+    # sync. Refuse orphaned, unknown, oversized, or malformed rows instead.
+    # Validate in SQLite without returning or logging any payload.
+    if connection.execute(
+        "SELECT 1 FROM session_inbox AS i LEFT JOIN session_v2 AS s "
+        "ON s.id=i.session_id WHERE s.id IS NULL "
+        "OR i.type != 'user' OR i.delivery != 'queue' "
+        "OR typeof(i.id) != 'text' OR typeof(i.session_id) != 'text' "
+        "OR substr(i.id,1,3) != 'msg' OR length(i.id) NOT BETWEEN 4 AND 256 "
+        "OR i.id GLOB '*[^A-Za-z0-9_-]*' "
+        "OR substr(i.session_id,1,3) != 'ses' "
+        "OR length(i.session_id) NOT BETWEEN 4 AND 256 "
+        "OR i.session_id GLOB '*[^A-Za-z0-9_-]*' "
+        "OR typeof(i.enqueued_seq) != 'integer' OR i.enqueued_seq < 0 "
+        "OR typeof(i.time_created) != 'integer' OR i.time_created < 0 "
+        "OR CASE WHEN typeof(i.payload) = 'text' "
+        "AND length(CAST(i.payload AS BLOB)) <= 1048576 AND json_valid(i.payload) "
+        "THEN json_type(i.payload,'$.text') IS NOT 'text' "
+        "OR (SELECT count(*) FROM json_each(i.payload)) != 1 ELSE 1 END LIMIT 1"
+    ).fetchone():
+        raise HistorySourceError("queue-metadata")
+
+
+def history_source_database(
+    guards, database, *, deadline=None, version="2.3.0", expected=None, preflight=False
+):
     """Read execution metadata only; never initialize, migrate or edit a store.
 
-    This is stricter than the post-stop reader: *all* durable jobs, queued work
-    and claims exclude this optimization. They remain the original per-request
-    path's responsibility, not permission to recover or resume a job here.
+    All durable jobs, queues and claims exclude this optimization. In 2.4
+    only recognized metadata may opt out before opening a native service;
+    any indeterminate or post-start state is fatal.
     """
+    exact = version in HISTORY_SOURCE_24
     try:
         guards["_check_system_config"]()
-        binding = guards["_check_database"](database)
+        if exact:
+            if deadline is None:
+                deadline = time.monotonic() + 5
+            sides = _history_source_24_paths(guards, database, deadline)
+            try:
+                binding = database.lstat()
+            except FileNotFoundError:
+                if sides or expected not in (None, _SOURCE_ABSENT):
+                    raise HistorySourceError("database-unsafe") from None
+                if preflight:
+                    return "database-missing"
+                raise HistorySourceError("database-missing") from None
+            if expected is _SOURCE_ABSENT:
+                raise HistorySourceError("database-unsafe")
+        else:
+            binding = guards["_check_database"](database)
     except guards["Refusal"] as error:
-        if error.category in HISTORY_SOURCE_FALLBACKS:
+        if not exact and error.category in HISTORY_SOURCE_FALLBACKS:
             return error.category
         raise HistorySourceError(error.category) from None
+    except FileNotFoundError:
+        raise HistorySourceError("database-missing") from None
+    except OSError:
+        raise HistorySourceError("database-unsafe") from None
     try:
 
         def verify(info):
-            fields = ("st_dev", "st_ino", "st_uid", "st_mode", "st_nlink")
+            identity = _source_stat_identity(info)
             if (
                 binding is None
                 or not stat.S_ISREG(info.st_mode)
                 or info.st_uid != os.getuid()
                 or info.st_nlink != 1
                 or info.st_mode & 0o022
-                or any(getattr(info, key) != getattr(binding, key) for key in fields)
+                or identity != _source_stat_identity(binding)
+                or (expected is not None and identity != expected)
             ):
                 raise HistorySourceError("database-unsafe")
 
@@ -781,11 +932,34 @@ def history_source_database(guards, database, *, deadline=None):
                 "notification_id",
             )
             table("kv", {"key": "TEXT", "value": "TEXT"}, "key")
-            table(
-                "session_inbox",
-                {"id": "TEXT", "session_id": "TEXT", "delivery": "TEXT"},
-                "id",
-            )
+            if exact:
+                # This same snapshot must be clear of every audited R24
+                # startup source before any native process can open it.
+                guards["_check_scheduler"](connection, guards["SNAPSHOT_24"])
+                guards["_check_24_state"](connection)
+                try:
+                    guards["_table_schema"](
+                        connection,
+                        "session_inbox",
+                        {
+                            "id": ("TEXT", None, True),
+                            "session_id": ("TEXT", True, False),
+                            "type": ("TEXT", True, False),
+                            "payload": ("TEXT", True, False),
+                            "delivery": ("TEXT", True, False),
+                            "enqueued_seq": ("INTEGER", True, False),
+                            "time_created": ("INTEGER", True, False),
+                        },
+                        "job-schema",  # Recognized by the reused Reader guard.
+                    )
+                except guards["Refusal"]:
+                    raise HistorySourceError("execution-schema") from None
+            else:
+                table(
+                    "session_inbox",
+                    {"id": "TEXT", "session_id": "TEXT", "delivery": "TEXT"},
+                    "id",
+                )
             table(
                 "session_v2",
                 {
@@ -794,39 +968,74 @@ def history_source_database(guards, database, *, deadline=None):
                     "time_compacting": "INTEGER",
                     "time_busy": "INTEGER",
                     "time_idle": "INTEGER",
+                    **({"resume_attempts": "INTEGER"} if exact else {}),
                 },
                 "id",
             )
             timestamps = ("time_suspended", "time_compacting", "time_busy", "time_idle")
-            if connection.execute(
-                "SELECT 1 FROM session_v2 WHERE "
-                + " OR ".join(
-                    "(" + name + " IS NOT NULL AND typeof(" + name + ") != 'integer')"
-                    for name in timestamps
+            fields = [
+                f"({name} IS NOT NULL AND "
+                f"(typeof({name}) != 'integer'{f' OR {name} < 0' if exact else ''}))"
+                for name in timestamps
+            ]
+            if exact:
+                fields.append(
+                    "(typeof(resume_attempts) != 'integer' OR resume_attempts < 0)"
                 )
-                + " LIMIT 1"
+            if connection.execute(
+                "SELECT 1 FROM session_v2 WHERE " + " OR ".join(fields) + " LIMIT 1"
             ).fetchone():
                 raise HistorySourceError("execution-schema")
             # Include legacy background records: migration must not turn a
             # superficially empty job table into resumed native work.
-            fallback = None
-            if connection.execute('SELECT 1 FROM "job" LIMIT 1').fetchone() or (
+            if exact:
+                # This validates all known jobs, and refuses unknown kinds,
+                # malformed recovery metadata and legacy jobs outright.
+                guards["_check_jobs"](connection, deadline)
+            jobs = connection.execute('SELECT 1 FROM "job" LIMIT 1').fetchone() or (
                 connection.execute(
                     "SELECT 1 FROM kv WHERE key LIKE 'job.background/%' LIMIT 1"
                 ).fetchone()
+            )
+            if (
+                exact
+                and jobs
+                and connection.execute(
+                    "SELECT 1 FROM job AS j LEFT JOIN session_v2 AS source "
+                    "ON source.id=j.session_id LEFT JOIN session_v2 AS child "
+                    "ON child.id=j.child_session_id WHERE source.id IS NULL "
+                    "OR (j.child_session_id IS NOT NULL AND child.id IS NULL) LIMIT 1"
+                ).fetchone()
             ):
-                fallback = "jobs-present"
-            elif connection.execute("SELECT 1 FROM session_inbox LIMIT 1").fetchone():
-                fallback = "queued-work"
-            elif connection.execute(
+                raise HistorySourceError("job-metadata")
+            queued = (
+                connection.execute("SELECT 1 FROM session_inbox LIMIT 1").fetchone()
+                if exact or not jobs
+                else None
+            )
+            if exact and queued:
+                _history_source_24_queue_known(connection)
+            claim = (
                 "SELECT 1 FROM session_v2 WHERE time_suspended IS NOT NULL "
                 "OR time_compacting IS NOT NULL "
                 "OR (time_busy IS NOT NULL AND "
-                "(time_idle IS NULL OR time_busy > time_idle)) LIMIT 1"
-            ).fetchone():
-                fallback = "execution-present"
-            # Recheck schedules in the same read snapshot as jobs/claims.
-            if connection.execute("SELECT 1 FROM schedule LIMIT 1").fetchone():
+                "(time_idle IS NULL OR time_busy > time_idle))"
+                + (" OR resume_attempts > 0" if exact else "")
+                + " LIMIT 1"
+            )
+            fallback = (
+                "jobs-present"
+                if jobs
+                else "queued-work"
+                if queued
+                else "execution-present"
+                if connection.execute(claim).fetchone()
+                else None
+            )
+            if exact:
+                if fallback is not None and not preflight:
+                    raise HistorySourceError(fallback)
+            elif connection.execute("SELECT 1 FROM schedule LIMIT 1").fetchone():
                 fallback = "schedule-present"
             bound()
         verify(database.lstat())
@@ -834,6 +1043,8 @@ def history_source_database(guards, database, *, deadline=None):
             _deadline_timeout(deadline)
     except OSError:
         raise HistorySourceError("database-unsafe") from None
+    except guards["Refusal"] as error:
+        raise HistorySourceError(error.category) from None
     except sqlite3.Error:
         if deadline is not None:
             _deadline_timeout(deadline)
@@ -841,7 +1052,7 @@ def history_source_database(guards, database, *, deadline=None):
     return fallback
 
 
-def history_source_quiet(request, *, deadline=None):
+def history_source_quiet(request, *, deadline=None, exact=False):
     """No foreground drain or job of any state may belong to this lease."""
     for route, empty in (
         ("/api/session/active", {}),
@@ -850,10 +1061,43 @@ def history_source_quiet(request, *, deadline=None):
         response = (
             request("GET", route)
             if deadline is None
-            else request("GET", route, deadline=deadline)
+            else request(
+                "GET", route, deadline=deadline, **({"max_body": 8192} if exact else {})
+            )
         )
-        if not isinstance(response, dict) or response.get("data") != empty:
+        if (
+            not isinstance(response, dict)
+            or response.get("data") != empty
+            or (exact and response.keys() != {"data"})
+        ):
             raise HistorySourceError("activity")
+
+
+def _history_source_24_identity(request, version, binary, executable, deadline):
+    try:
+        url = f"http://127.0.0.1:{named_native_port(request.endpoint['url'])}"
+        info = request(
+            "GET",
+            "/api/info",
+            deadline=min(deadline, time.monotonic() + 2),
+            max_body=8192,
+        )
+        if (
+            type(info) is not dict
+            or info.keys()
+            != {"version", "pid", "hostname", "urls", "paths", "capabilities"}
+            or info["version"] != version
+            or type(info["pid"]) is not int
+            or info["pid"] != request.child_pid
+            or info["urls"] != [url]
+            or _source_stat_identity(os.stat(f"/proc/{request.child_pid}/exe"))
+            != executable
+            or _source_stat_identity(os.stat(binary)) != executable
+            or not request.alive()
+        ):
+            raise HistorySourceError("identity")
+    except (OSError, ValueError):
+        raise HistorySourceError("identity") from None
 
 
 def _history_source_payload(deadline):
@@ -893,6 +1137,7 @@ def history_source_lease(binary):
     if (
         not isinstance(settings, dict)
         or set(settings) != {"guards", "version", "home"}
+        or type(settings["version"]) is not str
         or settings["version"] not in HISTORY_SOURCE_SUPPORTED
         or not isinstance(settings["guards"], str)
         or not isinstance(settings["home"], str)
@@ -905,19 +1150,54 @@ def history_source_lease(binary):
     guards = {"__name__": "oc_box_source_guards"}
     exec(settings["guards"], guards)
     database = Path(settings["home"]) / ".local/share/opencode/oc-box-v2.db"
-    fallback = history_source_database(guards, database, deadline=startup_deadline)
-    if fallback:
+    release = settings["version"]
+    exact = release in HISTORY_SOURCE_24
+    database_options = {}
+    if exact:
+        # A stale or active native registration is not permission to start a
+        # second service on the source. Never discover it or read credentials.
+        os.environ.clear()
+        os.environ["XDG_STATE_HOME"] = settings["home"] + "/.local/state"
+        try:
+            guards["_check_24_host_service"](startup_deadline)
+            try:
+                expected = _source_stat_identity(database.lstat())
+            except FileNotFoundError:
+                expected = _SOURCE_ABSENT
+            database_options = {"version": release, "expected": expected}
+        except guards["Refusal"] as error:
+            raise HistorySourceError(error.category) from None
+        except OSError:
+            raise HistorySourceError("database-unsafe") from None
+    fallback = history_source_database(
+        guards, database, deadline=startup_deadline, preflight=exact, **database_options
+    )
+    if fallback and not exact:
         write_control_record(descriptor, {"fallback": fallback})
         return
     # Clear create-time secrets before *any* native command. Reuse only the
     # stdlib guard/environment helpers, not Reader's verified-stop lifetime.
-    with guards["_remote_environment"](settings["home"]) as (root, env):
+    with guards["_remote_environment"](
+        settings["home"], **({"version": release} if exact else {})
+    ) as (root, env):
         os.chdir(root)
         os.environ.clear()
         os.environ.update(env)
+        executable = None
+        if exact:
+            try:
+                info = os.stat(binary)
+            except OSError:
+                raise HistorySourceError("identity") from None
+            if not stat.S_ISREG(info.st_mode) or info.st_mode & 0o022:
+                raise HistorySourceError("identity")
+            executable = _source_stat_identity(info)
         version = subprocess.run(
             [binary, "--version"],
-            env=env,
+            # Version attestation itself cannot see the ordinary source store.
+            env=(
+                {**env, "XDG_DATA_HOME": str(root / "version-data")} if exact else env
+            ),
             capture_output=True,
             text=True,
             timeout=_deadline_timeout(startup_deadline, 10),
@@ -925,18 +1205,49 @@ def history_source_lease(binary):
         try:
             if version.returncode:
                 raise HistorySourceError("unsupported-version")
-            guards["_check_version"](version.stdout, settings["version"])
+            guards["_check_version"](version.stdout, release)
         except guards["Refusal"]:
             raise HistorySourceError("unsupported-version") from None
+        if exact:
+            try:
+                if _source_stat_identity(os.stat(binary)) != executable:
+                    raise HistorySourceError("identity")
+            except OSError:
+                raise HistorySourceError("identity") from None
+            revalidated = history_source_database(
+                guards,
+                database,
+                deadline=startup_deadline,
+                preflight=True,
+                **database_options,
+            )
+            if revalidated != fallback:
+                raise HistorySourceError("activity")
+            if fallback:
+                if fallback not in HISTORY_SOURCE_24_FALLBACKS:
+                    raise HistorySourceError(fallback)
+                write_control_record(descriptor, {"fallback": fallback})
+                return
         exit_info = {}
         _deadline_timeout(startup_deadline)
         with server(
-            binary, exit_info=exit_info, startup_deadline=startup_deadline
+            binary,
+            exit_info=exit_info,
+            startup_deadline=startup_deadline,
+            **({"exact_history_source": True} if exact else {}),
         ) as request:
-            history_source_quiet(request, deadline=startup_deadline)
+            if exact:
+                _history_source_24_identity(
+                    request, release, binary, executable, startup_deadline
+                )
+            history_source_quiet(
+                request, deadline=startup_deadline, **({"exact": True} if exact else {})
+            )
             # Check once more before publishing; startup must not introduce
             # durable work. A post-start refusal is fatal, never a fallback.
-            if history_source_database(guards, database, deadline=startup_deadline):
+            if history_source_database(
+                guards, database, deadline=startup_deadline, **database_options
+            ):
                 raise HistorySourceError("activity")
             _deadline_timeout(startup_deadline)
             write_control_record(descriptor, {"endpoint": request.endpoint})
@@ -956,11 +1267,23 @@ def history_source_lease(binary):
             else:
                 raise HistorySourceError("lease-ended")
             final_deadline = time.monotonic() + 5
-            history_source_quiet(request, deadline=final_deadline)
-            if history_source_database(guards, database, deadline=final_deadline):
+            if exact:
+                _history_source_24_identity(
+                    request, release, binary, executable, final_deadline
+                )
+            history_source_quiet(
+                request, deadline=final_deadline, **({"exact": True} if exact else {})
+            )
+            if history_source_database(
+                guards, database, deadline=final_deadline, **database_options
+            ):
                 raise HistorySourceError("activity")
         if exit_info != {"code": 0, "forced": False}:
             raise HistorySourceError("cleanup-failed")
+        if exact:
+            history_source_database(
+                guards, database, deadline=final_deadline, **database_options
+            )
 
 
 def history_worker():

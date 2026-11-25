@@ -249,6 +249,15 @@ their checkout ownership distinct from unrelated source and flat installations.
   admission per request, bounded private framing, no restart/replay, and
   reaping/strict EOF before success. Transport reuse is
   post-stop only, never bulk work admission or destination writer reuse.
+  Explicit `sync --persisted` is one Reader attempt on a positively verified
+  already-stopped original container, with the same executable, source,
+  destination, stop-intent and cleanup fences. It neither prepares nor
+  recreates resources and never falls through to ordinary sync on refusal.
+  The ordinary quiet-source lease is separate. Its stock 2.4.0/2.4.1 admission
+  requires positive pre-start stop evidence, the same immutable ordinary
+  resource and verified native process/cleanup. Only positive pre-start
+  ineligibility with clean helper exit can keep the earlier standalone route.
+  Never reuse a destination writer or skip checked exports on timestamp matches.
   Preserve original client nonzero results
   and interruption/unconfirmed-completion warnings; only raw client exit 0 plus
   complete verified archival, recovery cleanup and final stop may return 0 after a

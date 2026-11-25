@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 from contextvars import ContextVar
+from dataclasses import dataclass
 import fcntl
 import hashlib
 import io
@@ -151,6 +152,18 @@ class HistoryWaitTimeout(BoxError):
 
 
 _TTY_PROGRESS = ContextVar("oc_box_tty_progress", default=())
+_QUIET_SYNC_BINDING = ContextVar("oc_box_quiet_sync_binding", default=None)
+
+
+@dataclass
+class _QuietSyncBinding:
+    container: str
+    mounts: tuple
+    engine_env: dict
+    start_requested: bool = False
+    start_verified: bool = False
+
+
 _DEBUG_ONLY_STAGES = frozenset(
     {"history-wait", "history-sync", "history-recovery", "shutdown"}
 )
@@ -845,15 +858,30 @@ def state_root():
     )
 
 
-def atomic_json(path, value, *, durable=False):
+def _json_fragments(value):
+    yield from json.JSONEncoder(indent=2).iterencode(value)
+    yield "\n"
+
+
+def atomic_json(path, value, *, durable=False, checksum=False):
+    """Write the usual JSON bytes, optionally hashing and syncing the write."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     tmp = path.with_name(path.name + "." + uuid.uuid4().hex + ".tmp")
     try:
-        with tmp.open("x", encoding="utf-8") as stream:
+        digest = hashlib.sha256() if checksum else None
+        mode = "xb" if digest is not None else "x"
+        options = {} if digest is not None else {"encoding": "utf-8"}
+        with tmp.open(mode, **options) as stream:
             os.chmod(tmp, 0o600)
-            json.dump(value, stream, indent=2)
-            stream.write("\n")
+            if digest is None:
+                json.dump(value, stream, indent=2)
+                stream.write("\n")
+            else:
+                for fragment in _json_fragments(value):
+                    encoded = fragment.encode("utf-8")
+                    digest.update(encoded)
+                    stream.write(encoded)
             if durable:
                 stream.flush()
                 os.fsync(stream.fileno())
@@ -864,6 +892,7 @@ def atomic_json(path, value, *, durable=False):
                 os.fsync(fd)
             finally:
                 os.close(fd)
+        return digest.hexdigest() if digest is not None else None
     finally:
         tmp.unlink(missing_ok=True)
 
@@ -1048,6 +1077,10 @@ def run(argv, *, capture=False, check=True, private=False, preparation=None, **k
 
 
 def podman(*args, **kwargs):
+    if _QUIET_SYNC_BINDING.get() is not None:
+        # All direct engine calls in the bound ordinary sync use the same local
+        # discovery selectors as admission and the optional quiet helper.
+        kwargs["env"] = maintenance_host_env()
     return run(["podman", *args], **kwargs)
 
 
@@ -1639,7 +1672,17 @@ def start_container(path, data):
             "Project directory identity changed; refusing to reuse the environment."
         )
     check_resource_controllers(data)
-    info = inspect_owned(data)
+    binding = _QUIET_SYNC_BINDING.get()
+    if binding is not None:
+        info = _inspect_sync_container(data, binding.container)
+        if (
+            data["container"] != binding.container
+            or not history_recovery.verified_container_state(info, running=False)
+            or _quiet_sync_mounts(data, info) != binding.mounts
+        ):
+            raise BoxError("The original stopped history source changed before start.")
+    else:
+        info = inspect_owned(data)
     if info is None:
         if data.get("ready"):
             startup_output.line(
@@ -1655,7 +1698,12 @@ def start_container(path, data):
         for m in mounts
     ):
         raise BoxError("Container workspace mount does not match the host registry.")
-    if not info["State"]["Running"]:
+    if binding is not None:
+        binding.start_requested = True
+        podman("start", binding.container, capture=True, private=True, timeout=20)
+        _verify_quiet_sync_source(data, binding)
+        binding.start_verified = True
+    elif not info["State"]["Running"]:
         podman("start", data["container"], capture=True)
     if not data.get("ready"):
         try:
@@ -1985,6 +2033,9 @@ def maintenance_host_env():
     Do not copy the whole host environment and subtract known token names:
     custom secrets, shell/loader hooks, proxies, and pass_env must be excluded.
     """
+    binding = _QUIET_SYNC_BINDING.get()
+    if binding is not None:
+        return binding.engine_env.copy()
     names = (
         "HOME",
         "PATH",
@@ -2101,6 +2152,9 @@ def exec_command(data, command, *, interactive=False, isolated_owner_env=None):
     if live and live["workspace"] == data["id"]:
         forwarded["OPENCODE_PASSWORD"] = live["password"]
     isolated_owner = isolated_owner_env is not None
+    binding = _QUIET_SYNC_BINDING.get()
+    if binding is not None and (interactive or data["container"] != binding.container):
+        raise BoxError("Invalid execution target for the bound history source.")
     if isolated_owner and (
         interactive
         or isolated_owner_env != maintenance_host_env()
@@ -2108,7 +2162,13 @@ def exec_command(data, command, *, interactive=False, isolated_owner_env=None):
         or opencode_compat.major(data.get("opencode_version")) != 2
     ):
         raise BoxError("Invalid isolated Studio owner execution.")
-    environment = isolated_owner_env.copy() if isolated_owner else os.environ.copy()
+    environment = (
+        isolated_owner_env.copy()
+        if isolated_owner
+        else maintenance_host_env()
+        if binding is not None
+        else os.environ.copy()
+    )
     result = ContainerCommand(["podman", "exec", "-i"], environment)
     if interactive and sys.stdin.isatty() and sys.stdout.isatty():
         result.append("-t")
@@ -2132,6 +2192,21 @@ def exec_command(data, command, *, interactive=False, isolated_owner_env=None):
         "OPENCODE_DB",
     }
     for key, value in forwarded.items():
+        if (
+            binding is not None
+            and key not in container_only
+            and (
+                key in environment
+                or key.startswith(
+                    ("CONTAINER_", "CONTAINERS_", "PODMAN_", "STORAGE_", "LD_")
+                )
+                or key
+                in {"DOCKER_HOST", "SSH_AUTH_SOCK", "BASH_ENV", "ENV", "GCONV_PATH"}
+            )
+        ):
+            raise BoxError(
+                "A forwarded setting overlaps the bound history source engine environment."
+            )
         if isolated_owner and key in isolated_owner_env and key not in container_only:
             raise BoxError("Studio owner engine and workspace environments overlap.")
         if isolated_owner and (
@@ -3508,6 +3583,8 @@ def sync_sessions(path, data, *, announce=True):
     )
     report = history_recovery.REPORT.get()
     reason = None
+    if report is not None:
+        report.phase = None
     try:
         with history_reader.export_pass(sys.modules[__name__], data):
             populated = _sync_sessions(path, data, started, source_mode, counts)
@@ -3525,6 +3602,9 @@ def sync_sessions(path, data, *, announce=True):
     finally:
         if report is not None:
             report.verified |= bool(counts["unchanged"] or counts["updated"])
+            report.pending_sessions = counts["pending"]
+            report.updated_sessions = counts["updated"]
+            report.unchanged_sessions = counts["unchanged"]
         lifecycle_output.record(
             "history.pass",
             level="debug",
@@ -3538,8 +3618,69 @@ def sync_sessions(path, data, *, announce=True):
         _announce_history_synced()
 
 
+def _archive_matches_checkpoint(path, archived, checkpoint):
+    """Reuse only an owned, byte-identical private archive, not just its checkpoint."""
+    digest, size = hashlib.sha256(), 0
+    for fragment in _json_fragments(archived):
+        encoded = fragment.encode("utf-8")
+        digest.update(encoded)
+        size += len(encoded)
+    if digest.hexdigest() != checkpoint:
+        return False
+
+    def identity(info):
+        return (
+            info.st_dev,
+            info.st_ino,
+            info.st_uid,
+            info.st_mode,
+            info.st_nlink,
+            info.st_size,
+            info.st_mtime_ns,
+            info.st_ctime_ns,
+        )
+
+    try:
+        before = path.lstat()
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or stat.S_IMODE(before.st_mode) != 0o600
+            or before.st_uid != os.geteuid()
+            or before.st_nlink != 1
+            or before.st_size != size
+        ):
+            return False
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(descriptor, "rb") as stream:
+            original = identity(before)
+            if identity(os.fstat(stream.fileno())) != original:
+                return False
+            existing, remaining = hashlib.sha256(), size
+            while remaining:
+                chunk = stream.read(min(remaining, 65536))
+                if not chunk:
+                    return False
+                existing.update(chunk)
+                remaining -= len(chunk)
+            return (
+                not stream.read(1)
+                and existing.hexdigest() == checkpoint
+                and identity(os.fstat(stream.fileno())) == original
+                and identity(path.lstat()) == original
+            )
+    except OSError:
+        return False
+
+
 def _sync_sessions(path, data, started, source_mode, counts):
+    report = history_recovery.REPORT.get()
+    if report is not None:
+        report.phase = "source inventory"
+    detailed = not lifecycle_output.concise()
+    phase = time.monotonic() if detailed else None
     state = refresh_sessions(path, data)
+    inventory_seconds = time.monotonic() - phase if detailed else 0
+    source_seconds = archive_seconds = destination_seconds = 0
     counts["sessions"] = len(state.get("sessions", []))
     archives = path.parent / "history"
     archives.mkdir(exist_ok=True, mode=0o700)
@@ -3547,6 +3688,9 @@ def _sync_sessions(path, data, started, source_mode, counts):
     for ident in state.get("sessions", []):
         if not valid_session_id(ident):
             raise BoxError("Invalid stored session ID")
+        phase = time.monotonic() if detailed else None
+        if report is not None:
+            report.phase = "source export"
         try:
             exported = export_container_session(data, ident)
         except HistoryPending as exc:
@@ -3554,16 +3698,34 @@ def _sync_sessions(path, data, started, source_mode, counts):
             pending.append(str(exc))
             counts["pending"] += 1
             continue
+        finally:
+            if detailed:
+                source_seconds += time.monotonic() - phase
         counts["exported"] += 1
         counts["interrupted"] += bool(exported.get(opencode_v2_io.INTERRUPTED))
+        if report is not None:
+            report.phase = "private archive"
+        phase = time.monotonic() if detailed else None
         archived = archive_session(exported, data)
         target = archives / (archived["info"]["id"] + ".json")
-        atomic_json(target, archived)
-        digest = hashlib.sha256(target.read_bytes()).hexdigest()
-        state.setdefault("synced", {})
-        if state["synced"].get(ident) == digest:
+        checkpoint = state.setdefault("synced", {}).get(ident)
+        if isinstance(checkpoint, str) and _archive_matches_checkpoint(
+            target, archived, checkpoint
+        ):
+            if detailed:
+                archive_seconds += time.monotonic() - phase
             counts["unchanged"] += 1
             continue
+        digest = atomic_json(target, archived, checksum=True)
+        if detailed:
+            now = time.monotonic()
+            archive_seconds += now - phase
+            phase = now
+        if checkpoint == digest:
+            counts["unchanged"] += 1
+            continue
+        if report is not None:
+            report.phase = "host archive replacement"
         if ident in state.get("host_sessions", {}):
             if opencode_compat.native(archived):
                 guard_host_archive_children(path, data, archived["info"]["id"])
@@ -3587,17 +3749,29 @@ def _sync_sessions(path, data, started, source_mode, counts):
             timeout=60,
         )
         if opencode_compat.native(archived):
+            if report is not None:
+                report.phase = "host archive verification"
             verify_host_archive(path, data, archived)
+        if report is not None:
+            report.phase = "verified checkpoint write"
         state["synced"][ident] = digest
         state.setdefault("host_sessions", {})[ident] = archived["info"]["id"]
         atomic_json(session_file(path), state)
         counts["updated"] += 1
-    if not lifecycle_output.concise():
+        if detailed:
+            destination_seconds += time.monotonic() - phase
+    if detailed:
         startup_output.line(
             f"oc-box: History sync summary: source={source_mode}, "
             f"sessions={counts['sessions']}, exported={counts['exported']}, "
             f"unchanged={counts['unchanged']}, updated={counts['updated']}, "
             f"pending={counts['pending']}, elapsed={time.monotonic() - started:.1f}s.",
+            flush=True,
+        )
+        startup_output.line(
+            "oc-box: History phase timing: "
+            f"inventory={inventory_seconds:.1f}s, exports={source_seconds:.1f}s, "
+            f"private archives={archive_seconds:.1f}s, host verification and checkpoint={destination_seconds:.1f}s.",
             flush=True,
         )
     if counts["interrupted"] and not lifecycle_output.concise():
@@ -3661,6 +3835,16 @@ _HISTORY_FAILURE_DETAILS = {
     "blob-state": "the OpenCode blob store could not be shown safe from native cleanup",
     "host-service-state": "a host OpenCode service registration is present or could not be ruled out",
 }
+_HISTORY_PHASES = frozenset(
+    (
+        "source inventory",
+        "source export",
+        "private archive",
+        "host archive replacement",
+        "host archive verification",
+        "verified checkpoint write",
+    )
+)
 
 
 def _report_history_result(report, *, recovered, error):
@@ -3669,15 +3853,22 @@ def _report_history_result(report, *, recovered, error):
     interruption = " Interrupted work may be incomplete." if report.interrupted else ""
     if reason == "cleanup-unverified":
         level, outcome = "error", "failure"
+        retry = (
+            "before any retry."
+            if report.manual and report.recovery_attempted
+            else "before retrying with 'oc-box sync'."
+        )
         message = (
             f"History sync cleanup could not be verified.{interruption} Container data retained. "
-            "Inspect the workspace on the host before retrying with 'oc-box sync'."
+            "Inspect the workspace on the host " + retry
         )
     elif recovered:
         level, outcome, reason = "warn", "success", "interrupted"
         message = (
             "No history to sync. Interrupted work may be incomplete."
             if report.populated is False
+            else "Persisted history synced. Earlier interrupted work may be incomplete."
+            if report.manual
             else "Available history synced. Interrupted work may be incomplete."
         )
     elif reason is not None:
@@ -3688,15 +3879,51 @@ def _report_history_result(report, *, recovered, error):
         status = "History partially synced" if report.verified else "History not synced"
         detail = _HISTORY_FAILURE_DETAILS.get(reason, "verification did not finish")
         guidance = interruption
+        source_refusal = getattr(error, "history_source_category", None)
+        quiet_refused = (
+            reason == "sync-failed"
+            and report.manual
+            and isinstance(source_refusal, str)
+            and source_refusal in opencode_v2_io.HISTORY_SOURCE_ERRORS
+        )
+        if reason == "sync-failed" and report.phase in _HISTORY_PHASES:
+            guidance += f" Last phase: {report.phase}."
         if reason in ("schema", "unsupported-version"):
             guidance += (
                 " Check for an oc-box update first; update OpenCode if necessary. "
                 "Do not reset or downgrade workspace state."
             )
-        message = (
-            f"{status}: {detail}.{guidance} "
-            "Container data retained; retry with 'oc-box sync'."
-        )
+        if quiet_refused:
+            message = (
+                f"{status}: the private history source refused ({source_refusal}). "
+                "Container data retained; standalone export was not retried. "
+                "For a compatible stopped workspace, use 'oc-box sync --persisted'."
+            )
+        elif reason == "pending" and report.manual:
+            diagnostics = (
+                "oc-box sync --persisted --lifecycle-diagnostics"
+                if report.recovery_attempted
+                else "oc-box sync --lifecycle-diagnostics"
+            )
+            message = (
+                f"{status}: {detail}.{guidance} "
+                f"Newly verified: {report.updated_sessions}; "
+                f"already checkpointed: {report.unchanged_sessions}; "
+                f"pending: {report.pending_sessions}. "
+                "Container data and prior archives retained. Repeating an unchanged "
+                "sync cannot settle unfinished native history. Use "
+                f"'{diagnostics}' for the fixed source reason and timings."
+            )
+        elif report.manual and report.recovery_attempted:
+            message = (
+                f"{status}: {detail}.{guidance} "
+                "Container data retained; ordinary startup was not attempted."
+            )
+        else:
+            message = (
+                f"{status}: {detail}.{guidance} "
+                "Container data retained; retry with 'oc-box sync'."
+            )
     elif report.populated is not None:
         level, outcome = "info", "success"
         reason = None if report.populated else "not-needed"
@@ -3802,11 +4029,185 @@ def launch(path, data, args, *, image_preview_snapshot=None):
         raise BoxError(str(exc)) from exc
 
 
+def _launch_persisted_sync(path, data, version):
+    """Run exactly one verified snapshot; never fall back to ordinary startup."""
+    check_private_output()
+    box = sys.modules[__name__]
+    source = history_recovery.stopped_source(
+        box, path, data, version, guarded=runtime_safeguard.current()
+    )
+    report = history_recovery.Report(
+        attempted=True,
+        recovery_attempted=True,
+        manual=True,
+    )
+    token = history_recovery.REPORT.set(report)
+    saved, error = False, None
+    try:
+        saved = history_recovery.recover(box, path, data, source, already_stopped=True)
+    except BaseException as exc:
+        error = exc
+        if report.reason != "cleanup-unverified":
+            report.reason = _history_failure_reason(exc)
+        raise
+    finally:
+        history_recovery.REPORT.reset(token)
+        _report_history_result(report, recovered=saved, error=error)
+        if (
+            error is not None
+            and report.reason == "cleanup-unverified"
+            and not lifecycle_output.concise()
+        ):
+            with contextlib.suppress(OSError, ValueError):
+                startup_output.line(
+                    "oc-box: Persisted history cleanup could not be verified. "
+                    "Container data retained; inspect the workspace on the host before any retry.",
+                    file=sys.stderr,
+                    flush=True,
+                )
+    if saved and not lifecycle_output.concise():
+        _announce_history_synced(recovered=True)
+    return 0 if saved else 1
+
+
+def _inspect_sync_container(data, container, *, resolve_name=False, engine_env=None):
+    """Bounded local-engine observation; only initial admission resolves a name."""
+    try:
+        result = podman(
+            "container",
+            "inspect",
+            container,
+            capture=True,
+            private=True,
+            check=False,
+            env=maintenance_host_env() if engine_env is None else engine_env,
+            timeout=5,
+        )
+        if result.returncode or len(result.stdout) > 1024 * 1024:
+            return None
+        rows = json.loads(result.stdout)
+        if not isinstance(rows, list) or len(rows) != 1:
+            return None
+        info = rows[0]
+        if (
+            isinstance(info, dict)
+            and isinstance(info.get("Id"), str)
+            and re.fullmatch(r"[a-f0-9]{64}", info["Id"])
+            and (resolve_name or info["Id"] == container)
+            and info.get("Config", {}).get("Labels", {}).get(LABEL) == data["id"]
+        ):
+            return info
+    except (
+        BoxError,
+        OSError,
+        ValueError,
+        KeyError,
+        AttributeError,
+        subprocess.SubprocessError,
+    ):
+        return None
+    return None
+
+
+def _quiet_sync_mounts(data, info):
+    mounts = info.get("Mounts") if isinstance(info, dict) else None
+    host = info.get("HostConfig") if isinstance(info, dict) else None
+    if (
+        not isinstance(mounts, list)
+        or len(mounts) != 2
+        or not all(isinstance(item, dict) for item in mounts)
+        or not isinstance(host, dict)
+        or host.get("Devices") not in (None, [])
+    ):
+        return None
+    project = container_project(data)
+    if not any(
+        item.get("Destination") == project
+        and item.get("Source") == data["project"]
+        and item.get("Type") == "bind"
+        for item in mounts
+    ):
+        return None
+    for item in mounts:
+        source = item.get("Source")
+        if (
+            item.get("Destination") == data["home"]
+            and item.get("Type") == "volume"
+            and item.get("Name") == data["home_volume"]
+            and isinstance(source, str)
+            and source.startswith("/")
+        ):
+            return data["project"], project, source, data["home"]
+    return None
+
+
+def _capture_quiet_sync_binding(data):
+    """Pin the original already-stopped resource before ordinary startup."""
+    engine_env = maintenance_host_env()
+    info = _inspect_sync_container(
+        data, data["container"], resolve_name=True, engine_env=engine_env
+    )
+    if not history_recovery.verified_container_state(info, running=False):
+        return None
+    mounts = _quiet_sync_mounts(data, info)
+    if mounts is None:
+        return None
+    return _QuietSyncBinding(info["Id"], mounts, engine_env)
+
+
+def _verify_quiet_sync_source(data, binding):
+    info = _inspect_sync_container(data, binding.container)
+    if not history_recovery.verified_container_state(info, running=True):
+        raise BoxError(
+            "The original history source no longer has a verified running state."
+        )
+    try:
+        # This observes a normally started workspace only. The legacy
+        # entrypoint still cannot be used for a post-stop recovery restart.
+        signature = history_recovery.live_attachment_mounts(
+            sys.modules[__name__], data, info
+        )
+    except (history_recovery.RecoveryError, KeyError, TypeError):
+        signature = None
+    if signature != binding.mounts or _quiet_sync_mounts(data, info) != binding.mounts:
+        raise BoxError(
+            "The original history source resources changed; no alternate source was used."
+        )
+
+
+def _stop_quiet_sync_source(data):
+    container = data["container"]
+    info = _inspect_sync_container(data, container)
+    if history_recovery.verified_container_state(info, running=False):
+        return
+    if not history_recovery.verified_container_state(info, running=True):
+        raise BoxError(
+            "The original history source container state could not be verified."
+        )
+    podman(
+        "stop",
+        "--time",
+        "10",
+        container,
+        capture=True,
+        private=True,
+        env=maintenance_host_env(),
+        timeout=20,
+    )
+    info = _inspect_sync_container(data, container)
+    if not history_recovery.verified_container_state(info, running=False):
+        raise BoxError(
+            "The original history source container stop could not be verified."
+        )
+
+
 def launch_environment(path, data, args, *, image_preview_snapshot=None):
     version = getattr(args, "_opencode_release", None)
     if version is None:
         with loading_stage("Checking OpenCode version", stage="version"):
             version = detect_opencode_release()
+    if args.command == "sync" and getattr(args, "persisted", False):
+        return _launch_persisted_sync(path, data, version)
     validate_host_file_open(args, version, data)
     if getattr(args, "host_drop", None) is True:
         validate_host_drop(version)
@@ -3823,6 +4224,21 @@ def launch_environment(path, data, args, *, image_preview_snapshot=None):
     if opencode_compat.major(version) == 2 or credentials.has_unlocked_values():
         check_private_output()
     guarded = runtime_safeguard.current()
+    quiet_24_candidate = (
+        args.command == "sync"
+        and not guarded
+        and version in opencode_v2_io.HISTORY_SOURCE_24
+        and data.get("opencode_version") == version
+        and data.get("ready") is True
+        and not data.get("podman_args")
+        and not data.get("devices")
+        and not data.get("restore_incomplete")
+        and not any(
+            name.startswith(("CONTAINER_", "CONTAINERS_", "PODMAN_", "STORAGE_"))
+            or name == "DOCKER_HOST"
+            for name in os.environ
+        )
+    )
     if guarded:
         guarded.begin(sys.modules[__name__], data)
     if data.get("opencode_version") != version:
@@ -3836,6 +4252,10 @@ def launch_environment(path, data, args, *, image_preview_snapshot=None):
     recovered = False
     history_started = False
     manual_populated = False
+    quiet_binding = _capture_quiet_sync_binding(data) if quiet_24_candidate else None
+    manual_source = (
+        {**data, "container": quiet_binding.container} if quiet_binding else None
+    )
     manual_closing_source = client_returned = owner_closed = False
     error, owner = None, None
     stop_token, source, cleanup_data = None, None, data
@@ -3860,14 +4280,15 @@ def launch_environment(path, data, args, *, image_preview_snapshot=None):
         except OSError:
             pass
     concise = lifecycle_output.concise()
-    report = history_recovery.Report()
+    report = history_recovery.Report(manual=args.command == "sync")
     report_token = history_recovery.REPORT.set(report)
+    binding_token = _QUIET_SYNC_BINDING.set(quiet_binding)
     try:
         with loading_stage(f"Starting {data['distro']} container", stage="container"):
             initial_info = (
                 guarded.start(sys.modules[__name__], data)
                 if guarded
-                else start_container(path, data)
+                else start_container(path, manual_source or data)
             )
         migration = runtime_safeguard.entrypoint_migration
         if guarded and migration.needs_bootstrap(data):
@@ -3885,7 +4306,7 @@ def launch_environment(path, data, args, *, image_preview_snapshot=None):
         ):
             prepare_runtime(
                 path,
-                data,
+                manual_source or data,
                 version,
                 **({"history_only": True} if args.command == "sync" else {}),
                 **(
@@ -3900,13 +4321,19 @@ def launch_environment(path, data, args, *, image_preview_snapshot=None):
         if args.command == "sync":
             history_started = True
             report.attempted = True
+            if quiet_binding is not None:
+                _verify_quiet_sync_source(manual_source, quiet_binding)
             with loading_stage("Syncing session history", stage="history-sync"):
                 with (
-                    workspace_service.history_source(sys.modules[__name__], data)
+                    workspace_service.history_source(
+                        sys.modules[__name__],
+                        manual_source or data,
+                        **({"stopped_source": True} if manual_source else {}),
+                    )
                     if not guarded and opencode_compat.major(version) == 2
                     else contextlib.nullcontext()
                 ):
-                    sync_sessions(path, data, announce=False)
+                    sync_sessions(path, manual_source or data, announce=False)
                     manual_closing_source = True
                 manual_closing_source = False
                 manual_populated = bool(session_state(path).get("sessions"))
@@ -4030,10 +4457,19 @@ def launch_environment(path, data, args, *, image_preview_snapshot=None):
     finally:
         history_recovery.REPORT.reset(report_token)
         try:
-            if cleanup_data is data:
+            if cleanup_data is data and (
+                quiet_binding is None or quiet_binding.start_requested
+            ):
                 try:
                     with loading_stage("Stopping container", stage="shutdown"):
-                        stop_container(cleanup_data)
+                        if manual_source is not None:
+                            _stop_quiet_sync_source(manual_source)
+                            if not quiet_binding.start_verified:
+                                raise BoxError(
+                                    "The bound history source start could not be verified."
+                                )
+                        else:
+                            stop_container(cleanup_data)
                 except BaseException as exc:
                     error = exc
                     report.reason = "cleanup-unverified"
@@ -4059,7 +4495,7 @@ def launch_environment(path, data, args, *, image_preview_snapshot=None):
                             file=sys.stderr,
                         )
                     raise
-            else:
+            elif cleanup_data is not data:
                 try:
                     with (
                         loading_stage("Stopping container", stage="shutdown"),
@@ -4085,6 +4521,7 @@ def launch_environment(path, data, args, *, image_preview_snapshot=None):
                         error = exc
                         raise
         finally:
+            _QUIET_SYNC_BINDING.reset(binding_token)
             if report.attempted:
                 _report_history_result(report, recovered=recovered, error=error)
                 if (
@@ -4629,6 +5066,11 @@ def parser():
         "--workspace",
         metavar="ID",
         help="select a registered workspace by ID; takes precedence over --project",
+    )
+    result.add_argument(
+        "--persisted",
+        action="store_true",
+        help="with sync, use only a guarded snapshot of an existing stopped workspace",
     )
     result.add_argument(
         "--distro",
@@ -5194,6 +5636,32 @@ def _stop_selected(path, data):
 
 
 def _main_command(args, argv):
+    if getattr(args, "persisted", False) and (
+        args.command != "sync"
+        or args.status
+        or args.about
+        or args.version
+        or args.json
+        or any(
+            (
+                args.distro,
+                args.cpus,
+                args.memory,
+                args.pids_limit is not None,
+                args.device,
+                args.podman_arg,
+                args.clear_devices,
+                args.clear_podman_args,
+                args.new,
+                args.resume,
+                args.import_session,
+                args.model,
+            )
+        )
+    ):
+        raise BoxError(
+            "--persisted applies only to sync without setup, resource or session changes."
+        )
     owning_start_option = next(
         (
             option
@@ -5626,7 +6094,11 @@ def _main_command(args, argv):
             _validate_web_release(args, args._opencode_release)
     with loading_stage("Checking rootless Podman", stage="backend"):
         check_backend(
-            **({"env": maintenance_host_env()} if args.command == "terminal" else {}),
+            **(
+                {"env": maintenance_host_env()}
+                if args.command == "terminal" or getattr(args, "persisted", False)
+                else {}
+            ),
             **(
                 {"feature": "launch"}
                 if args.command in ("start", "reset", "sync", "web")
@@ -5634,7 +6106,8 @@ def _main_command(args, argv):
             ),
         )
     image_preview_snapshot = None
-    state_root().mkdir(parents=True, exist_ok=True, mode=0o700)
+    if not getattr(args, "persisted", False):
+        state_root().mkdir(parents=True, exist_ok=True, mode=0o700)
     path, data = (
         web_selection
         if web_selection is not None
@@ -5868,6 +6341,27 @@ def _locked_workspace_command(path, data, args, launch_context, image_preview_sn
         if args.command in ("start", "reset", "sync", "web", "terminal", "purge")
         else None
     )
+    if args.command == "sync" and getattr(args, "persisted", False):
+        if migration.RECEIPT in data and record is None:
+            raise BoxError(
+                "The replacement container has not completed guarded runtime enrollment. "
+                "Persisted history did not start it."
+            )
+        if record is not None:
+            launch_context.enter_context(
+                runtime_safeguard.admit(
+                    sys.modules[__name__],
+                    path,
+                    data,
+                    args,
+                    record,
+                    engine_env=maintenance_host_env(),
+                )
+            )
+        version = getattr(args, "_opencode_release", None) or detect_opencode_release(
+            isolated=True
+        )
+        return _launch_persisted_sync(path, data, version)
     guard = (
         record is not None
         or getattr(args, "runtime_guard", False)
