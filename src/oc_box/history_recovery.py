@@ -51,6 +51,7 @@ CAPTURE_REFUSALS = frozenset(
         "workspace-not-ready",
         "incomplete-restore",
         "custom-podman-options",
+        "guarded-devices",
         "invalid-container",
         "ownership",
         "nonpassive-container",
@@ -404,6 +405,8 @@ def capture(box, data, info, token, *, refusal=None, runtime_digest=None):
         return reject("incomplete-restore")
     if data.get("podman_args"):
         return reject("custom-podman-options")
+    if runtime_digest is not None and data.get("devices"):
+        return reject("guarded-devices")
     if (
         not isinstance(info, dict)
         or not isinstance(info.get("Id"), str)

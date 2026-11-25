@@ -27,6 +27,7 @@ RUNTIME_FILES = (
     "native_runtime_guard.py",
     "runtime_safeguard.py",
     "entrypoint_migration.py",
+    "guarded_devices.py",
     "workspace_service.py",
     "web_attachments.py",
     "web_attachments.js",

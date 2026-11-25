@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import socket
+import struct
 import subprocess
 import sys
 import tempfile
@@ -2121,6 +2122,102 @@ class WorkspaceServiceTests(unittest.TestCase):
                 command.environment,
                 {**pinned, "OPENCODE_PASSWORD": self.connection["password"]},
             )
+
+    def test_device_attachment_pins_engine_for_client_and_relay_only_during_lease(self):
+        data = {**self.data, "devices": ["/dev/dri/renderD128"]}
+        engine = {"PATH": "/usr/bin", "CONTAINERS_CONF": "/synthetic/local.conf"}
+        ident, digest = "b" * 64, "c" * 64
+        record = SimpleNamespace(
+            ready=True,
+            version="2.2.6",
+            volume=data["home_volume"],
+            container=ident,
+            digest=digest,
+        )
+        connection = {**self.connection, "_runtime_container": "spoofed"}
+        stream = Mock()
+        stream.getsockopt.return_value = struct.pack(
+            "3i", os.getpid(), os.getuid(), os.getgid()
+        )
+        guard = box.runtime_safeguard
+        with (
+            patch.object(service.socket, "socket", return_value=stream),
+            patch.object(service, "_legacy_attachment", return_value=connection),
+            patch.object(service, "validate_workspace") as validate,
+            patch.object(guard, "load", return_value=record),
+            patch.object(guard, "_inspect", return_value=(ident, (), ())) as inspect,
+            patch.object(
+                guard.entrypoint_migration, "engine_environment", return_value=engine
+            ),
+        ):
+            with service.attach(box, self.path, data) as attached:
+                self.assertEqual(attached["_runtime_container"], ident)
+                self.assertNotIn("CONTAINERS_CONF", repr(attached))
+                native = service.client_command(box, data, attached, ["/bin/true"])
+                self.assertEqual(native[:3], ["podman", "--remote=false", "exec"])
+                self.assertEqual(
+                    native.environment,
+                    {**engine, "OPENCODE_PASSWORD": self.connection["password"]},
+                )
+                gateway = service.Gateway(box, data, attached)
+                relay = service.relay_command(box, data, 12345, **gateway._device_relay)
+                self.assertEqual(relay[:3], ["podman", "--remote=false", "exec"])
+                self.assertIn(ident, relay)
+                self.assertEqual(relay.environment, engine)
+
+                class Request:
+                    def __enter__(self):
+                        return self
+
+                    def __exit__(self, *_):
+                        pass
+
+                    def settimeout(self, _):
+                        pass
+
+                    def recv(self, _):
+                        return b"GET /sessions HTTP/1.1\r\nHost: localhost\r\n\r\n"
+
+                worker_commands, worker_scope = [], []
+                child = Mock(stdin=io.BytesIO(), stdout=io.BytesIO())
+                child.poll.return_value = 0
+
+                def respond(instance, *_):
+                    worker_commands.append(
+                        service.client_command(
+                            box, data, instance.connection, ["/bin/true"]
+                        )
+                    )
+                    return True
+
+                def run_worker():
+                    worker_scope.append(service._DEVICE_LEASE.get())
+                    gateway.forward(Request())
+                    worker_scope.append(service._DEVICE_LEASE.get())
+
+                self.assertTrue(gateway.capacity.acquire(blocking=False))
+                with (
+                    patch.object(
+                        service.subprocess, "Popen", return_value=child
+                    ) as relay_process,
+                    patch.object(web_sessions, "respond", side_effect=respond),
+                ):
+                    worker = threading.Thread(target=run_worker)
+                    worker.start()
+                    worker.join(timeout=3)
+                self.assertFalse(worker.is_alive())
+                self.assertEqual(worker_scope, [None, None])
+                self.assertEqual(len(worker_commands), 1)
+                self.assertEqual(worker_commands[0].environment, native.environment)
+                self.assertEqual(relay_process.call_args.kwargs["env"], engine)
+            self.assertIsNone(service._DEVICE_LEASE.get())
+            with self.assertRaisesRegex(box.BoxError, "local device engine binding"):
+                service.client_command(box, data, connection, ["/bin/true"])
+        validate.assert_called_once_with(box, self.path, data, engine_env=engine)
+        inspect.assert_called_once_with(
+            box, self.path, data, running=True, attach_only=True, engine_env=engine
+        )
+        stream.close.assert_called_once()
 
     def test_info_refresh_holds_only_a_temporary_metadata_lease(self):
         owner = service.Owner(box, self.path, self.data)

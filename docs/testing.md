@@ -115,6 +115,16 @@ store selector and check that all subprocesses retain it without leaking it
 through the owner socket. Those regressions do not replace the exact-source
 host migration and history gates.
 
+For guarded saved-device compatibility, test the exact registered and
+effective bindings on a private rootless overlay store. Normal inspect may
+omit rootless device binds; use the documented `podman generate spec` device
+list for freshly created candidates and the verified OCI bundle for devices
+already used by a running or stopped container. A scoped creation override
+only suppresses ambient device defaults; it must not replace an existing
+override. Test source/candidate mismatches, missing nodes, alternate
+permissions, and unchanged Reader restrictions. A harmless synthetic device
+fixture does not establish accelerator/GPU or host driver compatibility.
+
 For an already-fenced `rlimit type 6` failure, the optional
 `tools/probe_legacy_start.py --container NAME` diagnostic inspects the affected
 container on its rootless Podman host and tests passive startup in a disposable

@@ -237,6 +237,16 @@ their checkout ownership distinct from unrelated source and flat installations.
   request and host-open workers; a thread does not inherit admission context.
   Never publish engine selectors in socket replies or forward provider secrets
   to the Reader, tab probes, or mount rechecks.
+- `guarded_devices.py`: narrow owning admission for previously registered
+  direct accelerator/render character nodes only. Require local rootless
+  overlay inspection, declared Podman Specgen devices and effective OCI
+  bindings once booted. Do not trust saved create argv alone. A staged
+  replacement suppresses ambient device defaults only during its create,
+  refuses existing overrides, and retains exact node identities and the
+  original container through passive access checks. No device I/O, host
+  policy changes, broad mapping forms, or Reader eligibility expansion.
+  Attach/relay/stop stay on the verified local engine, with stop independent
+  of device availability. Synthetic device tests are not hardware acceptance.
 - `history_recovery.py` / `history_reader.py` / `workspace_control.py`: one bounded
   persisted-history snapshot after audited live timeouts: shell-only on native
   2.2.6/2.2.7; shell/subagent on canonical stable 2.3.x. Never a live readiness

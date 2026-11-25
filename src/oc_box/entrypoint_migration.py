@@ -11,12 +11,14 @@ import sys
 
 if __package__:
     from . import (
+        guarded_devices,
         history_recovery,
         startup_output,
         workspace_control,
         workspace_identity,
     )
 else:
+    import guarded_devices
     import history_recovery
     import startup_output
     import workspace_control
@@ -90,6 +92,19 @@ class Unverified(ValueError):
 def _require(condition):
     if not condition:
         raise Unverified
+
+
+def _device_binding(nodes):
+    if nodes:
+        return hashlib.sha256(
+            json.dumps(nodes, separators=(",", ":")).encode()
+        ).hexdigest()
+    return None
+
+
+def _require_same_devices(record, binding):
+    if record.get("device_binding") != binding:
+        raise guarded_devices.DeviceError("changed")
 
 
 def _hash(value):
@@ -339,7 +354,8 @@ class Conversion:
         self.name = data["container"]
         self.home = data["home_volume"]
 
-    def _run(self, *args, check=True, timeout=15):
+    def _run(self, *args, check=True, timeout=15, env=None):
+        selected = self.env if env is None else env
         return self.box.podman(
             "--remote=false",
             *args,
@@ -348,7 +364,7 @@ class Conversion:
             check=check,
             timeout=timeout,
             stdin=subprocess.DEVNULL,
-            **({"env": self.env} if self.env is not None else {}),
+            **({"env": selected} if selected is not None else {}),
         )
 
     def _object(self, kind, selector, *, missing=False):
@@ -408,6 +424,7 @@ class Conversion:
         state = ("exited", "stopped") if legacy else ("created", "configured")
         _require(_hash(item["Id"]) and _stopped(item, state))
         config, host = item["Config"], item["HostConfig"]
+        saved = guarded_devices.paths(self.data)
         _require(
             config["Labels"].get(_MANAGED) == "true"
             and config["User"] == "0:0"
@@ -419,7 +436,6 @@ class Conversion:
                 host.get(key)
                 for key in (
                     "AutoRemove",
-                    "Devices",
                     "DeviceRequests",
                     "Tmpfs",
                     "PortBindings",
@@ -428,6 +444,7 @@ class Conversion:
                     "Links",
                 )
             )
+            and (saved or not host.get("Devices"))
             and not item.get("Dependencies")
             and not item.get("IsInfra")
             and not item.get("IsService")
@@ -441,6 +458,13 @@ class Conversion:
             else history_recovery.passive_workspace_mounts
         )
         mounts = check(self.box, self.data, item)
+        nodes = (
+            guarded_devices.verify(
+                self.box, self.data, item, self.env, fresh=not legacy
+            )
+            if saved
+            else ()
+        )
         _require(
             (legacy or no_copy_binding(self.data, item))
             and all(
@@ -476,12 +500,16 @@ class Conversion:
         # and a pending transaction from the old profile stays unadoptable.
         options = ["inherit-process-limits", *(host.get(key) for key in _OPTIONS)]
         options.append(sorted(item.get("EffectiveCaps") or ()))
+        if saved:
+            # Keep the existing device-free transaction profile byte-for-byte.
+            options.append({"verified_devices": list(saved)})
         return (
             item,
             mounts,
             hashlib.sha256(
                 json.dumps(options, sort_keys=True, separators=(",", ":")).encode()
             ).hexdigest(),
+            _device_binding(nodes),
         )
 
     def _persist(self, **record):
@@ -501,16 +529,16 @@ class Conversion:
                 )
             )
 
-    def _mutate(self, *args, timeout=15):
+    def _mutate(self, *args, timeout=15, env=None):
         with workspace_control.admission(self.path, timeout=15):
             self._unchanged()
-            return self._run(*args, timeout=timeout)
+            return self._run(*args, timeout=timeout, env=env)
 
     @staticmethod
     def _validated_record(record):
         _require(
             type(record) is dict
-            and set(record)
+            and (set(record) - {"device_binding"})
             == {
                 "token",
                 "source",
@@ -525,6 +553,7 @@ class Conversion:
             and _NONCE.fullmatch(record["token"])
             and all(_hash(record[key]) for key in ("source", "base", "profile"))
             and _stamp(record["volume"])
+            and ("device_binding" not in record or _hash(record["device_binding"]))
             and (record["image"] is None or _hash(record["image"]))
             and (record["candidate"] is None or _hash(record["candidate"]))
             and (
@@ -542,7 +571,7 @@ class Conversion:
 
     def _begin(self, source_id):
         self._project()
-        item, mounts, profile = self._container(self.name, legacy=True)
+        item, mounts, profile, devices = self._container(self.name, legacy=True)
         _require(item["Id"] == source_id and item["Name"] == self.name)
         self._users(source_id)
         volume = self._volume(mounts[2])
@@ -556,6 +585,7 @@ class Conversion:
             image=None,
             candidate=None,
             mode="snapshot",
+            **({"device_binding": devices} if devices is not None else {}),
         )
 
     def _snapshot(self, record, tag, *, rebuild):
@@ -616,7 +646,8 @@ class Conversion:
         candidate = self._container(lookup, legacy=False, missing=True)
         ids = []
         if source:
-            item, mounts, profile = source
+            item, mounts, profile, devices = source
+            _require_same_devices(record, devices)
             _require(
                 item["Id"] == record["source"]
                 and item["Name"] in (self.name, retired)
@@ -626,7 +657,8 @@ class Conversion:
             )
             ids.append(item["Id"])
         if candidate:
-            item, mounts, profile = candidate
+            item, mounts, profile, devices = candidate
+            _require_same_devices(record, devices)
             _require(
                 record["image"]
                 and _image(item["Image"]) == record["image"]
@@ -703,13 +735,17 @@ class Conversion:
             # this exact volume; non-forced removal cannot detach it. This
             # works with engines predating :nocreate. Keep the original
             # through the replacement's verified passive startup as well.
-            created = self._mutate(
-                *self.box.container_create_args(
-                    {**self.data, "container": stage, "image": record["image"]},
-                    self.data["project"],
-                    conversion=record["token"],
+            with guarded_devices.creation_env(
+                self.env, guarded_devices.paths(self.data)
+            ) as env:
+                created = self._mutate(
+                    *self.box.container_create_args(
+                        {**self.data, "container": stage, "image": record["image"]},
+                        self.data["project"],
+                        conversion=record["token"],
+                    ),
+                    env=env,
                 )
-            )
             source, candidate = self._observe(record)
             _require(candidate and candidate[0]["Id"] == created.stdout.strip())
         if not record["candidate"]:
@@ -794,6 +830,18 @@ class Conversion:
         mounts = history_recovery.passive_workspace_mounts(
             self.box, self.data, canonical
         )
+        devices = (
+            guarded_devices.verify(
+                self.box,
+                self.data,
+                canonical,
+                self.env,
+                fresh=not after_start and fresh_replacement(self.data, canonical),
+            )
+            if guarded_devices.paths(self.data)
+            else ()
+        )
+        _require_same_devices(record, _device_binding(devices))
         _require(
             len(canonical["Mounts"]) == 2
             and no_copy_binding(self.data, canonical)
@@ -811,7 +859,8 @@ class Conversion:
             _require(state["authorized"] and alias is None)
             self._users(candidate_id)
         else:
-            item, mounts, profile = source
+            item, mounts, profile, devices = source
+            _require_same_devices(record, devices)
             _require(
                 item["Id"] == record["source"]
                 and item["Name"] == parked
@@ -860,6 +909,8 @@ def verify_retirement(
             conversion.retire_started(candidate_id)
         else:
             conversion._verify_retirement(candidate_id)
+    except guarded_devices.DeviceError as exc:
+        raise box.BoxError(f"{exc} {RETIRE_PENDING}") from None
     except (
         OSError,
         ValueError,
@@ -934,7 +985,14 @@ def stop_staged(box, data, *, env=None, guarded_candidate=None):
 
 def convert(box, path, data, token, source_id, *, rebuild=False, env=None):
     try:
+        if guarded_devices.paths(data):
+            env = env if env is not None else engine_environment(box)
+            if "CONTAINERS_CONF_OVERRIDE" in env:
+                raise guarded_devices.DeviceError("override")
         Conversion(box, path, data, token, env=env).perform(source_id, rebuild=rebuild)
+    except guarded_devices.DeviceError as exc:
+        detail = f" {PENDING}" if FIELD in data else ""
+        raise box.BoxError(f"{exc}{detail}") from None
     except box.BoxError as exc:
         if str(exc).startswith(
             ("Stop was requested", OFFER_REBUILD, "Container OS rebuild")

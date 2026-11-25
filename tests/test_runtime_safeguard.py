@@ -103,12 +103,71 @@ class RuntimeSafeguardTests(unittest.TestCase):
             with self.subTest(candidate=item):
                 self.assertIs(guard.version_upgrade(OLD, item), expected)
 
+    def test_resource_refusals_identify_the_specific_fix_before_engine_access(self):
+        cases = (
+            (
+                {"restore_incomplete": True, "ready": False},
+                {},
+                "restore.*fresh destination",
+            ),
+            ({"ready": False}, {}, "completed setup.*status --table"),
+            ({"distro": "alpine"}, {}, "do not support Alpine"),
+            (
+                {"podman_args": ["--group-add=keep-groups"]},
+                {},
+                "saved custom Podman options",
+            ),
+            ({}, {"clear_devices": True}, "Retry without --device or --clear-devices"),
+            (
+                {},
+                {"podman_arg": ["--group-add=keep-groups"]},
+                "Retry without --podman-arg",
+            ),
+            ({}, {"import_session": "ses_test"}, "Retry without --import-session"),
+            ({"devices": ["some.cdi/device=node"]}, {}, "saved plain accelerator"),
+        )
+        for data, flags, expected in cases:
+            with (
+                self.subTest(data=data, flags=flags),
+                patch.object(guard, "_inspect") as inspect,
+            ):
+                with self.assertRaisesRegex(box.BoxError, expected):
+                    with guard.admit(
+                        box, self.path, {**self.data, **data}, self.args(**flags), None
+                    ):
+                        self.fail("unsupported setup entered admission")
+                inspect.assert_not_called()
+
+    def test_saved_device_nodes_use_pinned_admission_without_option_changes(self):
+        data = {**self.data, "devices": ["/dev/accel/accel0", "/dev/dri/renderD128"]}
+        box.atomic_json(self.path, data)
+        engine = {
+            "PATH": "/usr/bin",
+            "CONTAINERS_STORAGE_CONF": "/synthetic/storage.conf",
+        }
+        with (
+            self.synthetic_admission(version=OLD),
+            patch.object(
+                guard.entrypoint_migration, "engine_environment", return_value=engine
+            ),
+        ):
+            with guard.admit(
+                box, self.path, data, self.args(), self.record
+            ) as admission:
+                self.assertIs(admission.engine_env, engine)
+                guard._inspect.assert_called_once_with(
+                    box, self.path, data, running=False, engine_env=engine
+                )
+        self.assertEqual(box.read_json(self.path)["devices"], data["devices"])
+
     def test_retirement_requires_successful_start_and_mount_access(self):
         marker = guard.entrypoint_migration.RETIRE
-        for failure in ("start", "inconsistent", "mount", None):
+        for failure in ("start", "inconsistent", "mount", "device-access", None):
             with self.subTest(failure=failure), tempfile.TemporaryDirectory() as name:
                 path = Path(name) / "workspace.json"
                 data = {**self.data, marker: {"synthetic": True}}
+                if failure == "device-access":
+                    data["devices"] = ["/dev/accel/accel0"]
                 box.atomic_json(path, data)
                 token = workspace_control.capture(path)
                 env = {
@@ -148,6 +207,10 @@ class RuntimeSafeguardTests(unittest.TestCase):
                     self.assertIn(CONTAINER, command)
                     self.assertIn("/bin/sh", command)
                     self.assertNotIn("/usr/bin/python3", command)
+                    if command[-1] in data.get("devices", []):
+                        self.assertFalse(kwargs["check"])
+                        calls.append("device-access")
+                        return subprocess.CompletedProcess(command, 1)
                     self.assertEqual(
                         list(command[-2:]), [data["project"], data["home"]]
                     )
@@ -194,6 +257,8 @@ class RuntimeSafeguardTests(unittest.TestCase):
                         message = (
                             "staged replacement running"
                             if failure == "inconsistent"
+                            else "saved device nodes"
+                            if failure == "device-access"
                             else failure
                         )
                         with self.assertRaisesRegex(box.BoxError, message):
@@ -206,13 +271,64 @@ class RuntimeSafeguardTests(unittest.TestCase):
                     if failure in ("start", "inconsistent")
                     else ["verify-parked", "start", "mount"]
                     if failure == "mount"
+                    else ["verify-parked", "start", "mount", "device-access"]
+                    if failure == "device-access"
                     else ["verify-parked", "start", "mount", "retire"],
                 )
+                if failure == "device-access":
+                    self.assertIn(marker, box.read_json(path))
                 if failure in ("start", "inconsistent"):
                     with self.assertRaisesRegex(
                         workspace_control.ControlError, "uncertain-control"
                     ):
                         workspace_control.require_certain(path)
+
+    def test_device_stop_pins_store_without_requiring_device_access(self):
+        data = {**self.data, "devices": ["/dev/accel/accel0"]}
+        engine = {
+            "PATH": "/usr/bin",
+            "CONTAINERS_STORAGE_CONF": "/synthetic/local.conf",
+        }
+        running = {"Id": CONTAINER, "State": {"Running": True}}
+        stopped = {
+            "Id": CONTAINER,
+            "State": {
+                "Running": False,
+                "Paused": False,
+                "Restarting": False,
+                "Status": "exited",
+                "Pid": 0,
+                "ConmonPid": 0,
+            },
+        }
+        with (
+            patch.object(box, "find_workspace", return_value=(self.path, data)),
+            patch.object(guard, "load", return_value=self.record),
+            patch.object(
+                guard.entrypoint_migration, "engine_environment", return_value=engine
+            ),
+            patch.object(guard.entrypoint_migration, "require_local_engine") as local,
+            patch.object(
+                box, "inspect_owned", side_effect=[running, running, stopped]
+            ) as inspect,
+            patch.object(box, "podman") as podman,
+            patch.object(guard.guarded_devices, "verify") as devices,
+        ):
+            box._stop_selected(self.path, data, admitted=True)
+        local.assert_called_once_with(box, engine)
+        devices.assert_not_called()
+        self.assertEqual(inspect.call_count, 3)
+        for call in inspect.call_args_list:
+            self.assertEqual(call.kwargs, {"local_only": True, "env": engine})
+        podman.assert_called_once_with(
+            "--remote=false",
+            "stop",
+            "--time",
+            "10",
+            CONTAINER,
+            capture=True,
+            env=engine,
+        )
 
     def test_explicit_stop_during_retirement_targets_only_verified_replacement(self):
         migration = guard.entrypoint_migration

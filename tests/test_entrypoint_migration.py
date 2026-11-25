@@ -153,7 +153,7 @@ class FixturePodman:
             (row for row in self.containers.values() if row["Name"] == selector), None
         )
 
-    def __call__(self, *args, capture, private, check, timeout, stdin):
+    def __call__(self, *args, capture, private, check, timeout, stdin, env=None):
         assert args[0] == "--remote=false"
         args = args[1:]
         assert capture and private and stdin == subprocess.DEVNULL
@@ -227,6 +227,10 @@ class FixturePodman:
             self.images[tag] = self.images[_SNAPSHOT] = image
             stdout = image["Id"] + "\n"
         elif action == "create":
+            self.create_override = (env or {}).get("CONTAINERS_CONF_OVERRIDE")
+            self.create_override_content = (
+                Path(self.create_override).read_text() if self.create_override else None
+            )
 
             def value(flag):
                 return self.values(args, flag)[0]
@@ -335,6 +339,75 @@ class EntrypointMigrationTests(unittest.TestCase):
         with self.assertRaises(box.BoxError) as error:
             self.convert(**kwargs)
         self.assertEqual(str(error.exception), message)
+
+    def test_device_conversion_recreates_only_verified_saved_nodes(self):
+        nodes = ["/dev/accel/accel0", "/dev/dri/renderD128"]
+        with self.fixture():
+            self.original["devices"] = nodes
+            box.atomic_json(self.path, self.original)
+            checked = []
+
+            def verify(_box, data, info, env, *, fresh=False):
+                self.assertEqual(data["devices"], nodes)
+                self.assertNotIn("CONTAINERS_CONF_OVERRIDE", env)
+                checked.append((info["Id"], fresh))
+                return tuple((path, 1, 2, 3) for path in nodes)
+
+            with patch.object(migration.guarded_devices, "verify", side_effect=verify):
+                staged = self.convert()
+            self.assertEqual(staged["devices"], nodes)
+            self.assertIn((_SOURCE, False), checked)
+            self.assertIn((_CANDIDATE, True), checked)
+            self.assertEqual(
+                self.engine.create_override_content, "[containers]\ndevices = []\n"
+            )
+            self.assertFalse(Path(self.engine.create_override).exists())
+            created = self.engine.containers[_CANDIDATE]["Config"]["CreateCommand"]
+            self.assertEqual(
+                [item for item in created if item.startswith("--device=")],
+                [f"--device={path}" for path in nodes],
+            )
+            self.assertIn(_SOURCE, self.engine.containers)
+            self.assertFalse(staged[migration.RETIRE]["authorized"])
+
+    def test_device_mismatch_in_fresh_candidate_never_parks_or_retires_original(self):
+        with self.fixture():
+            self.original["devices"] = ["/dev/accel/accel0"]
+            box.atomic_json(self.path, self.original)
+
+            def verify(_box, _data, info, _env, **_kwargs):
+                if info["Id"] == _CANDIDATE:
+                    raise migration.guarded_devices.DeviceError("mismatch")
+
+            with patch.object(migration.guarded_devices, "verify", side_effect=verify):
+                with self.assertRaisesRegex(box.BoxError, "bindings do not match"):
+                    self.convert()
+            self.assertEqual(self.engine.mutations, ["commit", "create"])
+            self.assertEqual(
+                self.engine.containers[_SOURCE]["Name"], self.original["container"]
+            )
+            self.assertNotIn(migration.RETIRE, box.read_json(self.path))
+
+    def test_device_signature_change_prevents_cutover_even_with_same_saved_paths(self):
+        with self.fixture():
+            path = "/dev/accel/accel0"
+            self.original["devices"] = [path]
+            box.atomic_json(self.path, self.original)
+
+            def verify(_box, _data, info, _env, **_kwargs):
+                return ((path, 1, 3 if info["Id"] == _CANDIDATE else 2, 4),)
+
+            with patch.object(migration.guarded_devices, "verify", side_effect=verify):
+                with self.assertRaisesRegex(box.BoxError, "changed identity"):
+                    self.convert()
+            self.assertEqual(self.engine.mutations, ["commit", "create"])
+            self.assertEqual(
+                self.engine.containers[_SOURCE]["Name"], self.original["container"]
+            )
+            intent = box.read_json(self.path)[migration.FIELD]
+            self.assertEqual(
+                intent["device_binding"], migration._device_binding(((path, 1, 2, 4),))
+            )
 
     def verify_retirement(self, *, after_start=False, token=None, candidate=_CANDIDATE):
         with box.workspace_lock(self.path), workspace_control.admission(self.path):
@@ -879,6 +952,34 @@ class EntrypointMigrationTests(unittest.TestCase):
             self.assertIn(("container", "exists", _SOURCE), retry_calls)
             self.assertIn(("container", "exists", parked), retry_calls)
             self.assert_retired(staged, completed)
+            self.assertEqual(self.engine.mutations, [*_CUTOVER, "rm"])
+
+    def test_device_change_after_lost_removal_ack_keeps_retirement_pending(self):
+        with self.fixture():
+            path = "/dev/dri/renderD128"
+            self.original["devices"] = [path]
+            box.atomic_json(self.path, self.original)
+            node = (path, 1, 2, 3)
+
+            def no_ack():
+                raise box.BoxError("synthetic original removal acknowledgement lost")
+
+            with patch.object(
+                migration.guarded_devices, "verify", return_value=(node,)
+            ):
+                self.convert()
+                self.set_candidate_running()
+                self.engine.after["rm"] = no_ack
+                self.assert_retirement_refused(after_start=True)
+            observed = box.read_json(self.path)
+            self.assertTrue(observed[migration.RETIRE]["authorized"])
+            self.assertNotIn(_SOURCE, self.engine.containers)
+            with patch.object(
+                migration.guarded_devices, "verify", return_value=((path, 1, 5, 3),)
+            ):
+                with self.assertRaisesRegex(box.BoxError, "changed identity"):
+                    self.verify_retirement(after_start=True)
+            self.assertEqual(box.read_json(self.path), observed)
             self.assertEqual(self.engine.mutations, [*_CUTOVER, "rm"])
 
     def test_interruption_before_removal_leaves_authorized_original_for_retry(self):
