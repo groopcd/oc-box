@@ -114,8 +114,9 @@ def verify_roots(box, data, info):
     return container, (project, home), volume["Source"]
 
 
-def _inspect(box, kind, name):
+def _inspect(box, kind, name, *, engine_env=None):
     result = box.podman(
+        *(("--remote=false",) if engine_env is not None else ()),
         kind,
         "inspect",
         name,
@@ -123,7 +124,7 @@ def _inspect(box, kind, name):
         check=False,
         private=True,
         timeout=5,
-        env=box.maintenance_host_env(),
+        env=engine_env.copy() if engine_env is not None else box.maintenance_host_env(),
     )
     if result.returncode or len(result.stdout) > 1024 * 1024:
         return None
@@ -158,7 +159,7 @@ def _volume_source(box, data, volume, source):
     return (project, home) if project and home else None
 
 
-def client_binding(box, data, connection):
+def client_binding(box, data, connection, *, engine_env=None):
     """Read-only host admission for one opted-in, already-owned TUI client."""
     binding = None
     release = data.get("opencode_version")
@@ -171,11 +172,13 @@ def client_binding(box, data, connection):
         and not data.get("restore_incomplete")
     ):
         try:
-            info = _inspect(box, "container", data["container"])
+            info = _inspect(box, "container", data["container"], engine_env=engine_env)
             verified = verify_roots(box, data, info) if info is not None else None
             if verified is not None:
                 container, roots, source = verified
-                volume = _inspect(box, "volume", data["home_volume"])
+                volume = _inspect(
+                    box, "volume", data["home_volume"], engine_env=engine_env
+                )
                 if volume is not None:
                     identities = _volume_source(box, data, volume, source)
                     if identities is not None:
@@ -201,7 +204,7 @@ def client_binding(box, data, connection):
     return binding
 
 
-def host_export_mounts(box, data, container, *, refusals=None):
+def host_export_mounts(box, data, container, *, refusals=None, engine_env=None):
     """Inspect the active local engine for host mounts that could see the spool."""
 
     def refuse(reason):
@@ -213,7 +216,7 @@ def host_export_mounts(box, data, container, *, refusals=None):
         return refuse("workspace-project-unverified")
     # `ps` and inspect share one sanitized environment. Never silently use a
     # remote server's paths as if they were local paths.
-    env = box.maintenance_host_env()
+    env = engine_env.copy() if engine_env is not None else box.maintenance_host_env()
     try:
 
         def query(*args):

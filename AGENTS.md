@@ -232,7 +232,11 @@ their checkout ownership distinct from unrelated source and flat installations.
   startup and access to both mounts. Only then authorize exact-ID retirement;
   never use the parked container for startup or clear uncertainty to retry it.
   Keep the same verified local engine selection through the owning launch
-  and cleanup, including after clearing the retirement marker.
+  and cleanup, including after clearing the retirement marker. Carry that
+  binding into the recovery Reader lease, its helper commands, and the owner's
+  request and host-open workers; a thread does not inherit admission context.
+  Never publish engine selectors in socket replies or forward provider secrets
+  to the Reader, tab probes, or mount rechecks.
 - `history_recovery.py` / `history_reader.py` / `workspace_control.py`: one bounded
   persisted-history snapshot after audited live timeouts: shell-only on native
   2.2.6/2.2.7; shell/subagent on canonical stable 2.3.x. Never a live readiness
