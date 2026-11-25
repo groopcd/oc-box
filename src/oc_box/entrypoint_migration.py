@@ -170,11 +170,40 @@ def no_copy_binding(data, info):
     )
 
 
-def _inherits_process_limits(info):
+def _standard_process_limits(info):
     argv = _create_argv(info)
-    return argv is not None and not any(
+    if argv is None or any(
         option == "--ulimit" or option.startswith("--ulimit=") for option in argv
-    )
+    ):
+        return False
+    # Inspect does not establish whether these values were inherited. Keep the
+    # prior refusal of nonstandard rows, but never compare or replay the values.
+    limits = info["HostConfig"].get("Ulimits")
+    if limits is None:
+        return True
+    if type(limits) is not list or len(limits) > 2:
+        return False
+    seen = set()
+    for row in limits:
+        if (
+            type(row) is not dict
+            or set(row) != {"Name", "Soft", "Hard"}
+            or type(row["Name"]) is not str
+        ):
+            return False
+        name = row["Name"].lower().removeprefix("rlimit_")
+        soft, hard = row["Soft"], row["Hard"]
+        if (
+            name not in ("nofile", "nproc")
+            or name in seen
+            or not all(
+                type(value) is int and 0 <= value < 2**63 for value in (soft, hard)
+            )
+            or soft > hard
+        ):
+            return False
+        seen.add(name)
+    return True
 
 
 def replacement_matches(data, info):
@@ -330,7 +359,7 @@ class Conversion:
             and not item.get("IsService")
             and not item.get("Rootfs")
             and len(item["Mounts"]) == 2
-            and _inherits_process_limits(item)
+            and _standard_process_limits(item)
         )
         check = (
             history_recovery.legacy_migration_mounts

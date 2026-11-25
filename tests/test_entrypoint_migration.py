@@ -474,6 +474,21 @@ class EntrypointMigrationTests(unittest.TestCase):
             self.assertEqual(box.read_json(self.path), pending)
             self.assert_preserved()
 
+    def test_nonstandard_inspected_limits_still_refuse_without_mutation(self):
+        for limits in (
+            [{"Name": "RLIMIT_CORE", "Soft": 0, "Hard": 0}],
+            [{"Name": "nproc", "Soft": 100, "Hard": 50}],
+            [{"Name": "nofile", "Soft": "1024", "Hard": 2048}],
+            [{"Name": "nproc", "Soft": 10, "Hard": 20}] * 2,
+            "",
+        ):
+            with self.subTest(limits=limits), self.fixture():
+                self.engine.containers[_SOURCE]["HostConfig"]["Ulimits"] = limits
+                self.assert_refused(migration.REFUSED)
+                self.assertEqual(self.engine.mutations, [])
+                self.assertNotIn(migration.FIELD, box.read_json(self.path))
+                self.assert_preserved()
+
     def test_new_snapshot_attempt_revokes_previous_rebuild_authority(self):
         with self.fixture():
             self.engine.before["commit"] = lambda: 125
