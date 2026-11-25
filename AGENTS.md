@@ -67,8 +67,14 @@ their checkout ownership distinct from unrelated source and flat installations.
 - `status_report.py`: read-only host resource and storage reporting.
 - `tui.py` / `tui_app.py` / `tui_backend.py`: optional, host-side Textual manager.
   Keep ordinary CLI imports stdlib-only, demo strictly synthetic, browsing free
-  of workspace starts/unlocks/sync, and resource values informational. Live
-  CPU/RAM/storage edits are deferred; do not introduce resource-control RPCs.
+  of workspace starts/unlocks/sync, and resource values informational except for
+  explicit CPU and memory controls in Status. These may update live limits
+  through local Podman for the selected running workspace only. Recheck the
+  exact workspace and container identity before updating, serialize updates,
+  and distinguish verified results from uncertain outcomes. Never enable the
+  controls in demo or `--read-only` mode, change saved limits, automatically
+  reapply an update, or start, stop, or recreate a workspace for it. Storage
+  limit edits remain deferred; do not introduce resource-control RPCs.
   Host session Connect may use normal native host discovery; workspace sources
   must use an existing private owner, with explicit visible client leases.
   To manage the oc-box checkout itself, run an isolated non-editable package,
