@@ -160,7 +160,7 @@ _oc_box()
             options=$help
             (( positional == 0 )) && options+=' bash' ;;
         list|distros|runtime-check) options=$help ;;
-        *) options="$commands $help $selectors $launch $launch_logs --runtime-guard --convert-legacy-container --rebuild-legacy-container --persisted --status --about --version --json --table --check --stable --devel --vault --tui --auto-update --credential-mode --env-secret --vault-secret --clear-credentials --delete-sessions --all -y --yes --maintenance" ;;
+        *) options="$commands $help $selectors $launch $launch_logs --runtime-guard --convert-legacy-container --rebuild-legacy-container --persisted --status --about --version --json --table --check --stable --devel --vault --tui --auto-update --credential-mode --env-secret --vault-secret --clear-credentials --delete-sessions --all -y --yes --discard-guarded --maintenance" ;;
     esac
     if (( ! ended )); then
         _oc_box_words "$options"

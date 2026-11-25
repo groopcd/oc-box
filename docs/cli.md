@@ -3746,6 +3746,15 @@ Skip purge's ID-prefix confirmation. Purge-only; it does not answer OpenCode
 questions or bypass permissions on other commands. Example:
 `oc-box purge --workspace WORKSPACE_ID --all --yes`.
 
+### --discard-guarded
+
+Purge-only. With `--workspace WORKSPACE_ID` and no other options, remove the
+verified stopped guarded container and its private home without startup or final
+history sync. Type `DISCARD WORKSPACE_ID` on the controlling terminal after
+reviewing the targets. The private home may contain unsynced conversations; the
+project, host archives, registration and original fence are preserved. See
+[purge](#purge) for the supported host profile and refusal conditions.
+
 ## Lifecycle and persistence
 
 ```text
