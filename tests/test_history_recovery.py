@@ -102,6 +102,9 @@ class HistoryRecoveryTests(unittest.TestCase):
             self.record("volume")
             value = [
                 {
+                    "Name": self.data["home_volume"],
+                    "Driver": "local",
+                    "Options": {},
                     "Labels": {box.LABEL: self.data["id"]},
                     "Mountpoint": self.source.mount_signature[2],
                 }
@@ -133,6 +136,244 @@ class HistoryRecoveryTests(unittest.TestCase):
         ):
             result = recovery.recover(box, self.path, self.data, self.source)
         return result, lease, synchronize
+
+    def run_stopped_preflight_command(self, command, **options):
+        if command[1:] == ["container", "inspect", self.data["container"]]:
+            command = [*command[:-1], self.ident]
+        return self.run_command(command, **options)
+
+    def test_explicit_persisted_sync_uses_only_the_stopped_reader_path(self):
+        self.data["opencode_version"] = "2.4.1"
+        box.atomic_json(self.path, self.data)
+        args = SimpleNamespace(
+            command="sync", persisted=True, _opencode_release="2.4.1"
+        )
+        for pending in (False, True):
+            with self.subTest(pending=pending):
+                self.running = False
+                self.calls.clear()
+                before = self.path.read_bytes()
+
+                def sync(path, data, *, announce):
+                    self.record("sync")
+                    self.assertEqual(path, self.path)
+                    self.assertEqual(data["container"], self.ident)
+                    self.assertFalse(announce)
+                    recovery.REPORT.get().populated = True
+                    if pending:
+                        raise box.HistoryPending("synthetic pending")
+
+                stdout, stderr = io.StringIO(), io.StringIO()
+                with (
+                    lifecycle_output.invocation("sync", self.root / "state"),
+                    contextlib.redirect_stdout(stdout),
+                    contextlib.redirect_stderr(stderr),
+                    patch.object(
+                        box, "run", side_effect=self.run_stopped_preflight_command
+                    ),
+                    patch.object(
+                        recovery.history_reader, "Reader", return_value=self.reader
+                    ) as lease,
+                    patch.object(box, "sync_sessions", side_effect=sync) as archives,
+                    patch.object(box, "start_container") as start,
+                    patch.object(box, "prepare_runtime") as prepare,
+                    patch.object(box, "stop_container") as ordinary_stop,
+                ):
+                    self.assertEqual(
+                        box.launch_environment(self.path, self.data, args), int(pending)
+                    )
+                self.assertEqual(self.calls[:3], ["inspect-stopped"] * 3)
+                self.assertEqual(self.calls.count("start"), 1)
+                self.assertEqual(self.calls.count("stop"), 1)
+                self.assertLess(self.calls.index("start"), self.calls.index("sync"))
+                self.assertLess(self.calls.index("sync"), self.calls.index("stop"))
+                self.assertFalse(self.running)
+                self.assertEqual(self.path.read_bytes(), before)
+                self.assertEqual(lease.call_count, 1)
+                self.assertEqual(archives.call_count, 1)
+                for ordinary in (start, prepare, ordinary_stop):
+                    ordinary.assert_not_called()
+                if pending:
+                    self.assertIn("still unsettled", stderr.getvalue())
+                    self.assertNotIn("retry with 'oc-box sync'", stderr.getvalue())
+                    self.assertNotIn("Persisted history synced", stdout.getvalue())
+                else:
+                    self.assertIn("Persisted history synced", stdout.getvalue())
+
+    def test_explicit_persisted_sync_refuses_before_start_on_unsafe_source(self):
+        for running, command, reason in (
+            (True, "exec /bin/sleep infinity", "unexpected-container-state"),
+            (False, "exec sleep infinity", "startup-path-unverified"),
+        ):
+            with self.subTest(reason=reason):
+                self.running = running
+                self.info["Config"]["Cmd"] = ["-c", command]
+                self.calls.clear()
+                with (
+                    patch.object(
+                        box, "run", side_effect=self.run_stopped_preflight_command
+                    ),
+                    patch.object(recovery.history_reader, "Reader") as lease,
+                    self.assertRaisesRegex(box.BoxError, reason),
+                ):
+                    recovery.stopped_source(box, self.path, self.data, "2.2.7")
+                lease.assert_not_called()
+                self.assertNotIn("start", self.calls)
+                self.assertNotIn("stop", self.calls)
+
+    def test_persisted_cli_does_not_refresh_or_write_registration_on_refusal(self):
+        before = self.path.read_bytes(), self.path.stat().st_ino
+        self.running = True
+        with (
+            patch.dict(
+                os.environ,
+                {"OC_BOX_CONTAINER": "0", "CONTAINER_HOST": "synthetic-foreign-engine"},
+            ),
+            patch.object(box, "check_backend") as backend,
+            patch.object(
+                box, "detect_opencode_release", return_value="2.2.7"
+            ) as version,
+            patch.object(box, "check_private_output"),
+            patch.object(box, "refresh_workspace_identity") as refresh,
+            patch.object(box, "configure_podman_options") as configure,
+            patch.object(box, "prepare_runtime") as prepare,
+            patch.object(box, "run", side_effect=self.run_stopped_preflight_command),
+            self.assertRaisesRegex(box.BoxError, "unexpected-container-state"),
+        ):
+            box.main(["sync", "--persisted", "--workspace", self.data["id"]])
+        self.assertEqual((self.path.read_bytes(), self.path.stat().st_ino), before)
+        self.assertNotIn("CONTAINER_HOST", backend.call_args.kwargs["env"])
+        version.assert_called_once_with(isolated=True)
+        for operation in (refresh, configure, prepare):
+            operation.assert_not_called()
+        self.assertNotIn("start", self.calls)
+        self.assertNotIn("stop", self.calls)
+
+    def test_persisted_cli_cannot_replace_an_active_workspace_owner(self):
+        with (
+            patch.dict(os.environ, {"OC_BOX_CONTAINER": "0"}),
+            patch.object(box, "check_backend"),
+            patch.object(box, "_launch_persisted_sync") as snapshot,
+            patch.object(box, "detect_opencode_release") as version,
+            box.workspace_lock(self.path),
+            self.assertRaisesRegex(
+                box.BoxError, "already has an active oc-box process"
+            ),
+        ):
+            box.main(["sync", "--persisted", "--workspace", self.data["id"]])
+        snapshot.assert_not_called()
+        version.assert_not_called()
+
+    def test_persisted_stop_intent_after_capture_prevents_any_start(self):
+        self.running = False
+        with (
+            patch.object(box, "run", side_effect=self.run_stopped_preflight_command),
+            patch.object(recovery.history_reader, "Reader") as lease,
+            contextlib.redirect_stderr(io.StringIO()),
+        ):
+            source = recovery.stopped_source(box, self.path, self.data, "2.2.7")
+            workspace_control.request_stop(self.path)
+            self.assertFalse(
+                recovery.recover(
+                    box, self.path, self.data, source, already_stopped=True
+                )
+            )
+        lease.assert_not_called()
+        self.assertNotIn("start", self.calls)
+        self.assertNotIn("stop", self.calls)
+
+    def test_explicit_persisted_rejects_extra_mounts_and_nonlocal_home(self):
+        self.running = False
+        initial = copy.deepcopy(self.info)
+        self.info["Mounts"].append({"Destination": "/bin/sleep"})
+        with (
+            patch.object(box, "run", side_effect=self.run_stopped_preflight_command),
+            self.assertRaisesRegex(box.BoxError, r"refused \(mounts\)"),
+        ):
+            recovery.stopped_source(box, self.path, self.data, "2.2.7")
+        self.assertNotIn("start", self.calls)
+        self.info = initial
+        self.calls.clear()
+
+        def nonlocal_volume(command, **options):
+            result = self.run_stopped_preflight_command(command, **options)
+            if command[1:3] == ["volume", "inspect"]:
+                (record,) = json.loads(result.stdout)
+                result.stdout = json.dumps([{**record, "Driver": "foreign"}])
+            return result
+
+        with (
+            patch.object(box, "run", side_effect=nonlocal_volume),
+            patch.object(recovery.history_reader, "Reader") as lease,
+            contextlib.redirect_stderr(io.StringIO()) as errors,
+        ):
+            source = recovery.stopped_source(box, self.path, self.data, "2.2.7")
+            self.assertFalse(
+                recovery.recover(
+                    box, self.path, self.data, source, already_stopped=True
+                )
+            )
+        lease.assert_not_called()
+        self.assertIn("home-ownership", errors.getvalue())
+        self.assertNotIn("start", self.calls)
+
+    def test_persisted_cleanup_uncertainty_wins_over_pending_or_ambiguous_start(self):
+        for fault in ("reader-close", "start-timeout", "interrupted-stop"):
+            with self.subTest(fault=fault):
+                self.running = False
+                self.calls.clear()
+                args = SimpleNamespace(
+                    command="sync", persisted=True, _opencode_release="2.2.7"
+                )
+
+                def inject(event):
+                    if fault == "start-timeout" and event == "start":
+                        raise box.BoxError("synthetic ambiguous start")
+                    if fault == "interrupted-stop" and event == "stop":
+                        raise KeyboardInterrupt
+
+                def reader_close(_kind, error, _traceback):
+                    if fault == "reader-close":
+                        error.history_source_cleanup_failed = True
+
+                self.inject = inject
+                self.reader.__exit__.side_effect = reader_close
+                with (
+                    lifecycle_output.invocation(
+                        "sync", self.root / "state", verbose=fault == "interrupted-stop"
+                    ),
+                    contextlib.redirect_stdout(io.StringIO()) as output,
+                    contextlib.redirect_stderr(io.StringIO()) as errors,
+                    patch.object(box, "check_private_output"),
+                    patch.object(
+                        box, "run", side_effect=self.run_stopped_preflight_command
+                    ),
+                    patch.object(
+                        recovery.history_reader, "Reader", return_value=self.reader
+                    ),
+                    patch.object(
+                        box,
+                        "sync_sessions",
+                        side_effect=box.HistoryPending("synthetic"),
+                    ),
+                ):
+                    if fault == "interrupted-stop":
+                        with self.assertRaises(KeyboardInterrupt):
+                            box.launch_environment(self.path, self.data, args)
+                    else:
+                        self.assertEqual(
+                            box.launch_environment(self.path, self.data, args), 1
+                        )
+                self.assertIn("cleanup could not be verified", errors.getvalue())
+                self.assertNotIn("Persisted history synced", output.getvalue())
+                if fault == "start-timeout":
+                    with self.assertRaises(workspace_control.ControlError):
+                        workspace_control.capture(self.path)
+                    # Reset the known synthetic transition for the next matrix
+                    # entry; production does not clear a fence based on stop.
+                    with workspace_control.admission(self.path):
+                        workspace_control.finish_transition(self.path)
+        self.inject = lambda _event: None
 
     def test_relative_sleep_never_admits_guarded_or_post_stop_startup(self):
         self.info["Config"]["Cmd"] = ["-c", "exec sleep infinity"]

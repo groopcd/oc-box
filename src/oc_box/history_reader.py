@@ -1572,16 +1572,25 @@ class Reader:
 
     def __exit__(self, kind, value, traceback):
         if kind is not None:
-            with contextlib.suppress(self.box.BoxError):
-                self.shutdown()
+            self._shutdown_preserving(value)
             return
         try:
             self.assert_idle()
-        except BaseException:
-            with contextlib.suppress(self.box.BoxError):
-                self.shutdown()
+        except BaseException as error:
+            self._shutdown_preserving(error)
             raise
         self.shutdown()
+
+    def _shutdown_preserving(self, original):
+        try:
+            self.shutdown()
+        except self.box.BoxError:
+            # Keep the original refusal or interrupt, but never present an
+            # unacknowledged Reader shutdown as an ordinary pending export.
+            original.history_source_cleanup_failed = True
+        except BaseException as cleanup:
+            cleanup.history_source_cleanup_failed = True
+            raise
 
 
 if __name__ == "__main__":

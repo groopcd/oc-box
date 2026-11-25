@@ -86,6 +86,7 @@ _OPTION_GROUPS = {
         ),
     ),
     "sync-resources": ("Container resource limits", _RESOURCE_KEYS),
+    "sync-mode": ("History source", ("persisted",)),
     "native": (
         "Native terminal UI",
         (
@@ -125,7 +126,7 @@ _COMMAND_SCOPES = {
     "start": (*_LAUNCH_GROUPS, "runtime-guard"),
     "reset": _LAUNCH_GROUPS,
     "stop": ("workspace", "logging"),
-    "sync": ("workspace", "sync-resources", "logging"),
+    "sync": ("workspace", "sync-mode", "sync-resources", "logging"),
     "terminal": ("workspace", "terminal", "logging"),
     "repair": ("workspace",),
     "purge": ("workspace", "purge"),
@@ -159,6 +160,7 @@ _COMMAND_NOTES = {
     "sync": (
         _WORKSPACE_NOTE,
         "Exports workspace conversations to the host and stops the container afterward; it may prepare or recreate the environment.",
+        "Use --persisted for a guarded snapshot without normal preparation or container recreation.",
         (
             "Set resource limits only when recreating a missing container for a "
             "registered workspace; use reset for an existing container."

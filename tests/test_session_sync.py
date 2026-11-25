@@ -2,6 +2,7 @@
 
 import contextlib
 import copy
+import hashlib
 import io
 import json
 import os
@@ -50,6 +51,42 @@ class SessionSyncTests(unittest.TestCase):
 
     def result(self, value):
         return subprocess.CompletedProcess([], 0, json.dumps(value), "")
+
+    def test_archive_checksum_preserves_json_bytes_and_rejects_an_unsafe_copy(self):
+        private = self.root / "archive.json"
+        value = {"text": "línea 🧪\r\n", "parts": [{"ok": True, "count": 1}]}
+        expected = (json.dumps(value, indent=2) + "\n").encode()
+        checksum = hashlib.sha256(expected).hexdigest()
+        with patch.object(box.os, "fsync", wraps=os.fsync) as sync:
+            self.assertEqual(
+                box.atomic_json(private, value, durable=True, checksum=True), checksum
+            )
+        self.assertEqual(sync.call_count, 2)
+        self.assertEqual(private.read_bytes(), expected)
+        self.assertTrue(box._archive_matches_checkpoint(private, value, checksum))
+        alias = self.root / "alias.json"
+        alias.symlink_to(private)
+        self.assertFalse(box._archive_matches_checkpoint(alias, value, checksum))
+        self.assertFalse(
+            box._archive_matches_checkpoint(private, {"text": "changed"}, checksum)
+        )
+
+    def test_quiet_source_refusal_reports_only_validated_reason(self):
+        for reason in ("queued-work", "private-unknown-value"):
+            error = box.BoxError("private-native-error")
+            error.history_source_category = reason
+            report = box.history_recovery.Report(manual=True, reason="sync-failed")
+            with (
+                lifecycle_output.invocation("sync", self.root / "state"),
+                contextlib.redirect_stderr(io.StringIO()) as errors,
+            ):
+                box._report_history_result(report, recovered=False, error=error)
+            self.assertNotIn("private-", errors.getvalue())
+            if reason == "queued-work":
+                self.assertIn("(queued-work)", errors.getvalue())
+                self.assertIn("standalone export was not retried", errors.getvalue())
+            else:
+                self.assertIn("verification did not finish", errors.getvalue())
 
     def test_concise_outcome_waits_for_native_verification_source_and_final_stop(self):
         cases = {
@@ -1198,6 +1235,297 @@ class SessionSyncTests(unittest.TestCase):
             r"elapsed=\d+\.\ds\.",
         )
         self.assertIn("Session history synced", output.getvalue())
+
+    def test_manual_repeat_keeps_pending_checkpoint_and_repairs_only_local_copies(self):
+        args = SimpleNamespace(
+            command="sync", _opencode_release="2.4.1", import_session=None
+        )
+        infos = [self.session(f"ses_{name}") for name in ("first", "pending", "last")]
+        exports = {
+            entry["id"]: {"info": copy.deepcopy(entry), "messages": []}
+            for entry in infos
+        }
+        host, imports = {}, []
+        pending = False
+
+        def export(_data, ident):
+            if pending and ident == "ses_pending":
+                raise box.HistoryPending(v2.UNSETTLED)
+            return copy.deepcopy(exports[ident])
+
+        def host_run(command, **_kwargs):
+            if "import" in command:
+                archived = box.read_json(Path(command[-2]))
+                ident = archived["info"]["id"]
+                archived["info"]["location"] = {
+                    "directory": str(self.path.parent / "controller")
+                }
+                host[ident] = archived
+                imports.append(ident)
+            elif "export" in command:
+                return self.result(host[command[-2]])
+            elif "api" in command:
+                return self.result({"data": [], "cursor": {}})
+            elif "delete" in command:
+                host.pop(command[-2])
+            else:
+                self.fail("unexpected destination operation")
+            return self.result(None)
+
+        def run(*, expected=None):
+            with contextlib.redirect_stderr(io.StringIO()) as stderr:
+                if expected is None:
+                    self.assertEqual(
+                        box.launch_environment(self.path, self.data, args), 0
+                    )
+                else:
+                    with self.assertRaises(box.HistoryPending):
+                        box.launch_environment(self.path, self.data, args)
+                    (line,) = stderr.getvalue().splitlines()
+                    self.assertIn(expected, line)
+                    self.assertIn("prior archives retained", line)
+                    self.assertNotIn("retry with 'oc-box sync'", line)
+
+        with (
+            lifecycle_output.invocation("sync", self.root / "state"),
+            contextlib.redirect_stdout(io.StringIO()),
+            patch.object(box, "check_private_output"),
+            patch.object(box, "start_container"),
+            patch.object(box, "prepare_runtime"),
+            patch.object(box, "stop_container"),
+            patch.object(
+                workspace_service,
+                "history_source",
+                side_effect=lambda *_: contextlib.nullcontext(),
+            ),
+            patch.object(box, "list_container_sessions", return_value=infos),
+            patch.object(box, "export_container_session", side_effect=export) as source,
+            patch.object(box, "run", side_effect=host_run) as destination,
+        ):
+            run()
+            old = box.session_state(self.path)
+            archive = {
+                name: self.path.parent / "history" / (ident + ".json")
+                for name, ident in old["host_sessions"].items()
+            }
+            old_pending = archive["ses_pending"].read_bytes()
+            pending = True
+            exports["ses_last"]["info"]["title"] = "Changed without a new timestamp"
+            run(expected="Newly verified: 1; already checkpointed: 1; pending: 1.")
+            before_repeat = {name: path.stat().st_ino for name, path in archive.items()}
+            destination.reset_mock()
+            run(expected="Newly verified: 0; already checkpointed: 2; pending: 1.")
+            self.assertEqual(
+                {name: path.stat().st_ino for name, path in archive.items()},
+                before_repeat,
+            )
+            # Repair an absent or corrupted private copy without replacing the
+            # previously verified host archive or trusting the checkpoint alone.
+            first, last = archive["ses_first"], archive["ses_last"]
+            original_bytes = first.read_bytes(), last.read_bytes()
+            first.unlink()
+            last.write_bytes(b"X" * len(original_bytes[1]))
+            run(expected="Newly verified: 0; already checkpointed: 2; pending: 1.")
+            self.assertEqual((first.read_bytes(), last.read_bytes()), original_bytes)
+            self.assertEqual(archive["ses_pending"].read_bytes(), old_pending)
+            self.assertEqual(
+                box.session_state(self.path)["synced"]["ses_pending"],
+                old["synced"]["ses_pending"],
+            )
+            self.assertEqual(source.call_count, 12)
+            destination.assert_not_called()
+            self.assertEqual(len(imports), 4)
+
+    def test_quiet_24_manual_sync_pins_proven_stopped_source_and_verifies_final_stop(
+        self,
+    ):
+        data = {**self.data, "ready": True, "opencode_version": "2.4.1"}
+        box.atomic_json(self.path, data)
+        args = SimpleNamespace(
+            command="sync", _opencode_release="2.4.1", import_session=None
+        )
+        ident = "a" * 64
+        stopped = {
+            "Id": ident,
+            "State": {"Running": False, "Status": "exited", "Pid": 0, "ConmonPid": 0},
+            "Config": {
+                "Labels": {box.LABEL: data["id"]},
+                "Entrypoint": ["/bin/sh"],
+                "Cmd": ["-c", "exec sleep infinity"],
+                "Env": ["PATH=" + box.history_reader.PATH],
+            },
+            "HostConfig": {"PidMode": "private", "RestartPolicy": {"Name": "no"}},
+            "Mounts": [
+                {
+                    "Type": "bind",
+                    "Source": data["project"],
+                    "Destination": data["project"],
+                },
+                {
+                    "Type": "volume",
+                    "Name": data["home_volume"],
+                    "Source": str(self.root / "volume"),
+                    "Destination": data["home"],
+                },
+            ],
+        }
+        running = {
+            **stopped,
+            "State": {"Running": True, "Status": "running", "Pid": 123},
+        }
+        for case in (
+            "name-rebound",
+            "inspect-failed",
+            "preparation-failed",
+            "initially-running",
+        ):
+            with self.subTest(case=case):
+                admitted = case != "initially-running"
+                target = ident if admitted else data["container"]
+                calls = []
+                original_running = not admitted
+                preparing = False
+                lost_inspection = False
+
+                def engine(command, **options):
+                    nonlocal original_running, lost_inspection
+                    action = tuple(command[1:])
+                    calls.append(action)
+                    if action[:2] == ("container", "inspect"):
+                        if len(calls) == 1:  # Initial, read-only name resolution.
+                            self.assertEqual(action[-1], data["container"])
+                        else:
+                            self.assertEqual(action[-1], target)
+                        if (
+                            preparing
+                            and case == "inspect-failed"
+                            and not lost_inspection
+                        ):
+                            lost_inspection = True
+                            return subprocess.CompletedProcess(command, 1, "", "")
+                        return self.result([running if original_running else stopped])
+                    if action[0] != "start":
+                        self.assertTrue(original_running)
+                    if admitted:
+                        self.assertEqual(options["env"], box.maintenance_host_env())
+                    if action[0] == "start":
+                        self.assertEqual(action[-1], ident)
+                        original_running = True
+                    elif action[0] == "stop":
+                        self.assertEqual(action[-1], ident)
+                        original_running = False
+                    elif action[0] == "exec":
+                        self.assertEqual(action[1], target)
+                    else:
+                        self.fail(f"unexpected synthetic engine action {action[0]}")
+                    return self.result(None)
+
+                def prepare(_path, supplied, _version, **_kwargs):
+                    nonlocal preparing
+                    preparing = True
+                    self.assertEqual(supplied["container"], target)
+                    # A process-local override introduced during preparation
+                    # cannot send a bound command to a substitute engine.
+                    if admitted:
+                        with patch.dict(
+                            os.environ,
+                            {
+                                "CONTAINER_HOST": "synthetic-other-engine",
+                                "XDG_RUNTIME_DIR": str(
+                                    self.root / "substitute-runtime"
+                                ),
+                            },
+                        ):
+                            command = box.exec_command(supplied, ["true"])
+                        self.assertNotIn("CONTAINER_HOST", command.environment)
+                        self.assertNotIn("XDG_RUNTIME_DIR", command.environment)
+                        self.assertIn(ident, command)
+                    if case == "preparation-failed":
+                        raise box.BoxError("synthetic preparation failed")
+
+                with (
+                    lifecycle_output.invocation("sync", self.root / "state"),
+                    contextlib.redirect_stdout(io.StringIO()),
+                    patch.dict(
+                        os.environ,
+                        {
+                            "OC_BOX_STATE_HOME": str(self.root / "state"),
+                            "HOME": str(self.root / "host-home"),
+                        },
+                        clear=True,
+                    ),
+                    patch.object(box, "check_private_output"),
+                    patch.object(box, "check_resource_controllers"),
+                    patch.object(box, "prepare_runtime", side_effect=prepare),
+                    patch.object(box, "run", side_effect=engine),
+                    patch.object(box, "stop_container") as ordinary_stop,
+                    patch.object(
+                        workspace_service,
+                        "history_source",
+                        return_value=contextlib.nullcontext(),
+                    ) as source,
+                    patch.object(box, "sync_sessions") as sync,
+                ):
+                    if case.endswith("-failed"):
+                        with self.assertRaises(box.BoxError):
+                            box.launch_environment(self.path, data, args)
+                    else:
+                        self.assertEqual(
+                            box.launch_environment(self.path, data, args), 0
+                        )
+                self.assertIsNone(box._QUIET_SYNC_BINDING.get())
+                if case.endswith("-failed"):
+                    source.assert_not_called()
+                    sync.assert_not_called()
+                else:
+                    expected = {**data, "container": target}
+                    source.assert_called_once_with(
+                        box,
+                        expected,
+                        **({"stopped_source": True} if admitted else {}),
+                    )
+                    sync.assert_called_once_with(self.path, expected, announce=False)
+                if admitted:
+                    self.assertEqual(calls.count(("start", ident)), 1)
+                    self.assertEqual(calls.count(("stop", "--time", "10", ident)), 1)
+                    self.assertFalse(original_running)
+                    ordinary_stop.assert_not_called()
+                else:
+                    ordinary_stop.assert_called_once_with(data)
+
+    def test_persisted_options_refuse_scope_changes_before_backend(self):
+        for options in (
+            ["start", "--persisted"],
+            ["sync", "--persisted", "--cpus", "2"],
+            ["sync", "--persisted", "--pids-limit", "128"],
+            ["sync", "--persisted", "--device", "/dev/example"],
+        ):
+            with (
+                self.subTest(options=options),
+                patch.object(box, "check_backend") as backend,
+                self.assertRaisesRegex(box.BoxError, "--persisted applies only"),
+            ):
+                box.main(options)
+            backend.assert_not_called()
+
+    def test_persisted_sync_never_bypasses_legacy_replacement_enrollment(self):
+        data = {
+            **self.data,
+            box.runtime_safeguard.entrypoint_migration.RECEIPT: {"synthetic": True},
+        }
+        args = SimpleNamespace(command="sync", persisted=True)
+        with (
+            contextlib.ExitStack() as context,
+            patch.object(box.runtime_safeguard, "load", return_value=None),
+            patch.object(box, "_launch_persisted_sync") as snapshot,
+            patch.object(box, "detect_opencode_release") as probe,
+            self.assertRaisesRegex(
+                box.BoxError, "has not completed guarded runtime enrollment"
+            ),
+        ):
+            box._locked_workspace_command(self.path, data, args, context, None)
+        snapshot.assert_not_called()
+        probe.assert_not_called()
 
     def test_other_history_refusals_still_abort_and_interrupted_count_is_validated(
         self,

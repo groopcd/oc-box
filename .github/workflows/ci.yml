@@ -195,6 +195,13 @@ jobs:
           python3 -B tests/smoke_history_subagent_recovery_v2.py --opencode "$binary" --foreground
           python3 -B tests/smoke_history_subagent_recovery_v2.py --opencode "$binary" \
             --foreground --producer-close abrupt
+      - name: Native stopped-origin manual source reuse and bounded refusals
+        env:
+          NATIVE_VERSION: ${{ matrix.opencode }}
+        run: >-
+          python3 -B tests/smoke_history_source_v24.py
+          --opencode "$RUNNER_TEMP/opencode-v24/node_modules/@opencode/cli-linux-x64/bin/opencode"
+          --release "$NATIVE_VERSION"
       # These adapters have independent, behavior-tested release profiles.
       # A floating OpenCode install can correctly refuse an unverified profile.
       - name: Native host attachment broker and direct queue on verified OpenCode 2.4.1

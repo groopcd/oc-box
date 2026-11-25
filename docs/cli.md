@@ -9,7 +9,7 @@ oc-box - persistent rootless Podman environments for mainline OpenCode.
 ```text
 oc-box [start] [--project PATH | --workspace ID] [START-OPTIONS] [LIFECYCLE-LOG-OPTIONS]
 oc-box stop [--project PATH | --workspace ID] [LIFECYCLE-LOG-OPTIONS]
-oc-box sync [--project PATH | --workspace ID] [--cpus N] [--memory SIZE] [--pids-limit N] [LIFECYCLE-LOG-OPTIONS]
+oc-box sync [--project PATH | --workspace ID] [--persisted | [--cpus N] [--memory SIZE] [--pids-limit N]] [LIFECYCLE-LOG-OPTIONS]
 oc-box reset [--project PATH | --workspace ID] [RESET-OPTIONS] [LIFECYCLE-LOG-OPTIONS]
 oc-box repair [--project PATH | --workspace ID]
 oc-box terminal [--project PATH | --workspace ID] [--maintenance] [LIFECYCLE-LOG-OPTIONS]
@@ -645,11 +645,23 @@ and apply `--cpus`, `--memory`, and `--pids-limit` overrides. It refuses explici
 limit changes if an owned container already exists, even when stopped; use
 `reset` for that case.
 
-Manual `sync` retains ordinary runtime preparation and native service startup,
+Ordinary manual `sync` retains runtime preparation and native service startup,
 including configured integrations and native scheduling behavior. It is not the
 isolated, non-executing post-stop reader used by automatic timeout recovery.
 Both use the same checked `sync_sessions` archival implementation; automatic
 recovery does not recursively launch this command or repeat its preparation.
+
+Use `oc-box sync --persisted` for one guarded archival attempt on an existing,
+verified stopped workspace. This uses the isolated Reader and the same
+source/destination checks as post-stop recovery. It temporarily starts only
+the original safe passive container by immutable ID and verifies it stopped
+again. It never recreates resources, prepares runtime/configuration, refreshes
+credentials, replays a normal launch, or starts an owner. Matching supported
+native versions, the verified passive entrypoint, standard mounts and clear
+stop/transition state are required; a legacy PATH-relative entrypoint cannot
+be restarted by this mode. A refusal does not fall back to ordinary `sync`.
+This mode does not finish earlier interrupted work or accept an incomplete
+native export. Use encrypted workspace backup to preserve pending private state.
 
 On V2, discovery reads every native API page at the workspace's internal project
 directory, including archived conversations, forks, and linked child/subagent
@@ -688,6 +700,17 @@ to replay an uncertain pass. The optimized source has a ten-minute active-lease
 budget with separate bounded startup/cleanup; verified per-session progress is
 retained if a later operation fails.
 
+On stock native 2.4.0 and 2.4.1, the reusable source requires a previously
+ready workspace whose original container was positively observed stopped
+before this invocation started it. The launcher binds the same immutable
+container ID and local engine before startup and keeps that binding through
+preparation, every source read and final stop verification. The lease
+checks the exact native process. Positively identified pre-start ineligibility
+can keep the previous ordinary path after clean helper exit; an unverified
+store, native startup or cleanup failure cannot. Runtime-guarded workspaces
+do not use this optimization. This does not bypass ordinary preparation for
+`sync` without `--persisted`.
+
 This optimization does not apply to existing owners or post-stop recovery
 readers, and does not change their readiness/stop guarantees. Destination
 replacement, child guards and fresh-native verification remain serialized and
@@ -696,11 +719,15 @@ Overall success is announced only after the private source lease closes cleanly.
 
 The [final history result](#lifecycle-output) distinguishes partial or
 unverified work from success. Detailed sync diagnostics use aggregate session,
-exported, unchanged, updated and pending counts, elapsed time and a fixed source
+exported, unchanged, updated and pending counts, elapsed time, phase timings and a fixed source
 mode (`post-stop-reader`, `private-endpoint` or `standalone`), not session IDs,
-titles, commands/argv, environment values, native errors or model values. This
-feedback does not speed up source exports or archive writes; further optimization
-is deferred.
+titles, commands/argv, environment values, native errors or model values.
+Repeated passes still check every source transcript. A matching checkpoint
+avoids destination work and does not rewrite a byte-identical verified private
+copy; a missing or corrupted private copy is repaired. A pending manual sync
+reports newly verified, already checkpointed and pending counts separately.
+To inspect previously recorded aggregate results without starting another pass,
+use `oc-box logs --project ~/devel/demo --level debug --limit 40`.
 
 V2 exports are checked against the paginated projected transcript. An unfinished
 tail assistant, running user shell/compaction, or changing transcript leaves that
@@ -714,6 +741,7 @@ persistent shell terminals; use encrypted workspace backup for full private stat
 ```sh
 oc-box sync --project ~/devel/demo
 oc-box sync --workspace WORKSPACE_ID
+oc-box sync --persisted --project ~/devel/demo
 ```
 
 ### web — browser interface
@@ -3527,6 +3555,14 @@ links. Plugins, SSH identities, and encrypted identity files are refused in the
 initial format; passphrase-encrypted backups instead use age's terminal prompt.
 No identity text or passphrase is accepted through argv/environment. Example:
 `oc-box backup-info /backup/demo.ocbox --identity ~/.config/backup-age-key.txt`.
+
+### --persisted
+
+With `sync` only, attempt a guarded snapshot from an existing, verified stopped
+workspace. The Reader uses the original container and checks final stop;
+ordinary preparation, resource changes and native execution are not admitted.
+This option does not fall back to ordinary `sync` if the snapshot is refused.
+It cannot declare earlier unfinished work complete.
 
 ### --cpus NUMBER
 

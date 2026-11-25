@@ -217,6 +217,7 @@ class PackagingTests(unittest.TestCase):
                     "tests/test_history_recovery.py",
                     "tests/smoke_history_recovery_v2.py",
                     "tests/smoke_history_subagent_recovery_v2.py",
+                    "tests/smoke_history_source_v24.py",
                     "src/oc_box/private_memory.py",
                     "src/oc_box/ui_state.py",
                     "src/oc_box/ui_state_memory.js",

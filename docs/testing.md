@@ -1777,6 +1777,21 @@ the slower path. Existing-owner and post-stop-reader paths are unchanged.
 Destination writer reuse was investigated but not enabled: its longer lifetime
 was not established safe enough to replace the existing independent reads.
 
+For the distinct stock 2.4.0/2.4.1 manual source lease, run
+`python3 -B tests/smoke_history_source_v24.py --opencode /path/to/clean/native --release 2.4.1`
+with each binary and its matching release argument. Compare ordinary standalone and reusable native source
+startup counts and the bytes of their checked exports. Verify pre-start
+schema and durable-work refusals, clean handoff/reaping, and that queued work
+and execution claims are not consumed by the optimization. The fixture
+isolates source work: it does not measure normal configuration preparation,
+host destination writes, or rootless Podman.
+
+The explicit stopped Reader route must hold the lifecycle lock, preserve the
+workspace registration, refuse unknown resources before start, and never
+replay ordinary preparation. Exercise stopped identity, pending history with
+verified independent progress, post-read cleanup failure, and an ambiguous
+start that retains its persistent uncertainty fence even after a later stop.
+
 Keep the following boundaries when optimizing:
 
 - Read every inventory page and perform full checked source exports. Timestamps
