@@ -2156,7 +2156,7 @@ class Gateway:
             if isinstance(connection, dict)
             else None
         )
-        if data.get("devices") and container is not None:
+        if container is not None and isinstance(data, dict) and data.get("devices"):
             safeguard = getattr(box, "runtime_safeguard", None)
             guarded = safeguard.current() if safeguard else None
             environment = getattr(guarded, "engine_env", None)
