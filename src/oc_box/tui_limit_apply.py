@@ -44,6 +44,18 @@ def _require(condition, reason="unsupported"):
         raise tui_limits.LimitError(reason)
 
 
+def _check(reason, function, *args, **kwargs):
+    """Local diagnostics may identify the failed check, never its raw inputs."""
+    try:
+        return function(*args, **kwargs)
+    except tui_limits.LimitError as exc:
+        if exc.reason != "unsupported":
+            raise
+    except Exception:
+        pass
+    raise tui_limits.LimitError(reason) from None
+
+
 def _dir_stamp(info):
     return info.st_dev, info.st_ino
 
@@ -84,7 +96,8 @@ class _Engine:
             and host["security"]["rootless"] is True
             and host["cgroupVersion"] == "v2"
             and store.get("transientStore", False) is False
-            and store.get("graphDriverName") in ("overlay", "vfs", "btrfs")
+            and store.get("graphDriverName") in ("overlay", "vfs", "btrfs"),
+            "engine-capabilities",
         )
         return (
             *[store[key] for key in _SCOPE_KEYS],
@@ -108,32 +121,38 @@ class _Engine:
 @contextmanager
 def _engine(box, deadline):
     policy = workspace_podman
-    uid = policy._host_uid(os.environ)
+    uid = _check("host-scope", policy._host_uid, os.environ)
     _require(
         not (os.environ.keys() & policy._ROUTING_NAMES)
-        and not any(key.startswith(policy._ROUTING_PREFIXES) for key in os.environ)
+        and not any(key.startswith(policy._ROUTING_PREFIXES) for key in os.environ),
+        "engine-selectors",
     )
     environment = box.maintenance_host_env()
     path = shutil.which("podman", path=environment.get("PATH", _SYSTEM_PATH))
-    _require(path is not None)
-    path = str(Path(path).resolve(strict=True))
+    _require(path is not None, "engine-binary")
+    path = str(_check("engine-binary", Path(path).resolve, strict=True))
     environment = {**environment, "PATH": _SYSTEM_PATH, "LC_ALL": "C"}
     with ExitStack() as stack:
-        binary = policy._pin(stack, path, uid, owner=0, directory=False)
+        binary = _check(
+            "engine-binary", policy._pin, stack, path, uid, owner=0, directory=False
+        )
         _require(
             binary.stamp[4] & 0o111
             and not binary.stamp[4] & 0o6000
-            and policy._read_pin(binary, 4) == b"\x7fELF"
+            and _check("engine-binary", policy._read_pin, binary, 4) == b"\x7fELF",
+            "engine-binary",
         )
         engine = _Engine(binary, environment, deadline)
-        scope = engine.scope()
+        scope = _check("engine-info", engine.scope)
         engine.roots = tuple(
-            policy._pin(stack, entry, uid, owner=uid, directory=True)
-            for entry in scope[:3]
+            _check(category, policy._pin, stack, entry, uid, owner=uid, directory=True)
+            for category, entry in zip(
+                ("graph-root", "run-root", "volume-root"), scope[:3], strict=True
+            )
         )
         # Passing --root/--storage-driver would clear native graph driver
         # options. Keep the same effective config throughout this operation.
-        _require(engine.scope() == scope)
+        _require(_check("engine-info", engine.scope) == scope, "engine-scope")
         yield engine, scope
 
 
@@ -165,7 +184,7 @@ def _serialize(record):
             yield check
     except workspace_control.ControlError as error:
         raise tui_limits.LimitError(
-            "busy" if error.category == "control-timeout" else "unsupported"
+            "busy" if error.category == "control-timeout" else "transition-lock"
         ) from None
 
 
@@ -239,9 +258,12 @@ def _cgroup(pid, path, ident):
         and any(
             part in (f"libpod-{ident}", f"libpod-{ident}.scope", ident)
             for part in path.split("/")
-        )
+        ),
+        "cgroup-path",
     )
-    start = history_overlap_domains.observe_process_start(pid)
+    start = _check(
+        "process-identity", history_overlap_domains.observe_process_start, pid
+    )
     with workspace_podman._path_fd(
         f"{_CGROUP_ROOT}{path}", os.geteuid(), directory=True
     ) as (directory, info):
@@ -256,7 +278,13 @@ def _cgroup(pid, path, ident):
             finally:
                 os.close(proc)
             _require(
-                history_overlap_domains.observe_process_start(pid) == start, "stale"
+                _check(
+                    "process-identity",
+                    history_overlap_domains.observe_process_start,
+                    pid,
+                )
+                == start,
+                "stale",
             )
 
         recheck()
@@ -282,10 +310,12 @@ def _configured_limits(live, limits):
         limits.get(key) for key in ("CpuQuota", "CpuPeriod", "Memory", "MemorySwap")
     )
     _require(
-        all(type(value) is int for value in (quota, period, memory, combined))
-        and live.cpu is not None
-        and live.memory is not None
-        and live.swap is not None
+        all(type(value) is int for value in (quota, period, memory, combined)),
+        "podman-limits",
+    )
+    _require(
+        live.cpu is not None and live.memory is not None and live.swap is not None,
+        "cgroup-controllers",
     )
     observed_cpu = status_report.observed_cpu_limit(limits)
     if quota > 0:
@@ -313,7 +343,9 @@ def _configured_limits(live, limits):
 
 def _snapshot(engine, box, record, target):
     data = record.data
-    info = engine.inspect("container", record.row.container)
+    info = _check(
+        "container-inspect", engine.inspect, "container", record.row.container
+    )
     _require(
         info["Id"] == target.container
         and info["Name"] == record.row.container
@@ -337,7 +369,7 @@ def _snapshot(engine, box, record, target):
         and home_mounts[0].get("Name") == record.row.home_volume,
         "stale",
     )
-    volume = engine.inspect("volume", record.row.home_volume)
+    volume = _check("volume-inspect", engine.inspect, "volume", record.row.home_volume)
     _require(
         volume["Name"] == record.row.home_volume
         and volume["Driver"] == "local"
@@ -348,7 +380,13 @@ def _snapshot(engine, box, record, target):
         "stale",
     )
     state = info["State"]
-    live = _cgroup(state["Pid"], state["CgroupPath"], target.container)
+    live = _check(
+        "cgroup-access",
+        _cgroup,
+        state["Pid"],
+        state.get("CgroupPath"),
+        target.container,
+    )
     return live, *_configured_limits(live, info["HostConfig"])
 
 
@@ -360,11 +398,13 @@ def apply(box, draft, *, read_only, demo):
     deadline = time.monotonic() + _SECONDS
     attempted = False
     try:
-        original = _registration(box, target)
+        original = _check("workspace-record", _registration, box, target)
         record, _ = original
         with _engine(box, deadline) as (engine, scope):
             with _admission(record) as allowed, _serialize(record) as lock_current:
-                before, cpu, memory, combined = _snapshot(engine, box, record, target)
+                before, cpu, memory, combined = _check(
+                    "container-witness", _snapshot, engine, box, record, target
+                )
                 _require((cpu, memory) == (target.cpu, target.memory), "stale")
                 flags = []
                 if draft.cpu is not None:
@@ -393,8 +433,11 @@ def apply(box, draft, *, read_only, demo):
                             f"--memory-swap={expected_combined}",
                         )
                     )
-                _require(_registration(box, target) == original, "stale")
-                _require(engine.scope() == scope)
+                _require(
+                    _check("workspace-record", _registration, box, target) == original,
+                    "stale",
+                )
+                _require(_check("engine-info", engine.scope) == scope, "engine-scope")
                 allowed()
                 lock_current()
                 # External Podman users or normal exit can still race a CLI

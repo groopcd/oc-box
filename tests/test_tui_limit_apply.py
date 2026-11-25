@@ -278,8 +278,25 @@ class ApplyTests(unittest.TestCase):
             (*base[:4], {"mountopt": "noexec"}, base[-1]),
         ]
         self.assert_refused(
-            "unsupported", tui_limits.LimitDraft(self.base, cpu=450_000)
+            "engine-scope", tui_limits.LimitDraft(self.base, cpu=450_000)
         )
+
+    def test_preflight_names_missing_witness_without_mutation(self):
+        draft = tui_limits.LimitDraft(self.base, cpu=450_000)
+        self.engine.container["HostConfig"].pop("MemorySwap")
+        self.assert_refused("podman-limits", draft)
+        self.engine.container["HostConfig"]["MemorySwap"] = 16 * GIB
+        self.engine.observed = replace(self.engine.observed, swap=None)
+        self.assert_refused("cgroup-controllers", draft)
+
+    def test_preflight_does_not_render_raw_engine_error(self):
+        draft = tui_limits.LimitDraft(self.base, cpu=450_000)
+        with patch.object(self.engine, "inspect", side_effect=OSError("PRIVATE_DATA")):
+            with self.assertRaises(tui_limits.LimitError) as caught:
+                self.apply(draft)
+        self.assertEqual(caught.exception.reason, "container-inspect")
+        self.assertNotIn("PRIVATE_DATA", str(caught.exception))
+        self.assertEqual(self.engine.calls, [])
 
     def test_ordinary_launcher_stop_waits_for_the_live_update_gate(self):
         real_gate = workspace_control.live_limit_gate
