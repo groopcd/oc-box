@@ -24,11 +24,17 @@ import tempfile
 import uuid
 
 if __package__:
-    from . import backup_crypto as crypto, credentials, workspace_identity
+    from . import (
+        backup_crypto as crypto,
+        credentials,
+        entrypoint_migration,
+        workspace_identity,
+    )
     from .version_info import get_version_info
 else:
     import backup_crypto as crypto
     import credentials
+    import entrypoint_migration
     import workspace_identity
     from version_info import get_version_info
 
@@ -645,6 +651,11 @@ def make_backup(box, args, *, interaction=None, reviewed_workspace=None):
     crypto.tools()
     with box.workspace_lock(path), ExitStack() as stack:
         if reviewed_workspace is None:
+            verified_path, current_data = box.find_workspace(None, data["id"])
+            if verified_path != path or current_data != data:
+                raise BackupError(
+                    "Workspace changed before backup; retry with the intended workspace."
+                )
             box.refresh_workspace_identity(path, data)
         else:
             revalidate_review()
@@ -655,6 +666,13 @@ def make_backup(box, args, *, interaction=None, reviewed_workspace=None):
                 raise BackupError("Reviewed workspace changed; open a new review.")
             box.check_backend(env=crypto.environment(), feature="backup")
             revalidate_review()
+        if entrypoint_migration.FIELD in data or entrypoint_migration.needs_bootstrap(
+            data
+        ):
+            raise BackupError(
+                "Legacy container replacement is not ready for backup. "
+                "Finish the verified replacement and baseline setup first."
+            )
         info = owned_container(box, data)
         if info is None:
             raise BackupError(

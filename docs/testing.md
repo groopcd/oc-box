@@ -91,7 +91,17 @@ refusal, prior runtime retention, patch rechecks, and durable forward
 admission. They are not external-host Podman acceptance or proof that an
 older helper can safely reopen the normal host store.
 
-The fixture audits the generated public plugin SDK dependency tree at all
+`tools/test_entrypoint_migration_podman.py` is an opt-in fixture for a fresh VM
+with local rootless Podman and a disposable user/store. It uses the production
+replacement engine twice: once with a real OS snapshot, and once with a single
+injected nonzero snapshot result followed by a separately approved OS rebuild.
+The fixture checks the unchanged project and private volume identity, SQLite
+bytes and mapped ownership, the different OS-layer outcomes, and that the
+legacy PATH-shadow command never runs during replacement or subsequent boot.
+It does not run native OpenCode, baseline installation, or a full launcher
+lifecycle. Never substitute a real project or backup for the synthetic data.
+
+The npm upgrade fixture audits the generated public plugin SDK dependency tree at all
 reported severities before installing the resolved tree. An advisory or
 failed audit fails the job and therefore blocks PyPI publication through the
 reusable source gate. The managed SDK graphs for 2.2.6–2.2.7 and

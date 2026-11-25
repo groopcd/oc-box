@@ -26,6 +26,7 @@ RUNTIME_FILES = (
     "native_preflight.py",
     "native_runtime_guard.py",
     "runtime_safeguard.py",
+    "entrypoint_migration.py",
     "workspace_service.py",
     "web_attachments.py",
     "web_attachments.js",

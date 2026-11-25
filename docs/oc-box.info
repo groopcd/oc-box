@@ -405,12 +405,34 @@ credentials.
 
 New containers use an absolute ‘/bin/sleep’ path for their passive
 entrypoint.  The safeguard refuses older containers whose stored
-entrypoint would look up ‘sleep’ on the workspace ‘PATH’.  It does not
-modify or replace those containers, or fall back from guarded to
-unguarded startup.  Ordinary unguarded startup of existing containers is
+entrypoint would look up ‘sleep’ on the workspace ‘PATH’.  On an
+eligible stopped V2 workspace, owning ‘start’ detects the exact legacy
+command and offers a one-time replacement.  Use ‘oc-box start
+--convert-legacy-container’ to approve it noninteractively.  The
+replacement snapshots the installed container OS locally and retains the
+same workspace ID, project path, settings and private home volume
+(including conversations never synchronized to the host).  Neither
+container starts during the replacement; guarded startup still has to
+pass.
+
+If Podman confirms that the OS snapshot failed before the name switch
+and oc-box can still verify the original resources, you may separately
+approve ‘oc-box start --rebuild-legacy-container’.  This takes the
+original local base image, discards changes made in the old container's
+writable OS layer, and reinstalls baseline tools.  It keeps the same
+project and private home; it does not run ‘oc-box purge’.  A timed-out,
+interrupted, or otherwise unverified switch never offers an OS rebuild
+just because the state is uncertain.  Retry a pending replacement only
+with an explicit replacement flag; oc-box continues only from a verified
+intermediate state.  Do not reset, purge, or downgrade to bypass a
+refusal.  Back up important data first.
+
+In-place replacement does not rebind containers already enrolled in a
+runtime floor, nonstandard resources, or custom devices/Podman
+arguments.  Preserve those through a full backup if replacement is
+unavailable.  Ordinary unguarded startup of existing containers is
 unchanged.  A verified, already-running guarded owner can still accept
-clients; attaching does not authorize a new start.  Preserve existing
-workspace data; do not reset or downgrade to bypass a refusal.
+clients; attaching does not authorize a replacement or a new start.
 
 Before normal preparation can write state, oc-box durably records the
 admitted version.  An interruption, late startup failure or missing
@@ -3776,7 +3798,25 @@ there is no switch to delete the version fence.  This option is not a
 request for rollback, and does not apply to attach-only clients or
 ‘reset’.
 
-5.58 -no-vault
+5.58 -convert-legacy-container
+==============================
+
+Owning ‘start’ only.  Explicitly approve the one-time stopped legacy
+container replacement, including continuation of a previously approved
+interrupted replacement.  Preserve the existing project, private home
+and installed OS. Normal guarded runtime checks still apply.  The flag
+is not an environment or workspace preference.
+
+5.59 -rebuild-legacy-container
+==============================
+
+Owning ‘start’ only.  After a confirmed OS snapshot failure, approve
+replacing just the old container OS, keeping the project and private
+conversation volume.  This discards changes to the old writable OS layer
+and reinstalls baseline tools.  It is mutually exclusive with
+‘--convert-legacy-container’.
+
+5.60 -no-vault
 ==============
 
 V2-only, for one **owning** start (including ‘--import-session’), reset,
@@ -3795,7 +3835,7 @@ processes.
      oc-box reset --project ~/devel/demo --no-vault
      oc-box web --project ~/devel/demo --no-vault --no-open
 
-5.59 -env-secret NAME
+5.61 -env-secret NAME
 =====================
 
 With ‘credentials’, append an uppercase environment credential name to
@@ -3808,7 +3848,7 @@ per-name selections are refused in vault mode; choose an explicit
 env/selected mode to use them.  Example: ‘oc-box credentials
 --credential-mode selected --env-secret PERSONAL_GITHUB_TOKEN’.
 
-5.60 -vault-secret NAME
+5.62 -vault-secret NAME
 =======================
 
 With ‘credentials’, select an existing encrypted vault entry name to
@@ -3820,7 +3860,7 @@ selected with -env-secret.  Example: ‘oc-box credentials
 --credential-mode selected --vault-secret BRAVE_API_KEY’.  Vault mode
 instead uses every current entry and refuses nonempty per-name lists.
 
-5.61 -clear-credentials
+5.63 -clear-credentials
 =======================
 
 With ‘credentials’, clear both saved env-name and vault-name lists
@@ -3832,7 +3872,7 @@ workflow without deleting encrypted vault entries.  Use
 ‘--credential-mode vault --clear-credentials’ to replace selections with
 dynamic global V2 use.  Clearing alone does not change the mode.
 
-5.62 -output FILE
+5.64 -output FILE
 =================
 
 Backup-only.  Required new encrypted backup output pathname.  Its parent
@@ -3842,7 +3882,7 @@ destination created during capture.  Example: ‘oc-box backup --project
 ~/devel/demo --output /backup/demo.ocbox’.  The archive suffix is
 conventional; the versioned format is checked on restore.
 
-5.63 -portable
+5.65 -portable
 ==============
 
 Backup-only.  Omit the container OS image while retaining project,
@@ -3853,7 +3893,7 @@ packages and native-cache compatibility are the user's responsibility.
 Example: ‘oc-box backup --project ~/devel/demo --portable --output
 /backup/demo.ocbox’.
 
-5.64 -recipient AGE_KEY
+5.66 -recipient AGE_KEY
 =======================
 
 Backup-only, repeatable (up to 16).  Encrypt the backup key envelope to
@@ -3864,7 +3904,7 @@ recipients are not secret; private identities must be stored
 independently of the archive and project.  Example: ‘oc-box backup
 --recipient age1PUBLIC_KEY --output /backup/demo.ocbox’.
 
-5.65 -host
+5.67 -host
 ==========
 
 For ‘backup’, include the [host migration
@@ -3875,14 +3915,14 @@ vault; omit ‘--project’ for a host-only restore from either type of
 host-containing archive.  A host-only archive cannot be used with
 ‘--project’.
 
-5.66 -opencode-auth-export FILE
+5.68 -opencode-auth-export FILE
 ===============================
 
 For ‘backup --host’, include a native V2 credential export from a
 private file, or use ‘-’ for a binary stdin stream.  The export is
 encrypted separately and is never printed by ‘oc-box backup-info’.
 
-5.67 -include-opencode
+5.69 -include-opencode
 ======================
 
 For ‘restore --host’, additionally install the native OpenCode profile
@@ -3890,7 +3930,7 @@ and saved credentials when present.  Requires separate typed
 confirmation and fresh destination paths.  It does not activate or start
 OpenCode.
 
-5.68 -identity FILE
+5.70 -identity FILE
 ===================
 
 Restore/backup-info only, repeatable.  Read a native age X25519 private
@@ -3901,7 +3941,7 @@ backups instead use age's terminal prompt.  No identity text or
 passphrase is accepted through argv/environment.  Example: ‘oc-box
 backup-info /backup/demo.ocbox --identity ~/.config/backup-age-key.txt’.
 
-5.69 -cpus NUMBER
+5.71 -cpus NUMBER
 =================
 
 Set the CPU quota in core units; fractions such as ‘2.5’ are accepted by
@@ -3913,7 +3953,7 @@ missing container for a registered workspace.
 
      oc-box reset --project ~/devel/demo --cpus 8
 
-5.70 -memory SIZE
+5.72 -memory SIZE
 =================
 
 Set the memory limit using Podman size syntax, such as ‘512m’, ‘8g’, or
@@ -3926,7 +3966,7 @@ a missing container for a registered workspace.
 
      oc-box reset --project ~/devel/demo --memory 16g
 
-5.71 -pids-limit NUMBER
+5.73 -pids-limit NUMBER
 =======================
 
 Set the container's process limit; default ‘2048’.  oc-box requires at
@@ -3935,7 +3975,7 @@ requires reset.  ‘sync’ can save a new value when recreating a missing
 container for a registered workspace.  Example: ‘oc-box reset --project
 ~/devel/demo --pids-limit 4096’.
 
-5.72 -device MAPPING
+5.74 -device MAPPING
 ====================
 
 Add a persistent Podman mapping, repeatable.  Supports
@@ -3949,7 +3989,7 @@ install an NPU/GPU SDK.
      oc-box reset --project ~/devel/demo --device /dev/accel/accel0
      oc-box --project ~/devel/gpu --device /dev/dri/renderD128:rw
 
-5.73 -podman-arg=-OPTION[=VALUE]
+5.75 -podman-arg=-OPTION[=VALUE]
 ================================
 
 Append one literal long-option token to the Podman create command before
@@ -3976,7 +4016,7 @@ options extend the default boundary as requested by the host operator.
 Podman and the host's rootless permissions determine which settings are
 available.
 
-5.74 -clear-devices
+5.76 -clear-devices
 ===================
 
 Clear all saved ‘--device’ mappings before adding any new ones on this
@@ -3987,7 +4027,7 @@ for that list.
      oc-box reset --project ~/devel/demo --clear-devices
      oc-box reset --project ~/devel/demo --clear-devices --device /dev/accel/accel1
 
-5.75 -clear-podman-args
+5.77 -clear-podman-args
 =======================
 
 Clear saved additional Podman options before appending replacements.
@@ -3997,7 +4037,7 @@ device list unchanged.
      oc-box reset --project ~/devel/demo --clear-podman-args \
        --podman-arg=--shm-size=2g
 
-5.76 -delete-sessions
+5.78 -delete-sessions
 =====================
 
 Purge-only.  Delete recorded host archive session copies as well as
@@ -4006,7 +4046,7 @@ never deletes an original host source conversation merely because that
 conversation was imported into this workspace.  Example: ‘oc-box purge
 --workspace WORKSPACE_ID --delete-sessions’.
 
-5.77 -all
+5.79 -all
 =========
 
 Purge-only.  Remove environment resources, recorded host session
@@ -4014,7 +4054,7 @@ archives, metadata, and the entire original project directory, including
 untracked files.  The directory identity and marker must still match.
 Example: ‘oc-box purge --project ~/devel/disposable --all’.
 
-5.78 -y, -yes
+5.80 -y, -yes
 =============
 
 Skip purge's ID-prefix confirmation.  Purge-only; it does not answer
@@ -5379,20 +5419,20 @@ Node: Name769
 Node: Synopsis930
 Node: Description5275
 Node: Commands11095
-Node: Options154397
-Node: Lifecycle and persistence218832
-Node: Distribution images221132
-Node: Sessions and recovery226209
-Node: Devices and host permissions232794
-Node: Resource reports235140
-Node: Configuration and environment237251
-Node: Files248632
-Node: Exit status259542
-Node: Examples260950
-Node: Troubleshooting263089
-Node: Installation and manuals275581
-Node: Authors and license285771
-Node: See also286378
+Node: Options155696
+Node: Lifecycle and persistence220902
+Node: Distribution images223202
+Node: Sessions and recovery228279
+Node: Devices and host permissions234864
+Node: Resource reports237210
+Node: Configuration and environment239321
+Node: Files250702
+Node: Exit status261612
+Node: Examples263020
+Node: Troubleshooting265159
+Node: Installation and manuals277651
+Node: Authors and license287841
+Node: See also288448
 
 End Tag Table
 

@@ -259,7 +259,7 @@ class Source:
     runtime_digest: str | None = None
 
 
-def _signature(box, data, info, *, attach_only=False):
+def _signature(box, data, info, *, attach_only=False, migration_source=False):
     """Validate the passive entrypoint and bind/volume signature without I/O."""
     if not isinstance(info, dict):
         raise RecoveryError("invalid-container")
@@ -275,12 +275,18 @@ def _signature(box, data, info, *, attach_only=False):
     if isinstance(entrypoint, str):
         entrypoint = [entrypoint]
     command = config.get("Cmd")
-    if entrypoint == [PASSIVE_ENTRYPOINT] and command == ["-c", "exec sleep infinity"]:
+    legacy = entrypoint == [PASSIVE_ENTRYPOINT] and command == [
+        "-c",
+        "exec sleep infinity",
+    ]
+    if migration_source and not legacy:
+        raise RecoveryError("nonpassive-container")
+    if legacy:
         # Podman start cannot override the stored argv. In a legacy rootfs
         # the runtime prefix is searched first and can shadow this command
         # before any executable verification or Reader helper runs.
         state = info.get("State")
-        if not (
+        if not migration_source and not (
             attach_only is True
             and isinstance(state, dict)
             and state.get("Running") is True
@@ -354,6 +360,18 @@ def passive_workspace_mounts(box, data, info):
 def live_attachment_mounts(box, data, info):
     """Observe the original running attachment only; never authorize a start."""
     return _signature(box, data, info, attach_only=True)
+
+
+def legacy_migration_mounts(box, data, info):
+    """Inspect exact legacy metadata for replacement, never for start or recovery."""
+    state = info.get("State") if isinstance(info, dict) else None
+    if not (
+        isinstance(state, dict)
+        and state.get("Running") is False
+        and state.get("Status") in ("exited", "stopped")
+    ):
+        raise RecoveryError("startup-path-unverified")
+    return _signature(box, data, info, migration_source=True)
 
 
 def capture(box, data, info, token, *, refusal=None, runtime_digest=None):

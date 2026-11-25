@@ -163,6 +163,115 @@ class RuntimeSafeguardTests(unittest.TestCase):
         self.assertIsNone(native_runtime_guard.load(self.path))
         self.assertEqual(native_runtime_guard.rejected(self.path).version, NEW)
 
+    def test_legacy_replacement_cannot_run_without_consent_or_with_an_enrolled_floor(
+        self,
+    ):
+        error = box.BoxError("PATH-dependent startup")
+        error.legacy_entrypoint = CONTAINER
+        with (
+            patch.object(guard, "_inspect", side_effect=error),
+            patch.object(sys.stdin, "isatty", return_value=False),
+            patch.object(guard, "pinned_host") as preflight,
+            patch.object(guard.entrypoint_migration, "convert") as convert,
+        ):
+            for record, pattern in (
+                (None, "--convert-legacy-container"),
+                (self.record, "already bound"),
+            ):
+                with self.subTest(enrolled=record is not None):
+                    with self.assertRaisesRegex(box.BoxError, pattern):
+                        with guard.admit(
+                            box, self.path, self.data, self.args(), record
+                        ):
+                            self.fail("unapproved replacement was admitted")
+        preflight.assert_not_called()
+        convert.assert_not_called()
+
+    def test_legacy_replacement_still_requires_preflight_and_binds_the_new_id(self):
+        error = box.BoxError("PATH-dependent startup")
+        error.legacy_entrypoint = CONTAINER
+        replacement = "5" * 64
+        order = []
+
+        def preflight(*_):
+            order.append("preflight")
+            return DIGEST
+
+        def convert(module, path, data, token, source, *, rebuild):
+            order.append("convert")
+            self.assertIs(module, box)
+            self.assertIs(data, self.data)
+            self.assertEqual((path, source, rebuild), (self.path, CONTAINER, False))
+            self.assertTrue(workspace_control.unchanged(path, token))
+            self.assertIsNone(native_runtime_guard.load(self.path))
+
+        with (
+            self.synthetic_admission(),
+            patch.object(
+                guard,
+                "_inspect",
+                side_effect=[error, (replacement, ("fixed-mounts",))],
+            ),
+            patch.object(native_preflight, "check", side_effect=preflight),
+            patch.object(guard.entrypoint_migration, "convert", side_effect=convert),
+        ):
+            args = self.args(convert_legacy_container=True)
+            with guard.admit(
+                box,
+                self.path,
+                self.data,
+                args,
+                None,
+                prepare_replacement=lambda: order.append("credentials"),
+            ) as scope:
+                self.assertEqual(scope.record.container, replacement)
+                self.assertFalse(scope.record.ready)
+        self.assertEqual(order, ["preflight", "credentials", "convert"])
+
+    def test_bad_vault_does_not_retire_original_os_on_rebuild(self):
+        data = {**self.data, guard.entrypoint_migration.FIELD: {}}
+        box.atomic_json(self.path, data)
+        with (
+            self.synthetic_admission(),
+            patch.object(native_preflight, "check", return_value=DIGEST) as preflight,
+            patch.object(
+                box, "launch_credentials", side_effect=box.vault.VaultError("bad vault")
+            ),
+            patch.object(guard.entrypoint_migration, "convert") as convert,
+            contextlib.ExitStack() as stack,
+            self.assertRaisesRegex(box.BoxError, "bad vault"),
+        ):
+            box._locked_workspace_command(
+                self.path, data, self.args(rebuild_legacy_container=True), stack, None
+            )
+        preflight.assert_called_once_with(box, NEW)
+        convert.assert_not_called()
+        self.assertEqual(box.read_json(self.path), data)
+
+    def test_completed_swap_cannot_fall_back_to_ordinary_start_before_enrollment(self):
+        data = {
+            **self.data,
+            guard.entrypoint_migration.RECEIPT: {
+                "id": CONTAINER,
+                "bootstrap": False,
+                "volume": [1, 2],
+            },
+        }
+        with (
+            patch.object(guard, "load", return_value=None),
+            patch.object(
+                guard, "admit", side_effect=box.BoxError("required guard")
+            ) as admit,
+            patch.object(box, "detect_opencode_release") as probe,
+            patch.object(box, "launch_credentials") as credentials,
+            contextlib.ExitStack() as stack,
+            self.assertRaisesRegex(box.BoxError, "required guard"),
+        ):
+            box._locked_workspace_command(self.path, data, self.args(), stack, None)
+        self.assertEqual(admit.call_args.args[2], data)
+        probe.assert_not_called()
+        credentials.assert_not_called()
+
     def test_unavailable_scratch_probe_is_not_cached(self):
         with (
             self.synthetic_admission(),

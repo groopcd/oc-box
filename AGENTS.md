@@ -220,6 +220,14 @@ their checkout ownership distinct from unrelated source and flat installations.
   ephemeral memory only; no published container/LAN ports or shared host service.
   Owners wait for attached clients before sync/stop, and lifecycle locks remain
   exclusive against reset/purge/backup. Attach never refreshes credentials.
+- `entrypoint_migration.py`: explicitly approved one-time host replacement of
+  the exact stopped legacy passive command, only during owning guarded start
+  and only before runtime enrollment. Preserve canonical names, the project,
+  the same private home and OS changes by default. The separate rebuild approval
+  is available only after a positively verified snapshot failure; it discards
+  only the old writable OS layer. Never start the old command, replace the
+  volume, call purge, relax runtime floors or rely on an unverified partial
+  switch. Keep name changes recoverable by exact IDs and durable intent.
 - `history_recovery.py` / `history_reader.py` / `workspace_control.py`: one bounded
   persisted-history snapshot after audited live timeouts: shell-only on native
   2.2.6/2.2.7; shell/subagent on canonical stable 2.3.x. Never a live readiness

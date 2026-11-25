@@ -127,7 +127,7 @@ _oc_box()
     fi
 
     case $command in
-        start) options="$help $selectors $launch $launch_logs --runtime-guard" ;;
+        start) options="$help $selectors $launch $launch_logs --runtime-guard --convert-legacy-container --rebuild-legacy-container" ;;
         reset) options="$help $selectors $launch_logs --distro --new --resume --model --cpus --memory --pids-limit --device --podman-arg --clear-devices --clear-podman-args --no-vault --image-preview --no-image-preview --host-file-open --no-host-file-open --host-drop --no-host-drop --host-clipboard --no-host-clipboard --host-clipboard-symlinks --no-host-clipboard-symlinks" ;;
         sync) options="$help $selectors $launch_logs --cpus --memory --pids-limit" ;;
         stop) options="$help $selectors $launch_logs" ;;
@@ -160,7 +160,7 @@ _oc_box()
             options=$help
             (( positional == 0 )) && options+=' bash' ;;
         list|distros|runtime-check) options=$help ;;
-        *) options="$commands $help $selectors $launch $launch_logs --runtime-guard --status --about --version --json --table --check --stable --devel --vault --tui --auto-update --credential-mode --env-secret --vault-secret --clear-credentials --delete-sessions --all -y --yes --maintenance" ;;
+        *) options="$commands $help $selectors $launch $launch_logs --runtime-guard --convert-legacy-container --rebuild-legacy-container --status --about --version --json --table --check --stable --devel --vault --tui --auto-update --credential-mode --env-secret --vault-secret --clear-credentials --delete-sessions --all -y --yes --maintenance" ;;
     esac
     if (( ! ended )); then
         _oc_box_words "$options"
