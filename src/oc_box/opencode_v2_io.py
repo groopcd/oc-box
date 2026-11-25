@@ -23,7 +23,7 @@ import sys
 import time
 from urllib.parse import quote, urlparse
 from urllib.error import HTTPError
-from urllib.request import Request, build_opener, ProxyHandler
+from urllib.request import HTTPErrorProcessor, Request, build_opener, ProxyHandler
 
 if __package__:
     from .web_named_native_profile import (
@@ -241,7 +241,18 @@ def _read_quiet_wire(body):
     return value, b"" if duplicate else body
 
 
-def endpoint_request(endpoint):
+class _NoHistoryRedirect(HTTPErrorProcessor):
+    def http_response(self, request, response):
+        # Refuse before urllib can invoke a handler with the lease credential.
+        if 300 <= response.code < 400:
+            response.close()
+            raise FixedError(ENDPOINT)
+        return super().http_response(request, response)
+
+    https_response = http_response
+
+
+def endpoint_request(endpoint, *, no_redirect=False):
     """Use a private loopback endpoint without persisting its credentials."""
     address, password = endpoint["url"], endpoint["password"]
     parsed = urlparse(address)
@@ -259,7 +270,10 @@ def endpoint_request(endpoint):
     ):
         raise FixedError(ENDPOINT)
     auth = "Basic " + base64.b64encode(("opencode:" + password).encode()).decode()
-    opener = build_opener(ProxyHandler({}))
+    handlers = [ProxyHandler({})]
+    if no_redirect:
+        handlers.append(_NoHistoryRedirect())
+    opener = build_opener(*handlers)
 
     def request(method, path, data=None, *, deadline=None, max_body=None, raw=False):
         headers = {"Authorization": auth, "Content-Type": "application/json"}
@@ -1569,7 +1583,9 @@ def main(argv):
                 raise FixedError(ENDPOINT)
             action = action.removeprefix("quiet-history-")
         with (
-            contextlib.nullcontext(endpoint_request(endpoint))
+            contextlib.nullcontext(
+                endpoint_request(endpoint, **({"no_redirect": True} if quiet else {}))
+            )
             if endpoint is not None
             else server(binary)
         ) as request:
