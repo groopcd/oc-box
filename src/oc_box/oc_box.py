@@ -3008,7 +3008,8 @@ def run_v2_history(data, action, **settings):
     source_is_live = bool(endpoint) and reader is None
     binding = _QUIET_SYNC_BINDING.get()
     quiet_source = workspace_service.quiet_history_source()
-    if binding is not None and quiet_source is not None:
+    quiet = binding is not None and quiet_source is not None
+    if quiet:
         if (
             not source_is_live
             or runtime_safeguard.current() is not None
@@ -3051,6 +3052,8 @@ def run_v2_history(data, action, **settings):
         # Only a whitelisted constant explanation is ever shown; native errors
         # and private output stay hidden behind the generic exit status.
         failed(result, f"podman failed (exit {result.returncode})")
+    if quiet and action == "export":
+        result.quiet_export_envelope = True
     return result
 
 
@@ -3271,7 +3274,12 @@ def validate_session_export(exported, ident):
 
 def export_container_session(data, ident):
     if opencode_compat.major(data.get("opencode_version", "1.0.0")) == 2:
-        exported = json.loads(run_v2_history(data, "export", session=ident).stdout)
+        result = run_v2_history(data, "export", session=ident)
+        exported = json.loads(result.stdout)
+        if getattr(result, "quiet_export_envelope", False) is True:
+            if not isinstance(exported, dict) or set(exported) != {"data"}:
+                raise BoxError("Invalid OpenCode 2.x session export envelope.")
+            exported = exported["data"]
         validate_session_export(exported, ident)
         if opencode_compat.directory(exported) != container_project(data):
             raise BoxError(
