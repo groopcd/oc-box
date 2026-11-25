@@ -15,6 +15,7 @@ import time
 if __package__:
     from . import (
         entrypoint_migration,
+        podman_config_layers,
         private_memory,
         runtime_safeguard,
         uninstall_tty,
@@ -26,6 +27,7 @@ if __package__:
     )
 else:
     import entrypoint_migration
+    import podman_config_layers
     import private_memory
     import runtime_safeguard
     import uninstall_tty
@@ -46,16 +48,17 @@ _NET_NAMESPACE = re.compile(rb"net:\[[0-9]{1,20}\]")
 _CONFIG_LIMIT = 256 * 1024
 _MUTATION_SECONDS = 180
 _PROFILE = "6.2.0"
-_CONFIG_FILES = ("CONTAINERS_CONF", "CONTAINERS_STORAGE_CONF")
+_CONFIG_FILES = podman_config_layers.FILES
+_PREEXEC_MARKER = "/etc/containers/podman_preexec_hooks.txt"
 _NAMESPACE_PROBE = """\
 import json, os, re, stat, sys
 stamps = []
 for index, path in enumerate(sys.argv[1:]):
-    mode = os.O_DIRECTORY if index else 0
+    mode = os.O_DIRECTORY if index >= 2 else 0
     fd = os.open(path, os.O_PATH | mode | os.O_NOFOLLOW | os.O_CLOEXEC)
     try:
         info = os.fstat(fd)
-        if index == 0 and not stat.S_ISREG(info.st_mode):
+        if index < 2 and not stat.S_ISREG(info.st_mode):
             raise SystemExit(1)
         with open(f"/proc/self/fdinfo/{fd}", "rb") as stream:
             ids = re.findall(rb"^mnt_id:\\s*([0-9]{1,20})$", stream.read(4097), re.M)
@@ -220,53 +223,6 @@ def _config_bytes(path):
         return data
 
 
-def _single_config(environment, key, name):
-    if environment.get(key):
-        _require(
-            _absolute(environment[key]),
-            "An explicit Podman configuration path is unsupported.",
-        )
-        return _config_bytes(Path(environment[key]))
-    home = environment.get("HOME", "")
-    config = environment.get("XDG_CONFIG_HOME") or str(Path(home) / ".config")
-    _require(
-        _absolute(home) and _absolute(config),
-        "The local Podman configuration location is unsupported.",
-    )
-    directories = (
-        Path("/usr/share/containers"),
-        Path("/usr/etc/containers"),
-        Path("/etc/containers"),
-        Path(config) / "containers",
-    )
-    candidates = []
-    for directory in directories:
-        for suffix in (".conf.d", ".rootless.conf.d", ".rootless.d"):
-            drop_in = directory / (name + suffix)
-            try:
-                # Do not recreate the native TOML merge or ignore a drop-in
-                # that could select another database or a different lock type.
-                with os.scandir(drop_in) as entries:
-                    _require(
-                        next(entries, None) is None,
-                        "Guarded disposal does not support merged Podman configuration.",
-                    )
-            except FileNotFoundError:
-                pass
-        path = directory / (name + ".conf")
-        try:
-            data = _config_bytes(path)
-        except FileNotFoundError:
-            continue
-        if data not in candidates:
-            candidates.append(data)
-    _require(
-        len(candidates) <= 1,
-        "Guarded disposal does not support merged Podman configuration.",
-    )
-    return candidates[0] if candidates else b""
-
-
 def _sealed_config(stack, data):
     fd = private_memory.create("oc-box-discard-config", allow_sealing=True)
     stack.callback(os.close, fd)
@@ -280,55 +236,14 @@ def _sealed_config(stack, data):
     return fd
 
 
-def _engine_config(stack, environment):
+def _check_config_values(containers, storage, environment):
     _require(
-        not any(
-            environment.get(key)
-            for key in (
-                "CONTAINERS_CONF_OVERRIDE",
-                "CONTAINERS_CONF_MODULES",
-                "CONTAINERS_STORAGE_CONF_OVERRIDE",
-                "STORAGE_DRIVER",
-                "STORAGE_OPTS",
-            )
-        ),
-        "Guarded disposal does not support Podman configuration overrides.",
-    )
-    try:
-        import tomllib
-    except ImportError:
-        raise Refused(
-            "Guarded disposal requires a host Python with TOML support (3.11 or later)."
-        ) from None
-    container_config = _single_config(environment, _CONFIG_FILES[0], "containers")
-    storage_config = _single_config(environment, _CONFIG_FILES[1], "storage")
-    containers = tomllib.loads(container_config.decode("utf-8"))
-    storage = tomllib.loads(storage_config.decode("utf-8"))
-
-    # Both native decoders accept one TOML file and ignore the other's tables.
-    # Refuse ambiguous capitalization and collisions instead of relying on
-    # differences between the Go and Python decoders for selector fields.
-    def canonical_fields(fields):
-        if type(fields) is list:
-            return all(map(canonical_fields, fields))
-        if type(fields) is dict:
-            return all(
-                key.isascii() and key == key.lower() and canonical_fields(value)
-                for key, value in fields.items()
-            )
-        return True
-
-    _require(
-        canonical_fields(containers) and canonical_fields(storage),
+        podman_config_layers.canonical_fields(containers)
+        and podman_config_layers.canonical_fields(storage),
         "Podman configuration contains an unsupported field spelling.",
     )
     _require(
         set(storage) <= {"storage"} and "storage" not in containers,
-        "The Podman configuration files cannot be bound as one profile.",
-    )
-    combined = container_config + b"\n" + storage_config
-    _require(
-        tomllib.loads(combined.decode("utf-8")) == {**containers, **storage},
         "The Podman configuration files cannot be bound as one profile.",
     )
     config = containers.get("engine", {})
@@ -345,8 +260,10 @@ def _engine_config(stack, environment):
         "The Podman database location is unsupported.",
     )
     storage_settings = storage.get("storage", {})
-    # Libpod uses a SQLite DSN, not a quoted filename. Its driver splits
-    # at the first '?'; refuse such a selector before the first native call.
+    _require(
+        type(storage_settings) is dict,
+        "The Podman storage configuration is unsupported.",
+    )
     inputs = tuple(
         storage_settings.get(key, "")
         for key in ("graphroot", "runroot", "rootless_storage_path", "imagestore")
@@ -354,9 +271,79 @@ def _engine_config(stack, environment):
         environment.get(key, "")
         for key in ("HOME", "XDG_DATA_HOME", "XDG_RUNTIME_DIR", "USER", "LOGNAME")
     )
+    # Libpod uses a SQLite DSN, not a quoted filename. Its driver splits
+    # at the first '?'; refuse such a selector before the first native call.
     _require(
         all(type(value) is str and "?" not in value for value in inputs),
         "The Podman database location is unsupported.",
+    )
+    return static_dir
+
+
+def _engine_config(stack, environment):
+    _require(
+        "STORAGE_OPTS" not in environment
+        and not any(
+            environment.get(key)
+            for key in (
+                "CONTAINERS_CONF_OVERRIDE",
+                "CONTAINERS_CONF_MODULES",
+                "CONTAINERS_STORAGE_CONF_OVERRIDE",
+                "STORAGE_DRIVER",
+            )
+        ),
+        "Guarded disposal does not support Podman configuration overrides.",
+    )
+    try:
+        import tomllib
+    except ImportError:
+        raise Refused(
+            "Guarded disposal requires a host Python with TOML support (3.11 or later)."
+        ) from None
+    if all(environment.get(key) for key in _CONFIG_FILES):
+        explicit = [environment[key] for key in _CONFIG_FILES]
+        _require(
+            all(_absolute(path) for path in explicit),
+            "An explicit Podman configuration path is unsupported.",
+        )
+        container_config, storage_config = (
+            _config_bytes(Path(path)) for path in explicit
+        )
+    else:
+        try:
+            possible = podman_config_layers.candidates(environment, _config_bytes)
+            # Validate each selected declaration before flattening it, even
+            # when a later file overrides the value.
+            _check_config_values({}, {}, environment)
+            for family, blob in possible.values():
+                values = tomllib.loads(blob.decode("utf-8"))
+                _check_config_values(
+                    values if family == "containers" else {},
+                    values if family == "storage" else {},
+                    environment,
+                )
+            container_config, storage_config = (
+                podman_config_layers.flatten(
+                    [blob for family, blob in possible.values() if family == name],
+                    tomllib.loads,
+                )
+                for name in podman_config_layers.NAMES
+            )
+            _require(
+                podman_config_layers.candidates(environment, _config_bytes) == possible,
+                "The installed Podman configuration changed during review.",
+            )
+        except podman_config_layers.ConfigError as exc:
+            raise Refused(str(exc)) from None
+    containers = tomllib.loads(container_config.decode("utf-8"))
+    storage = tomllib.loads(storage_config.decode("utf-8"))
+    static_dir = _check_config_values(containers, storage, environment)
+
+    # Both native decoders accept one TOML file and ignore the other's tables.
+    combined = container_config + b"\n" + storage_config
+    _require(
+        tomllib.loads(combined.decode("utf-8")) == {**containers, **storage},
+        "The Podman configuration files cannot be bound as one profile.",
     )
     result = {
         key: value for key, value in environment.items() if key not in _CONFIG_FILES
@@ -369,7 +356,8 @@ def _engine_config(stack, environment):
     # stdin is a sealed regular file, never the confirmation terminal. The
     # Podman rootless re-exec and operand-free unshare pass standard input;
     # each config decoder opens its own read handle in its own namespace.
-    return result, static_dir, _sealed_config(stack, combined)
+    settings = containers.get("engine", {}), storage.get("storage", {})
+    return result, static_dir, _sealed_config(stack, combined), settings
 
 
 def _database_stamp(fd, info):
@@ -382,9 +370,149 @@ def _database_stamp(fd, info):
     return info.st_dev, info.st_ino, workspace_uninstall._mount_id(fd)
 
 
+def _storage_options(observed):
+    """Explicit graphroot/driver flags suppress config-derived driver options."""
+    if observed == {}:
+        return ()
+    # info projects a map rather than a lossless option vector. Replay only
+    # the audited distro default, not arbitrary strings or external stores.
+    _require(
+        observed == {"overlay.mountopt": "nodev"},
+        "The native Podman storage options could not be reproduced safely.",
+    )
+    return ("--storage-opt=overlay.mountopt=nodev",)
+
+
+def _store_path(value, environment):
+    _require(type(value) is str, "A configured Podman store path is unsupported.")
+    # Admit only a known leading path variable, with the exact same value the
+    # sanitized Podman child receives. No derived SQLite DSN can contain '?'.
+    prefix = re.match(
+        r"^\$(?:\{(HOME|XDG_DATA_HOME|XDG_RUNTIME_DIR)\}|(HOME|XDG_DATA_HOME|XDG_RUNTIME_DIR))(?=/|$)",
+        value,
+    )
+    if prefix:
+        selected = environment.get(prefix.group(1) or prefix.group(2), "")
+        _require(
+            _absolute(selected), "A configured Podman store path could not be resolved."
+        )
+        value = selected + value[prefix.end() :]
+    _require(
+        _absolute(value) and "$" not in value and "?" not in value,
+        "A configured Podman store path is unsupported.",
+    )
+    return value
+
+
+def _store_layout(environment, static_dir, settings):
+    engine, storage = settings
+    runtime_base = _store_path(environment.get("XDG_RUNTIME_DIR", ""), {})
+    data_base = _store_path(
+        environment.get("XDG_DATA_HOME")
+        or (_store_path(environment.get("HOME", ""), {}) + "/.local/share"),
+        {},
+    )
+    graph = _store_path(
+        storage.get("graphroot")
+        or storage.get("rootless_storage_path")
+        or data_base + "/containers/storage",
+        environment,
+    )
+    runroot = _store_path(
+        storage.get("runroot") or runtime_base + "/containers", environment
+    )
+    volume = _store_path(engine.get("volume_path") or graph + "/volumes", {})
+    temp = _store_path(engine.get("tmp_dir") or runtime_base + "/libpod/tmp", {})
+    static = _store_path(static_dir or graph + "/libpod", {})
+    _require(
+        Path(volume).is_relative_to(graph)
+        and volume != graph
+        and Path(static).is_relative_to(graph)
+        and static != graph
+        and not workspace_uninstall._overlap(graph, runroot),
+        "The configured Podman store layout is unsupported.",
+    )
+    _require(
+        storage.get("driver", "") in ("", "overlay")
+        and storage.get("transient_store", False) is False
+        and storage.get("driver_priority", []) in ([], ["overlay"])
+        and not storage.get("imagestore")
+        and engine.get("database_backend", "") in ("", "sqlite"),
+        "Only a persistent local Podman overlay/SQLite store is supported.",
+    )
+    _require(
+        not engine.get("events_logfile_path"),
+        "A custom Podman event-log path is not supported by guarded disposal.",
+    )
+    options = storage.get("options", {})
+    _require(
+        type(options) is dict, "The configured Podman storage options are unsupported."
+    )
+    overlay = options.get("overlay", {})
+    _require(
+        type(overlay) is dict
+        and overlay.get("mountopt", "") in ("", "nodev")
+        and not any(value for key, value in overlay.items() if key != "mountopt")
+        and not any(
+            value
+            for key, value in options.items()
+            if key not in ("overlay", "pull_options", "vfs", "btrfs", "zfs")
+        ),
+        "The configured Podman overlay options are unsupported.",
+    )
+    graph_options = {"overlay.mountopt": "nodev"} if overlay.get("mountopt") else {}
+    database = str(Path(static if static_dir else graph) / "db.sql")
+    return graph, runroot, volume, static, temp, database, graph_options
+
+
+def _verify_database_metadata(database, expected):
+    """Verify only the existing Podman 6.2 DBConfig row, never open it writable."""
+    try:
+        import sqlite3
+    except ImportError:
+        raise Refused("Guarded disposal requires host Python SQLite support.") from None
+
+    uid = os.geteuid()
+    for suffix in ("-wal", "-shm", "-journal"):
+        try:
+            with workspace_podman._path_fd(database + suffix, uid) as (fd, info):
+                _database_stamp(fd, info)
+                _require(
+                    suffix != "-journal" or info.st_size == 0,
+                    "The Podman database has an unsettled rollback journal.",
+                )
+        except FileNotFoundError:
+            pass
+    uri = Path(database).as_uri() + "?mode=ro&immutable=1"
+    try:
+        with contextlib.closing(sqlite3.connect(uri, uri=True, timeout=1)) as db:
+            db.execute("PRAGMA trusted_schema = OFF")
+            _require(
+                db.execute(
+                    "SELECT type FROM sqlite_master WHERE name='DBConfig'"
+                ).fetchmany(2)
+                == [("table",)],
+                "The existing Podman database does not have the expected configuration table.",
+            )
+            rows = db.execute(
+                "SELECT ID, SchemaVersion, OS, StaticDir, TmpDir, GraphRoot, RunRoot, GraphDriver, VolumeDir FROM DBConfig"
+            ).fetchmany(2)
+    except sqlite3.Error:
+        raise Refused(
+            "The existing Podman database configuration could not be verified."
+        ) from None
+    _require(
+        len(rows) == 1
+        and rows[0][:3] == (1, 1, "linux")
+        and all(value in ("", wanted) for value, wanted in zip(rows[0][3:], expected)),
+        "The existing Podman database config does not match the reviewed store.",
+    )
+
+
 class Engine:
     def __init__(self, box):
         self.environment = entrypoint_migration.engine_environment(box)
+        self.environment["PATH"] = "/usr/sbin:/usr/bin:/sbin:/bin"
         # This native selector is not allowed to leak into the sealed profile.
         if "CONTAINERS_STORAGE_CONF_OVERRIDE" in os.environ:
             self.environment["CONTAINERS_STORAGE_CONF_OVERRIDE"] = os.environ[
@@ -398,8 +526,10 @@ class Engine:
             "The packaged Podman executable could not be located safely.",
         )
         self.flags = ("--remote=false",)
+        self.config_fd = subprocess.DEVNULL
         self.bound = None
         self.database = None
+        self.alive = None
 
     def __enter__(self):
         with contextlib.ExitStack() as stack:
@@ -419,61 +549,116 @@ class Engine:
                 and workspace_podman._read_pin(self.executable, 4) == b"\x7fELF",
                 "The local packaged Podman executable could not be verified.",
             )
-            self.environment, static_dir, self.config_fd = _engine_config(
+            self.environment, static_dir, self.config_fd, settings = _engine_config(
                 stack, self.environment
             )
-            _require(
-                self.read("--version") == f"podman version {_PROFILE}\n",
-                "Guarded disposal requires the verified Podman 6.2.0 executable.",
+            graph, runtime, volume, static, temp, self.database_path, options = (
+                _store_layout(self.environment, static_dir, settings)
             )
-            self.bound = self.scope()
-            graph, runtime, volume = (path for path, _ in self.bound[:3])
-            base = Path(static_dir or graph)
-            _require(
-                base.is_relative_to(graph),
-                "The Podman database is outside the verified store.",
+            self.roots = tuple(
+                (path, _identity(path)) for path in (graph, runtime, volume)
             )
-            self.database_path = str(base / "db.sql")
+            _identity(static)
+            _identity(temp)
             fd, info = stack.enter_context(
                 workspace_podman._path_fd(self.database_path, os.geteuid())
             )
             self.database = fd, _database_stamp(fd, info)
             _require(
-                self.database[1][::2] == self.bound[0][1][::2],
+                self.database[1][::2] == self.roots[0][1][::2],
                 "The Podman database crosses a storage boundary.",
             )
-            ambient = tuple(self.catalog(kind) for kind in ("container", "volume"))
-            # Destructive requests set explicit selectors instead of silently
-            # reopening whichever store ambient config then happens to name.
+            _verify_database_metadata(
+                self.database_path, (static, temp, graph, runtime, "overlay", volume)
+            )
+            try:
+                self.alive = workspace_podman._pin(
+                    stack,
+                    temp + "/alive",
+                    os.geteuid(),
+                    owner=os.geteuid(),
+                    directory=False,
+                )
+            except FileNotFoundError:
+                raise Refused(
+                    "The local Podman store is not initialized. Run 'podman info' on the host before retrying."
+                ) from None
+            with open("/proc/sys/kernel/random/boot_id", "rb") as stream:
+                boot = stream.read(64)
+            _require(
+                re.fullmatch(rb"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\n", boot)
+                and workspace_podman._read_pin(self.alive, 65) == boot,
+                "The Podman runtime is not verified for this boot. Run 'podman info' on the host before retrying.",
+            )
+            # The packaged binary initializes its default runtime directory
+            # and checks the pre-exec marker even during --version.
+            with workspace_podman._path_fd(
+                self.environment["XDG_RUNTIME_DIR"] + "/libpod",
+                os.geteuid(),
+                directory=True,
+            ) as (_, info):
+                _require(
+                    info.st_uid == os.geteuid()
+                    and stat.S_IMODE(info.st_mode) == 0o1700,
+                    "The default Podman runtime directory is not initialized privately.",
+                )
+            self._verify_version(stack)
+            # Use explicit checked roots and the preserved driver options on
+            # the very first runtime-opening command, not just during rm.
             self.flags = (
                 "--remote=false",
                 f"--root={graph}",
                 f"--runroot={runtime}",
                 f"--volumepath={volume}",
+                f"--tmpdir={temp}",
                 "--storage-driver=overlay",
+                *_storage_options(options),
                 "--transient-store=false",
                 "--namespace=",
             )
+            self.bound = self.scope()
             _require(
-                self.scope() == self.bound
-                and tuple(self.catalog(kind) for kind in ("container", "volume"))
-                == ambient,
+                self.bound[:3] == self.roots and self.bound[3][2] == options,
                 "Explicit Podman selectors did not preserve the reviewed store.",
             )
+            self.check_namespace(())
             self.stack = stack.pop_all()
         return self
 
     def __exit__(self, *_):
         self.stack.close()
 
+    def _verify_version(self, stack):
+        self._check_preexec()
+        environment = {
+            key: value
+            for key, value in self.environment.items()
+            if not key.startswith(("CONTAINER_", "CONTAINERS_", "STORAGE_"))
+        }
+        environment.update({key: "/proc/self/fd/0" for key in _CONFIG_FILES})
+        code, raw = workspace_podman._capture_pinned(
+            self.executable,
+            ("--remote=false", "--version"),
+            environment,
+            time.monotonic() + 8,
+            1024,
+            stdin=_sealed_config(stack, b""),
+        )
+        self.executable.recheck()
+        _require(
+            code == 0 and raw == f"podman version {_PROFILE}\n".encode("ascii"),
+            "Guarded disposal requires the verified Podman 6.2.0 executable.",
+        )
+
     def call(self, *arguments):
+        self._check_preexec()
         self.executable.recheck()
         self.check_database()
-        if self.bound is not None:
-            _require(
-                all(_identity(path) == stamp for path, stamp in self.bound[:3]),
-                "The reviewed Podman store paths changed.",
-            )
+        self.alive.recheck()
+        _require(
+            all(_identity(path) == stamp for path, stamp in self.roots),
+            "The reviewed Podman store paths changed.",
+        )
         timeout = (
             _MUTATION_SECONDS
             if arguments[:2]
@@ -494,8 +679,16 @@ class Engine:
         )
         self.executable.recheck()
         self.check_database()
+        self.alive.recheck()
         return subprocess.CompletedProcess(
             arguments, code, output.decode("utf-8", errors="strict")
+        )
+
+    @staticmethod
+    def _check_preexec():
+        _require(
+            _absent(_PREEXEC_MARKER),
+            "Podman pre-exec hooks are enabled; guarded disposal did not open the store.",
         )
 
     def check_database(self):
@@ -524,7 +717,11 @@ class Engine:
         return result.stdout
 
     def scope(self):
-        data = workspace_podman._json(self.read("info", "--format=json"))
+        return self._inspect_scope(self.read("info", "--format=json"))
+
+    @staticmethod
+    def _inspect_scope(raw):
+        data = workspace_podman._json(raw)
         host, store = data["host"], data["store"]
         graph, runtime, volume = (
             store[key] for key in ("graphRoot", "runRoot", "volumePath")
@@ -546,7 +743,14 @@ class Engine:
         )
         return (
             *((item, _identity(item)) for item in (graph, runtime, volume)),
-            (host["databaseBackend"], store.get("configFile"), store["graphOptions"]),
+            (
+                host["databaseBackend"],
+                store.get("configFile"),
+                store["graphOptions"],
+                host.get("networkBackend"),
+                host.get("cgroupManager"),
+                host.get("ociRuntime"),
+            ),
         )
 
     def mounted(self, rows):
@@ -564,9 +768,13 @@ class Engine:
         )
 
     def check_namespace(self, targets):
-        # A native mount namespace can shadow db.sql without shadowing its
-        # graphroot or the two directories that would be removed.
-        subject = ((self.database_path, self.database[1]), *targets)
+        # A native mount namespace can shadow the database or boot marker
+        # without shadowing either directory that would be removed.
+        subject = (
+            (self.database_path, self.database[1]),
+            (self.alive.path, self.alive.stamp),
+            *targets,
+        )
         text = self.read(
             "unshare",
             "/usr/bin/python3",
@@ -588,11 +796,11 @@ class Engine:
                 and len(stamp) == 3
                 and all(type(value) is int and value >= 0 for value in stamp)
                 and tuple(stamp[:2]) == expected[:2],
-                "The Podman namespace does not use the reviewed database."
-                if index == 0
+                "The Podman namespace does not use the reviewed database or boot marker."
+                if index < 2
                 else "The Podman namespace does not use the same backing storage.",
             )
-            if index:
+            if index >= 2:
                 _check_mount_backing(mounts, path, stamp[2])
 
     def catalog(self, kind):

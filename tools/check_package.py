@@ -205,6 +205,7 @@ def check_archives(directory):
             "oc-box-mark.png",
             "workspace_control.py",
             "guarded_discard.py",
+            "podman_config_layers.py",
             "stale_cleanup.py",
             *_HISTORY_OVERLAP_RUNTIME,
             "history_reader.py",
