@@ -845,7 +845,7 @@ def state_root():
     )
 
 
-def atomic_json(path, value):
+def atomic_json(path, value, *, durable=False):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     tmp = path.with_name(path.name + "." + uuid.uuid4().hex + ".tmp")
@@ -854,7 +854,16 @@ def atomic_json(path, value):
             os.chmod(tmp, 0o600)
             json.dump(value, stream, indent=2)
             stream.write("\n")
+            if durable:
+                stream.flush()
+                os.fsync(stream.fileno())
         tmp.replace(path)
+        if durable:
+            fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            try:
+                os.fsync(fd)
+            finally:
+                os.close(fd)
     finally:
         tmp.unlink(missing_ok=True)
 
@@ -1552,7 +1561,15 @@ def create_container(path, data, *, environment=None):
     )[0]
     if (volume_info.get("Labels") or {}).get(LABEL) != data["id"]:
         raise BoxError("Private home volume ownership mismatch.")
-    create_podman(
+    create_podman(*container_create_args(data, project), preparation="container-image")
+    data["ready"] = False
+    atomic_json(path, data)
+
+
+def container_create_args(data, project, *, conversion=None, ulimits=()):
+    # Conversion uses only this argument builder: it must neither create a
+    # home volume nor publish workspace state on the ordinary create path.
+    return (
         "create",
         "--name",
         data["container"],
@@ -1560,7 +1577,18 @@ def create_container(path, data, *, environment=None):
         f"{LABEL}={data['id']}",
         "--label",
         "io.oc-box.managed=true",
-        "--pull=missing",
+        *(
+            (
+                "--pull=never",
+                "--restart=no",
+                "--http-proxy=false",
+                "--env-host=false",
+                "--label",
+                f"io.oc-box.entrypoint-conversion={conversion}",
+            )
+            if conversion
+            else ("--pull=missing",)
+        ),
         "--init",
         "--user",
         "0:0",
@@ -1576,12 +1604,15 @@ def create_container(path, data, *, environment=None):
         "--workdir",
         container_project(data),
         "--volume",
-        f"{data['home_volume']}:{data['home']}:rw",
+        f"{data['home_volume']}:{data['home']}:rw" + (",nocopy" if conversion else ""),
         "--volume",
         f"{project}:{container_project(data)}:rw,z,rprivate,nosuid,nodev",
-        *(["--image-volume=ignore"] if data.get("restored_from") else []),
-        *(["--unsetenv-all"] if data.get("restored_from") else []),
-        *(["--no-healthcheck"] if data.get("restored_from") else []),
+        *(
+            ("--image-volume=ignore", "--unsetenv-all", "--no-healthcheck")
+            if conversion or data.get("restored_from")
+            else ()
+        ),
+        *("--ulimit=" + value for value in ulimits),
         *("--device=" + device for device in data.get("devices", [])),
         *data.get("podman_args", []),
         "--env",
@@ -1593,10 +1624,7 @@ def create_container(path, data, *, environment=None):
         data["image"],
         "-c",
         history_recovery.PASSIVE_COMMAND,
-        preparation="container-image",
     )
-    data["ready"] = False
-    atomic_json(path, data)
 
 
 def start_container(path, data):
@@ -1631,36 +1659,7 @@ def start_container(path, data):
         podman("start", data["container"], capture=True)
     if not data.get("ready"):
         try:
-            quiet = lifecycle_output.concise()
-            with (
-                loading_stage("Installing container baseline tools", stage="bootstrap")
-                if quiet
-                else contextlib.nullcontext()
-            ):
-                podman(
-                    "exec",
-                    data["container"],
-                    "/bin/sh",
-                    "-c",
-                    DISTROS[data["distro"]][1],
-                    timeout=1800,
-                    preparation="baseline-packages",
-                )
-                podman(
-                    "exec",
-                    "-i",
-                    data["container"],
-                    "python3",
-                    "-",
-                    *(
-                        ["--quiet-ready"]
-                        if quiet and not lifecycle_output.live_preparation_output()
-                        else []
-                    ),
-                    input=(PACKAGE / "bootstrap.py").read_text(),
-                    timeout=600,
-                    preparation="baseline-tools",
-                )
+            install_baseline(data)
         except BaseException:
             podman("stop", "--time", "5", data["container"], capture=True, check=False)
             raise
@@ -1687,6 +1686,58 @@ def start_container(path, data):
             "Then retry the same oc-box command. New containers use Podman's shared project label (:z)."
         )
     return info
+
+
+def install_baseline(data, *, guarded=None):
+    def command(*args, **kwargs):
+        if not guarded:
+            return podman(*args, **kwargs)
+        invocation = ContainerCommand(
+            [
+                "podman",
+                "exec",
+                "--workdir",
+                "/",
+                "--env",
+                "PATH=/usr/sbin:/usr/bin:/sbin:/bin",
+                *args[1:],
+            ],
+            os.environ.copy(),
+        )
+        invocation.guarded_spawn = True
+        return run(invocation, **kwargs)
+
+    ident = guarded.record.container if guarded else data["container"]
+    quiet = lifecycle_output.concise()
+    with (
+        loading_stage("Installing container baseline tools", stage="bootstrap")
+        if quiet
+        else contextlib.nullcontext()
+    ):
+        command(
+            "exec",
+            ident,
+            "/bin/sh",
+            "-c",
+            DISTROS[data["distro"]][1],
+            timeout=1800,
+            preparation="baseline-packages",
+        )
+        command(
+            "exec",
+            "-i",
+            ident,
+            *(runtime_safeguard.SYSTEM_HELPER if guarded else ("python3",)),
+            "-",
+            *(
+                ["--quiet-ready"]
+                if quiet and not lifecycle_output.live_preparation_output()
+                else []
+            ),
+            input=(PACKAGE / "bootstrap.py").read_text(),
+            timeout=600,
+            preparation="baseline-tools",
+        )
 
 
 def stop_container(data, *, env=None):
@@ -3818,6 +3869,17 @@ def launch_environment(path, data, args, *, image_preview_snapshot=None):
                 if guarded
                 else start_container(path, data)
             )
+        migration = runtime_safeguard.entrypoint_migration
+        if guarded and migration.needs_bootstrap(data):
+            install_baseline(data, guarded=guarded)
+            with workspace_control.admission(path):
+                guarded._unchanged(sys.modules[__name__])
+                guarded.require_live(sys.modules[__name__], data, running=True)
+                data[migration.RECEIPT] = {
+                    **data[migration.RECEIPT],
+                    "bootstrap": False,
+                }
+                atomic_json(path, data, durable=True)
         with loading_stage(
             "Preparing OpenCode and syncing configuration", stage="configuration"
         ):
@@ -4685,6 +4747,17 @@ def parser():
         action="store_true",
         help="enroll an existing stopped V2 workspace in isolated runtime preflight",
     )
+    conversion = result.add_mutually_exclusive_group()
+    conversion.add_argument(
+        "--convert-legacy-container",
+        action="store_true",
+        help="approve replacing a stopped legacy container while retaining its private home and OS",
+    )
+    conversion.add_argument(
+        "--rebuild-legacy-container",
+        action="store_true",
+        help="after a verified snapshot failure, approve rebuilding only the legacy container OS",
+    )
     result.add_argument(
         "--env-secret",
         action="append",
@@ -4849,6 +4922,11 @@ def credentials_command(args):
             "No oc-box workspace registered here. Create it with a normal launch before selecting credentials."
         )
     with workspace_lock(path):
+        selected_path, data = find_workspace(None, data["id"])
+        if selected_path != path or not data:
+            raise BoxError(
+                "The workspace registration changed; retry with the intended workspace."
+            )
         try:
             if (
                 args.credential_mode
@@ -4856,6 +4934,9 @@ def credentials_command(args):
                 or args.vault_secret
                 or args.clear_credentials
             ):
+                migration = runtime_safeguard.entrypoint_migration
+                if migration.FIELD in data:
+                    raise BoxError(migration.PENDING)
                 selected = credentials.configure(
                     data,
                     mode=args.credential_mode,
@@ -5095,6 +5176,12 @@ def _validate_web_release(args, version):
 
 
 def _stop_selected(path, data):
+    selected, current = find_workspace(None, data["id"])
+    if selected != path or not current:
+        raise BoxError("The workspace registration changed; no substitute was stopped.")
+    if runtime_safeguard.entrypoint_migration.FIELD in current:
+        raise BoxError(runtime_safeguard.entrypoint_migration.PENDING)
+    data = current
     record = runtime_safeguard.load(sys.modules[__name__], path)
     if record:
         info = inspect_owned(data)
@@ -5107,7 +5194,19 @@ def _stop_selected(path, data):
 
 
 def _main_command(args, argv):
-    if getattr(args, "runtime_guard", False) and (
+    owning_start_option = next(
+        (
+            option
+            for option in (
+                "runtime_guard",
+                "convert_legacy_container",
+                "rebuild_legacy_container",
+            )
+            if getattr(args, option, False)
+        ),
+        None,
+    )
+    if owning_start_option and (
         args.command != "start"
         or args.status
         or args.about
@@ -5115,7 +5214,7 @@ def _main_command(args, argv):
         or args.json
     ):
         raise BoxError(
-            "--runtime-guard applies only to owning start on a registered workspace."
+            f"--{owning_start_option.replace('_', '-')} applies only to owning start on a registered workspace."
         )
     if args.command == "runtime-check":
         raise BoxError("Use 'oc-box runtime-check VERSION' with no workspace options.")
@@ -5544,7 +5643,7 @@ def _main_command(args, argv):
         )
     )
     if data is None:
-        if getattr(args, "runtime_guard", False):
+        if owning_start_option:
             raise BoxError(
                 "The runtime safeguard can only enroll an existing stopped V2 workspace."
             )
@@ -5603,6 +5702,7 @@ def _main_command(args, argv):
     if (
         args.command in ("start", "terminal", "web")
         and opencode_compat.major(data.get("opencode_version", "1.0.0")) == 2
+        and runtime_safeguard.entrypoint_migration.FIELD not in data
     ):
         if args.command == "terminal" and not args.maintenance:
             with workspace_service.attach(
@@ -5659,6 +5759,8 @@ def _main_command(args, argv):
                     args.no_vault,
                     args.image_preview is not None,
                     getattr(args, "runtime_guard", False),
+                    getattr(args, "convert_legacy_container", False),
+                    getattr(args, "rebuild_legacy_container", False),
                 )
             ):
                 raise BoxError(
@@ -5739,12 +5841,11 @@ def _main_command(args, argv):
                     sys.modules[__name__], data, connection, args
                 )
     with workspace_lock(path), contextlib.ExitStack() as launch_context:
-        if args.command != "repair":
-            rechecked_path, data = find_workspace(None, data["id"])
-            if rechecked_path != path or not data or data.get("version") != 2:
-                raise BoxError(
-                    "The workspace registration changed; retry with the intended workspace."
-                )
+        rechecked_path, data = find_workspace(None, data["id"])
+        if rechecked_path != path or not data or data.get("version") != 2:
+            raise BoxError(
+                "The workspace registration changed; retry with the intended workspace."
+            )
         return _locked_workspace_command(
             path, data, args, launch_context, image_preview_snapshot
         )
@@ -5755,12 +5856,27 @@ def _locked_workspace_command(path, data, args, launch_context, image_preview_sn
         raise BoxError(
             "This workspace restore did not finish. Do not start it; inspect backup recovery staging and use plain purge by ID before retrying into a new destination."
         )
+    migration = runtime_safeguard.entrypoint_migration
+    pending = migration.FIELD in data
+    explicit = getattr(args, "convert_legacy_container", False) or getattr(
+        args, "rebuild_legacy_container", False
+    )
+    if pending and (args.command != "start" or not explicit):
+        raise BoxError(migration.PENDING)
     record = (
         runtime_safeguard.load(sys.modules[__name__], path)
         if args.command in ("start", "reset", "sync", "web", "terminal", "purge")
         else None
     )
-    guard = record is not None or getattr(args, "runtime_guard", False)
+    guard = (
+        record is not None
+        or getattr(args, "runtime_guard", False)
+        or explicit
+        or (
+            migration.RECEIPT in data
+            and args.command in ("start", "reset", "sync", "web", "terminal", "purge")
+        )
+    )
     if (
         not guard
         and data.get("ready") is True
@@ -5772,9 +5888,26 @@ def _locked_workspace_command(path, data, args, launch_context, image_preview_sn
         )
         args._opencode_release = release
         guard = runtime_safeguard.version_upgrade(data.get("opencode_version"), release)
+    credentials_open = False
+
+    def open_credentials():
+        nonlocal credentials_open
+        try:
+            launch_context.enter_context(launch_credentials(data, args))
+        except vault.VaultError as exc:
+            raise BoxError(str(exc)) from exc
+        credentials_open = True
+
     if guard:
         launch_context.enter_context(
-            runtime_safeguard.admit(sys.modules[__name__], path, data, args, record)
+            runtime_safeguard.admit(
+                sys.modules[__name__],
+                path,
+                data,
+                args,
+                record,
+                prepare_replacement=open_credentials,
+            )
         )
     if args.command == "web":
         args._opencode_release = getattr(
@@ -5819,13 +5952,10 @@ def _locked_workspace_command(path, data, args, launch_context, image_preview_sn
         configure_host_clipboard_preferences(
             path, data, args, getattr(args, "_opencode_release", None)
         )
-    if args.command in ("start", "reset", "web"):
+    if args.command in ("start", "reset", "web") and not credentials_open:
         # Validate/unlock before setup or reset changes the environment.
         # Wrong/missing credentials must never destroy the old OS.
-        try:
-            launch_context.enter_context(launch_credentials(data, args))
-        except vault.VaultError as exc:
-            raise BoxError(str(exc)) from exc
+        open_credentials()
     if args.command in ("start", "reset", "sync", "terminal", "web"):
         refresh_workspace_identity(path, data)
     if args.command == "terminal":
@@ -5868,6 +5998,7 @@ def _locked_workspace_command(path, data, args, launch_context, image_preview_sn
             check_resource_controllers(data)
             remove_resources(data, keep_home=True)
             data["ready"] = False
+            data.pop(migration.RECEIPT, None)
             # Reset rebuilds the distro, not the captured custom OS image.
             # Keep any restored internal paths for the preserved home DB.
             data["image"] = DISTROS[data["distro"]][0]

@@ -97,7 +97,10 @@ _OPTION_GROUPS = {
         ),
     ),
     "vault": ("Credential delivery", ("no_vault",)),
-    "runtime-guard": ("Native runtime safeguard", ("runtime_guard",)),
+    "runtime-guard": (
+        "Native runtime safeguard",
+        ("runtime_guard", "convert_legacy_container", "rebuild_legacy_container"),
+    ),
     "logging": (
         "Lifecycle logging",
         ("log_dir", "journald", "lifecycle_diagnostics", "verbose"),

@@ -258,6 +258,11 @@ class CliHelpTests(unittest.TestCase):
             with self.subTest(command=command):
                 output = self.help(command, "--help", command=command)
                 show, hide = scope.get(command, ("", ""))
+                conversion = "--convert-legacy-container --rebuild-legacy-container"
+                if command == "start":
+                    show = f"{show} {conversion}"
+                else:
+                    hide = f"{hide} {conversion}"
                 if command == "preferences":
                     show = f"{show} --host-file-open --image-preview"
                     hide = f"{hide} --no-host-file-open --no-image-preview"

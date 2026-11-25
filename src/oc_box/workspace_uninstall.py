@@ -465,6 +465,8 @@ def _read_record(directory, ident, mount, state_root):
         or "restore_volume_create_attempted" in data
     ):
         _fail("incomplete-restore", ident)
+    if "entrypoint_conversion" in data:
+        _fail("incomplete-container-replacement", ident)
     project, home = data.get("project"), data.get("home")
     container_project = data.get("container_project", project)
     if (

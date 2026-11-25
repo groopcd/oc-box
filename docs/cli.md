@@ -326,11 +326,31 @@ starting a preflight or refreshing its credentials.
 
 New containers use an absolute `/bin/sleep` path for their passive entrypoint.
 The safeguard refuses older containers whose stored entrypoint would look up
-`sleep` on the workspace `PATH`. It does not modify or replace those containers,
-or fall back from guarded to unguarded startup. Ordinary unguarded startup of
-existing containers is unchanged. A verified, already-running guarded owner
-can still accept clients; attaching does not authorize a new start. Preserve
-existing workspace data; do not reset or downgrade to bypass a refusal.
+`sleep` on the workspace `PATH`. On an eligible stopped V2 workspace, owning
+`start` detects the exact legacy command and offers a one-time replacement.
+Use `oc-box start --convert-legacy-container` to approve it noninteractively.
+The replacement snapshots the installed container OS locally and retains the
+same workspace ID, project path, settings and private home volume (including
+conversations never synchronized to the host). Neither container starts
+during the replacement; guarded startup still has to pass.
+
+If Podman confirms that the OS snapshot failed before the name switch and
+oc-box can still verify the original resources, you may separately approve
+`oc-box start --rebuild-legacy-container`. This takes the original local base
+image, discards changes made in the old container's writable OS layer, and
+reinstalls baseline tools. It keeps the same project and private home; it does
+not run `oc-box purge`. A timed-out, interrupted, or otherwise unverified
+switch never offers an OS rebuild just because the state is uncertain. Retry a
+pending replacement only with an explicit replacement flag; oc-box continues
+only from a verified intermediate state. Do not reset, purge, or downgrade to
+bypass a refusal. Back up important data first.
+
+In-place replacement does not rebind containers already enrolled in a
+runtime floor, nonstandard resources, or custom devices/Podman arguments.
+Preserve those through a full backup if replacement is unavailable. Ordinary
+unguarded startup of existing containers is unchanged. A verified,
+already-running guarded owner can still accept clients; attaching does not
+authorize a replacement or a new start.
 
 Before normal preparation can write state, oc-box durably records the admitted
 version. An interruption, late startup failure or missing readiness does not
@@ -3388,6 +3408,21 @@ Enroll an existing stopped standard OpenCode 2.x workspace on an owning
 than overriding it. The guard persists after runtime admission; there is no
 switch to delete the version fence. This option is not a request for rollback,
 and does not apply to attach-only clients or `reset`.
+
+### --convert-legacy-container
+
+Owning `start` only. Explicitly approve the one-time stopped legacy container
+replacement, including continuation of a previously approved interrupted
+replacement. Preserve the existing project, private home and installed OS.
+Normal guarded runtime checks still apply. The flag is not an environment or
+workspace preference.
+
+### --rebuild-legacy-container
+
+Owning `start` only. After a confirmed OS snapshot failure, approve replacing
+just the old container OS, keeping the project and private conversation volume.
+This discards changes to the old writable OS layer and reinstalls baseline
+tools. It is mutually exclusive with `--convert-legacy-container`.
 
 ### --no-vault
 

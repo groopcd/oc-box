@@ -18,6 +18,7 @@ import tempfile
 
 if __package__:
     from . import (
+        entrypoint_migration,
         history_recovery,
         lifecycle_output,
         native_preflight,
@@ -25,6 +26,7 @@ if __package__:
     )
     from . import opencode_compat, startup_output, workspace_control, workspace_identity
 else:
+    import entrypoint_migration
     import history_recovery
     import lifecycle_output
     import native_preflight
@@ -346,9 +348,19 @@ def _inspect(box, path, data, *, running, attach_only=False):
             or not _HASH.fullmatch(info["Id"])
             or info["State"]["Running"] is not running
             or info["State"].get("Paused") is True
-            or info["State"].get("Status")
-            not in (("running",) if running else ("exited", "stopped"))
+            or (
+                info["State"].get("Status")
+                not in (("running",) if running else ("exited", "stopped"))
+                and (running or not entrypoint_migration.fresh_replacement(data, info))
+            )
             or len(info["Mounts"]) != 2
+            or (
+                entrypoint_migration.RECEIPT in data
+                and (
+                    not entrypoint_migration.replacement_matches(data, info)
+                    or not entrypoint_migration.no_copy_binding(data, info)
+                )
+            )
         ):
             raise ValueError
         validate_mounts = (
@@ -370,6 +382,14 @@ def _inspect(box, path, data, *, running, attach_only=False):
             or volumes[0].get("Options")
             or volumes[0]["Labels"].get(box.LABEL) != data["id"]
             or volumes[0]["Mountpoint"] != signature[2]
+            or (
+                entrypoint_migration.RECEIPT in data
+                and (
+                    not entrypoint_migration.initialized_volume(volumes[0])
+                    or entrypoint_migration.volume_stamp(signature[2])
+                    != data[entrypoint_migration.RECEIPT]["volume"]
+                )
+            )
         ):
             raise ValueError
         return info["Id"], signature
@@ -386,10 +406,12 @@ def _inspect(box, path, data, *, running, attach_only=False):
             isinstance(exc, history_recovery.RecoveryError)
             and exc.reason == "startup-path-unverified"
         ):
-            raise box.BoxError(
+            error = box.BoxError(
                 "Guarded startup refused this older container's PATH-dependent entrypoint. "
                 "The existing container and data are retained; do not reset or downgrade to bypass the safeguard."
-            ) from None
+            )
+            error.legacy_entrypoint = info["Id"]
+            raise error from None
         mode = "running" if running else "stopped"
         raise box.BoxError(
             f"Cannot verify the same {mode} workspace and private home for the runtime safeguard."
@@ -570,9 +592,18 @@ def bind_client(box, path, data, connection):
 
 
 @contextlib.contextmanager
-def admit(box, path, data, args, previous):
+def admit(box, path, data, args, previous, *, prepare_replacement=None):
     """Run before the vault/readiness path; the caller holds the workspace lock."""
     command = args.command
+    requested = getattr(args, "convert_legacy_container", False)
+    rebuild = getattr(args, "rebuild_legacy_container", False)
+    pending = entrypoint_migration.FIELD in data
+    if pending and (command != "start" or not (requested or rebuild)):
+        raise box.BoxError(entrypoint_migration.PENDING)
+    if entrypoint_migration.needs_bootstrap(data) and command != "start":
+        raise box.BoxError(
+            "The replacement OS needs baseline setup. Use owning 'oc-box start'."
+        )
     if command not in ("start", "web", "sync", "purge"):
         raise box.BoxError(
             "This operation is unavailable on a runtime-guarded workspace. "
@@ -604,7 +635,46 @@ def admit(box, path, data, args, previous):
         raise box.BoxError(
             "Only plain history-preserving purge with the verified runtime is supported for a guarded workspace."
         )
-    resources = _inspect(box, path, data, running=False)
+    source_id = None
+    if pending:
+        resources = None
+    else:
+        try:
+            resources = _inspect(box, path, data, running=False)
+        except box.BoxError as exc:
+            if command != "start" or not getattr(exc, "legacy_entrypoint", False):
+                raise
+            if previous is not None:
+                raise box.BoxError(
+                    "This legacy container is already bound to a verified runtime floor. "
+                    "In-place replacement is unavailable; preserve it with a full backup."
+                ) from None
+            source_id = exc.legacy_entrypoint
+            resources = None
+    converting = pending or source_id is not None
+    if converting and (
+        previous is not None
+        or any(
+            getattr(args, option, None)
+            for option in (
+                "distro",
+                "cpus",
+                "memory",
+                "pids_limit",
+                "clear_devices",
+                "clear_podman_args",
+            )
+        )
+    ):
+        raise box.BoxError(
+            "Legacy container replacement cannot change resource settings or rebind an enrolled runtime."
+        )
+    if (requested or rebuild) and not converting:
+        raise box.BoxError("No eligible legacy container entrypoint to replace.")
+    if rebuild and not pending:
+        raise box.BoxError(
+            "Container OS rebuild is available only after a verified snapshot failure."
+        )
     if previous and (previous.container, previous.volume) != (
         resources[0],
         data["home_volume"],
@@ -621,6 +691,8 @@ def admit(box, path, data, args, previous):
                 "Inspect the stopped resources and preserve a backup; do not reset or downgrade to bypass the fence."
             ) from None
         raise box.BoxError(str(exc)) from None
+    if converting:
+        entrypoint_migration.consent(box, args, data)
     with pinned_host(box) as host:
         version = _host_release(box, host)
         if getattr(args, "_opencode_release", version) != version:
@@ -653,6 +725,20 @@ def admit(box, path, data, args, previous):
             raise box.BoxError(
                 "The host OpenCode is not the exact verified native artifact; guarded startup refused."
             )
+        if converting:
+            if prepare_replacement is None:
+                raise box.BoxError(
+                    "Legacy container replacement requires owning credential validation."
+                )
+            # Keep the isolated preflight ahead of unlock, but never retire
+            # the original OS before the owning launch can unlock its vault.
+            args._opencode_release = version
+            prepare_replacement()
+            host.command(box)
+            entrypoint_migration.convert(
+                box, path, data, token, source_id, rebuild=rebuild
+            )
+            resources = _inspect(box, path, data, running=False)
         record = (
             previous
             if not transition
