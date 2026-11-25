@@ -99,6 +99,24 @@ def native_action(local_box, action, settings, *, env=None, cwd=None):
     return result
 
 
+def quiet_action(data, action, settings):
+    source = workspace_service.quiet_history_source()
+    require(source is not None, "A positive quiet lease did not expose a read client.")
+    command = source.read_command(data, action)
+    require(
+        command[5] == data["container"] and command[-2] == "quiet-history-" + action,
+        "Quiet read escaped its original container or action.",
+    )
+    return subprocess.run(
+        [sys.executable, *command[command.index("-I") :]],
+        env={"PATH": os.defpath, "LANG": "C.UTF-8"},
+        input=json.dumps(settings),
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+
 def seed_completed(request, ident, project):
     def completed(method, route, payload):
         payload["messages"].append(
@@ -157,6 +175,7 @@ def run(binary, release):
         local_box = fake_box()
         local_box.CONTAINER_OPENCODE = binary
         local_box.captured_output = box.captured_output
+        local_box.container_project = box.container_project
         start = time.monotonic()
         with history_reader._remote_environment(str(home), version=release) as (
             cwd,
@@ -218,8 +237,8 @@ def run(binary, release):
                 endpoint = {key: live[key] for key in ("url", "password")}
                 request = bridge.endpoint_request(endpoint)
                 pid = request("GET", "/api/info")["pid"]
-                result = native_action(
-                    local_box,
+                result = quiet_action(
+                    data,
                     "sessions",
                     {"endpoint": endpoint, "directory": str(project)},
                 )
@@ -232,8 +251,8 @@ def run(binary, release):
                     "Leased inventory differs from standalone.",
                 )
                 for ident in IDS:
-                    result = native_action(
-                        local_box, "export", {"endpoint": endpoint, "session": ident}
+                    result = quiet_action(
+                        data, "export", {"endpoint": endpoint, "session": ident}
                     )
                     require(
                         result.returncode == 0 and not result.stderr,
@@ -288,15 +307,18 @@ def run(binary, release):
                     updated.rowcount == 1, "The synthetic assistant was not projected."
                 )
             pending_before = metadata(pending)
+            pending_data = {**data, "home": str(pending)}
             with (
                 patch.object(workspace_service.HistorySource, "command", local_command),
                 workspace_service.history_source(
-                    local_box, {**data, "home": str(pending)}, stopped_source=True
+                    local_box, pending_data, stopped_source=True
                 ) as live,
             ):
                 endpoint = {key: live[key] for key in ("url", "password")}
-                result = native_action(
-                    local_box, "export", {"endpoint": endpoint, "session": pending_id}
+                result = quiet_action(
+                    pending_data,
+                    "export",
+                    {"endpoint": endpoint, "session": pending_id},
                 )
                 require(
                     result.returncode == 2
@@ -304,8 +326,8 @@ def run(binary, release):
                     and bridge.fixed_message(result.stderr) == bridge.UNSETTLED,
                     "Unfinished native history did not remain a fixed pending export refusal.",
                 )
-                result = native_action(
-                    local_box, "export", {"endpoint": endpoint, "session": IDS[0]}
+                result = quiet_action(
+                    pending_data, "export", {"endpoint": endpoint, "session": IDS[0]}
                 )
                 require(
                     result.returncode == 0

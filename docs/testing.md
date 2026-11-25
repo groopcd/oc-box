@@ -1861,6 +1861,31 @@ sessions, and no extra provider/shell/plugin execution. This is local synthetic
 native coverage, not new external-host acceptance or a real-project timing.
 No broad local suite, host-fixture replay or native workload sweep is implied.
 
+##### Large history sync benchmark
+
+The optional `tools/benchmark_history_sync.py` uses disposable stock 2.4.1
+stores and exercises fresh checked exports, ordinary quiet-source reads, and
+standalone native destination imports and readback. It reports first sync,
+unchanged retry, and one changed session separately. The unchanged and changed
+passes require complete checked export counts and zero or exactly one verified
+destination update, respectively. No timings are CI thresholds.
+
+```sh
+PYTHONPATH=src:tests python3 -B tools/benchmark_history_sync.py \
+  --opencode /path/to/stock/opencode --sessions 160 --messages 3 --text-size 100
+PYTHONPATH=src:tests python3 -B tools/benchmark_history_sync.py \
+  --opencode /path/to/stock/opencode --sessions 40 --messages 128 --text-size 16384
+```
+
+The fixture substitutes local process placement for Podman exec and excludes
+container startup, configuration preparation, and container stop. Results are
+not end-to-end host acceptance. The many-session shape measures process and
+native import/readback cost independently of total transcript size; the longer
+shape exercises pagination and archive encoding. The local archive tests keep
+the old bytes, privilege removal, and provenance independent of this benchmark,
+including oversized encoder fallback, same-size corruption, and missing-copy
+repair without duplicate host import.
+
 #### Native terminal preferences and open tabs
 
 Native terminal preferences and tab membership are not the history inventory.
