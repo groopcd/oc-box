@@ -18,6 +18,29 @@ APP = Path(__file__).resolve().parents[1]
 
 
 class PackagingTests(unittest.TestCase):
+    def test_guarded_discard_imports_from_actual_flat_install_inventory(self):
+        with tempfile.TemporaryDirectory() as root:
+            target = Path(root)
+            for name in installation.RUNTIME_FILES:
+                if name.endswith(".py"):
+                    (target / name).write_bytes(
+                        installation.source_file(APP, name).read_bytes()
+                    )
+            output = subprocess.run(
+                [
+                    sys.executable,
+                    "-IB",
+                    "-c",
+                    "import sys; sys.path.insert(0, sys.argv[1]); "
+                    "import guarded_discard; assert guarded_discard.Engine",
+                    str(target),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            self.assertEqual(output.returncode, 0, output.stderr)
+
     def test_exact_named_assets_are_present_without_compiled_payloads(self):
         source_names = {
             web_named_account_assets._DOCUMENT[0],

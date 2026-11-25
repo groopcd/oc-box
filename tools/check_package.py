@@ -182,6 +182,8 @@ def check_archives(directory):
             *_WEB_RUNTIME_FILES,
             "oc-box-mark.png",
             "workspace_control.py",
+            "guarded_discard.py",
+            "workspace_podman.py",
             "history_reader.py",
             "history_recovery.py",
             "native_tabs.py",

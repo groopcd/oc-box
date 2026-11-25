@@ -1739,6 +1739,44 @@ is rejected before deleting any history or resources. Extra externally supplied
 mounts/volumes are not owned resources unless they bear this workspace's
 ownership label.
 
+To deliberately discard a guarded or fenced workspace without attempting
+startup or final history sync, use:
+
+```sh
+oc-box purge --workspace WORKSPACE_ID --discard-guarded
+```
+
+Use the full workspace ID from `oc-box status --table`. Read the review on
+the controlling host terminal, then type `DISCARD WORKSPACE_ID` with that same
+full ID. `--yes`, `--all`, `--delete-sessions`, path selectors, and other
+options are not accepted in this mode.
+
+This removes only the positively verified, stopped owned container and
+original private home volume, without force. **Unsynced conversations in that
+volume are lost.** Project files and their marker, host OpenCode archives,
+images, networks, and unrelated workspaces stay intact. The original workspace
+registration and fence stay in place; this command neither resumes the workspace
+nor makes its project eligible for automatic re-creation.
+
+This recovery mode requires host Python 3.11 or later and the checked Podman
+6.2.0 rootless overlay/SQLite profile. It uses sealed copies of the engine and
+storage configuration and verifies the existing database. Merged configuration
+and overrides are not supported. The original container or a matching private
+home with a verified conversion receipt must identify the local store. An empty
+store alone cannot establish that the resources were removed.
+
+Active, mounted, shared, or changed resources, pending conversions or restores,
+and unverified replies stop the operation without retries. If removal is
+interrupted or only partly verified, inspect the remaining resources; a surviving
+home without an original volume receipt may not be verifiable on a new invocation.
+
+Do not run other Podman or storage-changing commands against this workspace
+during review or disposal. Launcher locks exclude competing oc-box lifecycle
+operations, not direct Podman commands. Prefix matches are refused when observed,
+but Podman has no atomic compare-and-remove operation for a volume's reviewed
+filesystem identity. Never change the reviewed workspace with direct Podman or
+filesystem commands while this operation is in progress.
+
 By default, enter the first eight characters of the workspace ID to confirm.
 `-y` or `--yes` skips this confirmation. These deletion flags apply only to purge.
 

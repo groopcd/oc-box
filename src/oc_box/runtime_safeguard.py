@@ -854,7 +854,9 @@ def admit(
         raise box.BoxError("Use owning 'oc-box start --runtime-guard' to enroll.")
     if command == "purge" and (not previous.ready or args.all or args.delete_sessions):
         raise box.BoxError(
-            "Only plain history-preserving purge with the verified runtime is supported for a guarded workspace."
+            "Only plain history-preserving purge with the verified runtime is supported "
+            "by this path. To discard a stopped workspace without starting it, use "
+            "'oc-box purge --workspace WORKSPACE_ID --discard-guarded' and confirm."
         )
     source_id = None
     if pending:
@@ -927,6 +929,12 @@ def admit(
             raise box.BoxError(
                 "The prior container transition is uncertain. No native launch was admitted. "
                 "Inspect the stopped resources and preserve a backup; do not reset or downgrade to bypass the fence."
+                + (
+                    " To discard without startup, use 'oc-box purge --workspace "
+                    "WORKSPACE_ID --discard-guarded' and confirm."
+                    if command == "purge"
+                    else ""
+                )
             ) from None
         raise box.BoxError(str(exc)) from None
     if converting:

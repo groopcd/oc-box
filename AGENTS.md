@@ -251,6 +251,13 @@ their checkout ownership distinct from unrelated source and flat installations.
   resolver/containerenv binds at the exact container's verified Podman
   run-root paths. Do not ignore other missing bind sources, missing device
   nodes, symlinks, or missing evidence on a running container.
+- `guarded_discard.py`: explicit `purge --discard-guarded` with one exact
+  reviewed workspace and fresh typed controlling-TTY confirmation. No
+  startup, sync, auth, forced removal, fence clearing, project or host
+  archive removal. Keep the original active registration and fence in
+  place after verified resource disposal. Empty alternate storage does
+  not establish absence; incomplete or unverified outcomes stop the
+  pass and do not authorize a retry or startup.
 - `history_recovery.py` / `history_reader.py` / `workspace_control.py`: one bounded
   persisted-history snapshot after audited live timeouts: shell-only on native
   2.2.6/2.2.7; shell/subagent on canonical stable 2.3.x. Never a live readiness

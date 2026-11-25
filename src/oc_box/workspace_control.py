@@ -461,6 +461,16 @@ def require_certain(path):
         _certain(_read_marker(directory))
 
 
+def disposal_observation(path, *, admission_fd=None):
+    """Observe the existing stop binding even if uncertain; never admit work."""
+    with _errors(), _control(path, create=False) as (directory, _):
+        _validate_locks(directory)
+        if admission_fd is not None:
+            _same_file(directory, _ADMISSION, admission_fd)
+        marker = _read_marker(directory)
+        return marker["token"], marker["uncertain"]
+
+
 def unchanged(path, baseline):
     """Read/validate only; return false for changed intent, refuse unsafe state."""
     with _errors():
@@ -512,6 +522,17 @@ def admission(path, timeout=DEFAULT_TIMEOUT):
     fd = _acquire_admission(path, timeout)
     try:
         yield
+    finally:
+        with _errors():
+            os.close(fd)
+
+
+@contextmanager
+def disposal_admission(path, timeout=DEFAULT_TIMEOUT):
+    """Keep disposal observations bound to the held admission lock inode."""
+    fd = _acquire_admission(path, timeout)
+    try:
+        yield lambda: disposal_observation(path, admission_fd=fd)
     finally:
         with _errors():
             os.close(fd)

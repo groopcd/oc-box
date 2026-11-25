@@ -379,11 +379,20 @@ def _private_capture(executable, argv, environment, deadline, limit):
     return _capture_pinned(executable, argv, environment, deadline, limit)
 
 
-def _capture_pinned(executable, argv, environment, deadline, limit):
+def _capture_pinned(
+    executable,
+    argv,
+    environment,
+    deadline,
+    limit,
+    *,
+    command_seconds=_COMMAND_SECONDS,
+    stdin=subprocess.DEVNULL,
+):
     """Private transport only; operation allowlists belong to the caller."""
     if type(limit) is not int or not 0 < limit <= _INSPECT:
         _fail("engine-output-limit")
-    deadline = min(deadline, time.monotonic() + _COMMAND_SECONDS)
+    deadline = min(deadline, time.monotonic() + command_seconds)
     _remaining(deadline)
     process = None
     try:
@@ -393,7 +402,7 @@ def _capture_pinned(executable, argv, environment, deadline, limit):
             pass_fds=(executable.fd,),
             env=environment,
             cwd="/",
-            stdin=subprocess.DEVNULL,
+            stdin=stdin,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
         )

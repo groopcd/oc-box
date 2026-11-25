@@ -129,6 +129,29 @@ missing, and contrast the same names at another container's paths, dangling
 symlinks, and missing binds while running. Never remove real engine files
 to manufacture test evidence.
 
+For confirmed guarded disposal, `tests/test_guarded_discard.py` exercises
+changed stop intent and locks, alternate/empty stores, occupied volumes,
+bind aliases, a shadowed SQLite file in the engine namespace, prefix
+collisions, lost removal acknowledgements and retained registration/guard
+bytes. `tests/test_uninstall_tty.py` covers the shared
+controlling-terminal reader and rejection of queued confirmation. Neither
+suite exercises the native removal and re-exec transport.
+
+A separate disposable rootless Podman 6.2.0/runc VM with signed packages
+verified that a never-started, synthetically fenced container survives an
+incorrect phrase, and that exact approval removes only its stopped container
+and private home. A `static_dir` edit at confirmation did not redirect the
+sealed selection. The project, host archive, registration, stop fence,
+unrelated volume and image were unchanged; the VM was reaped and the
+temporary storage removed. The staged runtime snapshot SHA-256 was
+`0bb736144e1dfda77d55897ef6d70d5a281a4e8192ef68c2dc85377909c47de1`;
+the report SHA-256 was
+`4a758cbaa6daeb232a4e9fa689e28acf14f1b5fa8976e019ac53243547076301`.
+This is focused scripted synthetic evidence, not proof of recovery, native
+job quiescence, a general Podman release profile, or atomic removal
+against concurrent direct Podman commands. Earlier fixture failures remain
+separate results.
+
 For an already-fenced `rlimit type 6` failure, the optional
 `tools/probe_legacy_start.py --container NAME` diagnostic inspects the affected
 container on its rootless Podman host and tests passive startup in a disposable

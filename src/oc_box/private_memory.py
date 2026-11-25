@@ -10,11 +10,13 @@ import stat
 import sys
 
 
-def create(name: str) -> int:
+def create(name: str, *, allow_sealing: bool = False) -> int:
     """Return a new anonymous regular-file descriptor with atomic CLOEXEC."""
     if sys.platform != "linux":
         raise OSError(errno.ENOSYS, "Linux anonymous-memory files are unavailable.")
     flags = getattr(os, "MFD_CLOEXEC", 1)
+    if allow_sealing:
+        flags |= getattr(os, "MFD_ALLOW_SEALING", 2)
     native = getattr(os, "memfd_create", None)
     if native is not None:
         return native(name, flags)

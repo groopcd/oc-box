@@ -32,8 +32,13 @@ def confirm(snapshot):
         or (snapshot.request.full and snapshot.workspace is None)
     ):
         return False
-    review = snapshot.render().encode("ascii")
-    expected = snapshot.request.phrase.encode("ascii") + b"\n"
+    return confirm_review(snapshot.render(), snapshot.request.phrase)
+
+
+def confirm_review(review, phrase):
+    """Ask for an exact fresh reply after showing the caller's fixed review."""
+    review = review.encode("ascii")
+    expected = phrase.encode("ascii") + b"\n"
     try:
         fd = os.open("/dev/tty", os.O_RDWR | os.O_CLOEXEC | os.O_NOCTTY)
         try:

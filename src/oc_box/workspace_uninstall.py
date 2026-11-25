@@ -397,7 +397,7 @@ def _child_directory(parent, name, mount, *, owned):
         os.close(fd)
 
 
-def _read_record(directory, ident, mount, state_root):
+def _read_record(directory, ident, mount, state_root, *, include_data=False):
     try:
         with _child_directory(directory, ident, mount, owned=True) as (
             workspace,
@@ -481,7 +481,7 @@ def _read_record(directory, ident, mount, state_root):
         _fail("invalid-registration", ident)
     if _overlap(project, state_root):
         _fail("registry-project-overlap", ident)
-    return Registration(
+    registration = Registration(
         ident,
         project,
         container_project,
@@ -492,9 +492,10 @@ def _read_record(directory, ident, mount, state_root):
         expected,
         stamp,
     )
+    return (registration, data) if include_data else registration
 
 
-def _registry(state_root):
+def _registry(state_root, *, selected=None):
     components = Path(state_root).parts[1:]
     fd = os.open("/", _DIR)
     try:
@@ -522,16 +523,25 @@ def _registry(state_root):
             if stamp[2] != mount:
                 _fail("registry-mount-boundary")
             chain.append(stamp)
-            names = []
-            with os.scandir(directory) as entries:
-                for entry in entries:
-                    if len(names) >= MAX_WORKSPACES:
-                        _fail("registry-limit")
-                    if not _matches(_WORKSPACE_ID, entry.name):
-                        _fail("unexpected-registry-entry")
-                    names.append(entry.name)
+            if selected is None:
+                names = []
+                with os.scandir(directory) as entries:
+                    for entry in entries:
+                        if len(names) >= MAX_WORKSPACES:
+                            _fail("registry-limit")
+                        if not _matches(_WORKSPACE_ID, entry.name):
+                            _fail("unexpected-registry-entry")
+                        names.append(entry.name)
+            else:
+                names = [selected]
             records = tuple(
-                _read_record(directory, name, mount, state_root)
+                _read_record(
+                    directory,
+                    name,
+                    mount,
+                    state_root,
+                    include_data=selected is not None,
+                )
                 for name in sorted(names)
             )
             # Directory mtime/ctime detect membership changes during this pass.
@@ -544,6 +554,17 @@ def _registry(state_root):
         _fail("unsafe-registry")
     finally:
         os.close(fd)
+
+
+def read_discard_registration(state_root, ident):
+    """Read one explicitly selected valid registration without exploring others."""
+    if not _matches(_WORKSPACE_ID, ident):
+        _fail("invalid-registration")
+    root = _validate_selectors(state_root, ())
+    _, present, records = _registry(root, selected=ident)
+    if not present or len(records) != 1:
+        _fail("missing-registration", ident)
+    return records[0]
 
 
 def _label(value):
