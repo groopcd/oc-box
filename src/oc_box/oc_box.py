@@ -891,11 +891,6 @@ def _json_byte_chunks(value):
 @contextlib.contextmanager
 def _atomic_json_file(path, *, binary=False, durable=False):
     path = Path(path)
-    if (
-        path.name == "workspace.json"
-        and runtime_safeguard.entrypoint_migration.durable_registry(value)
-    ):
-        durable = True
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     tmp = path.with_name(path.name + "." + uuid.uuid4().hex + ".tmp")
     try:
@@ -920,6 +915,12 @@ def _atomic_json_file(path, *, binary=False, durable=False):
 
 def atomic_json(path, value, *, durable=False, checksum=False):
     """Write the usual JSON bytes, optionally hashing and syncing the write."""
+    path = Path(path)
+    if (
+        path.name == "workspace.json"
+        and runtime_safeguard.entrypoint_migration.durable_registry(value)
+    ):
+        durable = True
     digest = hashlib.sha256() if checksum else None
     with _atomic_json_file(path, binary=checksum, durable=durable) as stream:
         if digest is None:
