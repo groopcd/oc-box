@@ -332,7 +332,12 @@ Use `oc-box start --convert-legacy-container` to approve it noninteractively.
 The replacement snapshots the installed container OS locally and retains the
 same workspace ID, project path, settings and private home volume (including
 conversations never synchronized to the host). Neither container starts
-during the replacement; guarded startup still has to pass.
+during staging. The original stays stopped under a reserved name until the
+replacement's guarded passive boot and project mount access are verified.
+Only then does oc-box remove the old container, without removing the private
+volume. A failed or uncertain startup before that proof preserves both
+containers; it never falls back to running the old entrypoint. This is not
+automatic in-place repair of an already-fenced workspace.
 The replacement keeps the saved cgroup limits and inherits Podman's current
 process limits rather than replaying values observed after the old container
 booted. An explicit Podman `--ulimit` on the source makes it ineligible.

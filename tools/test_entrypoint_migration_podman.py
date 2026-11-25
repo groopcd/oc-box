@@ -40,6 +40,7 @@ sys.path.insert(0, str(ROOT / "src"))
 from oc_box import (
     entrypoint_migration,
     history_recovery,
+    native_runtime_guard,
     oc_box as box,
     runtime_safeguard,
     workspace_control,
@@ -348,6 +349,11 @@ class Engine:
         return info["version"]["Version"]
 
     def conversion_podman(self, *args, **kwargs):
+        forced_local = args[:1] == ("--remote=false",)
+        if forced_local:
+            args = args[1:]
+        if args[0] in ("commit", "create", "rename") or args[:2] == ("container", "rm"):
+            require(forced_local, "unscoped-conversion-mutation")
         # A conversion may inspect/replace the stopped source; it may never start,
         # exec in, or stop any container. All permitted calls are the real CLI
         # except the single confirmed nonzero commit reply for the rebuild case.
@@ -666,6 +672,7 @@ def run_case(engine, root, base, mode, report):
 
     check_phase(report, mode, "replacement-before-start")
     replacement = engine.inspect("container", name)
+    original = engine.inspect("container", source)
     current = replacement["Id"]
     fresh = replacement["Config"]
     is_rebuild = mode == "rebuild"
@@ -683,13 +690,18 @@ def run_case(engine, root, base, mode, report):
         and (image_id(data["image"]) == base) is is_rebuild
         and fresh["Labels"].get("io.oc-box.entrypoint-conversion")
         == engine.projects[wid]["token"]
-        and engine.inspect("container", source, missing=True) is None
-        and engine.listed("container") == {current},
+        and original["Name"].endswith("-old")
+        and original["State"]["Running"] is False
+        and data[entrypoint_migration.RETIRE]["authorized"] is False
+        and engine.listed("container") == {source, current},
         "replacement-binding",
     )
     history_recovery.passive_workspace_mounts(box, data, replacement)
     with patch.object(box, "podman", engine.conversion_podman):
-        guarded_id, _ = runtime_safeguard._inspect(box, path, data, running=False)
+        guarded_resources = runtime_safeguard._inspect(
+            box, path, data, running=False, engine_env=engine.env
+        )
+    guarded_id = guarded_resources[0]
     require(guarded_id == current, "replacement-guarded-inspection")
     require(
         engine.volume_identity(volume, wid) == (home, volume_id)
@@ -698,8 +710,52 @@ def run_case(engine, root, base, mode, report):
         "replacement-data-before-start",
     )
 
-    check_phase(report, mode, "absolute-passive-start-stop")
-    engine.run("start", current, timeout=60)
+    check_phase(report, mode, "guarded-passive-start-and-retirement")
+
+    class PassiveOnly:
+        def command(self, _box):
+            # Admission.start never dispatches the native host CLI. This
+            # synthetic selector lets the real launcher spawn fence run.
+            return "/no-native-cli-in-this-passive-fixture"
+
+    def passive_podman(*args, **kwargs):
+        if args == ("--remote=false", "start", current):
+            require(
+                engine.inspect("container", source)["State"]["Running"] is False,
+                "parked-source-before-real-start",
+            )
+            result = engine.run(*args[1:], **kwargs)
+            require(
+                engine.inspect("container", source)["State"]["Running"] is False,
+                "parked-source-after-real-start",
+            )
+            return result
+        return engine.conversion_podman(*args, **kwargs)
+
+    # This exercises actual Admission.start including the credential-free
+    # guarded mount exec, without claiming native preflight or guard enrollment.
+    scope = runtime_safeguard.Admission(
+        path,
+        PassiveOnly(),
+        None,
+        native_runtime_guard.Record(current, volume, "2.4.0", "a" * 64, False),
+        guarded_resources,
+        token,
+        transition=True,
+        engine_env=engine.env,
+    )
+    with box.workspace_lock(path), patch.object(box, "podman", passive_podman):
+        marker = runtime_safeguard._ACTIVE.set(scope)
+        try:
+            scope.start(box, data)
+        finally:
+            runtime_safeguard._ACTIVE.reset(marker)
+    require(
+        entrypoint_migration.RETIRE not in data
+        and engine.inspect("container", source, missing=True) is None
+        and engine.listed("container") == {current},
+        "retirement-completion",
+    )
     require(
         engine.inspect("container", current)["State"]["Running"] is True,
         "replacement-running",
@@ -746,6 +802,7 @@ exec /bin/sleep "$@"'
         "confirmed_nonzero_commit_injected": is_rebuild,
         "same_project_and_volume_inode_bytes_ownership_modes": True,
         "source_retired": True,
+        "original_retained_until_verified_boot_and_mount": True,
         "fresh_replacement_on_canonical_name": True,
         "guarded_inspection_of_stopped_replacement": True,
         "os_layer_preserved": not is_rebuild,

@@ -343,12 +343,21 @@ def _inspect(box, path, data, *, running, attach_only=False, engine_env=None):
         if current_path != path or not workspace_identity.same_project(data, project):
             raise ValueError
         options = {"env": engine_env} if engine_env is not None else {}
-        info = box.inspect_owned(data, **options)
+        staged = entrypoint_migration.RETIRE in data
+        prefix = ("--remote=false",) if staged else ()
+        info = box.inspect_owned(
+            data, **({"local_only": True} if staged else {}), **options
+        )
         if (
             not isinstance(info, dict)
             or not _HASH.fullmatch(info["Id"])
             or info["State"]["Running"] is not running
             or info["State"].get("Paused") is True
+            or (
+                staged
+                and running
+                and not entrypoint_migration.running_replacement(info)
+            )
             or (
                 info["State"].get("Status")
                 not in (("running",) if running else ("exited", "stopped"))
@@ -372,6 +381,7 @@ def _inspect(box, path, data, *, running, attach_only=False, engine_env=None):
         signature = validate_mounts(box, data, info)
         volumes = json.loads(
             box.podman(
+                *prefix,
                 "volume",
                 "inspect",
                 data["home_volume"],
@@ -434,6 +444,10 @@ class Admission:
     stop_token: str
     transition: bool
     launching: bool = True
+    engine_env: dict | None = None
+
+    def _engine_options(self):
+        return {"env": self.engine_env} if self.engine_env is not None else {}
 
     def _unchanged(self, box):
         try:
@@ -445,7 +459,20 @@ class Admission:
             raise box.BoxError(str(exc)) from None
 
     def require_live(self, box, data, *, running):
-        if _inspect(box, self.path, data, running=running) != self.resources:
+        if (
+            _inspect(
+                box,
+                self.path,
+                data,
+                running=running,
+                **(
+                    {"engine_env": self.engine_env}
+                    if self.engine_env is not None
+                    else {}
+                ),
+            )
+            != self.resources
+        ):
             raise box.BoxError(
                 "Workspace resources changed during guarded preparation."
             )
@@ -474,6 +501,15 @@ class Admission:
             with workspace_control.admission(self.path):
                 self._unchanged(box)
                 self.require_live(box, data, running=False)
+                if entrypoint_migration.RETIRE in data:
+                    entrypoint_migration.verify_retirement(
+                        box,
+                        self.path,
+                        data,
+                        self.stop_token,
+                        self.record.container,
+                        **self._engine_options(),
+                    )
                 self.host.command(box)
                 # Retry a pending publication even when its bytes are visible:
                 # the previous writer may have failed the directory fsync.
@@ -489,38 +525,98 @@ class Admission:
 
     def start(self, box, data):
         try:
+            staged = entrypoint_migration.RETIRE in data
+            prefix = ("--remote=false",) if staged else ()
+            engine_options = self._engine_options()
+            mount_env = (
+                self.engine_env
+                if self.engine_env is not None
+                else (entrypoint_migration.engine_environment(box))
+            )
             with workspace_control.admission(self.path), history_recovery.budget(20):
                 self._unchanged(box)
                 self.require_live(box, data, running=False)
-                box.check_resource_controllers(data)
+                if entrypoint_migration.RETIRE in data:
+                    entrypoint_migration.verify_retirement(
+                        box,
+                        self.path,
+                        data,
+                        self.stop_token,
+                        self.record.container,
+                        **engine_options,
+                    )
+                box.check_resource_controllers(
+                    data,
+                    **(
+                        {"engine_env": self.engine_env}
+                        if self.engine_env is not None
+                        else {}
+                    ),
+                )
                 self._unchanged(box)
                 workspace_control.mark_uncertain(self.path)
                 box.podman(
+                    *prefix,
                     "start",
                     self.record.container,
                     capture=True,
                     private=True,
                     timeout=15,
+                    **engine_options,
                 )
-                info = box.inspect_owned({**data, "container": self.record.container})
+                info = box.inspect_owned(
+                    {**data, "container": self.record.container},
+                    **({"local_only": True} if staged else {}),
+                    **engine_options,
+                )
                 self.require_live(box, data, running=True)
+                if (
+                    entrypoint_migration.RETIRE in data
+                    and not entrypoint_migration.running_replacement(info)
+                ):
+                    raise box.BoxError(
+                        "Could not verify the staged replacement running; the original is retained."
+                    )
                 workspace_control.finish_transition(self.path)
                 self._unchanged(box)
-            box.run(
-                box.exec_command(
-                    data,
-                    [
-                        "/bin/sh",
-                        "-c",
-                        'test -r "$1" && test -w "$1" && /bin/ls -A "$1" >/dev/null',
-                        "oc-box",
-                        box.container_project(data),
-                    ],
-                ),
-                capture=True,
-                private=True,
-                timeout=30,
+            # A restored base image may not have Python before bootstrap.
+            # This passive check uses no forwarded credentials or native CLI.
+            command = box.ContainerCommand(
+                [
+                    "podman",
+                    *prefix,
+                    "exec",
+                    "--workdir",
+                    "/",
+                    "--user",
+                    "0:0",
+                    self.record.container,
+                    "/bin/sh",
+                    "-c",
+                    'for directory; do test -d "$directory" && test -r "$directory" '
+                    '&& test -w "$directory" && /bin/ls -A "$directory" >/dev/null '
+                    "|| exit 1; done",
+                    "oc-box",
+                    box.container_project(data),
+                    data["home"],
+                ],
+                mount_env,
             )
+            command.guarded_spawn = True
+            box.run(command, capture=True, private=True, timeout=30)
+            if entrypoint_migration.RETIRE in data:
+                with workspace_control.admission(self.path):
+                    self._unchanged(box)
+                    self.require_live(box, data, running=True)
+                    entrypoint_migration.verify_retirement(
+                        box,
+                        self.path,
+                        data,
+                        self.stop_token,
+                        self.record.container,
+                        after_start=True,
+                        **engine_options,
+                    )
             return info
         except workspace_control.ControlError as exc:
             raise box.BoxError(str(exc)) from None
@@ -576,6 +672,8 @@ def bound_command(arguments, digest):
 
 
 def bind_client(box, path, data, connection):
+    if entrypoint_migration.RETIRE in data:
+        raise box.BoxError(entrypoint_migration.RETIRE_PENDING)
     # These are host-private execution selectors, never trusted from the
     # socket's payload or the native readiness frame.
     connection.pop("_runtime_container", None)
@@ -606,6 +704,13 @@ def admit(
     requested = getattr(args, "convert_legacy_container", False)
     rebuild = getattr(args, "rebuild_legacy_container", False)
     pending = entrypoint_migration.FIELD in data
+    retirement_env = None
+    if entrypoint_migration.RETIRE in data:
+        entrypoint_migration.retirement_target(box, data)
+        if command != "start":
+            raise box.BoxError(entrypoint_migration.RETIRE_PENDING)
+        retirement_env = entrypoint_migration.engine_environment(box)
+        entrypoint_migration.require_local_engine(box, retirement_env)
     if pending and (command != "start" or not (requested or rebuild)):
         raise box.BoxError(entrypoint_migration.PENDING)
     if entrypoint_migration.needs_bootstrap(data) and command != "start":
@@ -653,7 +758,13 @@ def admit(
                 path,
                 data,
                 running=False,
-                **({"engine_env": engine_env} if engine_env is not None else {}),
+                **(
+                    {"engine_env": retirement_env}
+                    if retirement_env is not None
+                    else {"engine_env": engine_env}
+                    if engine_env is not None
+                    else {}
+                ),
             )
         except box.BoxError as exc:
             if command != "start" or not getattr(exc, "legacy_entrypoint", False):
@@ -684,6 +795,11 @@ def admit(
             "Legacy container replacement cannot change resource settings or rebind an enrolled runtime."
         )
     if (requested or rebuild) and not converting:
+        if entrypoint_migration.RETIRE in data:
+            raise box.BoxError(
+                "The replacement is already staged; use owning 'oc-box start'. "
+                "Do not bypass any uncertainty refusal."
+            )
         raise box.BoxError("No eligible legacy container entrypoint to replace.")
     if rebuild and not pending:
         raise box.BoxError(
@@ -706,6 +822,7 @@ def admit(
             ) from None
         raise box.BoxError(str(exc)) from None
     if converting:
+        retirement_env = entrypoint_migration.engine_environment(box)
         entrypoint_migration.consent(box, args, data)
     with pinned_host(box) as host:
         version = _host_release(box, host)
@@ -750,9 +867,11 @@ def admit(
             prepare_replacement()
             host.command(box)
             entrypoint_migration.convert(
-                box, path, data, token, source_id, rebuild=rebuild
+                box, path, data, token, source_id, rebuild=rebuild, env=retirement_env
             )
-            resources = _inspect(box, path, data, running=False)
+            resources = _inspect(
+                box, path, data, running=False, engine_env=retirement_env
+            )
         record = (
             previous
             if not transition
@@ -765,7 +884,14 @@ def admit(
             )
         )
         scope = Admission(
-            path, host, previous, record, resources, token, not record.ready
+            path,
+            host,
+            previous,
+            record,
+            resources,
+            token,
+            not record.ready,
+            engine_env=retirement_env,
         )
         scope._unchanged(box)
         args._opencode_release = version
@@ -822,6 +948,7 @@ def install_container(box, data):
     command = box.ContainerCommand(
         [
             "podman",
+            *(("--remote=false",) if scope.engine_env is not None else ()),
             "exec",
             "--workdir",
             "/",
@@ -832,7 +959,9 @@ def install_container(box, data):
             PREFIX,
             scope.record.version,
         ],
-        box.maintenance_host_env(),
+        scope.engine_env.copy()
+        if scope.engine_env is not None
+        else box.maintenance_host_env(),
     )
     command.guarded_spawn = True
     box.run(

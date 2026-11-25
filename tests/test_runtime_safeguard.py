@@ -3,6 +3,7 @@ import contextlib
 from dataclasses import replace
 import hashlib
 import io
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -102,6 +103,483 @@ class RuntimeSafeguardTests(unittest.TestCase):
             with self.subTest(candidate=item):
                 self.assertIs(guard.version_upgrade(OLD, item), expected)
 
+    def test_retirement_requires_successful_start_and_mount_access(self):
+        marker = guard.entrypoint_migration.RETIRE
+        for failure in ("start", "inconsistent", "mount", None):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as name:
+                path = Path(name) / "workspace.json"
+                data = {**self.data, marker: {"synthetic": True}}
+                box.atomic_json(path, data)
+                token = workspace_control.capture(path)
+                env = {
+                    "PATH": "/usr/bin",
+                    "CONTAINERS_STORAGE_CONF": "/synthetic/storage.conf",
+                }
+                state = {
+                    "Status": "running",
+                    "Running": True,
+                    "Paused": False,
+                    "Restarting": False,
+                    "Pid": 0 if failure == "inconsistent" else 123,
+                }
+                scope = guard.Admission(
+                    path,
+                    self.binary,
+                    None,
+                    self.record,
+                    (CONTAINER, ()),
+                    token,
+                    transition=True,
+                    engine_env=env,
+                )
+                calls = []
+
+                def start(*args, **kwargs):
+                    self.assertEqual(args, ("--remote=false", "start", CONTAINER))
+                    self.assertIs(kwargs["env"], env)
+                    calls.append("start")
+                    if failure == "start":
+                        raise box.BoxError("synthetic start failure")
+
+                def mount(command, **kwargs):
+                    self.assertTrue(command.guarded_spawn)
+                    self.assertIs(command.environment, env)
+                    self.assertIn("--remote=false", command)
+                    self.assertIn(CONTAINER, command)
+                    self.assertIn("/bin/sh", command)
+                    self.assertNotIn("/usr/bin/python3", command)
+                    self.assertEqual(
+                        list(command[-2:]), [data["project"], data["home"]]
+                    )
+                    calls.append("mount")
+                    if failure == "mount":
+                        raise box.BoxError("synthetic mount failure")
+
+                def retire(
+                    module,
+                    reg,
+                    current,
+                    decision,
+                    candidate,
+                    *,
+                    after_start=False,
+                    env=None,
+                ):
+                    self.assertIs(module, box)
+                    self.assertEqual(
+                        (reg, decision, candidate), (path, token, CONTAINER)
+                    )
+                    self.assertIs(current, data)
+                    self.assertIs(env, scope.engine_env)
+                    self.assertTrue(workspace_control.unchanged(path, token))
+                    calls.append("retire" if after_start else "verify-parked")
+
+                with (
+                    patch.object(scope, "require_live"),
+                    patch.object(box, "check_resource_controllers"),
+                    patch.object(box, "podman", side_effect=start),
+                    patch.object(
+                        box,
+                        "inspect_owned",
+                        return_value={"Id": CONTAINER, "State": state},
+                    ),
+                    patch.object(box, "run", side_effect=mount),
+                    patch.object(
+                        guard.entrypoint_migration,
+                        "verify_retirement",
+                        side_effect=retire,
+                    ),
+                ):
+                    if failure:
+                        message = (
+                            "staged replacement running"
+                            if failure == "inconsistent"
+                            else failure
+                        )
+                        with self.assertRaisesRegex(box.BoxError, message):
+                            scope.start(box, data)
+                    else:
+                        scope.start(box, data)
+                self.assertEqual(
+                    calls,
+                    ["verify-parked", "start"]
+                    if failure in ("start", "inconsistent")
+                    else ["verify-parked", "start", "mount"]
+                    if failure == "mount"
+                    else ["verify-parked", "start", "mount", "retire"],
+                )
+                if failure in ("start", "inconsistent"):
+                    with self.assertRaisesRegex(
+                        workspace_control.ControlError, "uncertain-control"
+                    ):
+                        workspace_control.require_certain(path)
+
+    def test_explicit_stop_during_retirement_targets_only_verified_replacement(self):
+        migration = guard.entrypoint_migration
+        data = {
+            **self.data,
+            migration.RETIRE: {"synthetic": True},
+            migration.RECEIPT: {"id": CONTAINER, "bootstrap": False, "volume": [1, 2]},
+        }
+        idle = {
+            "Id": CONTAINER,
+            "Name": data["container"],
+            "State": {
+                "Status": "created",
+                "Running": False,
+                "Pid": 0,
+                "Paused": False,
+                "Restarting": False,
+            },
+        }
+        running = {
+            **idle,
+            "State": {
+                **idle["State"],
+                "Status": "running",
+                "Running": True,
+                "Pid": 123,
+            },
+        }
+        with (
+            patch.object(box, "find_workspace", return_value=(self.path, data)),
+            patch.object(guard, "load", return_value=None),
+            patch.object(migration, "retirement_target", return_value=CONTAINER),
+            patch.object(
+                migration, "engine_environment", return_value={"PATH": "/usr/bin"}
+            ),
+            patch.object(migration, "require_local_engine"),
+            patch.object(box, "inspect_owned", return_value=idle) as inspect,
+            patch.object(box, "podman") as stop,
+        ):
+            box._stop_selected(self.path, self.data, admitted=True)
+            inspect.assert_called_once_with(
+                {**data, "container": CONTAINER},
+                local_only=True,
+                env={"PATH": "/usr/bin"},
+            )
+            stop.assert_not_called()
+            inspect.side_effect = [running, idle]
+            box._stop_selected(self.path, self.data, admitted=True)
+            stop.assert_called_once_with(
+                "--remote=false",
+                "stop",
+                "--time",
+                "10",
+                CONTAINER,
+                capture=True,
+                private=True,
+                timeout=15,
+                env={"PATH": "/usr/bin"},
+            )
+            inspect.side_effect = [running, running]
+            with self.assertRaisesRegex(box.BoxError, "Could not verify"):
+                box._stop_selected(self.path, self.data, admitted=True)
+            inspect.side_effect = None
+            inspect.return_value = {**idle, "Id": "4" * 64}
+            with self.assertRaisesRegex(box.BoxError, "no substitute"):
+                box._stop_selected(self.path, self.data, admitted=True)
+            self.assertEqual(stop.call_count, 2)
+
+    def test_selected_engine_must_be_local_even_without_remote_environment_flags(self):
+        migration = guard.entrypoint_migration
+        environment = {"CONTAINERS_CONF": "/synthetic/containers.conf"}
+        output = '{"host":{"serviceIsRemote":true,"security":{"rootless":true}}}'
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch.object(
+                box, "podman", return_value=subprocess.CompletedProcess([], 0, output)
+            ) as podman,
+            self.assertRaisesRegex(box.BoxError, "local rootless"),
+        ):
+            migration.require_local_engine(box, environment)
+        podman.assert_called_once_with(
+            "--remote=false",
+            "info",
+            "--format=json",
+            capture=True,
+            private=True,
+            timeout=15,
+            env=environment,
+        )
+
+    def test_final_bound_observation_must_have_a_live_process_before_clearing_uncertainty(
+        self,
+    ):
+        migration = guard.entrypoint_migration
+        data = {**self.data, migration.RETIRE: {}}
+        box.atomic_json(self.path, data)
+        token = workspace_control.capture(self.path)
+        signature = ("project", "work", "/synthetic/mountpoint", "home")
+        idle = {
+            "Id": CONTAINER,
+            "Mounts": [{}, {}],
+            "State": {
+                "Status": "exited",
+                "Running": False,
+                "Pid": 0,
+                "Paused": False,
+                "Restarting": False,
+            },
+        }
+        running = {
+            **idle,
+            "State": {
+                **idle["State"],
+                "Status": "running",
+                "Running": True,
+                "Pid": 123,
+            },
+        }
+        inconsistent = {**running, "State": {**running["State"], "Pid": 0}}
+        volume = {
+            "Name": VOLUME,
+            "Driver": "local",
+            "Labels": {box.LABEL: data["id"]},
+            "Mountpoint": signature[2],
+        }
+        scope = guard.Admission(
+            self.path,
+            self.binary,
+            None,
+            self.record,
+            (CONTAINER, signature),
+            token,
+            transition=True,
+            engine_env={"PATH": "/usr/bin"},
+        )
+        with (
+            patch.object(
+                box, "inspect_owned", side_effect=[idle, running, inconsistent]
+            ),
+            patch.object(box, "validate_project", return_value=self.project),
+            patch.object(box, "find_workspace", return_value=(self.path, data)),
+            patch.object(guard.workspace_identity, "same_project", return_value=True),
+            patch.object(
+                guard.history_recovery,
+                "passive_workspace_mounts",
+                return_value=signature,
+            ),
+            patch.object(box, "check_resource_controllers"),
+            patch.object(
+                box,
+                "podman",
+                return_value=subprocess.CompletedProcess([], 0, json.dumps([volume])),
+            ),
+            patch.object(migration, "verify_retirement") as retire,
+            patch.object(box, "run") as mount,
+            self.assertRaisesRegex(box.BoxError, "same running workspace"),
+        ):
+            scope.start(box, data)
+        self.assertEqual(retire.call_count, 1)
+        self.assertFalse(retire.call_args.kwargs.get("after_start", False))
+        mount.assert_not_called()
+        with self.assertRaisesRegex(
+            workspace_control.ControlError, "uncertain-control"
+        ):
+            workspace_control.require_certain(self.path)
+
+    def test_v2_staged_stop_does_not_dispatch_without_admission(self):
+        data = {**self.data, guard.entrypoint_migration.RETIRE: {}}
+        with (
+            patch.object(box, "find_workspace", return_value=(self.path, data)),
+            patch.object(guard, "load", return_value=None),
+            patch.object(
+                workspace_control,
+                "admission",
+                side_effect=workspace_control.ControlError("admission-timeout"),
+            ),
+            patch.object(guard.entrypoint_migration, "stop_staged") as stop,
+            self.assertRaisesRegex(box.BoxError, "stop was not admitted"),
+        ):
+            box._stop_v2(self.path, data)
+        stop.assert_not_called()
+
+    def test_v2_staged_stop_does_not_repeat_when_uncertainty_remains(self):
+        workspace_control.capture(self.path)
+        workspace_control.mark_uncertain(self.path)
+        with (
+            patch.object(box, "_stop_selected") as stop,
+            self.assertRaisesRegex(box.BoxError, "uncertain-control"),
+        ):
+            box._stop_v2(self.path, self.data)
+        stop.assert_called_once_with(self.path, self.data, admitted=True)
+
+    def test_partial_marker_blocks_start_and_sync_without_preparing_environment(self):
+        data = {**self.data, guard.entrypoint_migration.RETIRE: {"synthetic": True}}
+        for command in ("start", "sync"):
+            with (
+                self.subTest(command=command),
+                contextlib.ExitStack() as context,
+                patch.object(box, "detect_opencode_release") as probe,
+                patch.object(box, "launch_credentials") as credentials,
+                self.assertRaisesRegex(box.BoxError, "waiting for verified startup"),
+            ):
+                box._locked_workspace_command(
+                    self.path,
+                    data,
+                    self.args(command=command),
+                    context,
+                    None,
+                )
+            probe.assert_not_called()
+            credentials.assert_not_called()
+
+    def test_preparation_failure_after_retirement_cleans_up_on_same_local_engine(self):
+        data = {
+            **self.data,
+            guard.entrypoint_migration.RECEIPT: {
+                "id": CONTAINER,
+                "bootstrap": True,
+                "volume": [1, 2],
+            },
+        }
+        box.atomic_json(self.path, data)
+        token = workspace_control.capture(self.path)
+        engine = {"PATH": "/usr/bin", "CONTAINERS_CONF": "/synthetic/approved.conf"}
+        scope = guard.Admission(
+            self.path,
+            self.binary,
+            None,
+            self.record,
+            (CONTAINER, ()),
+            token,
+            transition=True,
+            engine_env=engine,
+        )
+        calls = []
+
+        def admitted(command, admission, **options):
+            with admission():
+                self.assertEqual(command[:3], ["podman", "--remote=false", "exec"])
+                self.assertIn(CONTAINER, command)
+                self.assertEqual(options["env"], engine)
+                calls.append("baseline-failure")
+            return subprocess.CompletedProcess(command, 125)
+
+        def ordinary(command, **options):
+            self.assertEqual(options["env"], engine)
+            self.assertEqual(command[:2], ["podman", "--remote=false"])
+            if command[2:4] == ["container", "inspect"]:
+                self.assertEqual(command[4:], [CONTAINER])
+                info = {
+                    "Id": CONTAINER,
+                    "State": {"Running": True},
+                    "Config": {"Labels": {box.LABEL: data["id"]}},
+                }
+                options["stdout"].write(json.dumps([info]).encode())
+                calls.append("inspect")
+            else:
+                self.assertEqual(command[2:], ["stop", "--time", "10", CONTAINER])
+                calls.append("stop")
+            return subprocess.CompletedProcess(command, 0)
+
+        marker = guard._ACTIVE.set(scope)
+        try:
+            with (
+                patch.dict(
+                    os.environ,
+                    {
+                        "CONTAINERS_CONF": "/synthetic/wrong.conf",
+                        "SYNTHETIC_UNRELATED": "not-forwarded",
+                    },
+                ),
+                patch.object(
+                    guard.HostBinary, "command", return_value="/pinned/native/opencode"
+                ),
+                patch.object(
+                    guard.history_recovery, "run_admitted", side_effect=admitted
+                ),
+                patch.object(subprocess, "run", side_effect=ordinary),
+            ):
+                with self.assertRaisesRegex(box.BoxError, "exit 125"):
+                    box.install_baseline(data, guarded=scope)
+                self.assertNotIn(guard.entrypoint_migration.RETIRE, data)
+                box.stop_container(data)
+        finally:
+            guard._ACTIVE.reset(marker)
+        self.assertEqual(calls, ["baseline-failure", "inspect", "stop"])
+
+    def test_native_install_and_owner_client_stay_pinned_after_retirement(self):
+        data = {
+            **self.data,
+            guard.entrypoint_migration.RECEIPT: {
+                "id": CONTAINER,
+                "bootstrap": False,
+                "volume": [1, 2],
+            },
+        }
+        box.atomic_json(self.path, data)
+        token = workspace_control.capture(self.path)
+        engine = {"PATH": "/usr/bin", "CONTAINERS_CONF": "/synthetic/approved.conf"}
+        scope = guard.Admission(
+            self.path,
+            self.binary,
+            None,
+            self.record,
+            (CONTAINER, ()),
+            token,
+            transition=True,
+            engine_env=engine,
+        )
+        password = "synthetic-private-owner-password"
+        marker = guard._ACTIVE.set(scope)
+        try:
+            with (
+                patch.dict(os.environ, {"CONTAINERS_CONF": "/synthetic/wrong.conf"}),
+                patch.object(box, "run") as run,
+                patch.object(guard, "container_digest", return_value=DIGEST),
+            ):
+                guard.install_container(box, data)
+                install = run.call_args.args[0]
+                client = workspace_service.client_command(
+                    box, data, {"password": password}, ["/bin/true"]
+                )
+        finally:
+            guard._ACTIVE.reset(marker)
+        for command in (install, client):
+            self.assertEqual(command[:3], ["podman", "--remote=false", "exec"])
+            self.assertIn(CONTAINER, command)
+            self.assertNotIn(password, command)
+            self.assertEqual(
+                command.environment["CONTAINERS_CONF"], engine["CONTAINERS_CONF"]
+            )
+        self.assertEqual(install.environment, engine)
+        self.assertEqual(client.environment, {**engine, "OPENCODE_PASSWORD": password})
+        self.assertNotIn(guard.entrypoint_migration.RETIRE, data)
+
+    def test_ordinary_rewrites_keep_migration_markers_durable(self):
+        migration = guard.entrypoint_migration
+        previous = box.read_json(self.path)
+        fsync = os.fsync
+        for field in (migration.FIELD, migration.RECEIPT, migration.RETIRE):
+            with (
+                self.subTest(field=field),
+                patch.object(os, "fsync", wraps=fsync) as sync,
+            ):
+                data = {**previous, field: {"synthetic": True}}
+                box.atomic_json(self.path, data)
+                self.assertEqual(sync.call_count, 2)
+                self.assertEqual(box.read_json(self.path), data)
+        data = {**previous, migration.RETIRE: {"authorized": True}}
+        existing = box.read_json(self.path)
+        for failure, expected in ((1, existing), (2, data)):
+            with self.subTest(fsync_failure=failure):
+                calls = []
+
+                def fault(fd):
+                    calls.append(fd)
+                    if len(calls) == failure:
+                        raise OSError("synthetic fsync failure")
+                    fsync(fd)
+
+                with (
+                    patch.object(os, "fsync", side_effect=fault),
+                    self.assertRaises(OSError),
+                ):
+                    box.atomic_json(self.path, data)
+                self.assertEqual(box.read_json(self.path), expected)
+
     def test_explicit_check_does_not_find_or_register_workspace(self):
         def fake_probe(_box, _version):
             for phase in ("stage", "probe", "cleanup"):
@@ -197,11 +675,12 @@ class RuntimeSafeguardTests(unittest.TestCase):
             order.append("preflight")
             return DIGEST
 
-        def convert(module, path, data, token, source, *, rebuild):
+        def convert(module, path, data, token, source, *, rebuild, env):
             order.append("convert")
             self.assertIs(module, box)
             self.assertIs(data, self.data)
             self.assertEqual((path, source, rebuild), (self.path, CONTAINER, False))
+            self.assertEqual(env, guard.entrypoint_migration.engine_environment(box))
             self.assertTrue(workspace_control.unchanged(path, token))
             self.assertIsNone(native_runtime_guard.load(self.path))
 
