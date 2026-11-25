@@ -4178,6 +4178,17 @@ Skip purge's ID-prefix confirmation.  Purge-only; it does not answer
 OpenCode questions or bypass permissions on other commands.  Example:
 ‘oc-box purge --workspace WORKSPACE_ID --all --yes’.
 
+5.82 -discard-guarded
+=====================
+
+Purge-only.  With ‘--workspace WORKSPACE_ID’ and no other options,
+remove the verified stopped guarded container and its private home
+without startup or final history sync.  Type ‘DISCARD WORKSPACE_ID’ on
+the controlling terminal after reviewing the targets.  The private home
+may contain unsynced conversations; the project, host archives,
+registration and original fence are preserved.  See [purge](#purge) for
+the supported host profile and refusal conditions.
+
 
 File: oc-box.info,  Node: Lifecycle and persistence,  Next: Distribution images,  Prev: Options,  Up: Top
 
@@ -5537,19 +5548,19 @@ Node: Synopsis930
 Node: Description5291
 Node: Commands11111
 Node: Options162185
-Node: Lifecycle and persistence227797
-Node: Distribution images230097
-Node: Sessions and recovery235174
-Node: Devices and host permissions241759
-Node: Resource reports244105
-Node: Configuration and environment246216
-Node: Files257597
-Node: Exit status268507
-Node: Examples269915
-Node: Troubleshooting272054
-Node: Installation and manuals284546
-Node: Authors and license294736
-Node: See also295343
+Node: Lifecycle and persistence228315
+Node: Distribution images230615
+Node: Sessions and recovery235692
+Node: Devices and host permissions242277
+Node: Resource reports244623
+Node: Configuration and environment246734
+Node: Files258115
+Node: Exit status269025
+Node: Examples270433
+Node: Troubleshooting272572
+Node: Installation and manuals285064
+Node: Authors and license295254
+Node: See also295861
 
 End Tag Table
 
