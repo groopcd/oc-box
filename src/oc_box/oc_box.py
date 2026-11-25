@@ -1896,7 +1896,10 @@ def start_container(path, data):
         try:
             install_baseline(data)
         except BaseException:
-            podman("stop", "--time", "5", data["container"], capture=True, check=False)
+            with _live_limit_transition_gate(data):
+                podman(
+                    "stop", "--time", "5", data["container"], capture=True, check=False
+                )
             raise
         data["ready"] = True
         atomic_json(path, data)
@@ -1977,6 +1980,27 @@ def install_baseline(data, *, guarded=None):
         )
 
 
+@contextlib.contextmanager
+def _live_limit_transition_gate(data):
+    """Keep dashboard updates outside launcher stop and removal commands."""
+    ident = data.get("id")
+    if not isinstance(ident, str) or not re.fullmatch(r"[0-9a-f]{32}", ident):
+        yield
+        return
+    path = state_root() / "workspaces" / ident / "workspace.json"
+    if not path.is_file():
+        # No canonical registration can admit a dashboard update.
+        yield
+        return
+    try:
+        remaining = history_recovery.remaining()
+        timeout = 30 if remaining is None else min(30, remaining)
+        with workspace_control.live_limit_gate(path, timeout=timeout):
+            yield
+    except workspace_control.ControlError as exc:
+        raise BoxError(str(exc)) from None
+
+
 def stop_container(data, *, env=None, local_only=False):
     guarded = runtime_safeguard.current()
     migration = runtime_safeguard.entrypoint_migration
@@ -2002,15 +2026,16 @@ def stop_container(data, *, env=None, local_only=False):
     else:
         info = inspect_owned(data, **options)
     if info and info["State"]["Running"]:
-        podman(
-            *(("--remote=false",) if local_only else ()),
-            "stop",
-            "--time",
-            "10",
-            data["container"],
-            capture=True,
-            **options,
-        )
+        with _live_limit_transition_gate(data):
+            podman(
+                *(("--remote=false",) if local_only else ()),
+                "stop",
+                "--time",
+                "10",
+                data["container"],
+                capture=True,
+                **options,
+            )
 
 
 def session_file(path):
@@ -4943,16 +4968,17 @@ def _stop_quiet_sync_source(data):
         raise BoxError(
             "The original history source container state could not be verified."
         )
-    podman(
-        "stop",
-        "--time",
-        "10",
-        container,
-        capture=True,
-        private=True,
-        env=maintenance_host_env(),
-        timeout=20,
-    )
+    with _live_limit_transition_gate(data):
+        podman(
+            "stop",
+            "--time",
+            "10",
+            container,
+            capture=True,
+            private=True,
+            env=maintenance_host_env(),
+            timeout=20,
+        )
     info = _inspect_sync_container(data, container)
     if not history_recovery.verified_container_state(info, running=False):
         raise BoxError(
@@ -5644,13 +5670,18 @@ def remove_resources(data, *, keep_home=False):
             )
             if labels.get(LABEL) != data["id"]:
                 raise BoxError(f"Ownership mismatch for {kind} {ident}")
-            podman(
-                kind,
-                "rm",
-                *(["--force"] if kind == "container" else []),
-                ident,
-                capture=True,
-            )
+            with (
+                _live_limit_transition_gate(data)
+                if kind == "container"
+                else contextlib.nullcontext()
+            ):
+                podman(
+                    kind,
+                    "rm",
+                    *(["--force"] if kind == "container" else []),
+                    ident,
+                    capture=True,
+                )
     # Base images are shared cache. Never prune them globally.
 
 

@@ -1570,7 +1570,9 @@ settings.  Podman may retain the new limit if that same container is
 stopped and started; recreating it uses the saved settings.  Lowering
 memory can interrupt workloads.  If a competing operation or container
 exit prevents verification after submission, check the actual limits
-before trying again; there is no automatic retry or rollback.
+before trying again.  An independent Podman stop can race with Apply,
+leaving the same container's settings changed on its next start even if
+live verification failed.  There is no automatic retry or rollback.
 
 The workspace table uses only supplied project/state/CPU/RAM data and
 explicit private-home scan results.  Stopped/unknown readings are not
@@ -5608,20 +5610,20 @@ Node: Name769
 Node: Synopsis930
 Node: Description5291
 Node: Commands11111
-Node: Options165202
-Node: Lifecycle and persistence231733
-Node: Distribution images234033
-Node: Sessions and recovery239110
-Node: Devices and host permissions245695
-Node: Resource reports248041
-Node: Configuration and environment250152
-Node: Files261533
-Node: Exit status272443
-Node: Examples273851
-Node: Troubleshooting275990
-Node: Installation and manuals288482
-Node: Authors and license298672
-Node: See also299279
+Node: Options165350
+Node: Lifecycle and persistence231881
+Node: Distribution images234181
+Node: Sessions and recovery239258
+Node: Devices and host permissions245843
+Node: Resource reports248189
+Node: Configuration and environment250300
+Node: Files261681
+Node: Exit status272591
+Node: Examples273999
+Node: Troubleshooting276138
+Node: Installation and manuals288630
+Node: Authors and license298820
+Node: See also299427
 
 End Tag Table
 
