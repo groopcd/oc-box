@@ -2,12 +2,10 @@
 
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
-import fcntl
 import os
 from pathlib import Path
 import re
 import shutil
-import stat
 import time
 
 if __package__:
@@ -35,7 +33,6 @@ else:
 
 
 _SYSTEM_PATH = "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
-_LOCK = ".live-limits.lock"
 _SCOPE_KEYS = ("graphRoot", "runRoot", "volumePath")
 _CGROUP_ROOT = "/sys/fs/cgroup"
 _META_BYTES = 1024 * 1024
@@ -89,7 +86,12 @@ class _Engine:
             and store.get("transientStore", False) is False
             and store.get("graphDriverName") in ("overlay", "vfs", "btrfs")
         )
-        return (*[store[key] for key in _SCOPE_KEYS], store["graphDriverName"])
+        return (
+            *[store[key] for key in _SCOPE_KEYS],
+            store["graphDriverName"],
+            store.get("graphOptions"),
+            store.get("configFile"),
+        )
 
     def inspect(self, kind, selector):
         rows = workspace_podman._json(
@@ -129,13 +131,8 @@ def _engine(box, deadline):
             policy._pin(stack, entry, uid, owner=uid, directory=True)
             for entry in scope[:3]
         )
-        graph, runtime, volume, driver = scope
-        engine.flags += (
-            f"--root={graph}",
-            f"--runroot={runtime}",
-            f"--volumepath={volume}",
-            f"--storage-driver={driver}",
-        )
+        # Passing --root/--storage-driver would clear native graph driver
+        # options. Keep the same effective config throughout this operation.
         _require(engine.scope() == scope)
         yield engine, scope
 
@@ -144,6 +141,7 @@ def _registration(box, target):
     record = tui_storage.read_workspace_action(box, target.workspace)
     _require(
         record.project_condition == "present"
+        and record.data.get("ready") is True
         and not record.data.get("restore_incomplete")
         and not entrypoint_migration.in_progress(record.data),
         "stale",
@@ -160,39 +158,15 @@ def _registration(box, target):
 
 @contextmanager
 def _serialize(record):
-    with workspace_podman._path_fd(
-        str(record.row.record_path.parent), os.geteuid(), directory=True
-    ) as (directory, info):
-        _require(_dir_stamp(info) == record.registry_identity[-1], "stale")
-        fd = os.open(
-            _LOCK,
-            os.O_CREAT | os.O_RDWR | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC,
-            0o600,
-            dir_fd=directory,
-        )
-        try:
-
-            def recheck():
-                held = os.fstat(fd)
-                named = os.stat(_LOCK, dir_fd=directory, follow_symlinks=False)
-                _require(
-                    stat.S_ISREG(held.st_mode)
-                    and held.st_uid == os.geteuid()
-                    and stat.S_IMODE(held.st_mode) == 0o600
-                    and held.st_nlink == 1
-                    and held.st_size == 0
-                    and _dir_stamp(named) == _dir_stamp(held)
-                )
-
-            recheck()
-            try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError:
-                raise tui_limits.LimitError("busy") from None
-            recheck()
-            yield recheck
-        finally:
-            os.close(fd)
+    try:
+        with workspace_control.live_limit_gate(
+            record.row.record_path, timeout=0
+        ) as check:
+            yield check
+    except workspace_control.ControlError as error:
+        raise tui_limits.LimitError(
+            "busy" if error.category == "control-timeout" else "unsupported"
+        ) from None
 
 
 @contextmanager
@@ -302,6 +276,41 @@ def _cgroup(pid, path, ident):
         return result
 
 
+def _configured_limits(live, limits):
+    """Podman re-applies the full resource spec, not just flags in this call."""
+    quota, period, memory, combined = (
+        limits.get(key) for key in ("CpuQuota", "CpuPeriod", "Memory", "MemorySwap")
+    )
+    _require(
+        all(type(value) is int for value in (quota, period, memory, combined))
+        and live.cpu is not None
+        and live.memory is not None
+        and live.swap is not None
+    )
+    observed_cpu = status_report.observed_cpu_limit(limits)
+    if quota > 0:
+        cpu = tui_limits._cpu_units(observed_cpu)
+        _require(
+            cpu is not None and live.cpu == (quota, period) and live.cpu_units() == cpu,
+            "stale",
+        )
+    else:
+        _require(
+            quota in (0, -1)
+            and observed_cpu == 0
+            and live.cpu[0] == -1
+            and period in (0, live.cpu[1]),
+            "stale",
+        )
+        cpu = None
+    _require(memory >= 0 and live.memory == (memory or -1), "stale")
+    if combined in (-1, 0):
+        _require(live.swap == -1, "stale")
+    else:
+        _require(combined >= memory and live.swap == combined - memory, "stale")
+    return cpu, tui_limits._memory_bytes(memory), combined
+
+
 def _snapshot(engine, box, record, target):
     data = record.data
     info = engine.inspect("container", record.row.container)
@@ -340,10 +349,7 @@ def _snapshot(engine, box, record, target):
     )
     state = info["State"]
     live = _cgroup(state["Pid"], state["CgroupPath"], target.container)
-    limits = info["HostConfig"]
-    cpu = tui_limits._cpu_units(status_report.observed_cpu_limit(limits))
-    memory = tui_limits._memory_bytes(limits.get("Memory"))
-    return live, cpu, memory, limits.get("MemorySwap")
+    return live, *_configured_limits(live, info["HostConfig"])
 
 
 def apply(box, draft, *, read_only, demo):
@@ -356,14 +362,18 @@ def apply(box, draft, *, read_only, demo):
     try:
         original = _registration(box, target)
         record, _ = original
-        with _serialize(record) as lock_current, _admission(record) as allowed:
-            with _engine(box, deadline) as (engine, scope):
+        with _engine(box, deadline) as (engine, scope):
+            with _admission(record) as allowed, _serialize(record) as lock_current:
                 before, cpu, memory, combined = _snapshot(engine, box, record, target)
                 _require((cpu, memory) == (target.cpu, target.memory), "stale")
                 flags = []
                 if draft.cpu is not None:
-                    _require(before.cpu_units() == cpu, "stale")
-                    flags.append(f"--cpus={tui_limits.cpu_text(draft.cpu)}")
+                    flags.extend(
+                        (
+                            f"--cpu-period={tui_limits.CPU_UNIT}",
+                            f"--cpu-quota={draft.cpu}",
+                        )
+                    )
                 expected_combined = combined
                 if draft.memory is not None:
                     _require(before.memory == memory, "stale")
@@ -384,6 +394,7 @@ def apply(box, draft, *, read_only, demo):
                         )
                     )
                 _require(_registration(box, target) == original, "stale")
+                _require(engine.scope() == scope)
                 allowed()
                 lock_current()
                 # External Podman users or normal exit can still race a CLI

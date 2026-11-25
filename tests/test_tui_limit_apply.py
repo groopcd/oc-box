@@ -2,15 +2,18 @@
 
 from contextlib import contextmanager, ExitStack
 import copy
+from dataclasses import replace
 import json
 import os
 from pathlib import Path
 import tempfile
+import threading
 from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
 from oc_box import (
+    oc_box as launcher,
     tui_limit_apply as live,
     tui_limits,
     workspace_control,
@@ -22,6 +25,7 @@ WORKSPACE, CONTAINER = "a" * 32, "b" * 64
 STARTED = "2026-01-02T03:04:05.123456789Z"
 GIB = tui_limits.GIB
 LABEL = "io.oc-box.workspace"
+CPU_PERIOD = "--cpu-period=100000"
 read_live_cgroup = live._cgroup
 
 
@@ -84,10 +88,12 @@ class FixtureEngine:
         cpu, memory, swap = self.observed.cpu, self.observed.memory, self.observed.swap
         limits = self.container["HostConfig"]
         for flag, value in (arg.split("=", 1) for arg in flags):
-            if flag == "--cpus":
-                quota = round(float(value) * 100_000)
-                limits["CpuQuota"] = quota
-                cpu = (quota, 100_000)
+            if flag == "--cpu-period":
+                cpu = (cpu[0], int(value))
+                limits["CpuPeriod"] = cpu[1]
+            elif flag == "--cpu-quota":
+                cpu = (int(value), cpu[1])
+                limits["CpuQuota"] = cpu[0]
             elif flag == "--memory":
                 memory = limits["Memory"] = int(value)
             elif flag == "--memory-swap":
@@ -119,6 +125,7 @@ class ApplyTests(unittest.TestCase):
             "home_volume": "oc-box-home-" + WORKSPACE,
             "cpus": "3",
             "memory": "6g",
+            "ready": True,
             "opencode_version": "2.4.1",
         }
         workspace_identity.record(self.data, *workspace_identity.snapshot(project))
@@ -165,7 +172,12 @@ class ApplyTests(unittest.TestCase):
             [
                 (
                     CONTAINER,
-                    ("--cpus=6", f"--memory={22 * GIB}", f"--memory-swap={30 * GIB}"),
+                    (
+                        CPU_PERIOD,
+                        "--cpu-quota=600000",
+                        f"--memory={22 * GIB}",
+                        f"--memory-swap={30 * GIB}",
+                    ),
                 )
             ],
         )
@@ -174,7 +186,9 @@ class ApplyTests(unittest.TestCase):
 
     def test_single_setting_omits_other_flags_and_retains_unlimited_swap(self):
         self.apply(tui_limits.LimitDraft(self.base, cpu=450_000))
-        self.assertEqual(self.engine.calls, [(CONTAINER, ("--cpus=4.5",))])
+        self.assertEqual(
+            self.engine.calls, [(CONTAINER, (CPU_PERIOD, "--cpu-quota=450000"))]
+        )
         self.engine = FixtureEngine(self.data, swap=-1)
         self.apply(tui_limits.LimitDraft(self.base, memory=7 * GIB))
         self.assertEqual(
@@ -191,7 +205,7 @@ class ApplyTests(unittest.TestCase):
                 "unsupported", tui_limits.LimitDraft(self.base, cpu=400_001)
             )
             registration.assert_not_called()
-        self.assertFalse(self.path.with_name(live._LOCK).exists())
+        self.assertFalse(self.path.with_name(".live-limits.lock").exists())
 
     def test_busy_or_uncertain_control_and_concurrent_apply_do_not_dispatch(self):
         draft = tui_limits.LimitDraft(self.base, cpu=450_000)
@@ -213,7 +227,12 @@ class ApplyTests(unittest.TestCase):
             ("Mounts", []),
             (
                 "HostConfig",
-                {"CpuPeriod": 100_000, "CpuQuota": 500_000, "Memory": 8 * GIB},
+                {
+                    "CpuPeriod": 100_000,
+                    "CpuQuota": 500_000,
+                    "Memory": 8 * GIB,
+                    "MemorySwap": 16 * GIB,
+                },
             ),
         ):
             with self.subTest(key=key):
@@ -226,9 +245,81 @@ class ApplyTests(unittest.TestCase):
 
     def test_lowering_memory_refuses_an_unverifiable_swap_limit(self):
         self.engine.container["HostConfig"]["MemorySwap"] = 0
-        self.assert_refused(
-            "unsupported", tui_limits.LimitDraft(self.base, memory=7 * GIB)
+        self.assert_refused("stale", tui_limits.LimitDraft(self.base, memory=7 * GIB))
+
+    def test_partial_drafts_require_other_limits_to_agree_before_dispatch(self):
+        for field, drift, draft in (
+            ("memory", 6 * GIB, tui_limits.LimitDraft(self.base, cpu=450_000)),
+            ("swap", 6 * GIB, tui_limits.LimitDraft(self.base, cpu=450_000)),
+            (
+                "cpu",
+                (300_000, 100_000),
+                tui_limits.LimitDraft(self.base, memory=7 * GIB),
+            ),
+        ):
+            with self.subTest(field=field):
+                self.engine = FixtureEngine(self.data)
+                self.engine.observed = replace(self.engine.observed, **{field: drift})
+                self.assert_refused("stale", draft)
+
+    def test_fractional_cpu_draft_dispatches_integer_quota(self):
+        self.engine.container["HostConfig"]["CpuQuota"] = 410_000
+        self.engine.observed = replace(self.engine.observed, cpu=(410_000, 100_000))
+        target = replace(self.base, cpu=410_000)
+        self.apply(tui_limits.LimitDraft(target, cpu=460_000))
+        self.assertEqual(
+            self.engine.calls, [(CONTAINER, (CPU_PERIOD, "--cpu-quota=460000"))]
         )
+
+    def test_scope_config_change_refuses_before_mutation(self):
+        base = ("graph", "run", "volume", "overlay", {"mountopt": "nodev"}, "/cfg")
+        self.engine.scope.side_effect = [
+            base,
+            (*base[:4], {"mountopt": "noexec"}, base[-1]),
+        ]
+        self.assert_refused(
+            "unsupported", tui_limits.LimitDraft(self.base, cpu=450_000)
+        )
+
+    def test_ordinary_launcher_stop_waits_for_the_live_update_gate(self):
+        real_gate = workspace_control.live_limit_gate
+        waiting = threading.Event()
+        failures = []
+
+        @contextmanager
+        def watch_gate(path, *, timeout):
+            waiting.set()
+            with real_gate(path, timeout=timeout):
+                yield
+
+        def stop():
+            try:
+                launcher.stop_container(self.data)
+            except BaseException as error:
+                failures.append(type(error).__name__)
+
+        with (
+            patch.object(launcher, "state_root", self.box.state_root),
+            patch.object(
+                launcher, "inspect_owned", return_value={"State": {"Running": True}}
+            ),
+            patch.object(launcher, "podman") as podman,
+            patch.object(workspace_control, "live_limit_gate", watch_gate),
+        ):
+            with real_gate(self.path, timeout=0):
+                thread = threading.Thread(target=stop)
+                thread.start()
+                try:
+                    self.assertTrue(waiting.wait(3))
+                    podman.assert_not_called()
+                finally:
+                    self.addCleanup(thread.join, 3)
+            thread.join(3)
+            self.assertFalse(thread.is_alive())
+            self.assertEqual(failures, [])
+            podman.assert_called_once_with(
+                "stop", "--time", "10", self.data["container"], capture=True
+            )
 
     def test_post_dispatch_refusals_never_retry_or_claim_no_change(self):
         draft = tui_limits.LimitDraft(self.base, cpu=450_000)
@@ -258,7 +349,9 @@ class ApplyTests(unittest.TestCase):
                         self.apply(draft)
                 self.assertEqual(caught.exception.reason, "unverified")
                 self.assertNotIn("PRIVATE_DIAGNOSTIC", str(caught.exception))
-                self.assertEqual(self.engine.calls, [(CONTAINER, ("--cpus=4.5",))])
+                self.assertEqual(
+                    self.engine.calls, [(CONTAINER, (CPU_PERIOD, "--cpu-quota=450000"))]
+                )
                 self.assertEqual(self.path.read_bytes(), self.saved)
 
     def test_update_transport_requests_closed_terminal_and_forces_local_target(self):
@@ -267,10 +360,17 @@ class ApplyTests(unittest.TestCase):
             live.workspace_podman, "_capture_pinned", return_value=(0, b"")
         ) as run:
             engine = live._Engine(binary, {"PATH": "/bin"}, 42)
-            engine.update(CONTAINER, ("--cpus=4.5",))
+            engine.update(CONTAINER, (CPU_PERIOD, "--cpu-quota=450000"))
         run.assert_called_once_with(
             binary,
-            ("--remote=false", "update", "--cpus=4.5", "--", CONTAINER),
+            (
+                "--remote=false",
+                "update",
+                CPU_PERIOD,
+                "--cpu-quota=450000",
+                "--",
+                CONTAINER,
+            ),
             {"PATH": "/bin"},
             42,
             4096,

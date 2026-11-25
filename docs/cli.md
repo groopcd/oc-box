@@ -1387,8 +1387,10 @@ cgroup v2. It does not restart the container or update saved oc-box settings.
 Podman may retain the new limit if that same container is stopped and started;
 recreating it uses the saved settings. Lowering memory can interrupt workloads.
 If a competing operation or container exit prevents verification after
-submission, check the actual limits before trying again; there is no automatic
-retry or rollback.
+submission, check the actual limits before trying again. An independent Podman
+stop can race with Apply, leaving the same container's settings changed on its
+next start even if live verification failed. There is no automatic retry or
+rollback.
 
 The workspace table uses only supplied project/state/CPU/RAM data and explicit
 private-home scan results. Stopped/unknown readings are not fabricated zeros.
