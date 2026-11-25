@@ -388,6 +388,7 @@ def _capture_pinned(
     *,
     command_seconds=_COMMAND_SECONDS,
     stdin=subprocess.DEVNULL,
+    detach_terminal=False,
 ):
     """Private transport only; operation allowlists belong to the caller."""
     if type(limit) is not int or not 0 < limit <= _INSPECT:
@@ -405,6 +406,7 @@ def _capture_pinned(
             stdin=stdin,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
+            **({"start_new_session": True} if detach_terminal else {}),
         )
         output = bytearray()
         fd = process.stdout.fileno()

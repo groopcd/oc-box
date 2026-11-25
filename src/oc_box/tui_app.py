@@ -35,7 +35,7 @@ from textual.widgets import (
 )
 
 if __package__:
-    from . import status_report, tui_clipboard
+    from . import status_report, tui_clipboard, tui_limits
     from .tui_backend import plain, TerminalAttachmentError
     from .tui_logs import (
         JOURNAL_LIMIT,
@@ -78,6 +78,7 @@ if __package__:
 else:
     import status_report
     import tui_clipboard
+    import tui_limits
     from tui_backend import plain, TerminalAttachmentError
     from tui_logs import (
         JOURNAL_LIMIT,
@@ -138,6 +139,13 @@ class LogTable(_CurrentLogSelection, SelectableDataTable):
 
 class LogRaw(_CurrentLogSelection, SelectableRichLog):
     pass
+
+
+LIMIT_STEPS = {
+    f"limit-{resource}-{action}": (resource, direction)
+    for resource in ("cpu", "memory")
+    for action, direction in (("less", -1), ("more", 1))
+}
 
 
 class Confirm(ModalScreen):
@@ -332,7 +340,18 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
     #workspace-inspector > Contents { padding: 0; }
     #workspace-source-context { height: auto; color: $text-muted; padding: 0 1; }
     #workspace-details { padding: 0; border: none; margin: 0; }
-    #scan-storage { width: auto; min-width: 12; margin: 0 1; }
+    #workspace-limit-card { height: auto; layers: readings adjusters; }
+    #workspace-limit-card > #full-diagnostics { layer: readings; }
+    #workspace-limit-card > .limit-step-row { layer: adjusters; dock: right;
+      width: 7; height: 1; margin-right: 3; background: $surface; }
+    #limit-cpu-controls { offset: 0 3; }
+    #limit-memory-controls { offset: 0 6; }
+    #workspace-limit-card .limit-step-row Button { width: 3; min-width: 0;
+      height: 1; padding: 0; border: none; }
+    #workspace-limit-card .limit-step-row Button:focus,
+    #workspace-limit-card .limit-step-row Button:hover { background: $primary 30%; }
+    #workspace-limit-actions { height: 3; padding: 0 1; }
+    #workspace-limit-actions Button { width: auto; min-width: 12; margin-right: 1; }
     #activity-card { height: 8; margin-top: 1; }
     #overview-activity { height: 4; text-wrap: nowrap; text-overflow: ellipsis; }
     #status-summary, #settings-info, #terminal-info { height: auto; padding: 1; }
@@ -457,6 +476,10 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
             False
         )
         self._storage_scanning = False
+        self._limit_draft = None
+        self._limit_attempt = None
+        self._limit_recheck = False
+        self._limit_revision = 0
         self._last_report = self._last_logs = 0
         self._rendered_logs = None
         self._log_scope_versions = dict.fromkeys(
@@ -582,9 +605,34 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
                                 collapsed=False,
                                 id="workspace-inspector",
                             ):
-                                yield WorkspaceInspector(
-                                    "workspace", id="full-diagnostics"
-                                )
+                                with Vertical(id="workspace-limit-card"):
+                                    yield WorkspaceInspector(
+                                        "workspace", id="full-diagnostics"
+                                    )
+                                    for resource, step in (
+                                        ("cpu", "0.5 core"),
+                                        ("memory", "1 GiB"),
+                                    ):
+                                        with Horizontal(
+                                            id=f"limit-{resource}-controls",
+                                            classes="limit-step-row",
+                                        ) as controls:
+                                            controls.display = False
+                                            for label, action in (
+                                                ("−", "less"),
+                                                ("+", "more"),
+                                            ):
+                                                button = Button(
+                                                    label,
+                                                    id=f"limit-{resource}-{action}",
+                                                    tooltip=f"Stage {step} {action} {resource}; "
+                                                    "changes only on Apply.",
+                                                    disabled=True,
+                                                    compact=True,
+                                                    flat=True,
+                                                )
+                                                button.active_effect_duration = 0
+                                                yield button
                                 yield Static(
                                     "Native sessions: not connected.",
                                     id="workspace-source-context",
@@ -600,9 +648,19 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
                                         id="status-summary",
                                         markup=False,
                                     )
-                                yield Button(
-                                    "Scan sizes", id="scan-storage", disabled=True
-                                )
+                                with Horizontal(id="workspace-limit-actions"):
+                                    yield Button(
+                                        "Scan sizes", id="scan-storage", disabled=True
+                                    )
+                                    yield Button(
+                                        "Apply",
+                                        id="apply-live-limits",
+                                        variant="primary",
+                                        disabled=True,
+                                        tooltip="Update this running container only. "
+                                        "Saved settings stay unchanged. "
+                                        "Lowering memory can interrupt workloads.",
+                                    )
                         with Vertical(id="activity-card", classes="card"):
                             yield Static("RETAINED ACTIVITY", classes="card-title")
                             yield Static(
@@ -959,6 +1017,7 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
         rows = self.report["workspaces"]
         if target not in {row["workspace_id"] for row in rows}:
             return
+        self._limit_draft = None
         self.selected = target
         self._session_source_changed()
         table = self.query_one("#workspaces", DataTable)
@@ -1138,9 +1197,12 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
         self._refreshing = True
         self._last_report = time.monotonic()
         try:
+            revision = self._limit_revision
             report = self.backend.collect(scan_storage=scan_storage)
             if self.is_running:
-                self.call_from_thread(self._apply_report, report, scan_storage)
+                self.call_from_thread(
+                    self._apply_report, report, scan_storage, revision
+                )
         except Exception:
             if self.is_running:
                 self.call_from_thread(
@@ -1151,7 +1213,25 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
             self._refreshing = False
             self._status_lock.release()
 
-    def _apply_report(self, report, scanned):
+    def _apply_report(self, report, scanned, limit_revision=None):
+        if limit_revision is not None and limit_revision != self._limit_revision:
+            # A pre-Apply read cannot put the old verified limits back on screen.
+            return
+        self._limit_recheck = False
+        if self._limit_attempt is not None:
+            target = self._limit_attempt.target
+            previous_limits = next(
+                (item for item in self.report["workspaces"] if target.same_run(item)),
+                None,
+            )
+            if previous_limits is not None:
+                for item in report["workspaces"]:
+                    if target.same_run(item):
+                        # Do not let polling display half of a multi-limit
+                        # update (or a new result before post-checks finish).
+                        for key in ("limits", "effective_limits"):
+                            item[key] = previous_limits.get(key)
+                        break
         target = self.podman_workspace
         prior_target = (
             self._podman_status_binding(self.report, target) if target else None
@@ -1451,6 +1531,7 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
         self._render_scan_button("#scan-storage", available=item is not None)
         self._render_context()
         self._update_monitor("#full-diagnostics", item)
+        self._render_limits(item)
         if not item:
             self._update_text(
                 "#status-summary",
@@ -1628,6 +1709,10 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
             self.action_logs()
         elif action == "scan-storage":
             self.scan_storage(self.selected)
+        elif action in LIMIT_STEPS:
+            self._stage_limit(*LIMIT_STEPS[action])
+        elif action == "apply-live-limits":
+            self._apply_limits()
         elif action == "connect-sessions":
             self.connect_sessions(
                 self.query_one("#session-scope", Select).value,
@@ -1677,6 +1762,112 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
         label = "Running…" if self._storage_scanning else "Scan sizes"
         if button.label.plain != label:
             button.label = label
+
+    def _limit_target(self, item):
+        if (
+            self.read_only
+            or self.demo
+            or self._limit_recheck
+            or not callable(getattr(self.backend, "apply_live_limits", None))
+        ):
+            return None
+        return tui_limits.LimitTarget.from_report(item)
+
+    def _render_limits(self, item):
+        target = self._limit_target(item)
+        draft = self._limit_draft
+        if draft and draft.target != target:
+            draft = self._limit_draft = None
+            self._message(
+                "Staged limits cleared because the workspace or its limits changed."
+            )
+        editable = target is not None and self._limit_attempt is None
+        candidate = (draft or tui_limits.LimitDraft(target)) if editable else None
+        for resource in ("cpu", "memory"):
+            self.query_one(f"#limit-{resource}-controls", Horizontal).display = (
+                item is not None
+            )
+        for ident, (resource, direction) in LIMIT_STEPS.items():
+            self.query_one(f"#{ident}", Button).disabled = (
+                not candidate or candidate.step(resource, direction) == candidate
+            )
+        self.query_one(WorkspaceInspector).show_limit_draft(
+            draft.captions() if draft else ("", ""), controls=item is not None
+        )
+        apply = self.query_one("#apply-live-limits", Button)
+        apply.disabled = not (editable and draft and draft.pending)
+        label = "Applying…" if self._limit_attempt is not None else "Apply"
+        if apply.label.plain != label:
+            apply.label = label
+
+    def _allow_limit_press(self):
+        return (
+            self._limit_attempt is None
+            and not self._clipboard_private()
+            and not isinstance(self.screen, ModalScreen)
+            and self.query_one("#content", TabbedContent).active == "status"
+        )
+
+    def _stage_limit(self, resource, direction):
+        if not self._allow_limit_press():
+            return
+        item = self._workspace()
+        target = self._limit_target(item)
+        if target is None:
+            return
+        draft = self._limit_draft or tui_limits.LimitDraft(target)
+        if draft.target != target:
+            self._render_limits(item)
+            return
+        staged = draft.step(resource, direction)
+        self._limit_draft = staged if staged.pending else None
+        self._render_limits(item)
+
+    def _apply_limits(self):
+        if not self._allow_limit_press() or not self._limit_draft:
+            return
+        item = self._workspace()
+        draft = self._limit_draft
+        if draft.target != self._limit_target(item) or not draft.pending:
+            self._render_limits(item)
+            return
+        self._limit_draft = None
+        self._limit_attempt = draft
+        self._render_limits(item)
+        self._apply_limits_worker(draft)
+
+    @work(thread=True, group="live-limits", exit_on_error=False)
+    def _apply_limits_worker(self, draft):
+        outcome = "verified"
+        try:
+            self.backend.apply_live_limits(
+                draft, read_only=self.read_only, demo=self.demo
+            )
+        except tui_limits.LimitError as error:
+            outcome = error.reason
+        except Exception:
+            outcome = "unverified"
+        if self.is_running:
+            self.call_from_thread(self._finish_limits, draft, outcome)
+
+    def _finish_limits(self, draft, outcome):
+        self._limit_attempt = None
+        self._limit_revision += 1
+        self._limit_recheck = outcome != "verified"
+        if outcome == "verified":
+            for item in self.report["workspaces"]:
+                if tui_limits.LimitTarget.from_report(item) != draft.target:
+                    continue
+                changes = {}
+                if draft.cpu is not None:
+                    changes["cpu_cores"] = draft.cpu / tui_limits.CPU_UNIT
+                if draft.memory is not None:
+                    changes["memory_bytes"] = draft.memory
+                for key in ("limits", "effective_limits"):
+                    item[key] = {**(item.get(key) or {}), **changes}
+                break
+        self._render_workspace()
+        self._message(tui_limits.LIMIT_MESSAGES[outcome])
 
     def _set_storage_scanning(self, scanning):
         self._storage_scanning = scanning

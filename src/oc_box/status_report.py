@@ -60,6 +60,18 @@ def memory_limit(value):
     return None
 
 
+def observed_cpu_limit(limits):
+    nano = number(limits.get("NanoCpus"))
+    if nano:
+        return nano / 1e9
+    quota, period = limits.get("CpuQuota"), limits.get("CpuPeriod")
+    if number(quota) and number(period):
+        return quota / period
+    if nano == 0 or quota in (0, -1):
+        return 0
+    return None
+
+
 def uptime(started, now):
     try:
         # Podman uses RFC3339Nano; Python 3.10 accepts only fixed-width
@@ -267,15 +279,8 @@ def collect_workspace(path, data, *, podman, session_state, now, scan_storage=Tr
         if info:
             current = info.get("State", {})
             limits = info.get("HostConfig", {})
-            observed_cpu = number(limits.get("NanoCpus"))
-            if observed_cpu is not None:
-                observed_cpu /= 1e9
-            elif limits.get("CpuQuota") in (0, -1):
-                observed_cpu = 0
-            elif number(limits.get("CpuQuota")) and number(limits.get("CpuPeriod")):
-                observed_cpu = limits["CpuQuota"] / limits["CpuPeriod"]
             report["effective_limits"] = {
-                "cpu_cores": observed_cpu,
+                "cpu_cores": observed_cpu_limit(limits),
                 "memory_bytes": number(limits.get("Memory")),
                 "pids": 0
                 if limits.get("PidsLimit") == -1

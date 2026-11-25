@@ -507,10 +507,32 @@ class HostResourceCards(_CardPanel):
 class WorkspaceInspector(_CardPanel):
     """Selected metadata and observed resource use, with no readiness inference."""
 
+    # Match the two one-row controls in the Status inspector. Leave the bars
+    # full-width; only the captions themselves share their rows with controls.
+    _CONTROL_WIDTH = 7
+
     def __init__(self, kind="workspace", **kwargs):
         kwargs.setdefault("id", "full-diagnostics")
         super().__init__(kind, **kwargs)
         self.caption = "Selected workspace"
+        self._limit_draft = ("", "")
+        self._limit_controls = False
+
+    def show_limit_draft(self, captions, *, controls):
+        if (captions, controls) != (self._limit_draft, self._limit_controls):
+            self._limit_draft, self._limit_controls = captions, controls
+            self._render_snapshot()
+
+    def _limit_caption(self, label, index, width, style):
+        if self._limit_controls:
+            width = max(1, width - self._CONTROL_WIDTH)
+        draft = self._limit_draft[index]
+        if not draft:
+            return _line(Text(label, style=style), width)
+        suffix = Text(" " + draft, style="bold")
+        # Reserve the pending value before truncating a long baseline at narrow
+        # widths. Never alter the readings or percentage used by the gauge.
+        return _line(Text(label, style=style), max(1, width - suffix.cell_len)) + suffix
 
     def _render_snapshot(self):
         width = max(1, self.content_size.width)
@@ -546,9 +568,11 @@ class WorkspaceInspector(_CardPanel):
                     style=styles["title"],
                 ),
                 Text(os_caption, style=styles["muted"]),
-                Text(
+                self._limit_caption(
                     f"CPU {'n/a' if cpu is None else f'{cpu:.1f}%'} · {quota_caption}",
-                    style=styles["cpu"],
+                    0,
+                    inner,
+                    styles["cpu"],
                 ),
                 _card_bar(
                     cpu_gauge,
@@ -561,9 +585,11 @@ class WorkspaceInspector(_CardPanel):
                     "CPU 100% = 1 core; gauge uses observed quota",
                     style=styles["muted"],
                 ),
-                Text(
+                self._limit_caption(
                     "RAM " + _card_memory(*memory, unlimited=True),
-                    style=styles["memory"],
+                    1,
+                    inner,
+                    styles["memory"],
                 ),
                 _card_bar(
                     ram_gauge,
