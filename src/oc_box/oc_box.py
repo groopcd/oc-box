@@ -1608,7 +1608,7 @@ def create_container(path, data, *, environment=None):
     atomic_json(path, data)
 
 
-def container_create_args(data, project, *, conversion=None, ulimits=()):
+def container_create_args(data, project, *, conversion=None):
     # Conversion uses only this argument builder: it must neither create a
     # home volume nor publish workspace state on the ordinary create path.
     return (
@@ -1654,7 +1654,6 @@ def container_create_args(data, project, *, conversion=None, ulimits=()):
             if conversion or data.get("restored_from")
             else ()
         ),
-        *("--ulimit=" + value for value in ulimits),
         *("--device=" + device for device in data.get("devices", [])),
         *data.get("podman_args", []),
         "--env",

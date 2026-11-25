@@ -2,6 +2,7 @@
 
 import contextlib
 from copy import deepcopy
+import hashlib
 import io
 import json
 import os
@@ -30,7 +31,10 @@ _HOST_CONFIG = {
     "RestartPolicy": {"Name": "no"},
     "PidsLimit": 2048,
     "Init": True,
-    "Ulimits": [{"Name": "RLIMIT_NOFILE", "Soft": 1024, "Hard": 8192}],
+    "Ulimits": [
+        {"Name": "RLIMIT_NOFILE", "Soft": 1024, "Hard": 8192},
+        {"Name": "RLIMIT_NPROC", "Soft": 7600, "Hard": 7600},
+    ],
 }
 _PATH = (
     "PATH=/opt/oc-box/runtime/bin:/usr/local/sbin:/usr/local/bin:"
@@ -120,6 +124,7 @@ class FixturePodman:
                 "Entrypoint": [entrypoint],
                 "Cmd": list(cmd),
                 "Healthcheck": {"Test": ["NONE"]},
+                "CreateCommand": ["podman", "create"],
             },
             "HostConfig": deepcopy(_HOST_CONFIG),
             "State": {
@@ -238,13 +243,6 @@ class FixturePodman:
             config["HostConfig"]["PidsLimit"] = int(value("--pids-limit"))
             config["HostConfig"]["Init"] = "--init" in args
             config["HostConfig"]["Ulimits"] = []
-            for arg in args:
-                if arg.startswith("--ulimit="):
-                    name, values = arg[len("--ulimit=") :].split("=")
-                    soft, hard = map(int, values.split(":"))
-                    config["HostConfig"]["Ulimits"].append(
-                        {"Name": name, "Soft": soft, "Hard": hard}
-                    )
             stdout = _CANDIDATE + "\n"
         elif action in ("retire", "publish"):
             _, ident, name = args
@@ -358,6 +356,14 @@ class EntrypointMigrationTests(unittest.TestCase):
         self.assertEqual(candidate["Name"], self.original["container"])
         self.assertEqual(candidate["Image"], image)
         self.assertEqual(candidate["State"]["Status"], "configured")
+        # A booted rootless container can report inherited limits that are
+        # absent before its replacement boots. Neither route may replay them.
+        create = candidate["Config"]["CreateCommand"]
+        self.assertFalse(
+            any(arg == "--ulimit" or arg.startswith("--ulimit=") for arg in create)
+        )
+        self.assertEqual(candidate["HostConfig"]["Ulimits"], [])
+        self.assertEqual(candidate["HostConfig"]["PidsLimit"], data["pids"])
         self.assertTrue(migration.fresh_replacement(data, candidate))
         self.assertIs(migration.needs_bootstrap(data), bootstrap)
         self.assertEqual(
@@ -387,7 +393,6 @@ class EntrypointMigrationTests(unittest.TestCase):
             self.assertIn("--include-volumes=false", commit)
             create = next(args for args in self.engine.calls if args[0] == "create")
             self.assertIn("--pull=never", create)
-            self.assertIn("--ulimit=nofile=1024:8192", create)
             home_options = next(
                 argument.split(":")[2].split(",")
                 for argument in self.engine.values(create, "--volume")
@@ -433,6 +438,41 @@ class EntrypointMigrationTests(unittest.TestCase):
                 self.engine.mutations, ["commit", "create", "retire", "publish", "rm"]
             )
             self.assertIn(("image", "inspect", _BASE), self.engine.calls)
+
+    def test_explicit_or_unverifiable_process_limit_settings_refuse_without_mutation(
+        self,
+    ):
+        for argv in (
+            ["podman", "create", "--ulimit=nproc=400:800"],
+            ["podman", "create", "--ulimit", "nofile=1024:2048"],
+            ["podman", "create", 3],
+            [],
+            None,
+        ):
+            with self.subTest(argv=argv), self.fixture():
+                self.engine.containers[_SOURCE]["Config"]["CreateCommand"] = argv
+                self.assert_refused(migration.REFUSED)
+                self.assertEqual(self.engine.mutations, [])
+                self.assertNotIn(migration.FIELD, box.read_json(self.path))
+                self.assert_preserved()
+
+    def test_previous_rlimit_replay_profile_is_not_adopted(self):
+        with self.fixture():
+            self.engine.before["commit"] = lambda: 125
+            self.assert_refused(migration.OFFER_REBUILD)
+            pending = box.read_json(self.path)
+            source = self.engine.containers[_SOURCE]
+            old_profile = [source["HostConfig"].get(key) for key in migration._OPTIONS]
+            old_profile.extend((["nofile=1024:8192", "nproc=7600:7600"], []))
+            pending[migration.FIELD]["profile"] = hashlib.sha256(
+                json.dumps(old_profile, sort_keys=True, separators=(",", ":")).encode()
+            ).hexdigest()
+            box.atomic_json(self.path, pending)
+            self.assert_refused(migration.PENDING)
+            self.assert_refused(migration.PENDING, rebuild=True)
+            self.assertEqual(self.engine.mutations, ["commit"])
+            self.assertEqual(box.read_json(self.path), pending)
+            self.assert_preserved()
 
     def test_new_snapshot_attempt_revokes_previous_rebuild_authority(self):
         with self.fixture():
