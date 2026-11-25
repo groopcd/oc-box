@@ -402,7 +402,8 @@ def checked_export(request, ident):
     archive mirrors that export and the omitted count is reported separately.
     """
     route = "/api/session/" + quote(ident, safe="") + "/message?limit=100"
-    projected, states, identities, cursors = [], [], set(), set()
+    expected, identities, cursors = [], set(), set()
+    omitted, trailing_unfinished = 0, False
     cursor = None
     while True:
         page = request(
@@ -424,13 +425,15 @@ def checked_export(request, ident):
                 message.get("status") == "running"
             ):
                 raise FixedError(UNSETTLED)
-            incomplete = (
+            trailing_unfinished = (
                 message.get("type") == "assistant"
                 and message.get("time", {}).get("completed") is None
             )
             identities.add(message["id"])
-            projected.append(message)
-            states.append(incomplete)
+            if trailing_unfinished:
+                omitted += 1
+            else:
+                expected.append(message)
         cursor = page["cursor"].get("next")
         if cursor is not None and (not isinstance(cursor, str) or not cursor):
             raise FixedError(HISTORY_CURSOR)
@@ -439,9 +442,7 @@ def checked_export(request, ident):
         if cursor in cursors:
             raise FixedError(HISTORY_CURSOR)
         cursors.add(cursor)
-    settled = [index for index, incomplete in enumerate(states) if not incomplete]
-    omitted = {index for index, incomplete in enumerate(states) if incomplete}
-    if omitted and (not settled or max(omitted) > settled[-1]):
+    if trailing_unfinished:
         raise FixedError(UNSETTLED)
     response = request(
         "GET", "/api/experimental/session/" + quote(ident, safe="") + "/export"
@@ -449,9 +450,6 @@ def checked_export(request, ident):
     if not isinstance(response, dict) or not isinstance(response.get("data"), dict):
         raise FixedError(EXPORT)
     exported = response["data"]
-    expected = [
-        message for index, message in enumerate(projected) if index not in omitted
-    ]
     if exported.get("messages") != expected:
         raise FixedError(CHANGED)
     if omitted:
@@ -461,7 +459,7 @@ def checked_export(request, ident):
             raise FixedError(ACTIVITY)
         if ident in activity["data"]:
             raise FixedError(UNSETTLED)
-        exported = {**exported, INTERRUPTED: {"assistant": len(omitted)}}
+        exported = {**exported, INTERRUPTED: {"assistant": omitted}}
     return exported
 
 
@@ -1503,9 +1501,18 @@ def main(argv):
     elif action == "ready":
         with server(binary):
             pass
-    elif action in ("sessions", "export"):
+    elif action in (
+        "sessions",
+        "export",
+        "quiet-history-sessions",
+        "quiet-history-export",
+    ):
         settings = json.load(sys.stdin)
         endpoint = settings.get("endpoint")
+        if action.startswith("quiet-history-"):
+            if not isinstance(endpoint, dict) or set(endpoint) != {"url", "password"}:
+                raise FixedError(ENDPOINT)
+            action = action.removeprefix("quiet-history-")
         with (
             contextlib.nullcontext(endpoint_request(endpoint))
             if endpoint is not None
@@ -1516,7 +1523,7 @@ def main(argv):
                 if action == "sessions"
                 else checked_export(request, settings["session"])
             )
-            print(json.dumps(value), flush=True)
+            print(json.dumps(value, separators=(",", ":")), flush=True)
     elif action == "web-sessions":
         settings = json.load(sys.stdin)
         # Mandatory existing endpoint: never discover/start a service here.

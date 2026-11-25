@@ -63,12 +63,94 @@ class SessionSyncTests(unittest.TestCase):
             )
         self.assertEqual(sync.call_count, 2)
         self.assertEqual(private.read_bytes(), expected)
-        self.assertTrue(box._archive_matches_checkpoint(private, value, checksum))
+        self.assertTrue(
+            box._archive_matches_checkpoint(private, checksum, len(expected))
+        )
         alias = self.root / "alias.json"
         alias.symlink_to(private)
-        self.assertFalse(box._archive_matches_checkpoint(alias, value, checksum))
         self.assertFalse(
-            box._archive_matches_checkpoint(private, {"text": "changed"}, checksum)
+            box._archive_matches_checkpoint(alias, checksum, len(expected))
+        )
+        self.assertFalse(
+            box._archive_matches_checkpoint(private, "0" * 64, len(expected))
+        )
+
+    def test_history_archive_reuses_byte_identical_copies_and_bounds_buffering(self):
+        private = self.root / "archive.json"
+        original = {"text": "línea \\ 🧪\n", "messages": [{"text": "." * 70000}]}
+        changed = {**original, "extra": ["other", True, None, 1.5]}
+        expected = (json.dumps(original, indent=2) + "\n").encode()
+        next_expected = (json.dumps(changed, indent=2) + "\n").encode()
+        checksum = hashlib.sha256(expected).hexdigest()
+        next_checksum = hashlib.sha256(next_expected).hexdigest()
+        for cap, changed_encodings in ((1024 * 1024, 1), (1024, 2)):
+            with (
+                self.subTest(cap=cap),
+                patch.object(box, "_HISTORY_ARCHIVE_BUFFER", cap),
+                patch.object(
+                    box, "_json_byte_chunks", wraps=box._json_byte_chunks
+                ) as encode,
+            ):
+                box.atomic_json(private, original, checksum=True)
+                previous_inode = private.stat().st_ino
+                encode.reset_mock()
+                self.assertEqual(
+                    box._write_history_archive(private, original, checksum), checksum
+                )
+                self.assertEqual(private.stat().st_ino, previous_inode)
+                self.assertEqual(encode.call_count, 1)
+                self.assertEqual(private.read_bytes(), expected)
+
+                encode.reset_mock()
+                self.assertEqual(
+                    box._write_history_archive(private, changed, checksum),
+                    next_checksum,
+                )
+                self.assertEqual(encode.call_count, changed_encodings)
+                self.assertEqual(private.read_bytes(), next_expected)
+
+                # Even same-size corruption needs repair; the previously
+                # verified host checkpoint is still the freshly computed hash.
+                private.write_bytes(b"!" + next_expected[1:])
+                self.assertEqual(
+                    box._write_history_archive(private, changed, next_checksum),
+                    next_checksum,
+                )
+                self.assertEqual(private.read_bytes(), next_expected)
+
+    def test_sync_archive_fast_copy_preserves_native_payload_and_bytes(self):
+        ident = "ses_root"
+        source = {
+            "info": {
+                **self.session(ident, parent="ses_parent"),
+                "permissions": [{"action": "*"}],
+                "metadata": {
+                    "oc-box.archive": {"unknown": "keep"},
+                    "nested": {"x": [1]},
+                },
+                "fork": {
+                    "sessionID": "ses_parent",
+                    "boundary": {"type": "through", "messageID": "msg_first"},
+                },
+            },
+            "messages": [
+                {"id": "msg_first", "type": "user", "text": "👋"},
+                {
+                    "id": "msg_compact",
+                    "type": "compaction",
+                    "metadata": {"keepID": "msg_first", "keep": ["text"]},
+                },
+            ],
+            "ocBoxInterrupted": {"assistant": 1},
+        }
+        before = copy.deepcopy(source)
+        expected = box.archive_session(before, self.data)
+        observed = box.archive_session(source, self.data, copy_payload=False)
+        self.assertEqual(source, before)
+        self.assertEqual(json.dumps(observed, indent=2), json.dumps(expected, indent=2))
+        self.assertIsNot(observed["info"]["metadata"], source["info"]["metadata"])
+        self.assertIsNot(
+            observed["messages"][1]["metadata"], source["messages"][1]["metadata"]
         )
 
     def test_quiet_source_refusal_reports_only_validated_reason(self):

@@ -14,7 +14,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
-from oc_box import history_reader, history_recovery
+from oc_box import history_reader, history_recovery, oc_box
 from oc_box import opencode_v2_io as bridge, workspace_service as service
 from test_history_reader import (
     AUTOMATION_SCHEMA,
@@ -503,6 +503,123 @@ class LeaseTests(unittest.TestCase):
         self.children.append(value)
         self.addCleanup(value.dispose)
         return value
+
+    def test_exact_read_client_uses_only_bound_engine_and_private_stdin(self):
+        data = {**DATA, "opencode_version": "2.4.1", "project": "/synthetic/project"}
+        child = self.child()
+        token = service.LIFECYCLE_LOCK.set(object())
+        self.addCleanup(service.LIFECYCLE_LOCK.reset, token)
+        binding = oc_box._QuietSyncBinding(data["container"], (), {"PATH": "/usr/bin"})
+        token = oc_box._QUIET_SYNC_BINDING.set(binding)
+        self.addCleanup(oc_box._QUIET_SYNC_BINDING.reset, token)
+        with (
+            patch.object(service.subprocess, "Popen", return_value=child) as start,
+            patch.object(
+                service.HistorySource,
+                "_wait",
+                side_effect=lambda timeout: child.wait(timeout=timeout),
+            ),
+            patch.object(oc_box, "captured_output", new=self.box.captured_output),
+            patch.object(
+                oc_box,
+                "run",
+                return_value=SimpleNamespace(returncode=0, stdout="[]", stderr=""),
+            ) as run,
+            patch.object(oc_box, "exec_command") as ordinary,
+            service.history_source(oc_box, data, stopped_source=True) as connection,
+        ):
+            source = service.quiet_history_source()
+            self.assertIsNotNone(source)
+            self.assertIs(source.connection, connection)
+            with self.assertRaisesRegex(oc_box.BoxError, "Invalid execution target"):
+                oc_box.run_v2_history(data, "sessions")
+            run.assert_not_called()
+            binding.start_verified = True
+            oc_box.run_v2_history(data, "sessions")
+            command = run.call_args.args[0]
+            self.assertEqual(
+                command[:8],
+                [
+                    "podman",
+                    "exec",
+                    "-i",
+                    "--workdir",
+                    "/",
+                    data["container"],
+                    "/usr/bin/env",
+                    "-i",
+                ],
+            )
+            self.assertEqual(
+                command[-2:], ["quiet-history-sessions", oc_box.CONTAINER_OPENCODE]
+            )
+            self.assertEqual(
+                command[10:15], ["/usr/bin/python3", "-I", "-S", "-B", "-c"]
+            )
+            self.assertEqual(command.environment, binding.engine_env)
+            self.assertNotIn(ENDPOINT["password"], repr(command))
+            self.assertNotIn(ENDPOINT["password"], repr(command.environment))
+            private = run.call_args.kwargs
+            self.assertTrue(private["capture"] and private["private"])
+            self.assertEqual(
+                json.loads(private["input"]),
+                {
+                    "directory": data["project"],
+                    "endpoint": ENDPOINT,
+                },
+            )
+            ordinary.assert_not_called()
+            self.assertEqual(start.call_count, 1)
+            self.assertEqual(run.call_count, 1)
+            for key in ("id", "container", "home", "project", "opencode_version"):
+                with self.subTest(key=key), self.assertRaises(oc_box.BoxError):
+                    source.read_command({**data, key: "different"}, "sessions")
+            with self.assertRaises(oc_box.BoxError):
+                source.read_command(data, "auth")
+            changed = service.LIFECYCLE_LOCK.set(object())
+            try:
+                with self.assertRaises(oc_box.BoxError):
+                    source.read_command(data, "sessions")
+            finally:
+                service.LIFECYCLE_LOCK.reset(changed)
+            foreign = service.CONNECTION.set(dict(connection))
+            try:
+                with self.assertRaises(oc_box.BoxError):
+                    source.read_command(data, "sessions")
+            finally:
+                service.CONNECTION.reset(foreign)
+            for value in (None, {**connection, "workspace": "d" * 32}):
+                foreign = service.CONNECTION.set(value)
+                try:
+                    with self.assertRaisesRegex(
+                        oc_box.BoxError, "Invalid execution target"
+                    ):
+                        oc_box.run_v2_history(data, "sessions")
+                finally:
+                    service.CONNECTION.reset(foreign)
+            ordinary.assert_not_called()
+            self.assertEqual(run.call_count, 1)
+        self.assertIsNone(service.quiet_history_source())
+        with self.assertRaises(oc_box.BoxError):
+            source.read_command(data, "sessions")
+
+    def test_quiet_read_helper_without_endpoint_never_starts_native(self):
+        for action in ("quiet-history-sessions", "quiet-history-export"):
+            for payload in (
+                {},
+                {"endpoint": None},
+                {"endpoint": {}},
+                {"endpoint": {"password": ENDPOINT["password"]}},
+                {"endpoint": {"url": ENDPOINT["url"]}},
+            ):
+                with (
+                    self.subTest(action=action, payload=payload),
+                    patch.object(bridge.sys, "stdin", io.StringIO(json.dumps(payload))),
+                    patch.object(bridge, "server") as server,
+                    self.assertRaisesRegex(bridge.FixedError, bridge.ENDPOINT),
+                ):
+                    bridge.main([action, self.box.CONTAINER_OPENCODE])
+                server.assert_not_called()
 
     def test_one_unregistered_lease_sets_resets_connection_and_never_mutates_host(self):
         child = self.child()

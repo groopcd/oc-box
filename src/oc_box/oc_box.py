@@ -867,30 +867,38 @@ def state_root():
     )
 
 
-def _json_fragments(value):
-    yield from json.JSONEncoder(indent=2).iterencode(value)
-    yield "\n"
+def _json_byte_chunks(value):
+    """Keep the original archive bytes without hashing every JSON token."""
+    fragments = json.JSONEncoder(indent=2).iterencode(value)
+    parts, size = [], 0
+    for fragment in fragments:
+        # The default encoder emits ASCII; join before encoding to avoid
+        # per-token byte allocations, hashes, and file writes.
+        if size + len(fragment) > 65536:
+            if parts:
+                yield "".join(parts).encode("utf-8")
+                parts.clear()
+                size = 0
+            if len(fragment) >= 65536:
+                yield fragment.encode("utf-8")
+                continue
+        parts.append(fragment)
+        size += len(fragment)
+    parts.append("\n")
+    yield "".join(parts).encode("utf-8")
 
 
-def atomic_json(path, value, *, durable=False, checksum=False):
-    """Write the usual JSON bytes, optionally hashing and syncing the write."""
+@contextlib.contextmanager
+def _atomic_json_file(path, *, binary=False, durable=False):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     tmp = path.with_name(path.name + "." + uuid.uuid4().hex + ".tmp")
     try:
-        digest = hashlib.sha256() if checksum else None
-        mode = "xb" if digest is not None else "x"
-        options = {} if digest is not None else {"encoding": "utf-8"}
+        mode = "xb" if binary else "x"
+        options = {} if binary else {"encoding": "utf-8"}
         with tmp.open(mode, **options) as stream:
             os.chmod(tmp, 0o600)
-            if digest is None:
-                json.dump(value, stream, indent=2)
-                stream.write("\n")
-            else:
-                for fragment in _json_fragments(value):
-                    encoded = fragment.encode("utf-8")
-                    digest.update(encoded)
-                    stream.write(encoded)
+            yield stream
             if durable:
                 stream.flush()
                 os.fsync(stream.fileno())
@@ -901,9 +909,22 @@ def atomic_json(path, value, *, durable=False, checksum=False):
                 os.fsync(fd)
             finally:
                 os.close(fd)
-        return digest.hexdigest() if digest is not None else None
     finally:
         tmp.unlink(missing_ok=True)
+
+
+def atomic_json(path, value, *, durable=False, checksum=False):
+    """Write the usual JSON bytes, optionally hashing and syncing the write."""
+    digest = hashlib.sha256() if checksum else None
+    with _atomic_json_file(path, binary=checksum, durable=durable) as stream:
+        if digest is None:
+            json.dump(value, stream, indent=2)
+            stream.write("\n")
+        else:
+            for chunk in _json_byte_chunks(value):
+                digest.update(chunk)
+                stream.write(chunk)
+    return digest.hexdigest() if digest is not None else None
 
 
 def read_json(path):
@@ -2985,19 +3006,32 @@ def run_v2_history(data, action, **settings):
     )
     reader = history_reader.current()
     source_is_live = bool(endpoint) and reader is None
-    arguments = [
-        "python3",
-        "-c",
-        (PACKAGE / "opencode_v2_io.py").read_text(),
-        action,
-        CONTAINER_OPENCODE,
-    ]
-    if reader is not None:
-        if reader.data["id"] != data["id"] or endpoint is None:
-            raise BoxError("History reader does not own this snapshot request.")
-        command = reader.command(arguments)
+    binding = _QUIET_SYNC_BINDING.get()
+    quiet_source = workspace_service.quiet_history_source()
+    if binding is not None and quiet_source is not None:
+        if (
+            not source_is_live
+            or runtime_safeguard.current() is not None
+            or history_recovery.FENCE.get() is not None
+            or not binding.start_verified
+            or data["container"] != binding.container
+        ):
+            raise BoxError("Invalid execution target for the bound history source.")
+        command = quiet_source.read_command(data, action)
     else:
-        command = exec_command(data, arguments)
+        arguments = [
+            "python3",
+            "-c",
+            (PACKAGE / "opencode_v2_io.py").read_text(),
+            action,
+            CONTAINER_OPENCODE,
+        ]
+        if reader is not None:
+            if reader.data["id"] != data["id"] or endpoint is None:
+                raise BoxError("History reader does not own this snapshot request.")
+            command = reader.command(arguments)
+        else:
+            command = exec_command(data, arguments)
     try:
         result = run(
             command,
@@ -3423,18 +3457,20 @@ with tempfile.TemporaryDirectory(prefix='oc-box-import-') as directory:
     )
 
 
-def archive_id(workspace_id, ident, prefix):
+def _namespaced_archive_id(namespace, ident, prefix):
     # OpenCode orders messages/parts by ID. Keep the original sortable suffix.
-    return (
-        prefix
-        + "_"
-        + hashlib.sha256(workspace_id.encode()).hexdigest()[:12]
-        + "_"
-        + ident.split("_", 1)[-1]
-    )
+    return prefix + "_" + namespace + "_" + ident.split("_", 1)[-1]
 
 
-def archive_session(export, data):
+def _archive_namespace(workspace_id):
+    return hashlib.sha256(workspace_id.encode()).hexdigest()[:12]
+
+
+def archive_id(workspace_id, ident, prefix):
+    return _namespaced_archive_id(_archive_namespace(workspace_id), ident, prefix)
+
+
+def archive_session(export, data, *, copy_payload=True):
     """Namespace container-controlled IDs before importing to the host DB."""
     if (
         not isinstance(export, dict)
@@ -3445,27 +3481,30 @@ def archive_session(export, data):
     if not valid_session_id(export["info"].get("id")):
         raise BoxError("Invalid container session ID")
     if opencode_compat.native(export):
+        namespace = _archive_namespace(data["id"] + "-v2")
         return opencode_compat.native_archive(
             export,
             data,
-            lambda ident, prefix: archive_id(data["id"] + "-v2", ident, prefix),
+            lambda ident, prefix: _namespaced_archive_id(namespace, ident, prefix),
+            copy_payload=copy_payload,
         )
     # Only schema identity fields are changed; conversation/tool text is intact.
-    result = json.loads(json.dumps(export))
+    result = json.loads(json.dumps(export)) if copy_payload else export
+    namespace = _archive_namespace(data["id"])
     mapping = {}
     info = result["info"]
-    mapping[info["id"]] = archive_id(data["id"], info["id"], "ses")
+    mapping[info["id"]] = _namespaced_archive_id(namespace, info["id"], "ses")
     for message in result["messages"]:
         ident = message["info"]["id"]
         if not isinstance(ident, str) or not re.fullmatch(r"msg[A-Za-z0-9_-]+", ident):
             raise BoxError("Invalid exported message ID")
-        mapping[ident] = archive_id(data["id"], ident, "msg")
+        mapping[ident] = _namespaced_archive_id(namespace, ident, "msg")
         for part in message["parts"]:
             if not isinstance(part.get("id"), str) or not re.fullmatch(
                 r"prt[A-Za-z0-9_-]+", part["id"]
             ):
                 raise BoxError("Invalid exported part ID")
-            mapping[part["id"]] = archive_id(data["id"], part["id"], "prt")
+            mapping[part["id"]] = _namespaced_archive_id(namespace, part["id"], "prt")
 
     def remap(value):
         if isinstance(value, list):
@@ -3626,15 +3665,8 @@ def sync_sessions(path, data, *, announce=True):
         _announce_history_synced()
 
 
-def _archive_matches_checkpoint(path, archived, checkpoint):
-    """Reuse only an owned, byte-identical private archive, not just its checkpoint."""
-    digest, size = hashlib.sha256(), 0
-    for fragment in _json_fragments(archived):
-        encoded = fragment.encode("utf-8")
-        digest.update(encoded)
-        size += len(encoded)
-    if digest.hexdigest() != checkpoint:
-        return False
+def _archive_matches_checkpoint(path, checkpoint, size):
+    """Verify the owned file against the already encoded fresh archive."""
 
     def identity(info):
         return (
@@ -3680,6 +3712,34 @@ def _archive_matches_checkpoint(path, archived, checkpoint):
         return False
 
 
+_HISTORY_ARCHIVE_BUFFER = 4 * 1024 * 1024
+
+
+def _write_history_archive(path, archived, checkpoint):
+    """Return the digest without replacing a verified unchanged private copy."""
+    if not isinstance(checkpoint, str):
+        return atomic_json(path, archived, checksum=True)
+    digest, size, buffered = hashlib.sha256(), 0, []
+    for chunk in _json_byte_chunks(archived):
+        digest.update(chunk)
+        size += len(chunk)
+        if buffered is not None:
+            if size > _HISTORY_ARCHIVE_BUFFER:
+                buffered = None
+            else:
+                buffered.append(chunk)
+    verified = digest.hexdigest()
+    if verified == checkpoint and _archive_matches_checkpoint(path, verified, size):
+        return verified
+    if buffered is None:
+        # Bound extra memory even for very large transcripts. Only a changed
+        # or damaged oversized archive needs the second encoder pass.
+        return atomic_json(path, archived, checksum=True)
+    with _atomic_json_file(path, binary=True) as stream:
+        stream.writelines(buffered)
+    return verified
+
+
 def _sync_sessions(path, data, started, source_mode, counts):
     report = history_recovery.REPORT.get()
     if report is not None:
@@ -3714,17 +3774,13 @@ def _sync_sessions(path, data, started, source_mode, counts):
         if report is not None:
             report.phase = "private archive"
         phase = time.monotonic() if detailed else None
-        archived = archive_session(exported, data)
+        # This freshly decoded export is private to the synchronous archive
+        # step; untouched payload fields need not be deep-copied.
+        archived = archive_session(exported, data, copy_payload=False)
+        del exported
         target = archives / (archived["info"]["id"] + ".json")
         checkpoint = state.setdefault("synced", {}).get(ident)
-        if isinstance(checkpoint, str) and _archive_matches_checkpoint(
-            target, archived, checkpoint
-        ):
-            if detailed:
-                archive_seconds += time.monotonic() - phase
-            counts["unchanged"] += 1
-            continue
-        digest = atomic_json(target, archived, checksum=True)
+        digest = _write_history_archive(target, archived, checkpoint)
         if detailed:
             now = time.monotonic()
             archive_seconds += now - phase

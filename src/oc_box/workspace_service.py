@@ -39,6 +39,9 @@ else:
     import startup_output
 
 CONNECTION = contextvars.ContextVar("oc_box_v2_connection")
+_QUIET_HISTORY_SOURCE = contextvars.ContextVar(
+    "oc_box_quiet_history_source", default=None
+)
 LIFECYCLE_LOCK = contextvars.ContextVar("oc_box_owner_lifecycle_lock", default=None)
 _NAMED_ONLY = "named-only"
 MAX_CONTROL = 16384
@@ -109,6 +112,8 @@ class HistorySource:
         self.stopped_source = stopped_source
         self.child = self.errors = self.error_file = self.token = None
         self.connection = None
+        self._source_code = None
+        self._lifecycle_lock = None
         self.started = False
         self.fallback = False
 
@@ -148,6 +153,7 @@ class HistorySource:
                 from .web_named_native_profile import named_native_worker_source
             else:
                 from web_named_native_profile import named_native_worker_source
+            self._source_code = source
             source = named_native_worker_source(source)
         return self.box.ContainerCommand(
             [
@@ -167,6 +173,57 @@ class HistorySource:
                 "-c",
                 source,
                 "history-source",
+                self.box.CONTAINER_OPENCODE,
+            ],
+            self.box.maintenance_host_env(),
+        )
+
+    def read_command(self, data, action):
+        """One short-lived read client, never a new service or reused transport."""
+        if __package__:
+            from .history_reader import PATH
+        else:
+            from history_reader import PATH
+        if (
+            not self.exact
+            or self.stopped_source is not True
+            or self._lifecycle_lock is None
+            or LIFECYCLE_LOCK.get() is not self._lifecycle_lock
+            or not self._source_code
+            or self.connection is None
+            or self.connection is not live_connection()
+            or action not in ("sessions", "export")
+            or any(
+                data.get(key) != self.data.get(key)
+                for key in ("id", "container", "home", "opencode_version")
+            )
+            or self.box.container_project(data) != self.box.container_project(self.data)
+        ):
+            raise self.fail("source")
+        if self.child is None or self.child.poll() is not None:
+            raise self.fail("lease-ended")
+        # An authenticated endpoint request needs no discovery roots or forwarded
+        # settings. Do not launch an environment trampoline or pass credentials as
+        # exec environment/argv. The endpoint still arrives only via private stdin.
+        return self.box.ContainerCommand(
+            [
+                "podman",
+                "exec",
+                "-i",
+                "--workdir",
+                "/",
+                self.data["container"],
+                "/usr/bin/env",
+                "-i",
+                "PATH=" + PATH,
+                "LANG=C.UTF-8",
+                "/usr/bin/python3",
+                "-I",
+                "-S",
+                "-B",
+                "-c",
+                self._source_code,
+                "quiet-history-" + action,
                 self.box.CONTAINER_OPENCODE,
             ],
             self.box.maintenance_host_env(),
@@ -216,8 +273,9 @@ class HistorySource:
             raise self.fail("reuse")
         self.started = True
         try:
+            self._lifecycle_lock = LIFECYCLE_LOCK.get()
             if self.exact and (
-                self.stopped_source is not True or LIFECYCLE_LOCK.get() is None
+                self.stopped_source is not True or self._lifecycle_lock is None
             ):
                 raise self.fail("source-not-stopped")
             if self.exact and signal.getsignal(signal.SIGCHLD) != signal.SIG_DFL:
@@ -406,6 +464,7 @@ class HistorySource:
                     caught(error)
                 self.token = None
             self.connection = None
+            self._source_code = self._lifecycle_lock = None
             if self.error_file is not None:
                 try:
                     self.errors.__exit__(None, None, None)
@@ -463,8 +522,19 @@ def history_source(box, data, *, stopped_source=False):
         ):
             yield None
             return
-    with HistorySource(box, data, stopped_source=stopped_source) as connection:
-        yield connection
+    source = HistorySource(box, data, stopped_source=stopped_source)
+    with source as connection:
+        token = _QUIET_HISTORY_SOURCE.set(
+            source if source.exact and connection is not None else None
+        )
+        try:
+            yield connection
+        finally:
+            _QUIET_HISTORY_SOURCE.reset(token)
+
+
+def quiet_history_source():
+    return _QUIET_HISTORY_SOURCE.get()
 
 
 def controller_running(box, data):

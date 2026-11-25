@@ -169,13 +169,20 @@ def validate_native(export, ident):
         seen.add(message["id"])
 
 
-def native_archive(export, data, remap_id):
-    result = json.loads(json.dumps(export))
+def native_archive(export, data, remap_id, *, copy_payload=True):
+    if copy_payload:
+        result = json.loads(json.dumps(export))
+    else:
+        # Only the synchronous sync caller may share untouched JSON payload.
+        # The dictionaries we change must still never mutate the projection.
+        result = {**export, "info": dict(export["info"])}
     # The bridge reports unfinished assistants native omits from its export out
     # of band; it is never part of the importable transcript.
     interrupted = result.pop("ocBoxInterrupted", None)
     ident = result["info"].get("id")
     validate_native(result, ident)
+    if not copy_payload:
+        result["messages"] = [dict(message) for message in result["messages"]]
     mapping = {ident: remap_id(ident, "ses")}
     mapping.update(
         {
@@ -190,6 +197,8 @@ def native_archive(export, data, remap_id):
         if message["type"] == "compaction":
             metadata = message.get("metadata", {})
             if isinstance(metadata.get("keepID"), str):
+                if not copy_payload:
+                    metadata = message["metadata"] = dict(metadata)
                 metadata["keepID"] = mapping.get(metadata["keepID"], metadata["keepID"])
     # Native parent links make deletion recursive, while native import does not
     # restore fork lineage. Keep independently replaceable, unprivileged archive
@@ -230,6 +239,8 @@ def native_archive(export, data, remap_id):
         metadata = result["info"].setdefault("metadata", {})
         if not isinstance(metadata, dict):
             raise ValueError("Invalid OpenCode 2.x session metadata.")
+        if not copy_payload:
+            metadata = result["info"]["metadata"] = dict(metadata)
         relationships = {"version": 1, **relationships}
         if "oc-box.archive" in metadata:
             relationships["sourceMetadata"] = metadata["oc-box.archive"]
