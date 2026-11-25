@@ -207,9 +207,12 @@ credentials and a fresh challenge authenticated by a per-owner in-memory
 capability. The reply binds that challenge, an owner generation independent
 of UI reports, the workspace, version, endpoint, container ID and `StartedAt`
 to the original `_attach_control()` stream. Neither process IDs nor the
-client count are evidence of native identity. The holder rechecks the original
-readiness worker, running instance and stop/closure fence; it will not
-reconnect or follow a replaced container by name. This is not a guarantee of
+client count are evidence of native identity. The reply contains only lease
+metadata; the same-process borrower uses the owner's existing private control
+credential after verification rather than transmitting it over this socket.
+The holder rechecks the original readiness worker, running instance and
+stop/closure fence; it will not reconnect or follow a replaced container by
+name. This is not a guarantee of
 continuous native HTTP responsiveness or an atomic transaction with native
 execution. The private control credential never goes to the browser.
 

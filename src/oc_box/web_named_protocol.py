@@ -272,6 +272,8 @@ class NamedControl:
         stream.sendall(frame + b"\n")
 
     def _reply(self, nonce):
+        # Authenticate only the lease metadata. The same-process borrower uses
+        # the owner's credential directly after verifying this control stream.
         identity = self.identity
         return {
             "protocol": _PROTOCOL,
@@ -282,7 +284,6 @@ class NamedControl:
             "started_at": self._run[1],
             "version": identity.version,
             "url": identity.endpoint,
-            "password": self._password,
         }
 
     def _live(self):

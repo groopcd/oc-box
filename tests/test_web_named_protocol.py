@@ -589,16 +589,44 @@ class OwnerProtocolTests(unittest.TestCase):
                 )
             gateway.assert_not_called()
             captured = []
+            received = []
             original = owner._named_control.lease
+            read = protocol._read
 
             def create(attached, connector):
                 captured.append(attached)
                 return original(attached, connector)
 
-            with patch.object(owner._named_control, "lease", side_effect=create):
+            def receive(stream):
+                frame = read(stream)
+                if "started_at" in frame:
+                    received.append(frame.copy())
+                return frame
+
+            with (
+                patch.object(owner._named_control, "lease", side_effect=create),
+                patch.object(protocol, "_read", side_effect=receive),
+            ):
                 with self.lease(owner) as lease:
                     self.assertIs(lease.control, captured[0].stream)
                     self.assertEqual(captured[0].connection["started_at"], _STARTED)
+                    self.assertEqual(len(received), 1)
+                    self.assertEqual(
+                        received[0].keys(),
+                        {
+                            "protocol",
+                            "nonce",
+                            "workspace",
+                            "generation",
+                            "container",
+                            "started_at",
+                            "version",
+                            "url",
+                            "proof",
+                        },
+                    )
+                    self.assertNotIn(_SECRET, json.dumps(received[0]))
+                    self.assertEqual(lease.native_password, _SECRET)
                     self.assertEqual(lease.identity.container_id, _CONTAINER)
                     self.assertEqual(lease.identity.endpoint, _ENDPOINT)
                     self.assertEqual(
@@ -659,6 +687,7 @@ class OwnerProtocolTests(unittest.TestCase):
             )
             with service.attach(box, self.path, self.data) as legacy:
                 self.assertEqual(legacy["session"], "ses_fixture")
+                self.assertEqual(legacy["password"], _SECRET)
                 self.assertNotIn("web_mode", legacy)
                 for root in (self.root, self.root / "other-runtime"):
                     root.mkdir(exist_ok=True)
