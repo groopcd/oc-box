@@ -332,6 +332,10 @@ nodes, not aliases, directory expansions, remaps, permission overrides, or CDI
 names. No device or host policy is changed. Reconnect any missing mapped device
 and retry with the saved settings; `oc-box status --table` lists those settings.
 Guarded purge and `sync --persisted` do not admit these device-backed workspaces.
+On a verified stopped container, Podman's own hostname, hosts, resolver, and
+container-environment runtime files may already have been cleaned up. Missing
+files are tolerated only at that exact container's known runtime paths; a
+missing project mount, unknown bind source, or device node still refuses.
 
 New containers use an absolute `/bin/sleep` path for their passive entrypoint.
 The safeguard refuses older containers whose stored entrypoint would look up

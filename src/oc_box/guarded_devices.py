@@ -14,6 +14,12 @@ _ID = re.compile(r"[a-f0-9]{64}")
 _LIMIT = 1024 * 1024
 _DIR = os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW
 _FD = os.O_CLOEXEC | os.O_NOFOLLOW
+_RUN_FILES = {
+    "/etc/hostname": "hostname",
+    "/etc/hosts": "hosts",
+    "/etc/resolv.conf": "resolv.conf",
+    "/run/.containerenv": ".containerenv",
+}
 _MESSAGES = {
     "unsupported": (
         "Guarded startup supports saved plain accelerator and render-node paths "
@@ -43,6 +49,12 @@ _MESSAGES = {
         "Podman's previously generated device bindings could not be verified "
         "for this container. Preserve the workspace and get help; no unsupported "
         "device binding was admitted."
+    ),
+    "bind-unavailable": (
+        "A non-device bind source in Podman's saved configuration is unavailable "
+        "and could not be verified as a generated runtime file. Check the original "
+        "mount and local Podman store with 'oc-box status --table'; preserve the "
+        "workspace and its device settings."
     ),
     "changed": (
         "A registered device changed identity during guarded replacement. "
@@ -124,6 +136,8 @@ def _storage(box, env):
     try:
         store, host = info["store"], info["host"]
         root = Path(store["graphRoot"])
+        spelling = store.get("runRoot")
+        run_root = Path(spelling) if type(spelling) is str else None
         if (
             host["serviceIsRemote"] is not False
             or host["security"]["rootless"] is not True
@@ -133,7 +147,14 @@ def _storage(box, env):
             or ".." in root.parts
         ):
             raise ValueError
-        return root
+        if run_root is not None and (
+            not run_root.is_absolute()
+            or run_root in (Path("/"), root)
+            or str(run_root) != spelling
+            or ".." in run_root.parts
+        ):
+            run_root = None  # Can't prove ephemeral binds; other binds remain strict.
+        return root, run_root
     except (ValueError, KeyError, TypeError):
         raise DeviceError("engine") from None
 
@@ -168,7 +189,51 @@ def _read_bundle(path):
         return json.loads(raw)
 
 
-def _effective(root, ident, info, saved, *, fresh):
+def _missing_runtime_file(run_root, ident, info, source, target):
+    """Recognize only Podman's own ephemeral binds for a stopped exact ID."""
+    name = _RUN_FILES.get(target)
+    if name is None or run_root is None:
+        return False
+    expected = run_root / "overlay-containers" / ident / "userdata" / name
+    if source != str(expected):
+        return False
+    state = info.get("State")
+    if (
+        not isinstance(state, dict)
+        or state.get("Status") not in ("exited", "stopped")
+        or any(
+            state.get(key) is not False for key in ("Running", "Paused", "Restarting")
+        )
+        or type(state.get("Pid")) is not int
+        or state["Pid"] != 0
+        or state.get("ConmonPid", 0) != 0
+        or state.get("Dead", False)
+    ):
+        return False
+    # A missing leaf (or private runtime subdirectory) is expected after
+    # cleanup. A dangling symlink or an untrusted ancestor is not.
+    uid = os.geteuid()
+    try:
+        for parent in reversed(expected.parents):
+            try:
+                details = parent.lstat()
+            except FileNotFoundError:
+                return parent != run_root and parent.is_relative_to(run_root)
+            if (
+                not stat.S_ISDIR(details.st_mode)
+                or details.st_uid not in (0, uid)
+                or details.st_mode & 0o022
+            ):
+                return False
+        expected.lstat()
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    return False
+
+
+def _effective(root, run_root, ident, info, saved, *, fresh):
     configured = info.get("OCIConfigPath")
     if fresh and configured in (None, ""):
         return
@@ -212,7 +277,12 @@ def _effective(root, ident, info, saved, *, fresh):
                 seen.add(source)
             else:
                 # Device aliases outside /dev are not part of this contract.
-                mode = os.stat(source).st_mode
+                try:
+                    mode = os.stat(source).st_mode
+                except FileNotFoundError:
+                    if _missing_runtime_file(run_root, ident, info, source, target):
+                        continue
+                    raise DeviceError("bind-unavailable") from None
                 if stat.S_ISCHR(mode) or stat.S_ISBLK(mode):
                     raise DeviceError("mismatch")
         if seen != set(saved):
@@ -251,7 +321,7 @@ def verify(box, data, info, env, *, fresh=False):
     except (TypeError, KeyError, ValueError, AttributeError):
         raise DeviceError("mismatch") from None
     nodes = _signature(saved)
-    root = _storage(box, env)
+    root, run_root = _storage(box, env)
     generated = _json_command(
         box, env, "contract", "generate", "spec", "--name=false", "--compact", ident
     )
@@ -274,7 +344,7 @@ def verify(box, data, info, env, *, fresh=False):
         )
     ):
         raise DeviceError("mismatch")
-    _effective(root, ident, info, saved, fresh=fresh)
+    _effective(root, run_root, ident, info, saved, fresh=fresh)
     if _signature(saved) != nodes:
         raise DeviceError("missing")
     return nodes
