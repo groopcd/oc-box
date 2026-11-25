@@ -352,6 +352,9 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
     #workspace-limit-card .limit-step-row Button:hover { background: $primary 30%; }
     #workspace-limit-actions { height: 3; padding: 0 1; }
     #workspace-limit-actions Button { width: auto; min-width: 12; margin-right: 1; }
+    #apply-live-limits.-style-default:disabled {
+      border: round $primary 35% !important;
+      background: $surface !important; color: $text-muted; }
     #activity-card { height: 8; margin-top: 1; }
     #overview-activity { height: 4; text-wrap: nowrap; text-overflow: ellipsis; }
     #status-summary, #settings-info, #terminal-info { height: auto; padding: 1; }

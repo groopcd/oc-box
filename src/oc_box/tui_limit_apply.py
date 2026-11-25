@@ -33,6 +33,7 @@ else:
 
 
 _SYSTEM_PATH = "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+_XDG_SEARCH_DIRS = ("XDG_CONFIG_DIRS", "XDG_DATA_DIRS")
 _SCOPE_KEYS = ("graphRoot", "runRoot", "volumePath")
 _CGROUP_ROOT = "/sys/fs/cgroup"
 _META_BYTES = 1024 * 1024
@@ -118,16 +119,39 @@ class _Engine:
         self._run(("update", *flags, "--", ident), 4096)
 
 
-@contextmanager
-def _engine(box, deadline):
+def _local_environment(box):
     policy = workspace_podman
-    uid = _check("host-scope", policy._host_uid, os.environ)
     _require(
-        not (os.environ.keys() & policy._ROUTING_NAMES)
+        not (os.environ.keys() & policy._ROUTING_NAMES.difference(_XDG_SEARCH_DIRS))
         and not any(key.startswith(policy._ROUTING_PREFIXES) for key in os.environ),
         "engine-selectors",
     )
     environment = box.maintenance_host_env()
+    # Keep ordinary desktop search paths in every command on this engine.
+    # Removing them could silently change which local configuration is used.
+    # Other selectors remain refused, and the exact running container is
+    # independently verified on the engine opened with this environment.
+    for name in _XDG_SEARCH_DIRS:
+        if name in os.environ:
+            value = os.environ[name]
+            _require(
+                len(value) <= 16_384
+                and value.isprintable()
+                and all(
+                    not component or component.startswith("/")
+                    for component in value.split(":")
+                ),
+                "engine-selectors",
+            )
+            environment[name] = value
+    return environment
+
+
+@contextmanager
+def _engine(box, deadline):
+    policy = workspace_podman
+    uid = _check("host-scope", policy._host_uid, os.environ)
+    environment = _local_environment(box)
     path = shutil.which("podman", path=environment.get("PATH", _SYSTEM_PATH))
     _require(path is not None, "engine-binary")
     path = str(_check("engine-binary", Path(path).resolve, strict=True))
