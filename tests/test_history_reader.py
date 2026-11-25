@@ -2,11 +2,13 @@
 
 import ast
 import contextlib
+from dataclasses import replace
 import io
 import json
 import os
 from pathlib import Path
 import signal
+import shutil
 import sqlite3
 import subprocess
 import tempfile
@@ -15,7 +17,14 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
-from oc_box import history_reader as reader, workspace_service
+from oc_box import history_reader as reader, oc_box as launcher
+from oc_box import (
+    history_recovery,
+    native_runtime_guard,
+    runtime_safeguard,
+    workspace_control,
+    workspace_service,
+)
 
 
 SCHEMA = "CREATE TABLE schedule (id TEXT PRIMARY KEY, session_id TEXT, status TEXT, last_message_id TEXT)"
@@ -1309,6 +1318,320 @@ class EnvironmentTests(unittest.TestCase):
             box.run.return_value.stdout = str(database) + "\n"
             with self.assertRaisesRegex(BoxError, "schedule-present"):
                 reader.assert_host_safe(box, None, DATA, {}, lambda: 5)
+
+
+class PinnedDestinationVersionTests(unittest.TestCase):
+    """Real destination guards/admission; substitute only native process I/O."""
+
+    def setUp(self):
+        stack = contextlib.ExitStack()
+        self.addCleanup(stack.close)
+        self.root = Path(stack.enter_context(tempfile.TemporaryDirectory()))
+        stack.enter_context(
+            patch.dict(
+                os.environ,
+                {
+                    "HOME": str(self.root),
+                    "PATH": os.defpath,
+                    "XDG_DATA_HOME": str(self.root / "data"),
+                    "XDG_STATE_HOME": str(self.root / "state"),
+                },
+                clear=True,
+            )
+        )
+        self.path = self.root / "workspace.json"
+        self.controller = self.root / "controller"
+        self.controller.mkdir()
+        self.data = {**DATA, "project": str(self.root / "project")}
+        launcher.atomic_json(self.path, self.data)
+        self.stop_token = workspace_control.capture(self.path)
+        self.executable = self.root / "opencode"
+        shutil.copyfile("/bin/sh", self.executable)
+        self.executable.chmod(0o700)
+        stack.enter_context(
+            patch.object(
+                runtime_safeguard.shutil, "which", return_value=self.executable
+            )
+        )
+        self.host = stack.enter_context(runtime_safeguard.pinned_host(launcher))
+        self.database = self.root / "native.db"
+        self.version = self.data["opencode_version"]
+        self.archives = {}
+        self.calls, self.admissions = [], []
+        self.system = stack.enter_context(patch.object(reader, "_check_system_config"))
+        admit = workspace_control.admission
+
+        @contextlib.contextmanager
+        def observed_admission(*args, **kwargs):
+            with admit(*args, **kwargs):
+                self.admissions.append(len(self.calls))
+                yield
+
+        stack.enter_context(
+            patch.object(workspace_control, "admission", observed_admission)
+        )
+        stack.enter_context(patch.object(subprocess, "Popen", side_effect=self.spawn))
+
+    def spawn(self, command, **options):
+        # A cache hit must not let the next Popen inherit another command's gate.
+        self.assertIsNotNone(history_recovery.ADMITTED.get())
+        self.assertEqual(self.admissions[-1], len(self.calls))
+        args = tuple(command[1:])
+        self.calls.append(args)
+        if args == ("--version",):
+            self.assertNotIn("OPENCODE_AUTH_CONTENT", options["env"])
+            self.assertEqual(options["env"]["OPENCODE_FLAGS"], "-schedules")
+            output = self.version + "\n"
+        elif args == ("debug", "paths", "db"):
+            output = str(self.database) + "\n"
+        else:
+            self.assertEqual(args[-1], "--standalone")
+            if args[:2] == ("session", "import"):
+                archived = launcher.read_json(args[2])
+                archived["info"]["location"]["directory"] = str(self.controller)
+                self.archives[archived["info"]["id"]] = archived
+                output = ""
+            elif args[:2] == ("api", "get"):
+                output = '{"data":[],"cursor":{}}'
+            elif args[:2] == ("session", "delete"):
+                self.archives.pop(args[2])
+                output = ""
+            elif args[:2] == ("session", "export"):
+                output = json.dumps(self.archives[args[2]])
+            else:
+                self.fail(f"unexpected synthetic destination command: {args!r}")
+        options["stdout"].write(output.encode())
+        return Mock(returncode=0, **{"communicate.return_value": (None, None)})
+
+    @contextlib.contextmanager
+    def scope(self, *, pinned=True):
+        digest = self.host.digest if pinned else None
+        source = history_recovery.Source(
+            self.data["container"], self.stop_token, (), digest
+        )
+        admission = (
+            runtime_safeguard.Admission(
+                self.path,
+                self.host,
+                None,
+                native_runtime_guard.Record(
+                    self.data["container"],
+                    "synthetic-volume",
+                    self.version,
+                    digest,
+                    True,
+                ),
+                (),
+                self.stop_token,
+                False,
+            )
+            if pinned
+            else None
+        )
+        lease = reader.Reader(
+            launcher,
+            self.data,
+            remaining=history_recovery.remaining,
+            runtime_digest=digest,
+        )
+        lease.connection = ENDPOINT
+        with (
+            history_recovery.budget(30),
+            history_recovery.commands(self.path, source),
+            contextlib.ExitStack() as context,
+        ):
+            for variable, value in (
+                (runtime_safeguard._ACTIVE, admission),
+                (reader.CURRENT, lease),
+            ):
+                context.callback(variable.reset, variable.set(value))
+            yield admission
+
+    def host_env(self):
+        return launcher.private_host_env(self.path, self.data)
+
+    @staticmethod
+    def calls_for(*operations):
+        return [
+            call
+            for operation in operations
+            for call in (("debug", "paths", "db"), operation)
+        ]
+
+    def test_first_import_and_replacement_keep_separate_destination_admissions(self):
+        first = {
+            "info": {
+                "id": "ses_first",
+                "location": {"directory": self.data["project"]},
+                "title": "first",
+                "time": {"created": 1, "updated": 1},
+            },
+            "messages": [],
+        }
+        source_id = first["info"]["id"]
+        host_id = launcher.archive_id(self.data["id"] + "-v2", source_id, "ses")
+        archive = self.root / "history" / (host_id + ".json")
+        import_call = ("session", "import", str(archive), "--standalone")
+        export_call = ("session", "export", host_id, "--standalone")
+        get_call = (
+            "api",
+            "get",
+            f"/api/session?parentID={host_id}&limit=1",
+            "--standalone",
+        )
+        delete_call = ("session", "delete", host_id, "--standalone")
+        with (
+            self.scope(),
+            patch.object(
+                launcher, "list_container_sessions", return_value=[first["info"]]
+            ),
+            patch.object(launcher, "export_container_session", return_value=first),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            launcher.sync_sessions(self.path, self.data, announce=False)
+            first["info"]["title"] = "changed"
+            launcher.sync_sessions(self.path, self.data, announce=False)
+        self.assertEqual(
+            self.calls,
+            [
+                ("--version",),
+                *self.calls_for(import_call, export_call),
+                ("--version",),  # A separate pass on the same Reader probes again.
+                *self.calls_for(get_call, delete_call, import_call, export_call),
+            ],
+        )
+        self.assertEqual(self.admissions, list(range(14)))
+        self.assertEqual(self.system.call_count, 6)
+        self.assertEqual(
+            self.archives[host_id]["info"]["title"], "[oc-box project] changed"
+        )
+        self.assertEqual(
+            launcher.session_state(self.path)["host_sessions"], {source_id: host_id}
+        )
+
+    def test_unpinned_pass_and_calls_outside_pass_probe_every_time(self):
+        args = [("--version",), ("debug", "paths", "db")]
+        with self.scope(pinned=False), reader.export_pass(launcher, self.data):
+            self.host_env()
+            self.host_env()
+        with self.scope():
+            self.host_env()
+            self.host_env()
+        self.assertEqual(self.calls, args * 4)
+
+    def test_changed_descriptor_identity_patch_or_environment_refuses(self):
+        for changed in ("descriptor", "digest", "patch", "environment"):
+            with (
+                self.subTest(changed=changed),
+                self.scope() as admission,
+                reader.export_pass(launcher, self.data),
+                contextlib.ExitStack() as stack,
+            ):
+                self.calls.clear()
+                self.host_env()
+                if changed == "descriptor":
+                    admission.host = stack.enter_context(
+                        runtime_safeguard.pinned_host(launcher)
+                    )
+                elif changed == "digest":
+                    admission.host = replace(self.host, digest="f" * 64)
+                elif changed == "patch":
+                    admission.record = replace(admission.record, version="2.2.7")
+                    stack.enter_context(
+                        patch.dict(self.data, {"opencode_version": "2.2.7"})
+                    )
+                else:
+                    stack.enter_context(
+                        patch.dict(
+                            os.environ, {"XDG_DATA_HOME": str(self.root / "changed")}
+                        )
+                    )
+                with self.assertRaisesRegex(
+                    launcher.BoxError,
+                    "unsupported-version"
+                    if changed == "patch"
+                    else "host-database-probe",
+                ):
+                    self.host_env()
+                self.assertEqual(self.calls, [("--version",), ("debug", "paths", "db")])
+        with self.scope(), reader.export_pass(launcher, self.data):
+            self.host_env()
+            # Keep the same descriptor open but change the underlying inode's mode.
+            self.executable.chmod(0o500)
+            before = list(self.calls)
+            with self.assertRaisesRegex(launcher.BoxError, "host-database-probe"):
+                self.host_env()
+            self.assertEqual(self.calls, before)
+
+    def test_failed_actual_version_probe_does_not_establish_a_proof(self):
+        with self.scope(), reader.export_pass(launcher, self.data):
+            self.version = "2.2.7"
+            for _ in range(2):
+                with self.assertRaisesRegex(launcher.BoxError, "unsupported-version"):
+                    self.host_env()
+            self.version = "2.2.6"
+            self.host_env()
+            self.host_env()
+        self.assertEqual(
+            self.calls, [("--version",)] * 3 + [("debug", "paths", "db")] * 2
+        )
+
+    def test_cached_version_still_checks_fresh_database_path_and_committed_wal(self):
+        with (
+            self.scope(),
+            reader.export_pass(launcher, self.data),
+            contextlib.closing(sqlite3.connect(self.root / "new.db")) as writer,
+        ):
+            self.host_env()
+            self.database = self.root / "new.db"
+            writer.execute(SCHEMA)
+            writer.execute("PRAGMA journal_mode=WAL")
+            writer.execute("INSERT INTO schedule (id, status) VALUES ('new', 'done')")
+            writer.commit()
+            wal = self.database.with_name(self.database.name + "-wal")
+            before = self.database.read_bytes(), wal.read_bytes()
+            with self.assertRaisesRegex(launcher.BoxError, "schedule-present"):
+                self.host_env()
+            self.assertEqual((self.database.read_bytes(), wal.read_bytes()), before)
+            self.assertEqual(
+                self.calls,
+                [("--version",), ("debug", "paths", "db"), ("debug", "paths", "db")],
+            )
+
+    def test_stop_after_cached_preflight_prevents_destination_spawn(self):
+        with self.scope(), reader.export_pass(launcher, self.data):
+            self.host_env()
+            version_checked_env = self.host_env()
+            workspace_control.request_stop(self.path)
+            with self.assertRaisesRegex(
+                history_recovery.RecoveryError, "stop-requested"
+            ):
+                launcher.run(
+                    launcher.host_command(
+                        self.data, "session", "export", "ses_archive"
+                    ),
+                    env=version_checked_env,
+                    cwd=self.controller,
+                    capture=True,
+                    private=True,
+                    timeout=15,
+                )
+        self.assertEqual(
+            self.calls,
+            [("--version",), ("debug", "paths", "db"), ("debug", "paths", "db")],
+        )
+        self.assertEqual(self.admissions, [0, 1, 2, 3])
+
+    def test_expired_budget_prevents_calls_after_the_version_was_verified(self):
+        with self.scope(), reader.export_pass(launcher, self.data):
+            self.host_env()
+            deadline = history_recovery.DEADLINE.set(time.monotonic() - 1)
+            try:
+                with self.assertRaisesRegex(launcher.BoxError, "host-database-probe"):
+                    self.host_env()
+            finally:
+                history_recovery.DEADLINE.reset(deadline)
+        self.assertEqual(self.calls, [("--version",), ("debug", "paths", "db")])
 
 
 class ReaderTests(unittest.TestCase):

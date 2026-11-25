@@ -237,6 +237,11 @@ their checkout ownership distinct from unrelated source and flat installations.
   must match the captured exact patch on both sides; a shared series is not a
   patch-mismatch waiver or untested-future-native acceptance. Prereleases,
   modified/malformed identities and unknown minor/major series refuse.
+  Only inside one post-stop Reader export pass, a positive destination version
+  probe may be reused for the same current runtime admission and rechecked
+  pinned host descriptor/identity/digest, exact patch and fenced environment.
+  This never caches a PATH-selected binary or any destination path/store check,
+  operation admission, deadline or native destination operation.
   Detected contract/version incompatibilities give fixed-category guidance to
   update oc-box/OpenCode as appropriate, never a reset or state-downgrade bypass.
   Do not misclassify ordinary activity, timeouts or cleanup failures as version
