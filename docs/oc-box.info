@@ -415,21 +415,24 @@ without starting a preflight or refreshing its credentials.
 
 A guarded launch can keep already registered plain accelerator and
 render character devices (‘/dev/accel/accelN’ and ‘/dev/dri/renderDN’)
-when local rootless Podman can verify both the saved and effective
-bindings.  It requires an overlay store and ‘podman generate spec’
-support.  The paths must be direct nodes, not aliases, directory
-expansions, remaps, permission overrides, or CDI names.  No device or
-host policy is changed.  Reconnect any missing mapped device and retry
-with the saved settings; ‘oc-box status --table’ lists those settings.
-Guarded purge and ‘sync --persisted’ do not admit these device-backed
-workspaces.  On a verified stopped container, Podman's own hostname,
-hosts, resolver, and container-environment runtime files may already
-have been cleaned up.  Missing files are tolerated only at that exact
-container's known runtime paths; a missing project mount, unknown bind
-source, or device node still refuses.  Once the existing container and
-its core mounts are usable, a failed optional in-container device-access
-check warns instead of blocking startup.  A staged replacement must
-still verify access before retiring the original.
+and the exact ‘/dev/kvm:rw’ binding when local rootless Podman can
+verify both the saved and effective bindings.  It requires an overlay
+store and ‘podman generate spec’ support.  The paths must be direct
+nodes, not aliases, directory expansions, remaps, other permission
+overrides, or CDI names.  The isolated native preflight does not receive
+these devices.  No device or host policy is changed.  Reconnect any
+missing mapped device and retry with the saved settings; ‘oc-box status
+--table’ lists those settings.  Guarded purge and ‘sync --persisted’ do
+not admit these device-backed workspaces.  On a verified stopped
+container, Podman's own hostname, hosts, resolver, and
+container-environment runtime files may already have been cleaned up.
+Missing files are tolerated only at that exact container's known runtime
+paths; a missing project mount, unknown bind source, or device node
+still refuses.  Once the existing container and its core mounts are
+usable and the mapped character nodes are visible, limited read/write
+permission warns instead of blocking startup.  A missing or unverified
+binding still refuses.  A staged replacement must verify access before
+retiring the original.
 
 New containers use an absolute ‘/bin/sleep’ path for their passive
 entrypoint.  The safeguard refuses older containers whose stored
@@ -5660,20 +5663,20 @@ Node: Name769
 Node: Synopsis930
 Node: Description5350
 Node: Commands11170
-Node: Options168607
-Node: Lifecycle and persistence235214
-Node: Distribution images237514
-Node: Sessions and recovery242591
-Node: Devices and host permissions249176
-Node: Resource reports251522
-Node: Configuration and environment253633
-Node: Files265014
-Node: Exit status275924
-Node: Examples277332
-Node: Troubleshooting279471
-Node: Installation and manuals291963
-Node: Authors and license302153
-Node: See also302760
+Node: Options168780
+Node: Lifecycle and persistence235387
+Node: Distribution images237687
+Node: Sessions and recovery242764
+Node: Devices and host permissions249349
+Node: Resource reports251695
+Node: Configuration and environment253806
+Node: Files265187
+Node: Exit status276097
+Node: Examples277505
+Node: Troubleshooting279644
+Node: Installation and manuals292136
+Node: Authors and license302326
+Node: See also302933
 
 End Tag Table
 

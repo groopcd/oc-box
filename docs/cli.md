@@ -338,20 +338,23 @@ workspaces. An existing private owner still serves additional clients without
 starting a preflight or refreshing its credentials.
 
 A guarded launch can keep already registered plain accelerator and render
-character devices (`/dev/accel/accelN` and `/dev/dri/renderDN`) when local
-rootless Podman can verify both the saved and effective bindings. It requires
-an overlay store and `podman generate spec` support. The paths must be direct
-nodes, not aliases, directory expansions, remaps, permission overrides, or CDI
-names. No device or host policy is changed. Reconnect any missing mapped device
+character devices (`/dev/accel/accelN` and `/dev/dri/renderDN`) and the exact
+`/dev/kvm:rw` binding when local rootless Podman can verify both the saved and
+effective bindings. It requires an overlay store and `podman generate spec`
+support. The paths must be direct nodes, not aliases, directory expansions,
+remaps, other permission overrides, or CDI names. The isolated native preflight
+does not receive these devices. No device or host policy is changed.
+Reconnect any missing mapped device
 and retry with the saved settings; `oc-box status --table` lists those settings.
 Guarded purge and `sync --persisted` do not admit these device-backed workspaces.
 On a verified stopped container, Podman's own hostname, hosts, resolver, and
 container-environment runtime files may already have been cleaned up. Missing
 files are tolerated only at that exact container's known runtime paths; a
 missing project mount, unknown bind source, or device node still refuses.
-Once the existing container and its core mounts are usable, a failed optional
-in-container device-access check warns instead of blocking startup. A staged
-replacement must still verify access before retiring the original.
+Once the existing container and its core mounts are usable and the mapped
+character nodes are visible, limited read/write permission warns instead of
+blocking startup. A missing or unverified binding still refuses. A staged
+replacement must verify access before retiring the original.
 
 New containers use an absolute `/bin/sleep` path for their passive entrypoint.
 The safeguard refuses older containers whose stored entrypoint would look up

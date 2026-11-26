@@ -341,31 +341,34 @@ class EntrypointMigrationTests(unittest.TestCase):
         self.assertEqual(str(error.exception), message)
 
     def test_device_conversion_recreates_only_verified_saved_nodes(self):
-        nodes = ["/dev/accel/accel0", "/dev/dri/renderD128"]
+        mappings = ["/dev/accel/accel0", "/dev/dri/renderD128", "/dev/kvm:rw"]
         with self.fixture():
-            self.original["devices"] = nodes
+            self.original["devices"] = mappings
             box.atomic_json(self.path, self.original)
             checked = []
 
             def verify(_box, data, info, env, *, fresh=False):
-                self.assertEqual(data["devices"], nodes)
+                self.assertEqual(data["devices"], mappings)
                 self.assertNotIn("CONTAINERS_CONF_OVERRIDE", env)
                 checked.append((info["Id"], fresh))
-                return tuple((path, 1, 2, 3) for path in nodes)
+                return tuple(
+                    (path, 1, 2, 3) for path in migration.guarded_devices.paths(data)
+                )
 
             with patch.object(migration.guarded_devices, "verify", side_effect=verify):
                 staged = self.convert()
-            self.assertEqual(staged["devices"], nodes)
+            self.assertEqual(staged["devices"], mappings)
             self.assertIn((_SOURCE, False), checked)
             self.assertIn((_CANDIDATE, True), checked)
             self.assertEqual(
-                self.engine.create_override_content, "[containers]\ndevices = []\n"
+                self.engine.create_override_content,
+                "[containers]\ndevices = [{append = false}]\n",
             )
             self.assertFalse(Path(self.engine.create_override).exists())
             created = self.engine.containers[_CANDIDATE]["Config"]["CreateCommand"]
             self.assertEqual(
                 [item for item in created if item.startswith("--device=")],
-                [f"--device={path}" for path in nodes],
+                [f"--device={mapping}" for mapping in mappings],
             )
             self.assertIn(_SOURCE, self.engine.containers)
             self.assertFalse(staged[migration.RETIRE]["authorized"])
