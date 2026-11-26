@@ -59,6 +59,9 @@ class NativeCliPreferencesTests(unittest.TestCase):
 
             with patch.dict(os.environ, {"XDG_CONFIG_HOME": str(source.parent)}):
                 sync_config.sync_config(home, box.config_archive(data), "2.3.0")
+                helper = home / ".config/opencode/plugins/oc-box-ui-state"
+                for name in ui_state.ACTIVITY_TIMELINE_RESOURCES:
+                    self.assertFalse((helper / name).exists())
                 preferences = home / ".config/opencode/cli.json"
                 self.assertEqual(preferences.read_bytes(), original_host)
                 native = (
@@ -67,17 +70,19 @@ class NativeCliPreferencesTests(unittest.TestCase):
                 )
                 preferences.write_bytes(native)
                 host_config.write_text('{"model":"fixture/after"}')
+                sync_config.sync_config(
+                    home, box.config_archive(data, activity_timeline=True), "2.3.0"
+                )
+                for name in ui_state.ACTIVITY_TIMELINE_RESOURCES:
+                    self.assertEqual(
+                        (helper / name).read_bytes(), (box.PACKAGE / name).read_bytes()
+                    )
                 sync_config.sync_config(home, box.config_archive(data), "2.3.0")
+                for name in ui_state.ACTIVITY_TIMELINE_RESOURCES:
+                    self.assertFalse((helper / name).exists())
 
             self.assertEqual(preferences.read_bytes(), native)
             self.assertEqual(host_preferences.read_bytes(), original_host)
-            for name in ui_state.ACTIVITY_TIMELINE_RESOURCES:
-                self.assertEqual(
-                    (
-                        home / ".config/opencode/plugins/oc-box-ui-state" / name
-                    ).read_bytes(),
-                    (box.PACKAGE / name).read_bytes(),
-                )
             self.assertEqual(
                 json.loads((home / ".config/opencode/opencode.json").read_text())[
                     "model"

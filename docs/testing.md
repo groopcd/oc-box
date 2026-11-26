@@ -826,6 +826,26 @@ service-worker activation separately; HTTP/Node checks alone are not browser
 acceptance. Synthetic native/browser checks are not physical desktop gestures,
 rootless-Podman lifecycle, real-provider or security acceptance.
 
+### Previewing the native Activity Timeline
+
+From the checkout, run either mode with an unmodified OpenCode 2.4.0 or 2.4.1
+binary in a terminal:
+
+```sh
+python3 -B tests/smoke_activity_timeline_v2.py --opencode "$(command -v opencode)" --demo on
+python3 -B tests/smoke_activity_timeline_v2.py --opencode "$(command -v opencode)" --demo off
+```
+
+The demo saves the actual add-on switch in a temporary registration and opens
+the actual native TUI on preloaded synthetic history. In the enabled demo, use
+Ctrl+P and select **Open activity timeline**; in the disabled demo, the command
+is absent. Press Esc to close the panel and use **Exit the app** to leave. The
+client connects through a read-only loopback proxy with no configured model
+provider or credentials. The temporary registration, server and history are
+discarded on exit. This is a demo of the add-on and switch, not a Podman launch
+or an external-host acceptance run. Omitting `--demo` runs the automated
+provider-free fixture instead.
+
 ### Experimental host-image attachments
 
 `oc-box attach PATH --session ID` sends a host-authorized native image user

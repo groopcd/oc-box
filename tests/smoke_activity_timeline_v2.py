@@ -1,4 +1,4 @@
-"""Provider-free native OpenCode 2.4.x activity panel smoke, not Podman acceptance."""
+"""Smoke-test or preview the real OpenCode 2.4.x activity panel in private synthetic state."""
 
 import argparse
 from contextlib import contextmanager
@@ -6,6 +6,8 @@ from datetime import datetime
 import json
 import os
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
 from unittest.mock import patch
 
@@ -14,6 +16,7 @@ from smoke_session_sync_v2 import bounded, exported, private_environment, requir
 from smoke_ui_state_v2 import LocalTransport, Observer
 
 from oc_box import opencode_compat, opencode_v2_io, ui_state
+from oc_box import oc_box as box
 
 
 SESSION = "ses_activity_example"
@@ -113,11 +116,13 @@ def select_command(client, query, title):
     client.wait(lambda: client.labels[title], title)
 
 
-def exercise(binary, root):
+@contextmanager
+def native_fixture(binary, root, *, include_addons):
     project = root / "project"
     project.mkdir()
     env = private_environment(root / "native")
     env.update(TERM="xterm-256color", COLORTERM="truecolor", TZ="UTC")
+    env["OC_BOX_STATE_HOME"] = str(root / "oc-box-state")
     release = opencode_compat.version(bounded([binary, "--version"], env, project))
     require(
         release in {"2.4.0", "2.4.1"},
@@ -128,7 +133,9 @@ def exercise(binary, root):
     destination = config / "plugins/oc-box-ui-state"
     destination.mkdir(parents=True)
     package = Path(__file__).resolve().parents[1] / "src/oc_box"
-    for name, content in ui_state.package_sources(package, include_addons=True).items():
+    for name, content in ui_state.package_sources(
+        package, include_addons=include_addons
+    ).items():
         (destination / name).write_bytes(content)
     # Use the same combined package discovery as the owning workspace. The
     # native service and its plugin policy are synthetic, with no providers.
@@ -160,6 +167,12 @@ def exercise(binary, root):
             ui_state.available(transport.box, transport.data, connection, timeout=10),
             "The native service did not load the bundled UI helper.",
         )
+        yield project, env, cli_config, release, native
+
+
+def exercise(binary, root):
+    with native_fixture(binary, root, include_addons=True) as fixture:
+        project, env, cli_config, _release, native = fixture
         before = exported(native, SESSION)
         inbox = f"/api/session/{SESSION}/inbox"
         checks = [native("GET", route) for route in (inbox, "/api/session/active")]
@@ -237,6 +250,42 @@ def exercise(binary, root):
         )
 
 
+def demo(binary, root, setting):
+    with native_fixture(binary, root, include_addons=setting == "on") as fixture:
+        project, env, _cli_config, release, native = fixture
+        path, workspace = box.create_workspace(project, "tumbleweed")
+        print(
+            f"Activity Timeline demo · native OpenCode {release} · read-only synthetic session"
+        )
+        require(
+            box.main(["addon", "activity-timeline", setting]) == 0,
+            "The synthetic add-on preference could not be saved.",
+        )
+        enabled = box.workspace_ui_preferences(path, workspace)["addons"][
+            "activity-timeline"
+        ]
+        if enabled:
+            print(
+                "Inside the TUI: Ctrl+P → Open activity timeline (or /activity-timeline)."
+            )
+        else:
+            print(
+                "Inside the TUI: Ctrl+P → search for activity timeline; no command is listed."
+            )
+        print("Esc closes the panel. Use Ctrl+P → Exit the app to leave.", flush=True)
+        with Observer(native.endpoint, read_only=True) as observer:
+            client_env = {**env, "OPENCODE_PASSWORD": native.endpoint["password"]}
+            if enabled:
+                client_env["OC_BOX_ACTIVITY_TIMELINE"] = "1"
+            return subprocess.run(
+                [binary, str(project), "--server", observer.url, "--session", SESSION],
+                cwd=project,
+                env=client_env,
+                timeout=900,
+                check=False,
+            ).returncode
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -244,13 +293,23 @@ def main():
         required=True,
         type=lambda value: str(Path(value).resolve(strict=True)),
     )
+    parser.add_argument(
+        "--demo",
+        choices=("on", "off"),
+        help="open an interactive, read-only synthetic session with this saved add-on setting",
+    )
     args = parser.parse_args()
+    if args.demo is not None and not (sys.stdin.isatty() and sys.stdout.isatty()):
+        parser.error("--demo needs an interactive terminal")
     with tempfile.TemporaryDirectory(prefix="oc-box-activity-timeline-") as directory:
+        if args.demo is not None:
+            return demo(args.opencode, Path(directory), args.demo)
         exercise(args.opencode, Path(directory))
     print(
         "Native activity panel: on/off, dates and invocation times verified; messages, tokens and work state unchanged."
     )
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

@@ -2667,7 +2667,12 @@ def _config_archive_paths(source):
 
 
 def config_archive(
-    data, *, image_preview=False, image_preview_snapshot=None, history_only=False
+    data,
+    *,
+    image_preview=False,
+    image_preview_snapshot=None,
+    history_only=False,
+    activity_timeline=False,
 ):
     """Snapshot user config as bytes. Extracted only inside the container."""
     source = (
@@ -2919,7 +2924,7 @@ def config_archive(
                 # Native/project/managed plugin policy remains authoritative:
                 # unlike the Build helper it gets no final mandatory overlay.
                 for name, content in ui_state.package_sources(
-                    PACKAGE, include_addons=not history_only
+                    PACKAGE, include_addons=activity_timeline and not history_only
                 ).items():
                     add_bytes("plugins/oc-box-ui-state/" + name, content)
     return buffer.getvalue()
@@ -2996,6 +3001,7 @@ def prepare_runtime(
     image_preview=False,
     image_preview_snapshot=None,
     history_only=False,
+    activity_timeline=False,
 ):
     if _bound_overlap() is not None:
         raise BoxError(
@@ -3006,6 +3012,8 @@ def prepare_runtime(
     if image_preview and opencode_compat.major(version) != 2:
         raise BoxError("--image-preview requires native OpenCode 2.x.")
     archive_options = {"history_only": True} if history_only else {}
+    if activity_timeline and not history_only:
+        archive_options["activity_timeline"] = True
     archive = (
         config_archive(
             data,
@@ -5126,6 +5134,12 @@ def launch_environment(
                     manual_source or data,
                     version,
                     **({"history_only": True} if args.command == "sync" else {}),
+                    **(
+                        {"activity_timeline": True}
+                        if args.command in ("start", "reset")
+                        and getattr(args, "_activity_timeline", False)
+                        else {}
+                    ),
                     **(
                         {
                             "image_preview": True,

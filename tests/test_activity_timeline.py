@@ -97,7 +97,7 @@ class AddonTests(unittest.TestCase):
         ]
         for requested, owner, ready, flag, notice in (
             (False, True, True, None, None),
-            (True, True, True, "1", "Activity timeline on"),
+            (True, True, True, "1", "Activity timeline requested"),
             (True, True, False, None, "Activity timeline unavailable"),
             (True, False, True, None, None),
         ):

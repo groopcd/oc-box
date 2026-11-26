@@ -969,13 +969,13 @@ def client_command(
         if ui_owner and activity_timeline:
             if binding is None:
                 startup_output.line(
-                    "oc-box: Activity timeline unavailable: the native UI helper did not load. Check the workspace OpenCode version and plug-in policy.",
+                    "oc-box: Activity timeline unavailable: could not verify the native UI helper. Check the workspace OpenCode version and plug-in policy.",
                     flush=True,
                 )
             else:
                 names["OC_BOX_ACTIVITY_TIMELINE"] = "1"
                 startup_output.line(
-                    "oc-box: Activity timeline on (Ctrl+P: Open activity timeline).",
+                    "oc-box: Activity timeline requested (Ctrl+P: Open activity timeline).",
                     flush=True,
                 )
         if file_preview:

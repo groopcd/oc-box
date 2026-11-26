@@ -126,8 +126,9 @@ export default Plugin.define({id:"synthetic.ui-control.tui", setup(ctx) {
 class Observer:
     """Forward real JSON/SSE; retain fixed route classifications, never bodies."""
 
-    def __init__(self, endpoint):
+    def __init__(self, endpoint, *, read_only=False):
         self.endpoint = urlsplit(endpoint["url"])
+        self.read_only = read_only
         self.bad_posts = self.releases = 0
         self.reports = 0
         self.report_statuses = []
@@ -145,6 +146,16 @@ class Observer:
                 pass
 
             def forward(self):
+                if owner.read_only and self.command != "GET":
+                    body = b'{"error":"The demo is read-only."}'
+                    self.close_connection = True
+                    self.send_response_only(405)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.send_header("Connection", "close")
+                    self.end_headers()
+                    self.wfile.write(body)
+                    return
                 upstream = http.client.HTTPConnection(
                     owner.endpoint.hostname, owner.endpoint.port, timeout=5
                 )
@@ -259,9 +270,8 @@ class Observer:
         deadline = time.monotonic() + 5
         for handler in handlers:
             handler.join(max(0, deadline - time.monotonic()))
-        stopped = (
-            not self.worker.is_alive()
-            and all(not handler.is_alive() for handler in handlers)
+        stopped = not self.worker.is_alive() and all(
+            not handler.is_alive() for handler in handlers
         )
         if error_type is None:
             require(stopped, "http-observer-stop")
@@ -853,7 +863,9 @@ def exercise(binary, root):
                                 "reports": observer.reports,
                                 "report_statuses": observer.report_statuses,
                                 "report_shapes": observer.report_shapes,
-                                "metadata_bound": getattr(owner, "metadata_bound", False),
+                                "metadata_bound": getattr(
+                                    owner, "metadata_bound", False
+                                ),
                             }
                         ),
                         flush=True,
@@ -871,7 +883,9 @@ def exercise(binary, root):
                     if cleanup_error is not None:
                         if not failing:
                             raise cleanup_error
-                        print("DIAGNOSTIC native client cleanup also failed", flush=True)
+                        print(
+                            "DIAGNOSTIC native client cleanup also failed", flush=True
+                        )
             after = {
                 ident: native("GET", "/api/experimental/session/" + ident + "/export")[
                     "data"
