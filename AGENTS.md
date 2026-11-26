@@ -192,9 +192,13 @@ their checkout ownership distinct from unrelated source and flat installations.
   Parent loss/cancel requests one interrupt and waits for real cleanup/exit;
   no automatic retry, blind process-group kill or unacknowledged success.
   Session cancellation retains attempted versus verified/observed fresh IDs,
-  never deletes them or imports more history to manufacture rollback. Core dumps
-  are disabled in manager/children before private input; this is not protection
-  against a same-user debugger, swap, terminal recording or all memory copies.
+  never deletes them or imports more history to manufacture rollback. Require a
+  verifiable file-based Linux core-dump policy and soft core-file limit zero
+  before dashboard backup work and password prompts/submission; child helpers
+  inherit the limit. Refuse pipe, socket, unreadable or unknown collectors
+  without altering host policy. The trusted kernel policy must remain stable;
+  this does not protect against a same-user debugger, swap, terminal recording
+  or all memory copies.
   Refuse private dashboard operations when Textual debug, developer tools or
   event-file logging are configured: framework input logging precedes widget
   handlers, so selection exclusion alone is not a sufficient privacy boundary.

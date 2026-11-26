@@ -34,6 +34,12 @@ _OPERATIONS = {
     "mutation": ("Action", "selected source"),
 }
 
+CORE_DUMP_POLICY_MESSAGE = (
+    "Dashboard backup, inspection and restore require a verifiable file-based Linux "
+    "core-dump policy and a zero soft core-file size limit. Ask your host "
+    "administrator to review the crash-dump policy. oc-box did not change it."
+)
+
 _DETAILS = {
     "host-only": "Run this operation as the regular user in a host terminal, not inside a container or with sudo.",
     "invalid-options": "The internal operation handoff received invalid options. Open a new review through the dashboard instead of invoking it as a standalone command.",
@@ -105,6 +111,7 @@ _DETAILS = {
     "invalid-provenance": "Managed archive provenance could not be verified. Refresh the intended source; do not infer ownership from a title or session ID.",
     "cancelled": "The action was cancelled. Wait for any bounded request to finish, then inspect the current state before starting another action.",
     "request-failed": "Native verification could not finish. Refresh the selected source and review again. No automatic retry or recovery was attempted.",
+    "core-dump-policy": CORE_DUMP_POLICY_MESSAGE,
     "permission-denied": "Access was denied. Check the intended target's ownership and permissions outside this dashboard, then review again; do not weaken safety checks.",
     "file-missing": "The selected file is no longer available. Refresh the file list and review the current selection before trying again.",
     "state-changed": "The selected state changed after review. Refresh and open a new confirmation; do not reuse an old selection.",

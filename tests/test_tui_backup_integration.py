@@ -7,6 +7,7 @@ from unittest.mock import Mock, PropertyMock, patch
 
 AVAILABLE = all(importlib.util.find_spec(name) for name in ("textual", "pyte"))
 if AVAILABLE:
+    from oc_box import tui_operation_io
     from oc_box.tui import DemoBackend
     from oc_box.tui_app import DashboardApp
     from oc_box.tui_backup_workflow import (
@@ -24,6 +25,13 @@ SECRET = "synthetic-only-private-123"
 
 @unittest.skipUnless(AVAILABLE, "optional UI dependencies unavailable")
 class BackupPrivacyIntegrationTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        policy = patch.object(
+            tui_operation_io, "_read_core_pattern", return_value=b"core\n"
+        )
+        policy.start()
+        self.addCleanup(policy.stop)
+
     async def begin(self, app, pilot):
         await app.workers.wait_for_complete()
         await pilot.pause()

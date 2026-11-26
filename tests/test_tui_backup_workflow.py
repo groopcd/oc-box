@@ -14,7 +14,7 @@ from unittest.mock import Mock, patch
 
 AVAILABLE = all(importlib.util.find_spec(name) for name in ("textual", "pyte"))
 if AVAILABLE:
-    from oc_box import tui_management, tui_operations
+    from oc_box import tui_management, tui_operation_io, tui_operations
     from oc_box import tui_backup_workflow as workflow_ui
     from oc_box.tui import DemoBackend
     from oc_box.tui_app import DashboardApp
@@ -32,6 +32,13 @@ VALUE = "synthetic-Private-0987"
 
 @unittest.skipUnless(AVAILABLE, "optional UI dependencies unavailable")
 class PrivateEditorTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        policy = patch.object(
+            tui_operation_io, "_read_core_pattern", return_value=b"core\n"
+        )
+        self.policy = policy.start()
+        self.addCleanup(policy.stop)
+
     def test_textual_event_logging_or_devtools_refuses_private_input(self):
         for log, debug, devtools in (
             ("configured", False, None),
@@ -411,18 +418,67 @@ class PrivateEditorTests(unittest.IsolatedAsyncioTestCase):
                 app._maintenance_busy = False
                 workflow.dismiss()
 
+    async def test_unsafe_core_policy_refuses_manager_admission_without_workflow(self):
+        app = DashboardApp(DemoBackend())
+        async with app.run_test(size=(110, 40)) as pilot:
+            await self.begin(app, pilot)
+            self.policy.return_value = b"|/synthetic-handler %p\n"
+            original_screen = app.screen
+            with (
+                patch.object(workflow_ui, "BackupWorkflow") as workflow,
+                patch.object(tui_operation_io.OperationProcess, "start") as start,
+                patch.object(tui_operations, "handoff") as handoff,
+                patch.object(app, "suspend") as suspend,
+            ):
+                app._perform_management({"action": "workspace-inspect"})
+                workflow.assert_not_called()
+                start.assert_not_called()
+                handoff.assert_not_called()
+                suspend.assert_not_called()
+            self.assertIs(app.screen, original_screen)
+            self.assertIsNone(app._embedded_operation)
+            self.assertFalse(app._private_interaction)
+            self.assertFalse(app._maintenance_busy)
+            notice = str(app.query_one("#notice", Static).render()).lower()
+            self.assertIn("core-dump policy", notice)
+            self.assertIn("administrator", notice)
+            self.assertNotIn("synthetic-handler", notice)
+
+    async def test_changed_core_policy_cancels_before_private_editor_and_waits(self):
+        app = DashboardApp(DemoBackend(), demo=True)
+        async with app.run_test(size=(110, 40)) as pilot:
+            await self.begin(app, pilot)
+            workflow = BackupWorkflow(None, {"action": "workspace-inspect"})
+            with patch.object(BackupWorkflow, "_run"):
+                await app.push_screen(workflow)
+                await pilot.pause()
+            self.policy.return_value = b"@/synthetic-socket\n"
+            with patch.object(workflow_ui, "PrivateSecretScreen") as editor_screen:
+                workflow._apply({"kind": "prompt", "id": 1, "purpose": "backup-unlock"})
+                editor_screen.assert_not_called()
+            self.assertIs(app.screen, workflow)
+            self.assertTrue(workflow.transport._cancelled)
+            self.assertTrue(app._private_interaction)
+            self.assertFalse(workflow.finished)
+            self.assertTrue(
+                workflow.query_one("#backup-operation-close", Button).disabled
+            )
+            workflow._finished(None)
+            status = str(workflow.query_one("#backup-operation-stage", Static).render())
+            self.assertIn("outcome unverified", status)
+            self.assertIn("core-dump policy", status)
+            self.assertNotIn("synthetic-socket", status)
+            self.assertFalse(app._private_interaction)
+            workflow.dismiss()
+
     async def test_real_private_process_roundtrip_stays_inside_dashboard(self):
-        from tests.test_tui_operation_io import FIXTURE, SOURCE, VALUE as CHILD_VALUE
+        from tests.test_tui_operation_io import VALUE as CHILD_VALUE, write_fixture
 
         with tempfile.TemporaryDirectory(
             prefix="oc-box-private-dashboard-"
         ) as temporary:
             root = Path(temporary)
-            (root / "tui_operations.py").write_text(
-                FIXTURE.replace("SOURCE", repr(str(SOURCE))).replace(
-                    "VALUE", repr(CHILD_VALUE)
-                )
-            )
+            write_fixture(root)
             runtime = SimpleNamespace(
                 PACKAGE=root,
                 state_root=lambda: root / "state",

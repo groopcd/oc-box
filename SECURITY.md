@@ -456,6 +456,13 @@ launcher core dumps are disabled on secret prompts where permitted, but host
 root/same-user debugging, swap, malicious binaries, terminal compromise, and
 unusual crash collection remain outside the protection.
 
+Dashboard backup, inspection and restore have an additional admission check:
+verify file-based Linux core-dump policy and a zero soft core-file limit
+before accepting private input. Piped, socket-based or unverified crash
+policies fail closed. oc-box does not change host settings, and this relies
+on the trusted kernel policy not changing during the operation. Ordinary CLI
+prompt behavior is unchanged.
+
 Use a strong passphrase and keep encrypted backups. A forgotten passphrase has
 no recovery path. Changing it or removing a secret does not revoke a provider
 credential or erase old ciphertext snapshots. WSL must provide private Unix

@@ -1548,6 +1548,10 @@ recording protection is not promised. Secrets never enter clipboard actions,
 widget values/messages, protocol metadata, argv, environment, plaintext files
 or journals. Private operations refuse Textual debug, developer tools and
 event-file logging. Clipboard/navigation shortcuts are fenced until child exit.
+Dashboard backup, inspection and restore also require a verifiable file-based
+Linux core-dump policy and a zero soft core-file size limit. Piped, socket
+or unverified policies are refused before password input. oc-box does not
+change the host's crash policy or fall back to a different prompt.
 For password confirmation, click its box or Shift+Tab before typing; queued
 first-password text is discarded.
 

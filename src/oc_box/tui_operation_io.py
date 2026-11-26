@@ -28,17 +28,19 @@ import time
 
 if __package__:
     from . import private_memory, secret_prompt
-    from .tui_notifications import failure_notice
+    from .tui_notifications import CORE_DUMP_POLICY_MESSAGE, failure_notice
 else:
     import private_memory
     import secret_prompt
-    from tui_notifications import failure_notice
+    from tui_notifications import CORE_DUMP_POLICY_MESSAGE, failure_notice
 
 MAX_FRAME = 128 * 1024
 MAX_TRAFFIC = 2 * 1024 * 1024
 MAX_EVENTS = 4096
 MAX_PROGRESS_EVENTS = 1024
 MAX_PROGRESS_BYTES = 128 * 1024**4
+_CORE_PATTERN = Path("/proc/sys/kernel/core_pattern")
+_MAX_CORE_PATTERN = 127
 STAGES = frozenset(
     {
         "validating",
@@ -139,11 +141,18 @@ _HOST_FIELDS = _BOOL_FIELDS | {
 
 
 class OperationIOError(RuntimeError):
+    reason = "request-failed"
+    message = (
+        "Private operation channel failed; inspect the explicit target before retrying."
+    )
+
     def __init__(self):
-        self.reason = "request-failed"
-        super().__init__(
-            "Private operation channel failed; inspect the explicit target before retrying."
-        )
+        super().__init__(self.message)
+
+
+class CoreDumpPolicyError(OperationIOError):
+    reason = "core-dump-policy"
+    message = CORE_DUMP_POLICY_MESSAGE
 
 
 def _fail():
@@ -312,6 +321,38 @@ def disable_core_dumps():
         _fail()
 
 
+def _read_core_pattern():
+    fd = os.open(
+        _CORE_PATTERN, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK
+    )
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise CoreDumpPolicyError()
+        return os.read(fd, _MAX_CORE_PATTERN + 2)
+    finally:
+        os.close(fd)
+
+
+def protect_private_input():
+    """The core-file limit also applies to the exec'd stock age in file mode."""
+    try:
+        raw = _read_core_pattern()
+        pattern = raw[:-1]
+        # Linux collectors starting with | or @ can disregard RLIMIT_CORE.
+        # Do not interpret a handler, modify host policy, or retain its text.
+        if (
+            not raw.endswith(b"\n")
+            or not 1 <= len(pattern) <= _MAX_CORE_PATTERN
+            or pattern != pattern.strip()
+            or pattern.startswith((b"|", b"@"))
+            or any(not 0x20 <= byte <= 0x7E for byte in pattern)
+        ):
+            raise CoreDumpPolicyError()
+        disable_core_dumps()
+    except (OSError, OperationIOError):
+        raise CoreDumpPolicyError() from None
+
+
 def _pipe(fd, direction):
     info = os.fstat(fd)
     if (
@@ -469,6 +510,7 @@ class ChildInteraction:
                 or maximum != 1024
             ):
                 _fail()
+            protect_private_input()
             self.prompt += 1
             self._active_prompt = self.prompt
             self.emit("prompt", id=self.prompt, purpose=purpose, maximum=maximum)
@@ -545,7 +587,6 @@ def child(runtime, descriptors, *, execute, check_request):
         )
     except (ValueError, UnicodeError, RecursionError):
         _fail()
-    disable_core_dumps()
     state = dict(
         operation="mutation",
         dispatched=False,
@@ -575,6 +616,9 @@ def child(runtime, descriptors, *, execute, check_request):
         for number in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
             previous[number] = signal.signal(number, cancel)
         interaction.start()
+        # The transport is open so it can return a fixed preflight refusal.
+        # Do not dispatch any work or advertise a private prompt until verified.
+        protect_private_input()
         with secret_prompt.operation_prompts(
             interaction.observe_prompt, cancellation=cancellation
         ):
@@ -665,7 +709,7 @@ class OperationProcess:
         value = json.dumps(self.request, ensure_ascii=True, allow_nan=False).encode()
         if len(value) > 128 * 1024 or self.process is not None:
             _fail()
-        disable_core_dumps()
+        protect_private_input()
         event_write = control_read = None
         try:
             self.master, self.slave = pty.openpty()
@@ -758,6 +802,7 @@ class OperationProcess:
                     or self._cancelled
                 ):
                     _fail()
+                protect_private_input()
                 attrs = termios.tcgetattr(self.slave)
                 if attrs[3] & (termios.ECHO | termios.ECHONL | termios.ICANON):
                     _fail()
@@ -772,6 +817,9 @@ class OperationProcess:
                 content.extend(b"\n")
                 if os.write(self.master, content) != len(content):
                     _fail()
+        except CoreDumpPolicyError:
+            self.cancel()
+            raise
         except Exception:
             self.cancel()
             raise OperationIOError() from None

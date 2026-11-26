@@ -943,8 +943,10 @@ class ManagementActions:
         if request["action"] in tui_operations.ACTIONS:
             if __package__:
                 from .tui_backup_workflow import BackupWorkflow, private_ui_allowed
+                from .tui_operation_io import CoreDumpPolicyError
             else:
                 from tui_backup_workflow import BackupWorkflow, private_ui_allowed
+                from tui_operation_io import CoreDumpPolicyError
 
             self._maintenance_busy = True
             self._private_interaction = True
@@ -953,13 +955,16 @@ class ManagementActions:
                 private_ui_allowed(self)
                 self._embedded_operation = BackupWorkflow(self.backend.box, request)
                 self.push_screen(self._embedded_operation, self._embedded_finished)
-            except Exception:
+            except Exception as error:
                 self._maintenance_busy = self._private_interaction = False
                 self._embedded_operation = None
-                self._message(
-                    "Private backup input is unavailable. Disable dashboard debug, developer tools, "
-                    "and event logging; check private terminal support before retrying."
-                )
+                if isinstance(error, CoreDumpPolicyError):
+                    self._operation_failure(error, operation=operation)
+                else:
+                    self._message(
+                        "Private backup input is unavailable. Disable dashboard debug, developer tools, "
+                        "and event logging; check private terminal support before retrying."
+                    )
             return
         if not all(stream.isatty() for stream in (sys.stdin, sys.stdout, sys.stderr)):
             self._operation_failure(
