@@ -63,7 +63,8 @@ function findOne(root, matches) {
     if (matches(node)) {
       if (match) return
       match = node
-      continue
+      // Another matching pane or transcript can be nested inside this one.
+      // A render tree is not a public layout contract; reject that ambiguity.
     }
     const children = node.getChildren?.() ?? []
     if (!Array.isArray(children) || children.length + pending.length > MAX_NODES) return
@@ -110,6 +111,9 @@ export function createInlineTimestamps({ column, makeLabel }) {
   function remove(row, { node }) {
     try {
       if (!node.isDestroyed) node.destroy()
+      if (node.parent != null || (!row.isDestroyed && row.getChildren().includes(node))) {
+        throw new Error("Native scene did not detach the inline timestamp")
+      }
     } catch (error) {
       // Do not keep displaying an old timestamp if this scene cannot detach it.
       try { node.visible = false } catch { /* No compatible visibility setter. */ }
@@ -154,6 +158,9 @@ export function createInlineTimestamps({ column, makeLabel }) {
         const node = makeLabel(`oc-box-inline-timestamp-${++sequence}`, format(stamp), color)
         decorations.set(row, { ...stamp, node, color })
         row.add(node)
+        if (node.parent !== row || !row.getChildren().includes(node)) {
+          throw new Error("Native scene did not attach the inline timestamp")
+        }
       }
     },
     clear,

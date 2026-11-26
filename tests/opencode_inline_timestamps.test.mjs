@@ -132,3 +132,35 @@ test("a failed detach hides only the owned label", () => {
   assert.equal(body.visible, true)
   assert.equal(promptRow.visible, true)
 })
+
+test("nested pane or transcript matches are ambiguous, not a preferred parent", () => {
+  for (const nestedPane of [true, false]) {
+    const first = row("msg_prompt")
+    const duplicate = row("msg_prompt")
+    const root = frame([first])
+    const nested = frame([duplicate]).children[0]
+    first.add(nestedPane ? nested : nested.children[0])
+    decorator().update({ root, sessionID: "ses_example", messages: [prompt] })
+    assert.equal(first.children.length, 2)
+    assert.equal(duplicate.children.length, 1)
+  }
+})
+
+test("a silent scene refusal cannot keep a stale annotation or request new ones every frame", () => {
+  const promptRow = row("msg_prompt")
+  const input = { root: frame([promptRow]), sessionID: "ses_example", messages: [prompt] }
+  const adapter = decorator()
+  adapter.update(input)
+  const stamp = promptRow.children[1]
+  stamp.destroy = () => {}
+  assert.throws(() => adapter.update({ ...input, messages: [] }), /did not detach/)
+  assert.equal(stamp.visible, false)
+  assert.equal(promptRow.children[0].visible, true)
+
+  const refusingRow = row("msg_prompt")
+  refusingRow.add = () => {}
+  const refusing = decorator()
+  assert.throws(() => refusing.update({ ...input, root: frame([refusingRow]) }), /did not attach/)
+  refusing.clear()
+  assert.equal(refusingRow.children.length, 1)
+})
