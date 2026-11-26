@@ -179,12 +179,15 @@ List the bundled native TUI add-ons, each with its saved workspace setting
 and default. By default the command selects the current directory's registered
 workspace. Without a registered workspace it can list defaults, but saving a
 switch requires an existing workspace. `--project PATH` and `--workspace ID`
-select a different workspace. Activity Timeline is disabled by default.
+select a different workspace. Both Activity Timeline and Inline timestamps are
+disabled by default and can be enabled independently.
 
 ```sh
 oc-box addon
 oc-box addon activity-timeline on
 oc-box addon activity-timeline off
+oc-box addon inline-timestamps on
+oc-box addon inline-timestamps off
 ```
 
 The switch persists in host-only workspace preferences. It does not start
@@ -211,6 +214,17 @@ It reads the TUI's existing message metadata without changing messages or
 making any requests to a model, so it adds no model tokens. It uses the public
 V2 session-panel API when available and does not affect OpenCode 1.x, the browser
 UI, or the oc-box manager.
+
+The `inline-timestamps` add-on adds a separate date and time line below matched
+rows in the main transcript. It uses stock OpenCode without a binary patch or
+an exact-version allowlist. It can label prompt rows and tool rows with
+explicit native tool-call IDs. It skips grouped summaries, unlabeled or
+ambiguous rows, and layouts it cannot recognize; it never matches displayed
+text or guesses by row order. Native verbosity and grouping affect which tool
+rows are identifiable. If a call's invocation was not recorded, a displayed
+creation time is labeled. It does not alter saved messages or add model tokens.
+Keep Activity Timeline enabled if you also want the separate panel for
+timestamps the inline view cannot place.
 
 ### doctor
 

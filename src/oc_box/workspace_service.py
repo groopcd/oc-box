@@ -873,6 +873,7 @@ def client_command(
     ui_owner=False,
     file_preview=False,
     activity_timeline=False,
+    inline_timestamps=False,
     engine_env=None,
 ):
     """No host pass_env, auth refresh, profiles, or vault unlock on attach.
@@ -972,6 +973,12 @@ def client_command(
             names["OC_BOX_ACTIVITY_TIMELINE"] = "1"
             startup_output.line(
                 "oc-box: Activity timeline requested (look for Open activity timeline in Ctrl+P).",
+                flush=True,
+            )
+        if ui_owner and inline_timestamps:
+            names["OC_BOX_INLINE_TIMESTAMPS"] = "1"
+            startup_output.line(
+                "oc-box: Inline timestamps requested (matched transcript rows only).",
                 flush=True,
             )
         if file_preview:

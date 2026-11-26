@@ -30,6 +30,7 @@ class AddonTests(unittest.TestCase):
             output = self.command()
             self.assertIn("DEFAULT", output)
             self.assertRegex(output, r"activity-timeline\s+disabled\s+disabled")
+            self.assertRegex(output, r"inline-timestamps\s+disabled\s+disabled")
             self.assertIn("No registered workspace", output)
             with self.assertRaisesRegex(box.BoxError, "existing valid workspace"):
                 self.command("activity-timeline", "on")
@@ -64,6 +65,7 @@ class AddonTests(unittest.TestCase):
                 self.assertTrue(value["addons"]["activity-timeline"])
                 self.assertTrue(value["addons"]["unrecognized-future-addon"])
                 self.assertFalse(value["host_drop"])
+                self.command("inline-timestamps", "on")
                 self.command("activity-timeline", "off")
                 self.assertRegex(
                     self.command(), r"activity-timeline\s+disabled\s+disabled"
@@ -72,6 +74,9 @@ class AddonTests(unittest.TestCase):
                     workspace_preferences.read(registration, ident)["addons"][
                         "activity-timeline"
                     ]
+                )
+                self.assertRegex(
+                    self.command(), r"inline-timestamps\s+enabled\s+disabled"
                 )
                 self.assertEqual(registration.read_text(), original)
 
@@ -96,14 +101,24 @@ class AddonTests(unittest.TestCase):
             "--server",
             connection["url"],
         ]
-        for requested, owner, ready, flag, notice in (
-            (False, True, True, None, None),
-            (True, True, True, "1", "Activity timeline requested"),
-            (True, True, False, "1", "Activity timeline requested"),
-            (True, False, True, None, None),
+        for requested, inline, owner, ready, notices in (
+            (False, False, True, True, ()),
+            (True, False, True, True, ("Activity timeline requested",)),
+            (True, False, True, False, ("Activity timeline requested",)),
+            (False, True, True, False, ("Inline timestamps requested",)),
+            (True, True, False, True, ()),
+            (
+                True,
+                True,
+                True,
+                True,
+                ("Activity timeline requested", "Inline timestamps requested"),
+            ),
         ):
             with (
-                self.subTest(requested=requested, owner=owner, ready=ready),
+                self.subTest(
+                    requested=requested, inline=inline, owner=owner, ready=ready
+                ),
                 patch.object(box, "maintenance_host_env", return_value={}),
                 patch.object(box.startup_output, "line") as line,
             ):
@@ -120,16 +135,22 @@ class AddonTests(unittest.TestCase):
                     interactive=True,
                     ui_owner=owner,
                     activity_timeline=requested,
+                    inline_timestamps=inline,
                 )
                 env = json.loads(command[command.index("-c") + 2])
-                self.assertEqual(env.get("OC_BOX_ACTIVITY_TIMELINE"), flag)
+                self.assertEqual(
+                    env.get("OC_BOX_ACTIVITY_TIMELINE"),
+                    "1" if owner and requested else None,
+                )
+                self.assertEqual(
+                    env.get("OC_BOX_INLINE_TIMESTAMPS"),
+                    "1" if owner and inline else None,
+                )
                 self.assertEqual("OC_BOX_UI_STATE_CLIENT" in env, ready)
                 self.assertNotIn("OPENCODE_CLI_CONFIG_CONTENT", env)
-                if notice is None:
-                    line.assert_not_called()
-                else:
-                    line.assert_called_once()
-                    self.assertIn(notice, line.call_args.args[0])
+                self.assertEqual(line.call_count, len(notices))
+                for notice, call in zip(notices, line.call_args_list):
+                    self.assertIn(notice, call.args[0])
 
     def test_incomplete_addon_does_not_block_preparing_the_base_config(self):
         source = box.PACKAGE
@@ -150,3 +171,35 @@ class AddonTests(unittest.TestCase):
                 self.assertIn(prefix + "ui_state_tui.js", config.getnames())
                 for name in ui_state.ACTIVITY_TIMELINE_RESOURCES:
                     self.assertNotIn(prefix + name, config.getnames())
+
+    def test_inline_assets_are_independently_optional(self):
+        source = box.PACKAGE
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for name in {
+                *ui_state.RESOURCES,
+                *ui_state.ACTIVITY_TIMELINE_RESOURCES,
+                *ui_state.INLINE_TIMESTAMP_RESOURCES,
+            }:
+                (root / name).write_bytes((source / name).read_bytes())
+            for inline, panel in (
+                (False, False),
+                (True, False),
+                (False, True),
+                (True, True),
+            ):
+                with self.subTest(inline=inline, panel=panel):
+                    package = ui_state.package_sources(
+                        root, include_addons=panel, inline_timestamps=inline
+                    )
+                    self.assertEqual("inline_timestamps_tui.mjs" in package, inline)
+                    self.assertEqual("activity_timeline_tui.tsx" in package, panel)
+                    self.assertEqual(
+                        "activity_timeline_events.mjs" in package, inline or panel
+                    )
+            (root / "inline_timestamps_tui.mjs").unlink()
+            package = ui_state.package_sources(
+                root, include_addons=True, inline_timestamps=True
+            )
+            self.assertTrue(set(ui_state.ACTIVITY_TIMELINE_RESOURCES) <= package.keys())
+            self.assertNotIn("inline_timestamps.mjs", package)

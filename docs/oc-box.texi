@@ -132,12 +132,14 @@ source <(oc-box completion bash)
 
 @section addon
 
-List the bundled native TUI add-ons, each with its saved workspace setting and default. By default the command selects the current directory's registered workspace. Without a registered workspace it can list defaults, but saving a switch requires an existing workspace. @code{--project PATH} and @code{--workspace ID} select a different workspace. Activity Timeline is disabled by default.
+List the bundled native TUI add-ons, each with its saved workspace setting and default. By default the command selects the current directory's registered workspace. Without a registered workspace it can list defaults, but saving a switch requires an existing workspace. @code{--project PATH} and @code{--workspace ID} select a different workspace. Both Activity Timeline and Inline timestamps are disabled by default and can be enabled independently.
 
 @example
 oc-box addon
 oc-box addon activity-timeline on
 oc-box addon activity-timeline off
+oc-box addon inline-timestamps on
+oc-box addon inline-timestamps off
 @end example
 
 The switch persists in host-only workspace preferences. It does not start Podman, unlock credentials, or change OpenCode configuration. It applies to the next owning native TUI launch, not to an already open client or an attach-only client. @code{off} disables the add-on; no uninstall or config edit is needed. When enabled, oc-box prints a one-line startup request, not a confirmation that the native TUI loaded it. There is no exact-version requirement for the add-on. If the native TUI cannot load it or lacks its session-panel APIs, the ordinary launch continues and the saved switch is unchanged.
@@ -145,6 +147,8 @@ The switch persists in host-only workspace preferences. It does not start Podman
 In an open session, use @code{Ctrl+P} and select @code{Open activity timeline}, or use @code{/activity-timeline}. The panel shows full local dates, times to the second, and UTC offsets for prompt and assistant message creation and tool invocations. A tool invocation timestamp is the native recorded call time, not an independently observed execution start. If only creation was recorded, the panel labels the invocation time unknown rather than using the completion time.
 
 This is a recent-activity view, not an audit log: it shows up to 200 events from the newest 200 loaded messages in the current session, considering the last 128 parts of each assistant message. It does not fetch older messages, traverse child sessions, or display prompt text, tool arguments, or tool results. It reads the TUI's existing message metadata without changing messages or making any requests to a model, so it adds no model tokens. It uses the public V2 session-panel API when available and does not affect OpenCode 1.x, the browser UI, or the oc-box manager.
+
+The @code{inline-timestamps} add-on adds a separate date and time line below matched rows in the main transcript. It uses stock OpenCode without a binary patch or an exact-version allowlist. It can label prompt rows and tool rows with explicit native tool-call IDs. It skips grouped summaries, unlabeled or ambiguous rows, and layouts it cannot recognize; it never matches displayed text or guesses by row order. Native verbosity and grouping affect which tool rows are identifiable. If a call's invocation was not recorded, a displayed creation time is labeled. It does not alter saved messages or add model tokens. Keep Activity Timeline enabled if you also want the separate panel for timestamps the inline view cannot place.
 
 @section doctor
 

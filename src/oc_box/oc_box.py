@@ -2673,6 +2673,7 @@ def config_archive(
     image_preview_snapshot=None,
     history_only=False,
     activity_timeline=False,
+    inline_timestamps=False,
 ):
     """Snapshot user config as bytes. Extracted only inside the container."""
     source = (
@@ -2924,7 +2925,9 @@ def config_archive(
                 # Native/project/managed plugin policy remains authoritative:
                 # unlike the Build helper it gets no final mandatory overlay.
                 for name, content in ui_state.package_sources(
-                    PACKAGE, include_addons=activity_timeline and not history_only
+                    PACKAGE,
+                    include_addons=activity_timeline and not history_only,
+                    inline_timestamps=inline_timestamps and not history_only,
                 ).items():
                     add_bytes("plugins/oc-box-ui-state/" + name, content)
     return buffer.getvalue()
@@ -3002,6 +3005,7 @@ def prepare_runtime(
     image_preview_snapshot=None,
     history_only=False,
     activity_timeline=False,
+    inline_timestamps=False,
 ):
     if _bound_overlap() is not None:
         raise BoxError(
@@ -3014,6 +3018,8 @@ def prepare_runtime(
     archive_options = {"history_only": True} if history_only else {}
     if activity_timeline and not history_only:
         archive_options["activity_timeline"] = True
+    if inline_timestamps and not history_only:
+        archive_options["inline_timestamps"] = True
     archive = (
         config_archive(
             data,
@@ -5141,6 +5147,12 @@ def launch_environment(
                         else {}
                     ),
                     **(
+                        {"inline_timestamps": True}
+                        if args.command in ("start", "reset")
+                        and getattr(args, "_inline_timestamps", False)
+                        else {}
+                    ),
+                    **(
                         {
                             "image_preview": True,
                             "image_preview_snapshot": image_preview_snapshot,
@@ -5542,9 +5554,15 @@ def launch_client(path, data, args, version, exported, owner=None):
                 )
             file_open = effective_host_file_open(args, data)
             activity_timeline = getattr(args, "_activity_timeline", False)
+            inline_timestamps = getattr(args, "_inline_timestamps", False)
             if activity_timeline and owner is None:
                 startup_output.line(
                     "oc-box: Activity timeline unavailable: a compatible native OpenCode 2.x TUI is required.",
+                    flush=True,
+                )
+            if inline_timestamps and owner is None:
+                startup_output.line(
+                    "oc-box: Inline timestamps unavailable: a compatible native OpenCode 2.x TUI is required.",
                     flush=True,
                 )
             if file_open and owner is None:
@@ -5568,6 +5586,7 @@ def launch_client(path, data, args, version, exported, owner=None):
                     ui_owner=True,
                     file_preview=file_open,
                     activity_timeline=activity_timeline,
+                    inline_timestamps=inline_timestamps,
                 )
                 if owner
                 else exec_command(data, command, interactive=True),
@@ -7261,6 +7280,11 @@ def _main_command(args, argv):
                         "oc-box: Activity timeline is available only on the owning TUI launch.",
                         flush=True,
                     )
+                if saved.get("addons", {}).get("inline-timestamps", False):
+                    startup_output.line(
+                        "oc-box: Inline timestamps are available only on the owning TUI launch.",
+                        flush=True,
+                    )
                 if (
                     saved.get("image_preview") is True
                     and connection.get("image_preview", False) is False
@@ -7439,6 +7463,9 @@ def _locked_workspace_command(path, data, args, launch_context, image_preview_sn
         saved = workspace_ui_preferences(path, data)
         args._activity_timeline = saved.get("addons", {}).get(
             "activity-timeline", False
+        )
+        args._inline_timestamps = saved.get("addons", {}).get(
+            "inline-timestamps", False
         )
         if args.image_preview is None and saved.get("image_preview") is True:
             # Saved policy applies only to a new owner. V1 keeps ordinary

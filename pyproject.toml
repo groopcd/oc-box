@@ -72,6 +72,8 @@ oc_box = [
   "file_preview_tui.tsx",
   "activity_timeline_tui.tsx",
   "activity_timeline_events.mjs",
+  "inline_timestamps.mjs",
+  "inline_timestamps_tui.mjs",
 ]
 
 [tool.setuptools.data-files]

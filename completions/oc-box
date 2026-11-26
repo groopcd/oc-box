@@ -161,7 +161,7 @@ _oc_box()
             (( positional == 0 )) && options+=' bash' ;;
         addon)
             options="$help $selectors"
-            (( positional == 0 )) && options+=' activity-timeline'
+            (( positional == 0 )) && options+=' activity-timeline inline-timestamps'
             (( positional == 1 )) && options+=' on off' ;;
         list|distros|runtime-check) options=$help ;;
         *) options="$commands $help $selectors $launch $launch_logs --runtime-guard --convert-legacy-container --rebuild-legacy-container --persisted --status --about --version --json --table --check --stable --devel --vault --tui --auto-update --credential-mode --env-secret --vault-secret --clear-credentials --delete-sessions --all -y --yes --discard-guarded --cleanup --maintenance" ;;

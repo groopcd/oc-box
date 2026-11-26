@@ -7,10 +7,16 @@ export default Plugin.define({
   id: "oc-box.ui-state.tui",
   setup(context) {
     const stopReporter = setupReporter(context)
-    const stopActivity = process.env.OC_BOX_ACTIVITY_TIMELINE === "1" ? setupActivity(context) : undefined
+    const stopActivity = process.env.OC_BOX_ACTIVITY_TIMELINE === "1"
+      ? setupAddon(context, () => import("./activity_timeline_tui.tsx"), "Activity timeline could not load; continuing without it.")
+      : undefined
+    const stopInline = process.env.OC_BOX_INLINE_TIMESTAMPS === "1"
+      ? setupAddon(context, () => import("./inline_timestamps_tui.mjs"), "Inline timestamps unavailable; continuing without them.")
+      : undefined
     if (!process.env.OC_BOX_FILE_PREVIEW_ROOTS) {
-      return stopActivity ? async () => {
-        stopActivity()
+      return stopActivity || stopInline ? async () => {
+        stopActivity?.()
+        stopInline?.()
         await stopReporter?.()
       } : stopReporter
     }
@@ -39,26 +45,27 @@ export default Plugin.define({
       stopped = true
       stopPreview?.()
       stopActivity?.()
+      stopInline?.()
       await stopReporter?.()
     }
   },
 })
 
-function setupActivity(context) {
+function setupAddon(context, load, warning) {
   let stopped = false
   let dispose
   const unavailable = () => {
     if (stopped) return
     try {
       context.ui.toast.show({
-        message: "Activity timeline could not load; continuing without it.",
+        message: warning,
         variant: "warning",
       })
     } catch {
       // Older SDKs may not provide compatible notifications either.
     }
   }
-  void import("./activity_timeline_tui.tsx").then(({ install }) => {
+  void load().then(({ install }) => {
     if (!stopped) dispose = install(context, unavailable)
   }).catch(unavailable)
   return () => {
@@ -66,7 +73,7 @@ function setupActivity(context) {
     try {
       dispose?.()
     } catch {
-      // Optional panel teardown must not interrupt reporter/preview cleanup.
+      // Optional add-on teardown must not interrupt reporter/preview cleanup.
     }
   }
 }

@@ -451,6 +451,13 @@ their checkout ownership distinct from unrelated source and flat installations.
   from native invocation and never substitute completion. Use a best-effort
   capability check, not release pins. Add-on loading, rendering or missing
   assets must not prevent ordinary startup or relax unrelated runtime guards.
+- `inline_timestamps*.mjs`: independently opted-in stock native TUI display.
+  Add only owned, noninteractive labels inside positively identified main
+  transcript rows. Match the current session's exact prompt or tool IDs,
+  never rendered text, ordinal positions, enclosing assistant IDs or groups.
+  Bound renderer/cache traversal, remove only owned nodes, and leave an
+  unfamiliar or ambiguous layout alone. Do not patch OpenCode, alter model
+  input, or add server hooks.
 - `ui_state.py` / `ui_state_*.js`: public-SDK container TUI/server/RPC reports,
   installed only during normal eligible V2 owning preparation, never on attach.
   Canonical stable native `2.x.y` is eligible, not proof of SDK compatibility.

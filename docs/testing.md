@@ -850,6 +850,18 @@ switch, not a Podman launch or an external-host acceptance run. Omitting
 `--demo` runs the automated provider-free fixture, including a deliberately
 missing add-on module.
 
+To preview the stock OpenCode inline add-on instead, add `--inline`:
+
+```sh
+python3 -B tests/smoke_activity_timeline_v2.py --opencode "$(command -v opencode)" --demo on --inline
+```
+
+The synthetic inline demo shows a prompt, shell command and edit with exact
+native row identities, and a read that is not labeled because it has no
+explicit tool row ID. `--inline` without `--demo` verifies the on, off, and
+missing-module paths with both plug-ins staged. This is native TUI testing,
+not an external Podman acceptance or a custom OpenCode build.
+
 ### Experimental host-image attachments
 
 `oc-box attach PATH --session ID` sends a host-authorized native image user

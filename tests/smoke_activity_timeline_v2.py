@@ -39,8 +39,8 @@ def millis(second):
     )
 
 
-def seed(request, project):
-    def tool(name, created, **timing):
+def seed(request, project, *, inline=False):
+    def tool(name, created, *, input=None, **timing):
         return {
             "type": "tool",
             "id": f"activity-{name}",
@@ -51,10 +51,31 @@ def seed(request, project):
             },
             "state": {
                 "status": "completed",
-                "input": {},
+                "input": input or {},
                 "content": [{"type": "text", "text": "Synthetic result"}],
             },
         }
+
+    content = []
+    if inline:
+        # A leading text part takes the assistant boundary ID. The visible
+        # shell and edit then carry explicit native tool-part IDs in High.
+        content.append({"type": "text", "text": "Inspecting the sample note."})
+    content.append(
+        tool(
+            "shell",
+            3,
+            input={"command": "head -n 1 demo-notes.txt"} if inline else None,
+            ran=7,
+            completed=40,
+        )
+    )
+    content.append(tool("read", 4, completed=38))
+    if inline:
+        content.append(
+            tool("edit", 15, input={"path": "demo-notes.txt"}, ran=18, completed=42)
+        )
+    content.append({"type": "text", "text": "Synthetic activity reply"})
 
     request(
         "POST",
@@ -90,11 +111,7 @@ def seed(request, project):
                         "providerID": "synthetic-provider",
                     },
                     "time": {"created": millis(2), "completed": millis(49)},
-                    "content": [
-                        tool("shell", 3, ran=7, completed=40),
-                        tool("read", 4, completed=38),
-                        {"type": "text", "text": "Synthetic activity reply"},
-                    ],
+                    "content": content,
                 },
                 {
                     "id": "msg_activity_3",
@@ -118,7 +135,7 @@ def select_command(client, query, title):
 
 
 @contextmanager
-def native_fixture(binary, root, *, include_addons):
+def native_fixture(binary, root, *, include_addons, inline=False):
     project = root / "project"
     project.mkdir()
     env = private_environment(root / "native")
@@ -130,7 +147,7 @@ def native_fixture(binary, root, *, include_addons):
     destination.mkdir(parents=True)
     package = Path(__file__).resolve().parents[1] / "src/oc_box"
     for name, content in ui_state.package_sources(
-        package, include_addons=include_addons
+        package, include_addons=include_addons, inline_timestamps=inline
     ).items():
         (destination / name).write_bytes(content)
     # Use the same combined package discovery as the owning workspace. The
@@ -144,6 +161,17 @@ def native_fixture(binary, root, *, include_addons):
             {
                 "highlights": False,
                 "animations": False,
+                **(
+                    {
+                        "session": {
+                            "verbosity": "high",
+                            "grouping": "none",
+                            "sidebar": "hide",
+                        }
+                    }
+                    if inline
+                    else {}
+                ),
             }
         )
     )
@@ -156,7 +184,7 @@ def native_fixture(binary, root, *, include_addons):
             native("GET", "/api/credential") == {"data": []},
             "Unexpected native credentials.",
         )
-        seed(native, project)
+        seed(native, project, inline=inline)
         seeded = native("GET", f"/api/session/{SESSION}")["data"]
         require(
             isinstance(seeded, dict) and seeded.get("id") == SESSION,
@@ -255,19 +283,98 @@ def exercise(binary, root):
         )
 
 
-def demo(binary, root, setting):
-    with native_fixture(binary, root, include_addons=setting == "on") as fixture:
+def exercise_inline(binary, root):
+    stamps = tuple(f"2026-11-26 14:32:{second:02} +00:00" for second in (1, 7, 18))
+    ambiguous = "2026-11-26 14:32:04 +00:00"
+    with native_fixture(binary, root, include_addons=True, inline=True) as fixture:
+        project, env, cli, native = fixture
+        before = exported(native, SESSION)
+        inbox = f"/api/session/{SESSION}/inbox"
+        checks = [native("GET", route) for route in (inbox, "/api/session/active")]
+        with Observer(native.endpoint) as observer:
+            endpoint = {**native.endpoint, "url": observer.url}
+            for enabled, missing in ((True, False), (False, False), (True, True)):
+                if missing:
+                    (
+                        cli.parent / "plugins/oc-box-ui-state/inline_timestamps_tui.mjs"
+                    ).unlink()
+                client = Client(
+                    binary,
+                    {
+                        **env,
+                        "OC_BOX_ACTIVITY_TIMELINE": "1",
+                        **({"OC_BOX_INLINE_TIMESTAMPS": "1"} if enabled else {}),
+                    },
+                    project,
+                    endpoint,
+                    cli,
+                    session_id=SESSION,
+                )
+                try:
+                    client.watch("Synthetic activity reply", ambiguous, *stamps)
+                    client.wait(
+                        lambda: client.labels["Synthetic activity reply"],
+                        "native transcript",
+                    )
+                    if enabled and not missing:
+                        client.wait(
+                            lambda: all(client.labels[stamp] for stamp in stamps),
+                            "inline prompt, shell and edit timestamps",
+                        )
+                    else:
+                        client.drain(0.3)
+                        require(
+                            not any(client.labels[stamp] for stamp in stamps),
+                            "Unexpected inline timestamp.",
+                        )
+                    require(
+                        not client.labels[ambiguous], "A grouped read was mislabeled."
+                    )
+                    select_command(
+                        client, "activity timeline", "Open activity timeline"
+                    )
+                    client.send(b"\x1b")
+                    select_command(client, "Exit the", "Exit the app")
+                    client.send(b"\r", 0.6)
+                finally:
+                    client.close()
+            require(
+                observer.bad_posts == 0 and not observer.errors,
+                "Unexpected native mutation or observer error.",
+            )
+        after = exported(native, SESSION)
+        require(
+            before["messages"] == after["messages"]
+            and before["info"]["tokens"] == after["info"]["tokens"],
+            "Inline timestamps changed history or token usage.",
+        )
+        require(
+            checks
+            == [native("GET", route) for route in (inbox, "/api/session/active")],
+            "Inline timestamps changed native work state.",
+        )
+
+
+def demo(binary, root, setting, *, inline=False):
+    addon = "inline-timestamps" if inline else "activity-timeline"
+    with native_fixture(
+        binary, root, include_addons=setting == "on" and not inline, inline=inline
+    ) as fixture:
         project, env, _cli_config, native = fixture
         path, workspace = box.create_workspace(project, "tumbleweed")
-        print("Activity Timeline demo · native OpenCode · read-only synthetic session")
+        print(f"{addon} demo · native OpenCode · read-only synthetic session")
         require(
-            box.main(["addon", "activity-timeline", setting]) == 0,
+            box.main(["addon", addon, setting]) == 0,
             "The synthetic add-on preference could not be saved.",
         )
-        enabled = box.workspace_ui_preferences(path, workspace)["addons"][
-            "activity-timeline"
-        ]
-        if enabled:
+        enabled = box.workspace_ui_preferences(path, workspace)["addons"][addon]
+        if inline:
+            print(
+                "Look below the prompt, shell command and edit for matched inline timestamps."
+                if enabled
+                else "Inline timestamps are off; the native transcript should have no added timestamps."
+            )
+        elif enabled:
             print(
                 "Look for Open activity timeline in Ctrl+P. If the add-on is unavailable, the TUI still opens normally."
             )
@@ -275,11 +382,15 @@ def demo(binary, root, setting):
             print(
                 "Inside the TUI: Ctrl+P → search for activity timeline; no command is listed."
             )
-        print("Esc closes the panel. Use Ctrl+P → Exit the app to leave.", flush=True)
+        if not inline:
+            print("Esc closes the panel.")
+        print("Use Ctrl+P → Exit the app to leave.", flush=True)
         with Observer(native.endpoint, read_only=True) as observer:
             client_env = {**env, "OPENCODE_PASSWORD": native.endpoint["password"]}
             if enabled:
-                client_env["OC_BOX_ACTIVITY_TIMELINE"] = "1"
+                client_env[
+                    "OC_BOX_INLINE_TIMESTAMPS" if inline else "OC_BOX_ACTIVITY_TIMELINE"
+                ] = "1"
             return subprocess.run(
                 [binary, str(project), "--server", observer.url, "--session", SESSION],
                 cwd=project,
@@ -301,13 +412,18 @@ def main():
         choices=("on", "off"),
         help="open an interactive, read-only synthetic session with this saved add-on setting",
     )
+    parser.add_argument(
+        "--inline", action="store_true", help="use the stock inline-timestamps add-on"
+    )
     args = parser.parse_args()
     if args.demo is not None and not (sys.stdin.isatty() and sys.stdout.isatty()):
         parser.error("--demo needs an interactive terminal")
     with tempfile.TemporaryDirectory(prefix="oc-box-activity-timeline-") as directory:
         if args.demo is not None:
             try:
-                return demo(args.opencode, Path(directory), args.demo)
+                return demo(
+                    args.opencode, Path(directory), args.demo, inline=args.inline
+                )
             except KeyboardInterrupt:
                 return 130
             except (
@@ -324,7 +440,15 @@ def main():
                     file=sys.stderr,
                 )
                 return 1
-        exercise(args.opencode, Path(directory))
+        if args.inline:
+            exercise_inline(args.opencode, Path(directory))
+        else:
+            exercise(args.opencode, Path(directory))
+    if args.inline:
+        print(
+            "Stock inline timestamps verified; ambiguous rows skipped, panel retained, history and tokens unchanged."
+        )
+        return 0
     print(
         "Native activity panel: on/off, dates, invocation times and load-failure fallback verified; messages, tokens and work state unchanged."
     )

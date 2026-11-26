@@ -4,7 +4,7 @@ export const MAX_EVENTS = 200
 const MAX_MESSAGES = 200
 const MAX_PARTS = 128
 
-function validTime(value) {
+export function validTime(value) {
   return Number.isSafeInteger(value) && value >= 0 && value <= 8_640_000_000_000_000
 }
 

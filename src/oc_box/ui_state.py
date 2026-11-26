@@ -41,6 +41,11 @@ ACTIVITY_TIMELINE_RESOURCES = (
     "activity_timeline_tui.tsx",
     "activity_timeline_events.mjs",
 )
+INLINE_TIMESTAMP_RESOURCES = (
+    "inline_timestamps.mjs",
+    "inline_timestamps_tui.mjs",
+    "activity_timeline_events.mjs",
+)
 
 
 @dataclass(frozen=True)
@@ -70,7 +75,7 @@ def _id(value):
     )
 
 
-def package_sources(package, *, include_addons=False):
+def package_sources(package, *, include_addons=False, inline_timestamps=False):
     """Generated private container package; never write a host plugin/config."""
     manifest = {
         "name": "oc-box-ui-state",
@@ -85,18 +90,20 @@ def package_sources(package, *, include_addons=False):
         "package.json": (json.dumps(manifest) + "\n").encode(),
         **{name: (Path(package) / name).read_bytes() for name in RESOURCES},
     }
-    if include_addons:
+    for selected, resources in (
+        (include_addons, ACTIVITY_TIMELINE_RESOURCES),
+        (inline_timestamps, INLINE_TIMESTAMP_RESOURCES),
+    ):
+        if not selected:
+            continue
         try:
-            activity = {
-                name: (Path(package) / name).read_bytes()
-                for name in ACTIVITY_TIMELINE_RESOURCES
-            }
+            optional = {name: (Path(package) / name).read_bytes() for name in resources}
         except OSError:
             # An incomplete optional add-on must not block base UI-state
             # preparation. Omit it atomically; the TUI handles a failed import.
             pass
         else:
-            files.update(activity)
+            files.update(optional)
     return files
 
 
