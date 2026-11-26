@@ -1026,6 +1026,7 @@ class IsolatedManagerTests(unittest.TestCase):
         files = {
             "oc_box/__init__.py": "",
             "oc_box/fixture.py": "def main(): pass\n",
+            "oc_box/reinstall-fixture.txt": f"Fixture payload for {version}\n",
             "oc_box/distribution.json": json.dumps(
                 {"installer": "python-package", "version": version}
             ),
@@ -1376,11 +1377,33 @@ class IsolatedManagerTests(unittest.TestCase):
                         "pipx_metadata.json" if kind == "pipx" else "uv-receipt.toml"
                     )
                     previous_receipt = receipt.read_bytes()
+
+            # Damage only a data file; the launcher and installed version must
+            # still be verifiable before a same-version reinstall can run.
+            payload = package / "reinstall-fixture.txt"
+            self.assertTrue(payload.resolve().is_relative_to(prefix.resolve()))
+            expected_payload = payload.read_bytes()
+            payload.unlink()
+            previous_count = len(mutations)
+            with contextlib.redirect_stdout(io.StringIO()) as output:
+                self.assertIsNone(updates.upgrade(package))
+            self.assertIn("up to date", output.getvalue())
+            self.assertEqual(len(mutations), previous_count)
+            self.assertFalse(payload.exists())
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertIsNone(updates.upgrade(package, force=True))
+            self.assertEqual(len(mutations), previous_count + 1)
+            self.assertEqual(payload.read_bytes(), expected_payload)
+            after_force = json.loads(
+                original([python, "-I", "-c", updates.PROBE], self.work, self.env)
+            )
+            self.assertEqual(after_force, fresh)
         self.assertEqual(
             observed_versions,
             (["1.6.3.dev0", "1.6.3.dev0"] if prerelease_origin else ["1.6.1"])
             + ["1.6.2"]
-            + ["1.6.3.dev0"] * (4 if add_extras else 2),
+            + ["1.6.3.dev0"] * (4 if add_extras else 2)
+            + ["1.6.2"] * 2,
         )
         return package, fresh
 
