@@ -989,6 +989,9 @@ oc\-box \-\-project "$HOME/devel/my project"
 .SS \-\-workspace ID
 .PP
 Select an existing workspace by its full 32\-character ID from \fBoc\-box list\fR\&. This works from another directory and allows cleanup after the project is deleted. Starting, syncing, or resetting still needs its original project directory. The identity marker and registry are not interchangeable with OpenCode session IDs. Example: \fBoc\-box \-\-status \-\-workspace WORKSPACE_ID\fR\&. For \fBlogs\fR, this is an exact workspace ID filter and cannot be combined with \fB\-\-project\fR\&.
+.SS \-\-private\-home
+.PP
+With \fBrepair \-\-workspace ID\fR, record the persistent filesystem identity of an existing converted private home after typed confirmation. The workspace must be stopped, and an older receipt must not already have a persistent baseline. Matching the old inode number does not prove past identity; confirm only if you independently know this is the original volume. This does not start the container, change its runtime floor, or move conversations.
 .SS \-\-status
 .PP
 Report CPU, RAM, storage, state, limits, and sessions without opening OpenCode. Equivalent to \fBstatus\fR\&. Only selectors and \fB\-\-json\fR or \fB\-\-table\fR apply. It cannot be combined with another command, session mode, resource change, or deletion action.
@@ -1065,7 +1068,10 @@ oc\-box reset \-\-project ~/devel/demo \-\-distro debian
 .fi
 .SS \-\-check
 .PP
-With \fBupgrade\fR, preview the saved or explicitly selected published channel and validate support for requested \fB\-\-vault\fR/\fB\-\-tui\fR extras without installing or persisting channel/extra preferences. Returns success when a version is available or the installation is current; it is not an update\-available exit code. Network errors or unsupported requested extras return nonzero. Cannot be combined with \fB\-\-auto\-update\fR, workspace selectors or other commands. Example: \fBoc\-box upgrade \-\-devel \-\-tui \-\-check\fR\&.
+With \fBupgrade\fR, preview the saved or explicitly selected published channel and validate support for requested \fB\-\-vault\fR/\fB\-\-tui\fR extras without installing or persisting channel/extra preferences. Returns success when a version is available or the installation is current; it is not an update\-available exit code. Network errors or unsupported requested extras return nonzero. Cannot be combined with \fB\-\-auto\-update\fR, \fB\-\-force\fR, workspace selectors or other commands. Example: \fBoc\-box upgrade \-\-devel \-\-tui \-\-check\fR\&.
+.SS \-\-force
+.PP
+With \fBupgrade\fR, reinstall the selected published release even when already current. This uses the verified GitHub installation or the verified Python package manager and preserves supported extras. It does not permit an implicit downgrade or change workspace state. Cannot be combined with \fB\-\-check\fR or \fB\-\-auto\-update\fR\&. Example: \fBoc\-box upgrade \-\-force\fR\&.
 .SS \-\-stable
 .PP
 With \fBupgrade\fR, select and remember the stable channel after a successful verified upgrade. With \fB\-\-check\fR, preview only. Mutually exclusive with \fB\-\-devel\fR; cannot be combined with \fB\-\-auto\-update\fR or workspace actions. An explicit downgrade replaces launcher files, not workspace/session state. Example: \fBoc\-box upgrade \-\-stable\fR\&.

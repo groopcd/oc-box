@@ -2833,6 +2833,15 @@ OpenCode session IDs. Example: `oc-box --status --workspace WORKSPACE_ID`.
 For `logs`, this is an exact workspace ID filter and cannot be combined with
 `--project`.
 
+### --private-home
+
+With `repair --workspace ID`, record the persistent filesystem identity of an
+existing converted private home after typed confirmation. The workspace must
+be stopped, and an older receipt must not already have a persistent baseline.
+Matching the old inode number does not prove past identity; confirm only if you
+independently know this is the original volume. This does not start the
+container, change its runtime floor, or move conversations.
+
 ### --status
 
 Report CPU, RAM, storage, state, limits, and sessions without opening OpenCode.
@@ -3010,8 +3019,16 @@ and validate support for requested `--vault`/`--tui` extras without installing
 or persisting channel/extra preferences. Returns success when a version is
 available or the installation is current; it is not an update-available exit
 code. Network errors or unsupported requested extras return nonzero. Cannot be
-combined with `--auto-update`, workspace selectors or other commands.
+combined with `--auto-update`, `--force`, workspace selectors or other commands.
 Example: `oc-box upgrade --devel --tui --check`.
+
+### --force
+
+With `upgrade`, reinstall the selected published release even when already
+current. This uses the verified GitHub installation or the verified Python
+package manager and preserves supported extras. It does not permit an implicit
+downgrade or change workspace state. Cannot be combined with `--check` or
+`--auto-update`. Example: `oc-box upgrade --force`.
 
 ### --stable
 

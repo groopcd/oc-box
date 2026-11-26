@@ -1003,6 +1003,10 @@ oc-box --project "$HOME/devel/my project"
 
 Select an existing workspace by its full 32-character ID from @code{oc-box list}. This works from another directory and allows cleanup after the project is deleted. Starting, syncing, or resetting still needs its original project directory. The identity marker and registry are not interchangeable with OpenCode session IDs. Example: @code{oc-box --status --workspace WORKSPACE_ID}. For @code{logs}, this is an exact workspace ID filter and cannot be combined with @code{--project}.
 
+@section --private-home
+
+With @code{repair --workspace ID}, record the persistent filesystem identity of an existing converted private home after typed confirmation. The workspace must be stopped, and an older receipt must not already have a persistent baseline. Matching the old inode number does not prove past identity; confirm only if you independently know this is the original volume. This does not start the container, change its runtime floor, or move conversations.
+
 @section --status
 
 Report CPU, RAM, storage, state, limits, and sessions without opening OpenCode. Equivalent to @code{status}. Only selectors and @code{--json} or @code{--table} apply. It cannot be combined with another command, session mode, resource change, or deletion action.
@@ -1089,7 +1093,11 @@ oc-box reset --project ~/devel/demo --distro debian
 
 @section --check
 
-With @code{upgrade}, preview the saved or explicitly selected published channel and validate support for requested @code{--vault}/@code{--tui} extras without installing or persisting channel/extra preferences. Returns success when a version is available or the installation is current; it is not an update-available exit code. Network errors or unsupported requested extras return nonzero. Cannot be combined with @code{--auto-update}, workspace selectors or other commands. Example: @code{oc-box upgrade --devel --tui --check}.
+With @code{upgrade}, preview the saved or explicitly selected published channel and validate support for requested @code{--vault}/@code{--tui} extras without installing or persisting channel/extra preferences. Returns success when a version is available or the installation is current; it is not an update-available exit code. Network errors or unsupported requested extras return nonzero. Cannot be combined with @code{--auto-update}, @code{--force}, workspace selectors or other commands. Example: @code{oc-box upgrade --devel --tui --check}.
+
+@section --force
+
+With @code{upgrade}, reinstall the selected published release even when already current. This uses the verified GitHub installation or the verified Python package manager and preserves supported extras. It does not permit an implicit downgrade or change workspace state. Cannot be combined with @code{--check} or @code{--auto-update}. Example: @code{oc-box upgrade --force}.
 
 @section --stable
 
