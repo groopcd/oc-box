@@ -1187,6 +1187,52 @@ class RuntimeSafeguardTests(unittest.TestCase):
             check.assert_called_once_with(box, "2.4.1")
         self.assertEqual(native_runtime_guard.load(self.path).version, "2.4.1")
 
+    def test_guarded_exec_can_forward_an_unchanged_engine_environment_value(self):
+        baseline = self.seed()
+        engine = {"PATH": "/usr/bin", "USER": "synthetic-guarded-user"}
+        with (
+            self.synthetic_admission(OLD),
+            guard.admit(
+                box, self.path, self.data, self.args(), baseline, engine_env=engine
+            ),
+            patch.object(box, "container_env", return_value={"USER": engine["USER"]}),
+        ):
+            command = box.exec_command(self.data, [box.CONTAINER_OPENCODE, "--version"])
+        self.assertEqual(command.environment, engine)
+        self.assertIn("USER", command)
+        self.assertNotIn(engine["USER"], command)
+        with self.assertRaisesRegex(box.BoxError, "overlaps the bound Podman engine"):
+            box._check_bound_exec_environment(
+                {"CONTAINERS_CONF": "/synthetic/config"},
+                {"CONTAINERS_CONF": "/synthetic/config"},
+            )
+
+    def test_guarded_forwarded_conflict_precedes_runtime_floor_and_container_start(
+        self,
+    ):
+        baseline = self.seed()
+        engine = {"PATH": "/usr/bin", "USER": "synthetic-engine"}
+        args = box.parser().parse_args(["start"])
+        with (
+            self.synthetic_admission(),
+            patch.object(guard, "_official_digest", return_value=DIGEST),
+            guard.admit(
+                box, self.path, self.data, args, baseline, engine_env=engine
+            ) as scope,
+            patch.object(
+                box, "container_env", return_value={"USER": "synthetic-workspace"}
+            ),
+            patch.object(box, "check_private_output"),
+            patch.object(scope, "begin") as begin,
+            patch.object(scope, "start") as start,
+            self.assertRaisesRegex(box.BoxError, "overlaps the bound Podman engine"),
+        ):
+            box.launch_environment(self.path, self.data, args)
+        begin.assert_not_called()
+        start.assert_not_called()
+        self.assertEqual(guard.load(box, self.path), baseline)
+        self.assertEqual(box.read_json(self.path)["opencode_version"], OLD)
+
     def test_guarded_upgrade_warns_without_probe_and_publishes_floor_before_open(self):
         previous = self.seed()
         with (

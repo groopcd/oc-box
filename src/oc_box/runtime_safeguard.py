@@ -1230,6 +1230,7 @@ def admit(
             # the original OS before the owning launch can unlock its vault.
             args._opencode_release = version
             prepare_replacement()
+            box.check_guarded_exec_environment(data, retirement_env)
             host.command(box)
             entrypoint_migration.convert(
                 box, path, data, token, source_id, rebuild=rebuild, env=retirement_env
