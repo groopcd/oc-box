@@ -454,8 +454,10 @@ their checkout ownership distinct from unrelated source and flat installations.
   assets must not prevent ordinary startup or relax unrelated runtime guards.
 - `inline_timestamps*.mjs`: independently opted-in stock native TUI display.
   Add only owned, noninteractive labels inside positively identified main
-  transcript rows. Match the current session's exact prompt or tool IDs,
-  never rendered text, ordinal positions, enclosing assistant IDs or groups.
+  transcript rows. Match the current session's exact prompt or tool IDs, or
+  the confirmed whole-message scroll anchor for a delivered shell/subagent
+  completion notice. Use its recorded notice time, not an inferred job end.
+  Never match rendered text, ordinal positions, enclosing assistant IDs or groups.
   Bound renderer/cache traversal, remove only owned nodes, and leave an
   unfamiliar or ambiguous layout alone. Do not patch OpenCode, alter model
   input, or add server hooks.

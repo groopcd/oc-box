@@ -218,14 +218,16 @@ UI, or the oc-box manager.
 
 The `inline-timestamps` add-on adds a separate date and time line below matched
 rows in the main transcript. It uses stock OpenCode without a binary patch or
-an exact-version allowlist. It can label prompt rows and tool rows with
-explicit native tool-call IDs. It skips grouped summaries, unlabeled or
-ambiguous rows, and layouts it cannot recognize; it never matches displayed
-text or guesses by row order. Native verbosity and grouping affect which tool
-rows are identifiable. If a call's invocation was not recorded, a displayed
-creation time is labeled. It does not alter saved messages or add model tokens.
-Keep Activity Timeline enabled if you also want the separate panel for
-timestamps the inline view cannot place.
+an exact-version allowlist. It can label prompt rows, tool rows with explicit
+native tool-call IDs, and shell and subagent `finished` notices that OpenCode
+maps to their exact transcript rows. A finished notice shows when it was
+recorded in the conversation, which can differ from when the work ended.
+The add-on skips pending notices, grouped summaries, ambiguous rows, and
+layouts it cannot recognize; it never matches displayed text or guesses by
+row order. Native verbosity and grouping affect which tool rows are
+identifiable. If a tool's invocation was not recorded, a displayed creation
+time is labeled. It does not alter saved messages or add model tokens. The
+separate Activity Timeline panel remains available.
 
 ### doctor
 

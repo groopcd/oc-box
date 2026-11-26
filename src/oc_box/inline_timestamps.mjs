@@ -8,6 +8,7 @@ const MAX_ROWS = 512
 const MESSAGE_ID = /^msg[A-Za-z0-9_-]{1,125}$/
 const TOOL_ID = /^[A-Za-z0-9_.-]{1,128}$/
 const SESSION_ID = /^ses[A-Za-z0-9_-]{1,125}$/
+const COMPLETION_SOURCES = new Set(["shell", "subagent"])
 
 function isID(value, pattern) {
   return typeof value === "string" && pattern.test(value)
@@ -18,8 +19,10 @@ function toolTime(time) {
   if (validTime(time?.created)) return { time: time.created, unknown: true }
 }
 
-function format({ time, unknown }) {
-  return localTimestamp(time) + (unknown ? " · call created; invocation unknown" : "")
+function format({ time, unknown, notice }) {
+  const timestamp = localTimestamp(time)
+  if (notice) return `${timestamp} · notice recorded`
+  return timestamp + (unknown ? " · call created; invocation unknown" : "")
 }
 
 export function transcriptTimes(messages) {
@@ -32,6 +35,10 @@ export function transcriptTimes(messages) {
   for (const [id, message] of unique) {
     if (message?.type === "user" && validTime(message.time?.created)) {
       times.set(id, { time: message.time.created, unknown: false })
+    }
+    if (message?.type === "synthetic" && message.metadata?.state === "completed" &&
+        COMPLETION_SOURCES.has(message.metadata.source) && validTime(message.time?.created)) {
+      times.set(id, { time: message.time.created, unknown: false, notice: true })
     }
     if (message?.type !== "assistant" || !Array.isArray(message.content) || message.content.length > MAX_PARTS) continue
     const parts = new Map()
@@ -73,9 +80,38 @@ function findOne(root, matches) {
   return match
 }
 
-function placements(root, times, column, decorations) {
+function completionRows(times, anchors, pending) {
+  const rows = new Map()
+  if (!anchors || !Array.isArray(pending) || pending.length > MAX_ROWS) return rows
+  const pendingIDs = new Set()
+  for (const item of pending) {
+    if (typeof item?.id !== "string") return rows
+    pendingIDs.add(item.id)
+  }
+  for (const [id, stamp] of times) {
+    // The projected creation timestamp can change when a queued notice is
+    // delivered. Wait for the settled transcript record.
+    if (!stamp.notice || pendingIDs.has(id)) continue
+    const anchor = anchors.get({ type: "part", ref: { messageID: id, partID: "message" } })
+    const ref = anchor?.target?.ref
+    const row = anchor?.node
+    if (anchor?.target?.type !== "part" || ref?.messageID !== id || ref.partID !== "message" ||
+        !visible(row) || (row.id != null && row.id !== id)) continue
+    rows.set(row, rows.has(row) ? undefined : id)
+  }
+  return rows
+}
+
+function placements(root, times, column, decorations, completion) {
   const result = new Map()
   if (!times.size) return result
+  let notices
+  try { notices = completionRows(times, completion?.anchors, completion?.pending) } catch { notices = new Map() }
+  const rowID = (row) => {
+    if (notices.has(row)) return notices.get(row)
+    const stamp = times.get(row.id)
+    if (stamp && !stamp.notice) return row.id
+  }
   // This is a private layout, not a native plugin slot. Require one visible
   // session pane and a unique scrollbox with matching *direct* transcript rows.
   const pane = findOne(root, (node) => node.id === "session-pane")
@@ -83,15 +119,16 @@ function placements(root, times, column, decorations) {
     if (typeof node.scrollBy !== "function") return false
     const rows = node.getChildren?.()
     return Array.isArray(rows) && rows.length <= MAX_ROWS &&
-      rows.some((row) => row?.parent === node && times.has(row.id))
+      rows.some((row) => row?.parent === node && rowID(row))
   })
   if (!scroll) return result
   const rows = scroll.getChildren()
   if (!Array.isArray(rows) || rows.length > MAX_ROWS) return result
   const unique = new Map()
   for (const row of rows) {
-    if (row?.parent !== scroll || !times.has(row.id)) continue
-    unique.set(row.id, unique.has(row.id) ? undefined : row)
+    if (row?.parent !== scroll) continue
+    const id = rowID(row)
+    if (id) unique.set(id, unique.has(id) ? undefined : row)
   }
   for (const [id, row] of unique) {
     if (!visible(row) || typeof row.add !== "function" || row.getFlexDirection?.() !== column) continue
@@ -130,13 +167,13 @@ export function createInlineTimestamps({ column, makeLabel }) {
   }
 
   return {
-    update({ root, sessionID, messages, color }) {
+    update({ root, sessionID, messages, color, completion }) {
       if (session !== sessionID) {
         clear()
         session = sessionID
       }
       const wanted = isID(session, SESSION_ID) && Array.isArray(messages)
-        ? placements(root, transcriptTimes(messages), column, decorations)
+        ? placements(root, transcriptTimes(messages), column, decorations, completion)
         : new Map()
       for (const [row, entry] of decorations) {
         if (wanted.get(row)?.id !== entry.id || entry.node.isDestroyed ||

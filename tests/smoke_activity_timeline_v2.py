@@ -21,6 +21,7 @@ from oc_box import oc_box as box
 
 
 SESSION = "ses_activity_example"
+FINISHED_NOTICES = (("shell", "Shell", 51), ("subagent", "General", 52))
 
 
 @contextmanager
@@ -119,6 +120,22 @@ def seed(request, project, *, inline=False):
                     "outcome": "succeeded",
                     "time": {"created": millis(50)},
                 },
+                *(
+                    {
+                        "id": f"msg_activity_notice_{second}",
+                        "type": "synthetic",
+                        "text": "Synthetic background result",
+                        "description": "Review the sample note",
+                        "metadata": {
+                            "source": source,
+                            "state": "completed",
+                            "agent": "general",
+                        },
+                        "time": {"created": millis(second)},
+                    }
+                    for source, _, second in FINISHED_NOTICES
+                    if inline
+                ),
             ],
             "location": {"directory": str(project)},
         },
@@ -284,7 +301,16 @@ def exercise(binary, root):
 
 
 def exercise_inline(binary, root):
-    stamps = tuple(f"2026-11-26 14:32:{second:02} +00:00" for second in (1, 7, 18))
+    stamps = tuple(
+        f"2026-11-26 14:32:{second:02} +00:00"
+        for second in (
+            1,
+            7,
+            18,
+            *(second for _, _, second in FINISHED_NOTICES),
+        )
+    )
+    notices = tuple(f"{actor} finished" for _, actor, _ in FINISHED_NOTICES)
     ambiguous = "2026-11-26 14:32:04 +00:00"
     with native_fixture(binary, root, include_addons=True, inline=True) as fixture:
         project, env, cli, native = fixture
@@ -311,15 +337,21 @@ def exercise_inline(binary, root):
                     session_id=SESSION,
                 )
                 try:
-                    client.watch("Synthetic activity reply", ambiguous, *stamps)
+                    client.watch(
+                        "Synthetic activity reply", ambiguous, *stamps, *notices
+                    )
                     client.wait(
                         lambda: client.labels["Synthetic activity reply"],
                         "native transcript",
                     )
+                    client.wait(
+                        lambda: all(client.labels[label] for label in notices),
+                        "native finished notices",
+                    )
                     if enabled and not missing:
                         client.wait(
                             lambda: all(client.labels[stamp] for stamp in stamps),
-                            "inline prompt, shell and edit timestamps",
+                            "inline prompt, tool and finished-notice timestamps",
                         )
                     else:
                         client.drain(0.3)
@@ -370,7 +402,7 @@ def demo(binary, root, setting, *, inline=False):
         enabled = box.workspace_ui_preferences(path, workspace)["addons"][addon]
         if inline:
             print(
-                "Look below the prompt, shell command and edit for matched inline timestamps."
+                "Look below the prompt, tool rows and finished notices for matched inline timestamps."
                 if enabled
                 else "Inline timestamps are off; the native transcript should have no added timestamps."
             )

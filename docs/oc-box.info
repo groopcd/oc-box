@@ -285,15 +285,17 @@ oc-box manager.
 
 The ‘inline-timestamps’ add-on adds a separate date and time line below
 matched rows in the main transcript.  It uses stock OpenCode without a
-binary patch or an exact-version allowlist.  It can label prompt rows
-and tool rows with explicit native tool-call IDs.  It skips grouped
-summaries, unlabeled or ambiguous rows, and layouts it cannot recognize;
-it never matches displayed text or guesses by row order.  Native
-verbosity and grouping affect which tool rows are identifiable.  If a
-call's invocation was not recorded, a displayed creation time is
-labeled.  It does not alter saved messages or add model tokens.  Keep
-Activity Timeline enabled if you also want the separate panel for
-timestamps the inline view cannot place.
+binary patch or an exact-version allowlist.  It can label prompt rows,
+tool rows with explicit native tool-call IDs, and shell and subagent
+‘finished’ notices that OpenCode maps to their exact transcript rows.  A
+finished notice shows when it was recorded in the conversation, which
+can differ from when the work ended.  The add-on skips pending notices,
+grouped summaries, ambiguous rows, and layouts it cannot recognize; it
+never matches displayed text or guesses by row order.  Native verbosity
+and grouping affect which tool rows are identifiable.  If a tool's
+invocation was not recorded, a displayed creation time is labeled.  It
+does not alter saved messages or add model tokens.  The separate
+Activity Timeline panel remains available.
 
 4.3 doctor
 ==========
@@ -5748,20 +5750,20 @@ Node: Name769
 Node: Synopsis930
 Node: Description5431
 Node: Commands11251
-Node: Options172219
-Node: Lifecycle and persistence239733
-Node: Distribution images242033
-Node: Sessions and recovery247110
-Node: Devices and host permissions253695
-Node: Resource reports256041
-Node: Configuration and environment258152
-Node: Files269533
-Node: Exit status280443
-Node: Examples281851
-Node: Troubleshooting283990
-Node: Installation and manuals296482
-Node: Authors and license306672
-Node: See also307279
+Node: Options172379
+Node: Lifecycle and persistence239893
+Node: Distribution images242193
+Node: Sessions and recovery247270
+Node: Devices and host permissions253855
+Node: Resource reports256201
+Node: Configuration and environment258312
+Node: Files269693
+Node: Exit status280603
+Node: Examples282011
+Node: Troubleshooting284150
+Node: Installation and manuals296642
+Node: Authors and license306832
+Node: See also307439
 
 End Tag Table
 

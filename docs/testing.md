@@ -859,11 +859,12 @@ To preview the stock OpenCode inline add-on instead, add `--inline`:
 python3 -B tests/smoke_activity_timeline_v2.py --opencode "$(command -v opencode)" --demo on --inline
 ```
 
-The synthetic inline demo shows a prompt, shell command and edit with exact
-native row identities, and a read that is not labeled because it has no
-explicit tool row ID. `--inline` without `--demo` verifies the on, off, and
-missing-module paths with both plug-ins staged. This is native TUI testing,
-not an external Podman acceptance or a custom OpenCode build.
+The synthetic inline demo shows a prompt, shell command, edit, and recorded
+shell and subagent completion notices with exact native row identities.
+A grouped read is not labeled because it has no explicit tool row ID.
+`--inline` without `--demo` verifies the on, off, and missing-module paths
+with both plug-ins staged. This is native TUI testing, not an external
+Podman acceptance or a custom OpenCode build.
 
 ### Experimental host-image attachments
 

@@ -164,3 +164,67 @@ test("a silent scene refusal cannot keep a stale annotation or request new ones 
   refusing.clear()
   assert.equal(refusingRow.children.length, 1)
 })
+
+test("finished notices use their own exact whole-message anchors and recorded times", () => {
+  const nativePrompt = row("msg_prompt")
+  const shell = row(undefined)
+  const child = row(undefined)
+  const script = row(undefined)
+  const unknown = row("msg_unproved")
+  const failed = row(undefined)
+  const root = frame([nativePrompt, shell, child, script, unknown, failed])
+  const adapter = decorator()
+  const notice = (id, source, created, state = "completed") => ({
+    id, type: "synthetic", time: { created, completed: 100 }, metadata: { source, state },
+    get description() { throw new Error("the add-on must not read the description") },
+  })
+  const messages = [
+    prompt,
+    notice("msg_shell", "shell", 4),
+    notice("msg_child", "subagent", 5),
+    notice("msg_script", "codemode", 6),
+    notice("msg_unproved", "shell", 7),
+    notice("msg_failed", "shell", 8, "error"),
+  ]
+  const nodes = { msg_shell: shell, msg_child: child, msg_script: script, msg_failed: failed }
+  const anchors = {
+    get(target) {
+      const node = nodes[target.ref.messageID]
+      if (node) return { target, node }
+    },
+  }
+  const input = { root, sessionID: "ses_example", messages }
+  adapter.update({ ...input, completion: { anchors, pending: [{ id: "msg_child" }] } })
+  assert.equal(shell.children[1].content, `${localTimestamp(4)} · notice recorded`)
+  assert.equal(nativePrompt.children[1].content, localTimestamp(1))
+  assert.deepEqual([child.children.length, script.children.length, unknown.children.length, failed.children.length], [1, 1, 1, 1])
+  adapter.update({ ...input, completion: { anchors, pending: [] } })
+  assert.equal(child.children[1].content, `${localTimestamp(5)} · notice recorded`)
+  adapter.update({ ...input, completion: { anchors } })
+  assert.deepEqual([shell.children.length, child.children.length, script.children.length], [1, 1, 1])
+  assert.equal(nativePrompt.children.length, 2)
+})
+
+test("finished notice anchors cannot use the wrong part, another row ID, or a duplicate node", () => {
+  const reused = row(undefined)
+  const foreign = row("msg_other")
+  const wrongPart = row(undefined)
+  const promptRow = row("msg_prompt")
+  const root = frame([reused, foreign, wrongPart, promptRow])
+  const adapter = decorator()
+  const messages = [prompt, ...["msg_one", "msg_two", "msg_three", "msg_four"].map((id) => ({
+    id, type: "synthetic", time: { created: 4 }, metadata: { source: "shell", state: "completed" },
+  }))]
+  const anchors = {
+    get(target) {
+      const { messageID } = target.ref
+      if (messageID === "msg_four") {
+        return { target: { type: "part", ref: { messageID, partID: "a-different-part" } }, node: wrongPart }
+      }
+      return { target, node: messageID === "msg_three" ? foreign : reused }
+    },
+  }
+  adapter.update({ root, sessionID: "ses_example", messages, completion: { anchors, pending: [] } })
+  assert.deepEqual([reused.children.length, foreign.children.length, wrongPart.children.length], [1, 1, 1])
+  assert.equal(promptRow.children.length, 2)
+})
