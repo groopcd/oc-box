@@ -1981,7 +1981,7 @@ def install_baseline(data, *, guarded=None):
         )
 
 
-def stop_container(data, *, env=None, local_only=False):
+def stop_container(data, *, env=None, local_only=False, timeout=None):
     guarded = runtime_safeguard.current()
     migration = runtime_safeguard.entrypoint_migration
     if migration.RETIRE in data:
@@ -2001,6 +2001,8 @@ def stop_container(data, *, env=None, local_only=False):
     if guarded is not None:
         data = {**data, "container": guarded.record.container}
     options = {"env": env} if env is not None else {}
+    if timeout is not None:
+        options["timeout"] = timeout
     if local_only:
         info = inspect_owned(data, local_only=True, **options)
     else:
@@ -6504,15 +6506,37 @@ def _validate_web_release(args, version):
             raise BoxError(web_attachments.UNVERIFIED_RELEASE)
 
 
-def _stop_selected(path, data, *, admitted=False):
+def _stop_guard_binding(path, data):
+    migration = runtime_safeguard.entrypoint_migration
+    durable = tuple(
+        (key, data[key])
+        for key in (migration.FIELD, migration.RETIRE, migration.RECEIPT)
+        if key in data
+    )
+    return durable, runtime_safeguard.guard_stamp(sys.modules[__name__], path)
+
+
+def _stop_selected(path, data, *, admitted=False, guard_binding=None):
     selected, current = find_workspace(None, data["id"])
     if selected != path or not current:
         raise BoxError("The workspace registration changed; no substitute was stopped.")
     migration = runtime_safeguard.entrypoint_migration
+    changed = "The guarded stop binding changed; no substitute was stopped."
+    if (
+        guard_binding is not None
+        and _stop_guard_binding(path, current) != guard_binding
+    ):
+        raise BoxError(changed)
     if migration.FIELD in current:
         raise BoxError(migration.PENDING)
     data = current
     record = runtime_safeguard.load(sys.modules[__name__], path)
+    if guard_binding is not None and (
+        (record is None) != (guard_binding[1] is None)
+        or runtime_safeguard.guard_stamp(sys.modules[__name__], path)
+        != guard_binding[1]
+    ):
+        raise BoxError(changed)
     if migration.RETIRE in data:
         if not admitted:
             raise BoxError(
@@ -6525,6 +6549,8 @@ def _stop_selected(path, data, *, admitted=False):
         )
         return
     elif record:
+        if not admitted:
+            raise BoxError("Guarded stop was not admitted; no substitute was stopped.")
         # Stop the same owned object without depending on optional devices,
         # native startup, or hardware access.
         env = migration.engine_environment(sys.modules[__name__])
@@ -6534,9 +6560,25 @@ def _stop_selected(path, data, *, admitted=False):
             raise BoxError(
                 "The guarded container identity changed; no substitute was stopped."
             )
-        data = {**data, "container": record.container}
-        stop_container(data, env=env, local_only=True)
-        final = inspect_owned(data, local_only=True, env=env, private=True, timeout=15)
+        if info["State"]["Running"]:
+            podman(
+                "--remote=false",
+                "stop",
+                "--time",
+                "10",
+                record.container,
+                capture=True,
+                private=True,
+                timeout=15,
+                env=env,
+            )
+        final = inspect_owned(
+            {**data, "container": record.container},
+            local_only=True,
+            env=env,
+            private=True,
+            timeout=15,
+        )
         if (
             not final
             or final.get("Id") != record.container
@@ -6548,26 +6590,33 @@ def _stop_selected(path, data, *, admitted=False):
                 "Could not verify the guarded workspace stopped on its local engine."
             )
         return
-    if opencode_compat.major(data.get("opencode_version", "1.0.0")) == 2:
-        check_backend()
-    stop_container(data)
+    if migration.durable_registry(data):
+        raise BoxError("The guarded stop record is missing; no substitute was stopped.")
+    if admitted:
+        stop_container(data, timeout=30)
+    else:
+        stop_container(data)
 
 
 def _stop_v2(path, data):
+    binding = _stop_guard_binding(path, data)
+    guarded = bool(binding[0]) or binding[1] is not None
+    if not guarded:
+        with loading_stage("Checking rootless Podman", stage="backend"):
+            check_backend()
     stopped = False
     try:
-        # Publish before inspecting the independent runtime sidecar. A pending
+        # Publish before reading the independent runtime sidecar. A pending
         # replacement must never cancel a stop request.
         workspace_control.request_stop(path)
         with workspace_control.admission(path, timeout=45):
-            _stop_selected(path, data, admitted=True)
+            _stop_selected(path, data, admitted=True, guard_binding=binding)
             stopped = True
             workspace_control.require_certain(path)
     except workspace_control.ControlError as exc:
-        # Preserve ordinary best-effort stop, but never dispatch a staged
-        # stop without admission or repeat an already completed stop.
-        if not stopped:
-            _stop_selected(path, data)
+        # Best effort remains available only for a still-ordinary target.
+        if not stopped and not guarded:
+            _stop_selected(path, data, guard_binding=binding)
         raise BoxError(str(exc)) from None
 
 
