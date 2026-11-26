@@ -258,6 +258,44 @@ class GuardedDiscardTests(unittest.TestCase):
         self.assertEqual(self.run_discard(), 0)
         self.assertEqual(self.engine.removals, [("volume", self.name)])
 
+    def test_strong_receipt_never_falls_back_to_matching_device_and_inode(self):
+        del self.engine.containers[OLD]
+        identity = list(discard._identity(self.home)[:2])
+        self.data[migration.RECEIPT] = {
+            "id": OLD,
+            "bootstrap": False,
+            "volume": identity,
+        }
+        stable = {
+            "method": "linux-file-handle-v1",
+            "fsid": "1234",
+            "handle": {"type": 1, "bytes": "00010203"},
+        }
+        self.data[migration.HOME_IDENTITY] = stable
+        box.atomic_json(self.path, self.data)
+        snapshot = discard.workspace_identity.snapshot_fd
+
+        def observe(proof):
+            def at(fd):
+                current, observed = snapshot(fd)
+                return (current, proof) if current == identity else (current, observed)
+
+            return patch.object(
+                discard.workspace_identity, "snapshot_fd", side_effect=at
+            )
+
+        with observe({**stable, "fsid": "4321"}):
+            with self.assertRaisesRegex(box.BoxError, "filesystem identity"):
+                self.run_discard()
+        self.assertEqual(self.engine.removals, [])
+        self.confirm.assert_not_called()
+        # A device-only renumber is accepted only with the recorded proof.
+        self.data[migration.RECEIPT]["volume"] = [identity[0] + 1, identity[1]]
+        box.atomic_json(self.path, self.data)
+        with observe(stable):
+            self.assertEqual(self.run_discard(), 0)
+        self.assertEqual(self.engine.removals, [("volume", self.name)])
+
     def test_active_or_reused_container_refuses_without_confirmation(self):
         for changed in (
             {**self.old, "State": {**self.old["State"], "Running": True, "Pid": 42}},

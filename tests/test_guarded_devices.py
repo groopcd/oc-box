@@ -5,12 +5,14 @@ from pathlib import Path
 import stat
 from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import call, patch
 
 from oc_box import guarded_devices as devices, oc_box as box
 
 
-NODES = ["/dev/accel/accel0", "/dev/dri/renderD128"]
+KVM = "/dev/kvm"
+NODES = ["/dev/accel/accel0", "/dev/dri/renderD128", KVM]
+MAPPINGS = [*NODES[:-1], f"{KVM}:rw"]
 IDENT = "a" * 64
 ENGINE = {"PATH": "/usr/bin", "CONTAINERS_CONF": "/synthetic/local.conf"}
 GRAPH = Path("/synthetic/containers")
@@ -21,18 +23,21 @@ RUNDIR = RUN / "overlay-containers" / IDENT / "userdata"
 
 class GuardedDevicesTests(unittest.TestCase):
     def setUp(self):
-        self.data = {"devices": NODES.copy()}
+        self.data = {"devices": MAPPINGS.copy()}
         self.info = {
             "Id": IDENT,
             "HostConfig": {"Privileged": False, "Devices": []},
             "Config": {
-                "CreateCommand": ["podman", "create", *(f"--device={d}" for d in NODES)]
+                "CreateCommand": [
+                    "podman", "create", *(f"--device={mapping}" for mapping in MAPPINGS)
+                ]
             },
             "OCIConfigPath": str(BUNDLE / "config.json"),
         }
         self.declared = {
             "host_device_list": [
-                {"path": path, "type": "", "major": 0, "minor": 0} for path in NODES
+                {"path": mapping, "type": "", "major": 0, "minor": 0}
+                for mapping in MAPPINGS
             ]
         }
         self.oci = {
@@ -86,7 +91,7 @@ class GuardedDevicesTests(unittest.TestCase):
         ):
             result = devices.verify(box, self.data, self.info, ENGINE, fresh=fresh)
         self.assertEqual(podman.call_count, 2)
-        self.assertEqual(stat.call_count, 4)
+        self.assertEqual(stat.call_count, 2 * len(NODES))
         if fresh and not self.info.get("OCIConfigPath"):
             bundle.assert_not_called()
         else:
@@ -105,6 +110,11 @@ class GuardedDevicesTests(unittest.TestCase):
             ["/dev/dri/../dri/renderD128"],
             ["/dev/dri/renderD128"] * 2,
             ["/dev/mem"],
+            ["/dev/kvm"],
+            ["/dev/kvm:r"],
+            ["/dev/kvm:rwm"],
+            ["/dev/kvm:/dev/kvm:rw"],
+            ["/dev/kvm:rw"] * 2,
         ):
             with (
                 self.subTest(value=value),
@@ -116,7 +126,56 @@ class GuardedDevicesTests(unittest.TestCase):
         del self.info["OCIConfigPath"]
         with self.assertRaisesRegex(devices.DeviceError, "previously generated"):
             self.verify()
-        self.assertEqual(len(self.verify(fresh=True)), 2)
+        self.assertEqual(len(self.verify(fresh=True)), len(NODES))
+
+    def test_kvm_requires_exact_saved_mapping_in_independent_podman_metadata(self):
+        create = self.info["Config"]["CreateCommand"]
+        create[-1] = "--device=/dev/kvm"
+        with patch.object(box, "podman") as podman:
+            with self.assertRaisesRegex(devices.DeviceError, "do not match"):
+                devices.verify(box, self.data, self.info, ENGINE)
+            podman.assert_not_called()
+        create[-1] = "--device=/dev/kvm:rw"
+        declared_kvm = self.declared["host_device_list"][-1]
+        declared_kvm["path"] = "/dev/kvm"
+        with self.assertRaisesRegex(devices.DeviceError, "do not match"):
+            self.verify()
+        declared_kvm["path"] = "/dev/kvm:rw"
+        kvm_mount = self.oci["mounts"][len(NODES) - 1]
+        kvm_mount["destination"] = "/dev/other"
+        with self.assertRaisesRegex(devices.DeviceError, "do not match"):
+            self.verify()
+
+    def test_kvm_checks_direct_linux_device_identity_without_opening_for_io(self):
+        kvm = os.makedev(10, 232)
+        for mode, rdev, allowed in (
+            (stat.S_IFCHR, kvm, True),
+            (stat.S_IFCHR, os.makedev(1, 3), False),
+            (stat.S_IFLNK, kvm, False),
+        ):
+            info = SimpleNamespace(st_mode=mode, st_dev=1, st_ino=2, st_rdev=rdev)
+            with (
+                self.subTest(mode=mode, rdev=rdev),
+                patch.object(devices.os, "open", side_effect=[10, 11]) as open_node,
+                patch.object(devices.os, "fstat", return_value=info),
+                patch.object(devices.os, "close") as close,
+            ):
+                if allowed:
+                    self.assertEqual(devices._node(KVM), (1, 2, kvm))
+                else:
+                    with self.assertRaisesRegex(devices.DeviceError, "direct character"):
+                        devices._node(KVM)
+                self.assertEqual(
+                    open_node.call_args_list,
+                    [
+                        call(
+                            "/dev",
+                            os.O_PATH | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
+                        ),
+                        call("kvm", os.O_PATH | os.O_CLOEXEC | os.O_NOFOLLOW, dir_fd=10),
+                    ],
+                )
+                self.assertEqual(close.call_args_list, [call(11), call(10)])
 
     def test_refuses_missing_extra_or_changed_effective_bindings(self):
         expected = copy.deepcopy(self.oci)
@@ -218,7 +277,7 @@ class GuardedDevicesTests(unittest.TestCase):
             patch.object(devices.os, "stat", side_effect=FileNotFoundError),
             patch.object(Path, "lstat", autospec=True, side_effect=metadata),
         ):
-            self.assertEqual(len(self.verify()), 2)
+            self.assertEqual(len(self.verify()), len(NODES))
 
     def test_stopped_runtime_subdirectory_may_already_be_cleaned_up(self):
         self.ephemeral_binds()
@@ -232,7 +291,7 @@ class GuardedDevicesTests(unittest.TestCase):
             patch.object(devices.os, "stat", side_effect=FileNotFoundError),
             patch.object(Path, "lstat", autospec=True, side_effect=metadata),
         ):
-            self.assertEqual(len(self.verify()), 2)
+            self.assertEqual(len(self.verify()), len(NODES))
 
     def test_missing_bind_from_other_source_or_running_state_refuses(self):
         mounts = self.ephemeral_binds()
@@ -292,7 +351,9 @@ class GuardedDevicesTests(unittest.TestCase):
             self.assertIs(passed, ENGINE)
         with devices.creation_env(ENGINE, NODES) as passed:
             path = Path(passed.pop("CONTAINERS_CONF_OVERRIDE"))
-            self.assertEqual(path.read_text(), "[containers]\ndevices = []\n")
+            self.assertEqual(
+                path.read_text(), "[containers]\ndevices = [{append = false}]\n"
+            )
             self.assertEqual(path.stat().st_mode & 0o777, 0o600)
             self.assertEqual(passed, ENGINE)
         self.assertFalse(path.exists())

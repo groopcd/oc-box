@@ -2376,15 +2376,17 @@ class Gateway:
             if isinstance(connection, dict)
             else None
         )
-        if container is not None and isinstance(data, dict) and data.get("devices"):
-            safeguard = getattr(box, "runtime_safeguard", None)
-            guarded = safeguard.current() if safeguard else None
-            environment = getattr(guarded, "engine_env", None)
+        safeguard = getattr(box, "runtime_safeguard", None)
+        guarded = safeguard.current() if safeguard and container is not None else None
+        environment = getattr(guarded, "engine_env", None)
+        if container is not None and (
+            environment is not None or (isinstance(data, dict) and data.get("devices"))
+        ):
             if environment is None:
                 environment = _borrowed_device_engine(data, container)
             if environment is None:
                 raise box.BoxError(
-                    "Private workspace relay lost its local device engine binding."
+                    "Private workspace relay lost its local engine binding."
                 )
             self._device_relay = {
                 "engine_env": environment.copy(),

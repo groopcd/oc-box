@@ -14,6 +14,7 @@ import re
 import shutil
 import stat
 import subprocess
+import sys
 import tempfile
 
 if __package__:
@@ -74,11 +75,6 @@ with tempfile.TemporaryDirectory(prefix="oc-box-native-install-") as home:
 def release_key(version):
     match = _RELEASE.fullmatch(version) if isinstance(version, str) else None
     return tuple(map(int, match.groups())) if match else None
-
-
-def version_upgrade(previous, candidate):
-    old, new = release_key(previous), release_key(candidate)
-    return old is not None and new is not None and new > old
 
 
 def cli(box, arguments):
@@ -183,7 +179,20 @@ def _probe_digest(box, version):
 def _candidate_digest(box, path, host, version, *, recheck):
     try:
         probe = _probe_digest(box, version)
-        previous = native_runtime_guard.rejected(path)
+        try:
+            previous = native_runtime_guard.rejected(path)
+            writable = True
+        except (OSError, native_runtime_guard.GuardError):
+            # A negative cache is not admission authority. Require fresh
+            # proof, without replacing an unreadable or unsafe receipt.
+            previous = None
+            writable = False
+            startup_output.line(
+                "oc-box: A saved OpenCode compatibility refusal could not be read. "
+                "Running a fresh isolated check without changing that record.",
+                file=sys.stderr,
+                flush=True,
+            )
         if (
             not recheck
             and previous is not None
@@ -203,7 +212,8 @@ def _candidate_digest(box, path, host, version, *, recheck):
         except box.BoxError as failure:
             exc = failure.__cause__
             if (
-                isinstance(exc, native_preflight.Refusal)
+                writable
+                and isinstance(exc, native_preflight.Refusal)
                 and exc.category in _INCOMPATIBLE
             ):
                 record = native_runtime_guard.Rejection(
@@ -216,6 +226,36 @@ def _candidate_digest(box, path, host, version, *, recheck):
         raise box.BoxError(
             "Cannot safely read or record the OpenCode compatibility decision."
         ) from None
+
+
+def _official_digest(box, version, expected):
+    """Verify the public CLI package before any new protected floor is written."""
+    error = (
+        f"Cannot verify the host OpenCode {version} against the official package. "
+        "The existing protected runtime was not changed. Check registry access "
+        "and use the official native executable."
+    )
+    try:
+        with (
+            box.loading_stage("Verifying OpenCode package", stage="version")
+            if lifecycle_output.concise()
+            else contextlib.nullcontext()
+        ):
+            result = box.run(
+                [*SYSTEM_HELPER, "-c", native_preflight.ARTIFACT_SOURCE, version],
+                cwd="/",
+                env={"PATH": _HOST_PROBE_PATH, "LANG": "C.UTF-8"},
+                stdin=subprocess.DEVNULL,
+                timeout=120,
+                capture=True,
+                private=True,
+                check=False,
+            )
+            if result.returncode != 0 or result.stdout != expected + "\n":
+                raise ValueError
+    except (OSError, ValueError, box.BoxError):
+        raise box.BoxError(error) from None
+    return expected
 
 
 def _signature(info):
@@ -320,23 +360,32 @@ def _host_release(box, binary):
     return read_version(box, binary.command(box))
 
 
-def load(box, path):
+def guard_stamp(box, path):
+    """Observe the guard entry without following a link or reading its record."""
     # Do not impose the new sidecar schema on ordinary legacy workspaces.
     # lstat also detects a dangling link; it is not an absent preference.
     try:
-        path.with_name("native-runtime-guard.json").lstat()
+        return _signature(path.with_name("native-runtime-guard.json").lstat())
     except FileNotFoundError:
         return None
     except OSError:
         raise box.BoxError("Cannot safely inspect the native runtime guard.") from None
+
+
+def load(box, path):
+    if guard_stamp(box, path) is None:
+        return None
     try:
         return native_runtime_guard.load(path)
     except native_runtime_guard.GuardError as exc:
         raise box.BoxError(str(exc)) from None
 
 
-def _inspect(box, path, data, *, running, attach_only=False, engine_env=None):
+def _inspect(
+    box, path, data, *, running, attach_only=False, engine_env=None, home_review=None
+):
     """Keep the guarded operation on the same passive, ordinary resources."""
+    check = "project-identity"
     try:
         if attach_only and running is not True:
             raise ValueError
@@ -349,35 +398,44 @@ def _inspect(box, path, data, *, running, attach_only=False, engine_env=None):
             engine_env = entrypoint_migration.engine_environment(box)
         options = {"env": engine_env} if engine_env is not None else {}
         staged = entrypoint_migration.RETIRE in data
-        prefix = ("--remote=false",) if staged or saved else ()
-        info = box.inspect_owned(
-            data, **({"local_only": True} if prefix else {}), **options
+        prefix = (
+            ("--remote=false",)
+            if staged or saved or engine_env is not None or home_review is not None
+            else ()
         )
-        if (
-            not isinstance(info, dict)
-            or not _HASH.fullmatch(info["Id"])
-            or info["State"]["Running"] is not running
-            or info["State"].get("Paused") is True
-            or (
-                staged
-                and running
-                and not entrypoint_migration.running_replacement(info)
-            )
-            or (
-                info["State"].get("Status")
-                not in (("running",) if running else ("exited", "stopped"))
-                and (running or not entrypoint_migration.fresh_replacement(data, info))
-            )
-            or len(info["Mounts"]) != 2
-            or (
-                entrypoint_migration.RECEIPT in data
-                and (
-                    not entrypoint_migration.replacement_matches(data, info)
-                    or not entrypoint_migration.no_copy_binding(data, info)
-                )
-            )
+        check = "container-inspection"
+        info = box.inspect_owned(
+            data,
+            **({"local_only": True} if prefix else {}),
+            **({"private": True, "timeout": 12} if home_review is not None else {}),
+            **options,
+        )
+        if not isinstance(info, dict) or not _HASH.fullmatch(info["Id"]):
+            raise ValueError
+        check = "container-state"
+        state_ok = (
+            history_recovery.verified_container_state(info, running=running)
+            and info["State"].get("Dead", False) is False
+        )
+        if not state_ok and not (
+            not running and entrypoint_migration.fresh_replacement(data, info)
         ):
             raise ValueError
+        if staged and running and not entrypoint_migration.running_replacement(info):
+            raise ValueError
+        if home_review is not None and not entrypoint_migration._stopped(
+            info, ("exited", "stopped")
+        ):
+            raise ValueError
+        check = "container-mounts"
+        if len(info["Mounts"]) != 2:
+            raise ValueError
+        if entrypoint_migration.RECEIPT in data:
+            check = "conversion-receipt"
+            if not entrypoint_migration.replacement_matches(
+                data, info
+            ) or not entrypoint_migration.no_copy_binding(data, info):
+                raise ValueError
         devices = (
             guarded_devices.verify(
                 box,
@@ -394,7 +452,9 @@ def _inspect(box, path, data, *, running, attach_only=False, engine_env=None):
             if attach_only
             else history_recovery.passive_workspace_mounts
         )
+        check = "passive-container"
         signature = validate_mounts(box, data, info)
+        check = "private-volume"
         volumes = json.loads(
             box.podman(
                 *prefix,
@@ -414,16 +474,25 @@ def _inspect(box, path, data, *, running, attach_only=False, engine_env=None):
             or volumes[0].get("Options")
             or volumes[0]["Labels"].get(box.LABEL) != data["id"]
             or volumes[0]["Mountpoint"] != signature[2]
-            or (
-                entrypoint_migration.RECEIPT in data
-                and (
-                    not entrypoint_migration.initialized_volume(volumes[0])
-                    or entrypoint_migration.volume_stamp(signature[2])
-                    != data[entrypoint_migration.RECEIPT]["volume"]
-                )
-            )
         ):
             raise ValueError
+        if entrypoint_migration.RECEIPT in data:
+            check = "conversion-home-state"
+            if not entrypoint_migration.initialized_volume(volumes[0]):
+                raise ValueError
+            check = "conversion-home-identity"
+            if home_review is not None:
+                # This observation is for the explicit, non-launching repair.
+                # It is never a substitute for admission's recorded identity.
+                identity, stable = workspace_identity.snapshot(signature[2])
+                if (
+                    stable is None
+                    or identity[1] != data[entrypoint_migration.RECEIPT]["volume"][1]
+                ):
+                    raise ValueError
+                home_review.append((identity, stable))
+            elif not entrypoint_migration.volume_matches(data, signature[2]):
+                raise ValueError
         return (info["Id"], signature, devices) if devices else (info["Id"], signature)
     except guarded_devices.DeviceError as exc:
         raise box.BoxError(str(exc)) from None
@@ -447,9 +516,140 @@ def _inspect(box, path, data, *, running, attach_only=False, engine_env=None):
             error.legacy_entrypoint = info["Id"]
             raise error from None
         mode = "running" if running else "stopped"
+        if isinstance(exc, history_recovery.RecoveryError) and exc.reason == "mounts":
+            check = "container-mounts"
+        guidance = (
+            " If the original private home is still in place, review "
+            "'oc-box repair --workspace WORKSPACE_ID --private-home'."
+            if check == "conversion-home-identity"
+            and entrypoint_migration.HOME_IDENTITY not in data
+            and not entrypoint_migration.in_progress(data)
+            and home_review is None
+            else ""
+        )
         raise box.BoxError(
-            f"Cannot verify the same {mode} workspace and private home for the runtime safeguard."
+            f"Cannot verify the same {mode} workspace and private home for the "
+            f"runtime safeguard ({check}). No alternate resources were admitted.{guidance}"
         ) from None
+
+
+def repair_private_home(box, path, data):
+    """Review an old converted-home receipt without reopening native state."""
+    if __package__:
+        from . import uninstall_tty
+    else:
+        import uninstall_tty
+
+    migration = entrypoint_migration
+    record = load(box, path)
+    ident = data.get("id")
+    if (
+        not isinstance(ident, str)
+        or not re.fullmatch(r"[a-f0-9]{32}", ident)
+        or data.get("container") != "oc-box-" + ident
+        or data.get("home_volume") != "oc-box-home-" + ident
+        or record is None
+        or not record.ready
+        or data.get("ready") is not True
+        or record.volume != data.get("home_volume")
+        or migration.RECEIPT not in data
+        or migration.HOME_IDENTITY in data
+        or migration.in_progress(data)
+        or migration.needs_bootstrap(data)
+        or data.get("restore_incomplete")
+    ):
+        raise box.BoxError(
+            "Private-home repair requires a completed guarded conversion with an "
+            "older receipt and no existing persistent home identity."
+        )
+    env = migration.engine_environment(box)
+    migration.require_local_engine(box, env)
+
+    def observe():
+        home = []
+        resources = _inspect(
+            box, path, data, running=False, engine_env=env, home_review=home
+        )
+        if len(home) != 1 or resources[0] != record.container:
+            raise box.BoxError(
+                "The original converted container could not be verified."
+            )
+        users = box.podman(
+            "--remote=false",
+            "ps",
+            "--all",
+            "--no-trunc",
+            "--filter",
+            "volume=" + record.volume,
+            "--format",
+            "{{.ID}}",
+            capture=True,
+            private=True,
+            timeout=15,
+            env=env,
+        ).stdout.split()
+        if users != [record.container]:
+            raise box.BoxError(
+                "The original container is not the only named-volume consumer in this store."
+            )
+        return resources, home[0]
+
+    try:
+        token, uncertain = workspace_control.disposal_observation(path)
+        if uncertain:
+            raise box.BoxError(
+                "The previous container transition is uncertain; no repair was attempted."
+            )
+        with history_recovery.budget(20):
+            expected = observe()
+        identity, stable = expected[1]
+        phrase = "REPAIR HOME " + ident
+        if not uninstall_tty.confirm_review(
+            f"Record persistent identity for the private home of workspace {ident}.\n"
+            f"Stopped container: {record.container}\n"
+            f"Private home: {record.volume}\n"
+            f"Selected mountpoint: {json.dumps(expected[0][1][2])}\n"
+            "The inode number matches, but the old receipt cannot prove past identity. "
+            "Confirm only if you independently know this is the original private home, "
+            "not a restored or replaced volume.\n"
+            "No container will start, and no files or conversations will be moved.\n"
+            f"To proceed, type {phrase}",
+            phrase,
+        ):
+            raise box.BoxError("Private-home repair was not confirmed.")
+        with workspace_control.admission(path), history_recovery.budget(20):
+            if (
+                not workspace_control.unchanged(path, token)
+                or box.read_json(path) != data
+                or load(box, path) != record
+                or observe() != expected
+            ):
+                raise box.BoxError(
+                    "The verified private home changed. No repair was recorded."
+                )
+            repaired = {
+                **data,
+                migration.RECEIPT: {**data[migration.RECEIPT], "volume": identity},
+                migration.HOME_IDENTITY: stable,
+            }
+            with workspace_control.retirement_gate(path):
+                if (
+                    not workspace_control.unchanged(path, token)
+                    or box.read_json(path) != data
+                    or load(box, path) != record
+                ):
+                    raise box.BoxError(
+                        "The workspace or stop intent changed. No repair was recorded."
+                    )
+                box.atomic_json(path, repaired, durable=True)
+    except (OSError, workspace_control.ControlError):
+        raise box.BoxError(
+            "Could not verify or record private-home repair. No container was started."
+        ) from None
+    print(
+        "Private-home identity recorded. The guarded version and conversations are unchanged."
+    )
+    return 0
 
 
 @dataclass
@@ -519,6 +719,7 @@ class Admission:
             with workspace_control.admission(self.path):
                 self._unchanged(box)
                 self.require_live(box, data, running=False)
+                self._remember_home_identity(box, data)
                 if entrypoint_migration.RETIRE in data:
                     entrypoint_migration.verify_retirement(
                         box,
@@ -541,11 +742,30 @@ class Admission:
         except workspace_control.ControlError as exc:
             raise box.BoxError(str(exc)) from None
 
+    def _remember_home_identity(self, box, data):
+        migration = entrypoint_migration
+        if (
+            migration.RECEIPT not in data
+            or migration.HOME_IDENTITY in data
+            or migration.in_progress(data)
+        ):
+            return
+        try:
+            identity, stable = workspace_identity.snapshot(self.resources[1][2])
+        except OSError:
+            # A filesystem without persistent identity keeps exact old checks.
+            return
+        if identity != data[migration.RECEIPT]["volume"] or stable is None:
+            return
+        updated = {**data, migration.HOME_IDENTITY: stable}
+        box.atomic_json(self.path, updated, durable=True)
+        data.update(updated)
+
     def start(self, box, data):
         try:
             staged = entrypoint_migration.RETIRE in data
             saved = guarded_devices.paths(data)
-            local = staged or bool(saved)
+            local = staged or bool(saved) or self.engine_env is not None
             prefix = ("--remote=false",) if local else ()
             engine_options = self._engine_options()
             mount_env = (
@@ -639,8 +859,10 @@ class Admission:
                         self.record.container,
                         "/bin/sh",
                         "-c",
-                        'for node; do test -c "$node" && test -r "$node" '
-                        '&& test -w "$node" || exit 1; done',
+                        'denied=0; for node; do test -c "$node" || exit 1; '
+                        'if ! test -r "$node" || ! test -w "$node"; then denied=1; fi; '
+                        'done; if test "$denied" = 1; then '
+                        'printf "oc-box-device-permission\\n"; exit 52; fi',
                         "oc-box",
                         *saved,
                     ],
@@ -650,12 +872,23 @@ class Admission:
                 result = box.run(
                     device_check, capture=True, private=True, timeout=30, check=False
                 )
-                if result.returncode:
-                    suffix = (
-                        " This attempt did not retire the original." if staged else ""
-                    )
-                    raise box.BoxError(
-                        f"{guarded_devices.DeviceError('access')}{suffix}"
+                if result.returncode != 0:
+                    if staged:
+                        raise box.BoxError(
+                            f"{guarded_devices.DeviceError('access')} "
+                            "This attempt did not retire the original."
+                        )
+                    if (result.returncode, result.stdout) != (
+                        52,
+                        "oc-box-device-permission\n",
+                    ):
+                        raise box.BoxError(str(guarded_devices.DeviceError("access")))
+                    startup_output.line(
+                        "oc-box: Could not verify access to a saved device. "
+                        "Continuing with the existing container; tools may not be able "
+                        "to use that device.",
+                        file=sys.stderr,
+                        flush=True,
                     )
             if entrypoint_migration.RETIRE in data:
                 with workspace_control.admission(self.path):
@@ -670,6 +903,7 @@ class Admission:
                         after_start=True,
                         **engine_options,
                     )
+                    self._remember_home_identity(box, data)
             return info
         except workspace_control.ControlError as exc:
             raise box.BoxError(str(exc)) from None
@@ -858,6 +1092,12 @@ def admit(
             "by this path. To discard a stopped workspace without starting it, use "
             "'oc-box purge --workspace WORKSPACE_ID --discard-guarded' and confirm."
         )
+    if retirement_env is None:
+        retirement_env = (
+            engine_env
+            if engine_env is not None
+            else entrypoint_migration.engine_environment(box)
+        )
     source_id = None
     if pending:
         resources = None
@@ -868,13 +1108,7 @@ def admit(
                 path,
                 data,
                 running=False,
-                **(
-                    {"engine_env": retirement_env}
-                    if retirement_env is not None
-                    else {"engine_env": engine_env}
-                    if engine_env is not None
-                    else {}
-                ),
+                engine_env=retirement_env,
             )
         except box.BoxError as exc:
             if command != "start" or not getattr(exc, "legacy_entrypoint", False):
@@ -938,7 +1172,6 @@ def admit(
             ) from None
         raise box.BoxError(str(exc)) from None
     if converting:
-        retirement_env = entrypoint_migration.engine_environment(box)
         if saved and "CONTAINERS_CONF_OVERRIDE" in retirement_env:
             raise box.BoxError(str(guarded_devices.DeviceError("override")))
         entrypoint_migration.consent(box, args, data)
@@ -963,13 +1196,33 @@ def admit(
             raise box.BoxError(
                 "The guarded runtime has not completed owner readiness; retry owning start."
             )
-        digest = (
-            _candidate_digest(
-                box, path, host, version, recheck=getattr(args, "runtime_guard", False)
+        recheck = getattr(args, "runtime_guard", False)
+        if not transition and not (recheck and not previous.ready):
+            digest = previous.digest
+        elif (
+            previous is None
+            or recheck
+            or entrypoint_migration.RETIRE in data
+            or entrypoint_migration.needs_bootstrap(data)
+        ):
+            # Enrollment and migration keep the isolated proof. Advancing an
+            # existing floor does not depend on the disposable SDK installer.
+            digest = _candidate_digest(box, path, host, version, recheck=recheck)
+            if not transition and digest != previous.digest:
+                raise box.BoxError(
+                    "The host OpenCode is not the exact recorded native artifact; guarded startup refused."
+                )
+        else:
+            # Do not let a repackaged binary strand the workspace at an
+            # uninstalled digest. Confirm the official bytes first, then
+            # enforce them as usual on the installed runtime and native helpers.
+            digest = _official_digest(box, version, host.digest)
+            startup_output.line(
+                f"oc-box: OpenCode {version} has not been checked in isolation for "
+                "this upgrade. Continuing with runtime and workspace verification.",
+                file=sys.stderr,
+                flush=True,
             )
-            if transition
-            else previous.digest
-        )
         if digest != host.digest:
             raise box.BoxError(
                 "The host OpenCode is not the exact verified native artifact; guarded startup refused."
@@ -983,6 +1236,7 @@ def admit(
             # the original OS before the owning launch can unlock its vault.
             args._opencode_release = version
             prepare_replacement()
+            box.check_guarded_exec_environment(data, retirement_env)
             host.command(box)
             entrypoint_migration.convert(
                 box, path, data, token, source_id, rebuild=rebuild, env=retirement_env
@@ -1054,7 +1308,7 @@ def container_digest(box, data, *, materialize=False):
 def verify_container(box, data):
     if container_digest(box, data) != current().record.digest:
         raise box.BoxError(
-            "Live container OpenCode did not match the preflight artifact. "
+            "Live container OpenCode did not match the admitted artifact. "
             "The guarded version remains reserved; no older binary was started."
         )
 

@@ -54,6 +54,7 @@ File: oc-box.info,  Node: Synopsis,  Next: Description,  Prev: Name,  Up: Top
      oc-box sync [--project PATH | --workspace ID] [--persisted | [--cpus N] [--memory SIZE] [--pids-limit N]] [LIFECYCLE-LOG-OPTIONS]
      oc-box reset [--project PATH | --workspace ID] [RESET-OPTIONS] [LIFECYCLE-LOG-OPTIONS]
      oc-box repair [--project PATH | --workspace ID]
+     oc-box repair --workspace ID --private-home
      oc-box terminal [--project PATH | --workspace ID] [--maintenance] [LIFECYCLE-LOG-OPTIONS]
      oc-box share PATH [--project PATH | --workspace ID] [--acknowledge-risk]
      oc-box attach PATH --session ID [--project PATH | --workspace ID] [--text TEXT] [--send] [--acknowledge-risk]
@@ -72,7 +73,7 @@ File: oc-box.info,  Node: Synopsis,  Next: Description,  Prev: Name,  Up: Top
      oc-box logs [--journald | --log-dir PATH] [--project PATH | --workspace ID] [--level LEVEL | --verbose[=LEVEL]] [--limit N] [--tail] [-f | --follow] [--json | --table]
      oc-box logs [--log-dir PATH] --path
      oc-box tui [--project PATH | --workspace ID] [--read-only] [--demo]
-     oc-box upgrade [--check] [--stable | --devel] [--vault] [--tui]
+     oc-box upgrade [--check | --force] [--stable | --devel] [--vault] [--tui]
      oc-box upgrade --auto-update on|off
      oc-box --uninstall [--dry-run]
      oc-box --uninstall --full [--dry-run]  # reports incomplete cleanup
@@ -432,48 +433,70 @@ not erased at handoff.  No badge is added to native UI or subprocess
 streams, credential prompts, or other commands such as ‘status’, ‘logs’,
 ‘web’, and ‘terminal’.  Pipes and ‘TERM=dumb’ receive neither badge nor
 padding.  The container OpenCode version is verified against the host on
-every launch; there is no automatic switch to another release.  On an
-existing stopped standard V2 workspace, a forward stable ‘2.x.y’ update
-(including a patch update) must pass isolated preflight before normal
-preparation.  To enroll without changing versions, use ‘oc-box start
---runtime-guard’.  After preflight and admission, the workspace
-remembers the exact runtime artifact; unchanged launches do not repeat
-package downloads or the synthetic check.
+every launch; there is no automatic switch to another release.  Routine
+OpenCode upgrades do not enroll a workspace into the runtime safeguard
+or require the disposable probe.  Use ‘oc-box runtime-check VERSION’ to
+run that check independently, or ‘oc-box start --runtime-guard’ to
+require it when enrolling or advancing a protected workspace.
 
-A confirmed required-plugin failure is remembered for that exact
-release, host artifact, and probe code.  It leaves the existing runtime
-in place and prints a GitHub issue link.  A different candidate, such as
-‘2.4.1’ after a refusal of ‘2.4.0’, gets its own check.  An explicit
-‘--runtime-guard’ rechecks a remembered refusal rather than bypassing
-it.  Unavailable downloads, timeouts, uncertain cleanup and artifact
-mismatches are not recorded as proof that an upstream version is
-unsupported.  Report the versions and fixed refusal category, not
-private output.
+On an already enrolled workspace, plain owning ‘start’ warns on a
+forward stable OpenCode change and continues without the disposable
+probe.  It still verifies the existing workspace, pins the selected host
+executable, requires the public npm artifact to match before recording
+the new version floor, and verifies the matching container executable
+and actual private service and required Build plugin.  The artifact
+check does not need a separate Podman image or run any npm scripts.
+Unchanged launches reuse the recorded runtime checks without repeating
+the synthetic check.  An in-progress legacy replacement still requires
+the isolated proof and its own review.
 
-Guarded admission currently requires the official native host executable
-with the same bytes as the verified container artifact and a standard
-stopped container/home pair on a glibc-based catalog distribution.
-Alpine, script shims and custom Podman arguments are not supported.
-Only owning ‘start’ admits a changed version.  Guarded ‘web’, ‘sync’ and
-plain history-preserving ‘purge’ use the already verified runtime;
-‘reset’, maintenance and ‘start --import-session’ are unavailable on
-guarded workspaces.  An existing private owner still serves additional
-clients without starting a preflight or refreshing its credentials.
+A confirmed required-plugin failure from guarded preflight is remembered
+for that exact release, host artifact, and probe code.  It leaves the
+existing runtime in place and prints a GitHub issue link.  A different
+candidate, such as ‘2.4.1’ after a refusal of ‘2.4.0’, gets its own
+check.  An explicit ‘--runtime-guard’ reruns the isolated check for a
+new runtime instead of reusing a remembered refusal.  A remembered
+result is not used to block a routine upgrade.  Unavailable downloads,
+timeouts, uncertain cleanup and artifact mismatches are not recorded as
+proof that an upstream version is unsupported.  Report the versions and
+fixed refusal category, not private output.
+
+Guarded admission currently requires the native host executable with the
+same bytes as the official container artifact and a standard stopped
+container/home pair on a glibc-based catalog distribution.  Alpine,
+script shims and custom Podman arguments are not supported.  Only owning
+‘start’ admits a changed version.  Guarded ‘web’, ‘sync’ and plain
+history-preserving ‘purge’ use the already verified runtime; ‘reset’,
+maintenance and ‘start --import-session’ are unavailable on guarded
+workspaces.  An existing private owner still serves additional clients
+without starting a preflight or refreshing its credentials.
+
+Guarded startup preserves the selected local Podman environment.  A
+forwarded setting may reuse an identical engine value, such as ‘USER’,
+but may not override engine selectors or replace a different engine
+value.  Those conflicts are reported before starting the workspace or
+advancing its runtime floor.
 
 A guarded launch can keep already registered plain accelerator and
 render character devices (‘/dev/accel/accelN’ and ‘/dev/dri/renderDN’)
-when local rootless Podman can verify both the saved and effective
-bindings.  It requires an overlay store and ‘podman generate spec’
-support.  The paths must be direct nodes, not aliases, directory
-expansions, remaps, permission overrides, or CDI names.  No device or
-host policy is changed.  Reconnect any missing mapped device and retry
-with the saved settings; ‘oc-box status --table’ lists those settings.
-Guarded purge and ‘sync --persisted’ do not admit these device-backed
-workspaces.  On a verified stopped container, Podman's own hostname,
-hosts, resolver, and container-environment runtime files may already
-have been cleaned up.  Missing files are tolerated only at that exact
-container's known runtime paths; a missing project mount, unknown bind
-source, or device node still refuses.
+and the exact ‘/dev/kvm:rw’ binding when local rootless Podman can
+verify both the saved and effective bindings.  It requires an overlay
+store and ‘podman generate spec’ support.  The paths must be direct
+nodes, not aliases, directory expansions, remaps, other permission
+overrides, or CDI names.  The isolated native preflight does not receive
+these devices.  No device or host policy is changed.  Reconnect any
+missing mapped device and retry with the saved settings; ‘oc-box status
+--table’ lists those settings.  Guarded purge and ‘sync --persisted’ do
+not admit these device-backed workspaces.  On a verified stopped
+container, Podman's own hostname, hosts, resolver, and
+container-environment runtime files may already have been cleaned up.
+Missing files are tolerated only at that exact container's known runtime
+paths; a missing project mount, unknown bind source, or device node
+still refuses.  Once the existing container and its core mounts are
+usable and the mapped character nodes are visible, limited read/write
+permission warns instead of blocking startup.  A missing or unverified
+binding still refuses.  A staged replacement must verify access before
+retiring the original.
 
 New containers use an absolute ‘/bin/sleep’ path for their passive
 entrypoint.  The safeguard refuses older containers whose stored
@@ -1997,13 +2020,29 @@ matching identity needs no change.
      oc-box repair --project ~/devel/demo
      oc-box --project ~/devel/demo --resume
 
-Accepts only ‘--project’ or ‘--workspace’ selectors, besides help.  With
-neither, use the current directory.  If a missing marker has exactly one
-registered workspace for this path, ‘--project’ selects it.  If several
-records reference the path, repair refuses to choose: inspect ‘--status’
-and supply ‘--workspace ID’ explicitly.  With ‘--workspace’, check the
+For project repair, use ‘--project’ or ‘--workspace’.  With neither, use
+the current directory.  If a missing marker has exactly one registered
+workspace for this path, ‘--project’ selects it.  If several records
+reference the path, repair refuses to choose: inspect ‘--status’ and
+supply ‘--workspace ID’ explicitly.  With ‘--workspace’, check the
 registered path and restore its missing marker rather than using the
 current directory.
+
+‘oc-box repair --workspace ID --private-home’ is a separate, one-time
+repair for older converted-home receipts that predate persistent
+filesystem identity.  It requires the full workspace ID, a completed
+guarded conversion, the exact stopped container and its own private
+home, a matching directory inode number, and kernel support for
+persistent filesystem identity.  The inode number alone does not prove
+this is the original volume.  Review the resources on the controlling
+terminal and type ‘REPAIR HOME ID’ only if you know it is the original
+private home.  The command records the filesystem ID and handle for
+future verification after checking the same resources again; it does not
+start Podman resources, renew credentials, change the runtime floor, or
+move any conversations.  A mismatching previously recorded persistent
+identity or an unfinished transition cannot be repaired this way.  When
+already recorded, a matching persistent identity allows ordinary device
+renumbering without another repair.
 
 4.16 purge
 ==========
@@ -2286,6 +2325,7 @@ does not save a new preference.
      oc-box upgrade --devel --tui    # Add dashboard dependencies independently
      oc-box upgrade --devel --vault --tui
      oc-box upgrade                  # Follow the saved channel
+     oc-box upgrade --force          # Reinstall from the owning channel
      oc-box upgrade --stable
      oc-box upgrade --auto-update on
      oc-box upgrade --auto-update off
@@ -2298,6 +2338,13 @@ editable checkout receives manual guidance rather than a guessed
 installation target.  Verified uv/pipx owners can receive additive
 package-extra requests.  Plain pip cannot prove prior requested extras,
 so ambiguous extras still refuse rather than guessing what to preserve.
+
+‘--force’ reinstalls the selected published release even when already
+current.  It stages a new GitHub release directory, or reinstalls the
+exact PyPI version through the verified owning package manager.  It does
+not change installation method, permit an implicit downgrade, or bypass
+ownership verification.  It cannot be combined with ‘--check’ or
+‘--auto-update’.
 
 ‘--vault’ and ‘--tui’ independently request optional installer
 dependencies.  They work from stable or development installations and
@@ -2347,15 +2394,20 @@ its old manuals are preserved as ‘legacy-docs’.  No workspaces or
 credentials are migrated/deleted.
 
 GitHub automatic updates are off by default and follow the saved release
-channel.  ‘--auto-update on’ saves ‘auto_update: true’ in the existing
-host oc-box configuration, retaining settings such as ‘pass_env’.  The
-verified active launcher checks before Podman/workspace setup.  The
-installer rechecks the active source, and only a compatible, verified
-target continues with the same arguments, holding its use lock across
-the restart.  Use explicit upgrade for a target without the automatic
-handoff protocol.  A retained copy using this protocol does not update
-or recreate a missing installation.  No background daemon,
-active-session update, or automatic check for
+channel.  On supported filesystems, new installer receipts retain
+persistent filesystem identity so a device-number change alone does not
+interrupt verified handoff.  An older receipt that already mismatches
+cannot prove that identity; use ‘oc-box upgrade --force’ from the active
+GitHub launcher, or rerun the verified installer once.  This does not
+change workspace registrations.  ‘--auto-update on’ saves ‘auto_update:
+true’ in the existing host oc-box configuration, retaining settings such
+as ‘pass_env’.  The verified active launcher checks before
+Podman/workspace setup.  The installer rechecks the active source, and
+only a compatible, verified target continues with the same arguments,
+holding its use lock across the restart.  Use explicit upgrade for a
+target without the automatic handoff protocol.  A retained copy using
+this protocol does not update or recreate a missing installation.  No
+background daemon, active-session update, or automatic check for
 list/status/terminal/reset/purge is introduced.  Direct source-checkout
 launches skip automatic updates.  A concurrent check does not block
 another normal launcher.  Network/download failures are reported and the
@@ -3152,7 +3204,18 @@ interchangeable with OpenCode session IDs.  Example: ‘oc-box --status
 --workspace WORKSPACE_ID’.  For ‘logs’, this is an exact workspace ID
 filter and cannot be combined with ‘--project’.
 
-5.16 -status
+5.16 -private-home
+==================
+
+With ‘repair --workspace ID’, record the persistent filesystem identity
+of an existing converted private home after typed confirmation.  The
+workspace must be stopped, and an older receipt must not already have a
+persistent baseline.  Matching the old inode number does not prove past
+identity; confirm only if you independently know this is the original
+volume.  This does not start the container, change its runtime floor, or
+move conversations.
+
+5.17 -status
 ============
 
 Report CPU, RAM, storage, state, limits, and sessions without opening
@@ -3160,7 +3223,7 @@ OpenCode.  Equivalent to ‘status’.  Only selectors and ‘--json’ or
 ‘--table’ apply.  It cannot be combined with another command, session
 mode, resource change, or deletion action.
 
-5.17 -json
+5.18 -json
 ==========
 
 Emit status as one JSON object with ‘sampled_at’ and ‘workspaces’.
@@ -3175,7 +3238,7 @@ and ‘--table’ are mutually exclusive.
 
      oc-box --status --json > status.json
 
-5.18 -table
+5.19 -table
 ===========
 
 Select human-readable tables instead of JSON or the usual text.
@@ -3188,7 +3251,7 @@ mutually exclusive with ‘--json’ and does not apply to ‘logs --path’.
      oc-box backup-info /backup/demo.ocbox --table
      oc-box logs --follow --table
 
-5.19 -level debug|info|warn|error
+5.20 -level debug|info|warn|error
 =================================
 
 For ‘logs’, set the minimum severity displayed, from ‘debug’ (all
@@ -3196,21 +3259,21 @@ levels) to ‘error’ (errors only).  Default: ‘info’, or all levels with
 ‘--tail’.  This is a read filter; it does not change what gets journaled
 or what an owning launcher prints.
 
-5.20 -limit N
+5.21 -limit N
 =============
 
 For ‘logs’, set the maximum number of matching retained entries in the
 initial output, from 1 to 10,000.  Default: 100, or 10,000 with
 ‘--verbose=ALL’.  Rotation may leave fewer entries available.
 
-5.21 -f, -follow
+5.22 -f, -follow
 ================
 
 For ‘logs’, keep displaying newly retained matching entries after the
 initial output.  Follow is best-effort: entries rotated out before they
 are read cannot be recovered.  Stop following with Ctrl-C.
 
-5.22 -tail
+5.23 -tail
 ==========
 
 Show recent environment preparation tasks and their results instead of
@@ -3219,7 +3282,7 @@ preparation records live.  This is read-only, uses a separate ring under
 the same private log directory (including any ‘--log-dir’ override), and
 does not show raw installer streams.
 
-5.23 -journald
+5.24 -journald
 ==============
 
 For ‘start’ (including when the command is omitted), ‘reset’, ‘stop’,
@@ -3233,7 +3296,7 @@ system journal instead of the private file.  Requires a usable local
 ‘journalctl’ and access to those records.  It does not enable mirroring,
 change journal settings or fall back to the private file.
 
-5.24 -no-journald
+5.25 -no-journald
 =================
 
 For the same launcher commands as ‘--journald’, disable mirroring for
@@ -3241,7 +3304,7 @@ this invocation even if saved ‘logs.journald’ is ‘true’.  This does not
 disable private journaling or change the saved choice.  It does not
 apply to ‘logs’.
 
-5.25 -log-dir PATH
+5.26 -log-dir PATH
 ==================
 
 Override the saved ‘logs.directory’ for this invocation of ‘start’
@@ -3252,7 +3315,7 @@ include a ‘..’ path component.  An append may create the directory
 privately; a read, including ‘logs --path’, never does.  Old logs are
 not moved or deleted.  Do not combine with ‘logs --journald’.
 
-5.26 -lifecycle-diagnostics
+5.27 -lifecycle-diagnostics
 ===========================
 
 Show expanded launcher stage messages and fixed-category diagnostics for
@@ -3262,7 +3325,7 @@ default and there is no saved diagnostic setting.  This option does not
 change native OpenCode output, journaling or lifecycle results.  See
 [Launcher diagnostics](#launcher-diagnostics).
 
-5.27 -verbose[=LEVEL]
+5.28 -verbose[=LEVEL]
 =====================
 
 For ‘start’ (including when omitted), ‘reset’, ‘stop’, ‘sync’,
@@ -3287,7 +3350,7 @@ explicit source choices.  It never changes the verbosity of an owning
 launcher; put ‘--verbose’ on ‘start’ or ‘reset’ to display live
 installer output.
 
-5.28 -path
+5.29 -path
 ==========
 
 For ‘logs’, display the effective private ‘activity.jsonl’ pathname
@@ -3296,7 +3359,7 @@ or with ‘--log-dir PATH’, not with ‘--journald’, workspace filters,
 ‘-f’/‘--follow’, ‘--tail’, ‘--verbose’, ‘--json’, or ‘--table’.
 ‘--level’ and ‘--limit’ have no effect when showing a path.
 
-5.29 -about
+5.30 -about
 ===========
 
 Print oc-box version, author Paulo Dias and email, OpenAI
@@ -3304,7 +3367,7 @@ coding-assistant contribution, GPL-3.0-or-later licensing, and source
 commit.  No Podman or workspace is required.  Use alone, without
 lifecycle selectors/options.
 
-5.30 -version
+5.31 -version
 =============
 
 Print oc-box's commit-derived version and exit without Podman.  Stable
@@ -3331,7 +3394,7 @@ until upgraded through their usual channel.  The absolute commit count
 remains in metadata for upgrade ordering; no workspace reset or database
 migration is required for the version-series transition.
 
-5.31 -distro NAME
+5.32 -distro NAME
 =================
 
 Choose a supported distro for a new environment.  The default matches
@@ -3344,7 +3407,7 @@ host packages or snapshot date.  Changing an existing workspace requires
      oc-box --project ~/devel/demo --distro tumbleweed
      oc-box reset --project ~/devel/demo --distro debian
 
-5.32 -check
+5.33 -check
 ===========
 
 With ‘upgrade’, preview the saved or explicitly selected published
@@ -3353,10 +3416,20 @@ without installing or persisting channel/extra preferences.  Returns
 success when a version is available or the installation is current; it
 is not an update-available exit code.  Network errors or unsupported
 requested extras return nonzero.  Cannot be combined with
-‘--auto-update’, workspace selectors or other commands.  Example:
-‘oc-box upgrade --devel --tui --check’.
+‘--auto-update’, ‘--force’, workspace selectors or other commands.
+Example: ‘oc-box upgrade --devel --tui --check’.
 
-5.33 -stable
+5.34 -force
+===========
+
+With ‘upgrade’, reinstall the selected published release even when
+already current.  This uses the verified GitHub installation or the
+verified Python package manager and preserves supported extras.  It does
+not permit an implicit downgrade or change workspace state.  Cannot be
+combined with ‘--check’ or ‘--auto-update’.  Example: ‘oc-box upgrade
+--force’.
+
+5.35 -stable
 ============
 
 With ‘upgrade’, select and remember the stable channel after a
@@ -3365,7 +3438,7 @@ exclusive with ‘--devel’; cannot be combined with ‘--auto-update’ or
 workspace actions.  An explicit downgrade replaces launcher files, not
 workspace/session state.  Example: ‘oc-box upgrade --stable’.
 
-5.34 -devel
+5.36 -devel
 ===========
 
 With ‘upgrade’, select and remember published development prereleases
@@ -3375,7 +3448,7 @@ Mutually exclusive with ‘--stable’; cannot be combined with
 experimental; selection is not stable acceptance.  Example: ‘oc-box
 upgrade --devel’.
 
-5.35 -vault
+5.37 -vault
 ===========
 
 With ‘upgrade’ only, add optional vault/cryptography dependencies
@@ -3389,7 +3462,7 @@ release supporting this flag and a published target supporting the
 extra.  Cannot be combined with ‘--auto-update’ or workspace actions.
 Example: ‘oc-box upgrade --devel --vault’.
 
-5.36 -tui
+5.38 -tui
 =========
 
 With ‘upgrade’ only, add optional dashboard dependencies through the
@@ -3403,7 +3476,7 @@ or a workspace.  Requires a launcher release supporting this flag and a
 published supporting target.  Cannot be combined with ‘--auto-update’ or
 workspace actions.  Example: ‘oc-box upgrade --devel --vault --tui’.
 
-5.37 -auto-update on|off
+5.39 -auto-update on|off
 ========================
 
 With ‘upgrade’, persistently enable or disable automatic updates before
@@ -3415,7 +3488,7 @@ Cannot be combined with ‘--check’, ‘--stable’, ‘--devel’, ‘--vault
 ‘--tui’ or workspace actions.  Example: ‘oc-box upgrade --auto-update
 on’.
 
-5.38 -new
+5.40 -new
 =========
 
 Select a new root conversation.  ‘start’ keeps the existing environment;
@@ -3424,7 +3497,7 @@ client cannot use this option against an existing V2 owner.  Mutually
 exclusive with ‘--resume’ and ‘--import-session’.  Example: ‘oc-box
 --project ~/devel/demo --new’.
 
-5.39 -resume
+5.41 -resume
 ============
 
 Require a registered workspace and select its recorded eligible root
@@ -3433,7 +3506,7 @@ If no eligible root exists, OpenCode can start a new conversation.  Use
 with start/reset.  Mutually exclusive with ‘--new’ and
 ‘--import-session’.  Example: ‘oc-box --project ~/devel/demo --resume’.
 
-5.40 -import-session SESSION_ID
+5.42 -import-session SESSION_ID
 ===============================
 
 Copy a host conversation from the selected project into the private
@@ -3447,7 +3520,7 @@ project; the original registry and saved archive verify its project.
 
      oc-box --project ~/devel/demo --import-session ses_HOST_SESSION_ID
 
-5.41 -model PROVIDER/MODEL
+5.43 -model PROVIDER/MODEL
 ==========================
 
 Select a model for the native launch.  On V2 this can set the model on
@@ -3457,7 +3530,7 @@ on an existing V2 owner.
 
      oc-box --project ~/devel/demo --model github-copilot/gpt-6.1-sol
 
-5.42 -image-preview
+5.44 -image-preview
 ===================
 
 V2-only, for an **owning** start (the default command) or reset TUI
@@ -3508,7 +3581,7 @@ is saved in host workspace preferences; no CLI snapshot is kept there.
      oc-box --project ~/devel/demo --image-preview
      oc-box reset --project ~/devel/demo --image-preview
 
-5.43 -no-image-preview
+5.45 -no-image-preview
 ======================
 
 Skip the launcher image-preview override for this owning TUI
@@ -3516,7 +3589,7 @@ start/reset, even when the workspace preference requests it.  It does
 not force image previews off in native OpenCode's own ‘cli.json’ or
 change the workspace preference.
 
-5.44 -host-file-open
+5.46 -host-file-open
 ====================
 
 Request Ctrl-click host file opening for this native ‘start’ (including
@@ -3527,14 +3600,14 @@ native OpenCode 2.x under direct Konsole or Yakuake and is incompatible
 with custom Podman arguments.  If actual mount or desktop admission
 later fails, host opening stays off.
 
-5.45 -no-host-file-open
+5.47 -no-host-file-open
 =======================
 
 Disable Ctrl-click host file opening for this native ‘start’ or ‘reset’
 TUI client, even if the workspace preference or installation default is
 on.  Neither flag is saved or changes another client.
 
-5.46 -startup-logo ascii|graphics
+5.48 -startup-logo ascii|graphics
 =================================
 
 For ‘preferences’ only.  Save the inline badge for launcher progress and
@@ -3554,7 +3627,7 @@ checkout, ‘python3 tools/demo_startup_logo.py ascii’ and ‘python3
 tools/demo_startup_logo.py graphics’ preview the badge with synthetic
 output, without launching a workspace or saving preferences.
 
-5.47 Experimental Ctrl-click host file opening
+5.49 Experimental Ctrl-click host file opening
 ==============================================
 
 With no saved workspace choice, the current development-channel GitHub
@@ -3642,7 +3715,7 @@ cannot use the feature.  Leave terminal hyperlink handlers at their
 normal settings; this feature does not use them.  It is not available in
 web, V1, plain host OpenCode, or the maintenance/session terminals.
 
-5.48 -host-drop
+5.50 -host-drop
 ===============
 
 Experimental and **enabled by default per workspace** for supported
@@ -3752,7 +3825,7 @@ guarantee, nor a new live-host acceptance result.  See ‘SECURITY.md’ and
      oc-box --project ~/devel/demo --no-host-drop
      oc-box preferences --project ~/devel/demo --host-drop off
 
-5.49 -no-host-drop
+5.51 -no-host-drop
 ==================
 
 Save host importing disabled for future workspace TUI clients and open
@@ -3761,7 +3834,7 @@ neither flag live-toggles existing clients.  To change only the
 preference without opening a TUI, use ‘oc-box preferences --host-drop
 off’.
 
-5.50 -host-clipboard
+5.52 -host-clipboard
 ====================
 
 Experimental, **off by default, with a saved per-workspace host
@@ -3942,7 +4015,7 @@ See the short [host test guide](host-clipboard-testing.md).  Focused
 mocked tests are not acceptance of KDE/Wayland/X11 behavior or native
 image composition.
 
-5.51 -no-host-clipboard
+5.53 -no-host-clipboard
 =======================
 
 Save clipboard importing disabled for future workspace TUI clients and
@@ -3952,7 +4025,7 @@ changes the independent host-drop preference.  A saved strict symlink
 choice is retained.  To change only policy, use ‘oc-box preferences
 --host-clipboard off’.
 
-5.52 -host-clipboard-symlinks
+5.54 -host-clipboard-symlinks
 =============================
 
 Save ordinary symlink following for clipboard file imports for this and
@@ -3962,7 +4035,7 @@ preference: a saved enable is enough, or combine with
 ‘--host-clipboard’.  Accepted only on ‘start’ or ‘reset’, and mutually
 exclusive with ‘--no-host-clipboard-symlinks’.
 
-5.53 -no-host-clipboard-symlinks
+5.55 -no-host-clipboard-symlinks
 ================================
 
 Save strict no-symlink clipboard sources for this and future workspace
@@ -3981,7 +4054,7 @@ is off.
      oc-box --project ~/devel/demo
      oc-box preferences --project ~/devel/demo --host-clipboard-symlinks on
 
-5.54 -credential-mode env|selected|vault
+5.56 -credential-mode env|selected|vault
 ========================================
 
 With ‘credentials’, save an explicit forwarding mode for that workspace.
@@ -3997,7 +4070,7 @@ next owner, not to an active client.  To replace an existing selection:
 
      oc-box credentials --project ~/devel/demo --credential-mode vault --clear-credentials
 
-5.55 -attachments
+5.57 -attachments
 =================
 
 Web only: explicitly select the visible, compatibility-verified browser
@@ -4005,24 +4078,25 @@ File-drop adapter described under ‘web’.  Keeps the native app and its
 draft/Send controls unchanged.  No automatic prompt admission or
 host-path/URL reading.
 
-5.56 -workspace-layout
+5.58 -workspace-layout
 ======================
 
 Web only: accepted for compatibility with earlier 1.8/1.9 commands.
 Studio opens with or without this flag.  The old compact session index
 is not served.
 
-5.57 -runtime-guard
+5.59 -runtime-guard
 ===================
 
 Enroll an existing stopped standard OpenCode 2.x workspace on an owning
-‘start’, even without a version change.  Rechecks an isolated refusal
-rather than overriding it.  The guard persists after runtime admission;
-there is no switch to delete the version fence.  This option is not a
-request for rollback, and does not apply to attach-only clients or
-‘reset’.
+‘start’, even without a version change, or require isolated preflight
+when advancing an already enrolled workspace.  Rechecks an isolated
+refusal rather than overriding it.  The guard persists after runtime
+admission; there is no switch to delete the version fence.  This option
+is not a request for rollback, and does not apply to attach-only clients
+or ‘reset’.
 
-5.58 -convert-legacy-container
+5.60 -convert-legacy-container
 ==============================
 
 Owning ‘start’ only.  Explicitly approve the one-time stopped legacy
@@ -4031,7 +4105,7 @@ interrupted replacement.  Preserve the existing project, private home
 and installed OS. Normal guarded runtime checks still apply.  The flag
 is not an environment or workspace preference.
 
-5.59 -rebuild-legacy-container
+5.61 -rebuild-legacy-container
 ==============================
 
 Owning ‘start’ only.  After a confirmed OS snapshot failure, approve
@@ -4040,7 +4114,7 @@ conversation volume.  This discards changes to the old writable OS layer
 and reinstalls baseline tools.  It is mutually exclusive with
 ‘--convert-legacy-container’.
 
-5.60 -no-vault
+5.62 -no-vault
 ==============
 
 V2-only, for one **owning** start (including ‘--import-session’), reset,
@@ -4059,7 +4133,7 @@ processes.
      oc-box reset --project ~/devel/demo --no-vault
      oc-box web --project ~/devel/demo --no-vault --no-open
 
-5.61 -env-secret NAME
+5.63 -env-secret NAME
 =====================
 
 With ‘credentials’, append an uppercase environment credential name to
@@ -4072,7 +4146,7 @@ per-name selections are refused in vault mode; choose an explicit
 env/selected mode to use them.  Example: ‘oc-box credentials
 --credential-mode selected --env-secret PERSONAL_GITHUB_TOKEN’.
 
-5.62 -vault-secret NAME
+5.64 -vault-secret NAME
 =======================
 
 With ‘credentials’, select an existing encrypted vault entry name to
@@ -4084,7 +4158,7 @@ selected with -env-secret.  Example: ‘oc-box credentials
 --credential-mode selected --vault-secret BRAVE_API_KEY’.  Vault mode
 instead uses every current entry and refuses nonempty per-name lists.
 
-5.63 -clear-credentials
+5.65 -clear-credentials
 =======================
 
 With ‘credentials’, clear both saved env-name and vault-name lists
@@ -4096,7 +4170,7 @@ workflow without deleting encrypted vault entries.  Use
 ‘--credential-mode vault --clear-credentials’ to replace selections with
 dynamic global V2 use.  Clearing alone does not change the mode.
 
-5.64 -output FILE
+5.66 -output FILE
 =================
 
 Backup-only.  Required new encrypted backup output pathname.  Its parent
@@ -4106,7 +4180,7 @@ destination created during capture.  Example: ‘oc-box backup --project
 ~/devel/demo --output /backup/demo.ocbox’.  The archive suffix is
 conventional; the versioned format is checked on restore.
 
-5.65 -portable
+5.67 -portable
 ==============
 
 Backup-only.  Omit the container OS image while retaining project,
@@ -4117,7 +4191,7 @@ packages and native-cache compatibility are the user's responsibility.
 Example: ‘oc-box backup --project ~/devel/demo --portable --output
 /backup/demo.ocbox’.
 
-5.66 -recipient AGE_KEY
+5.68 -recipient AGE_KEY
 =======================
 
 Backup-only, repeatable (up to 16).  Encrypt the backup key envelope to
@@ -4128,7 +4202,7 @@ recipients are not secret; private identities must be stored
 independently of the archive and project.  Example: ‘oc-box backup
 --recipient age1PUBLIC_KEY --output /backup/demo.ocbox’.
 
-5.67 -host
+5.69 -host
 ==========
 
 For ‘backup’, include the [host migration
@@ -4139,14 +4213,14 @@ vault; omit ‘--project’ for a host-only restore from either type of
 host-containing archive.  A host-only archive cannot be used with
 ‘--project’.
 
-5.68 -opencode-auth-export FILE
+5.70 -opencode-auth-export FILE
 ===============================
 
 For ‘backup --host’, include a native V2 credential export from a
 private file, or use ‘-’ for a binary stdin stream.  The export is
 encrypted separately and is never printed by ‘oc-box backup-info’.
 
-5.69 -include-opencode
+5.71 -include-opencode
 ======================
 
 For ‘restore --host’, additionally install the native OpenCode profile
@@ -4154,7 +4228,7 @@ and saved credentials when present.  Requires separate typed
 confirmation and fresh destination paths.  It does not activate or start
 OpenCode.
 
-5.70 -identity FILE
+5.72 -identity FILE
 ===================
 
 Restore/backup-info only, repeatable.  Read a native age X25519 private
@@ -4165,7 +4239,7 @@ backups instead use age's terminal prompt.  No identity text or
 passphrase is accepted through argv/environment.  Example: ‘oc-box
 backup-info /backup/demo.ocbox --identity ~/.config/backup-age-key.txt’.
 
-5.71 -persisted
+5.73 -persisted
 ===============
 
 With ‘sync’ only, attempt a guarded snapshot from an existing, verified
@@ -4175,7 +4249,7 @@ are not admitted.  This option does not fall back to ordinary ‘sync’ if
 the snapshot is refused.  It cannot declare earlier unfinished work
 complete.
 
-5.72 -cpus NUMBER
+5.74 -cpus NUMBER
 =================
 
 Set the CPU quota in core units; fractions such as ‘2.5’ are accepted by
@@ -4187,7 +4261,7 @@ missing container for a registered workspace.
 
      oc-box reset --project ~/devel/demo --cpus 8
 
-5.73 -memory SIZE
+5.75 -memory SIZE
 =================
 
 Set the memory limit using Podman size syntax, such as ‘512m’, ‘8g’, or
@@ -4200,7 +4274,7 @@ a missing container for a registered workspace.
 
      oc-box reset --project ~/devel/demo --memory 16g
 
-5.74 -pids-limit NUMBER
+5.76 -pids-limit NUMBER
 =======================
 
 Set the container's process limit; default ‘2048’.  oc-box requires at
@@ -4209,7 +4283,7 @@ requires reset.  ‘sync’ can save a new value when recreating a missing
 container for a registered workspace.  Example: ‘oc-box reset --project
 ~/devel/demo --pids-limit 4096’.
 
-5.75 -device MAPPING
+5.77 -device MAPPING
 ====================
 
 Add a persistent Podman mapping, repeatable.  Supports
@@ -4223,7 +4297,7 @@ install an NPU/GPU SDK.
      oc-box reset --project ~/devel/demo --device /dev/accel/accel0
      oc-box --project ~/devel/gpu --device /dev/dri/renderD128:rw
 
-5.76 -podman-arg=-OPTION[=VALUE]
+5.78 -podman-arg=-OPTION[=VALUE]
 ================================
 
 Append one literal long-option token to the Podman create command before
@@ -4250,7 +4324,7 @@ options extend the default boundary as requested by the host operator.
 Podman and the host's rootless permissions determine which settings are
 available.
 
-5.77 -clear-devices
+5.79 -clear-devices
 ===================
 
 Clear all saved ‘--device’ mappings before adding any new ones on this
@@ -4261,7 +4335,7 @@ for that list.
      oc-box reset --project ~/devel/demo --clear-devices
      oc-box reset --project ~/devel/demo --clear-devices --device /dev/accel/accel1
 
-5.78 -clear-podman-args
+5.80 -clear-podman-args
 =======================
 
 Clear saved additional Podman options before appending replacements.
@@ -4271,7 +4345,7 @@ device list unchanged.
      oc-box reset --project ~/devel/demo --clear-podman-args \
        --podman-arg=--shm-size=2g
 
-5.79 -delete-sessions
+5.81 -delete-sessions
 =====================
 
 Purge-only.  Delete recorded host archive session copies as well as
@@ -4280,7 +4354,7 @@ never deletes an original host source conversation merely because that
 conversation was imported into this workspace.  Example: ‘oc-box purge
 --workspace WORKSPACE_ID --delete-sessions’.
 
-5.80 -all
+5.82 -all
 =========
 
 Purge-only.  Remove environment resources, recorded host session
@@ -4288,14 +4362,14 @@ archives, metadata, and the entire original project directory, including
 untracked files.  The directory identity and marker must still match.
 Example: ‘oc-box purge --project ~/devel/disposable --all’.
 
-5.81 -y, -yes
+5.83 -y, -yes
 =============
 
 Skip purge's ID-prefix confirmation.  Purge-only; it does not answer
 OpenCode questions or bypass permissions on other commands.  Example:
 ‘oc-box purge --workspace WORKSPACE_ID --all --yes’.
 
-5.82 -discard-guarded
+5.84 -discard-guarded
 =====================
 
 Purge-only.  With ‘--workspace WORKSPACE_ID’ and no other options,
@@ -4306,7 +4380,7 @@ may contain unsynced conversations; the project, host archives,
 registration and original fence are preserved.  See [purge](#purge) for
 the supported host profile and refusal conditions.
 
-5.83 -cleanup
+5.85 -cleanup
 =============
 
 Purge-only.  Review all registered workspaces with missing project
@@ -5672,22 +5746,22 @@ Tag Table:
 Node: Top210
 Node: Name769
 Node: Synopsis930
-Node: Description5372
-Node: Commands11192
-Node: Options168952
-Node: Lifecycle and persistence235483
-Node: Distribution images237783
-Node: Sessions and recovery242860
-Node: Devices and host permissions249445
-Node: Resource reports251791
-Node: Configuration and environment253902
-Node: Files265283
-Node: Exit status276193
-Node: Examples277601
-Node: Troubleshooting279740
-Node: Installation and manuals292232
-Node: Authors and license302422
-Node: See also303029
+Node: Description5431
+Node: Commands11251
+Node: Options172219
+Node: Lifecycle and persistence239733
+Node: Distribution images242033
+Node: Sessions and recovery247110
+Node: Devices and host permissions253695
+Node: Resource reports256041
+Node: Configuration and environment258152
+Node: Files269533
+Node: Exit status280443
+Node: Examples281851
+Node: Troubleshooting283990
+Node: Installation and manuals296482
+Node: Authors and license306672
+Node: See also307279
 
 End Tag Table
 

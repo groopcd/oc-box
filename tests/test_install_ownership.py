@@ -15,6 +15,37 @@ from oc_box import host_file_open_policy as layout, install_ownership as ownersh
 from oc_box import installation
 
 
+def synthetic_vfs(fd, *, fsid="abc123"):
+    info = os.fstat(fd)
+    return [info.st_dev, info.st_ino], {
+        "method": "linux-file-handle-v1",
+        "fsid": fsid,
+        "handle": {"type": 1, "bytes": f"{info.st_ino:016x}"},
+    }
+
+
+def write_inventory(receipt, inventory):
+    # Keep the original receipt inode while modeling old persisted evidence.
+    receipt.write_text(
+        json.dumps(inventory, sort_keys=True, separators=(",", ":")) + "\n"
+    )
+
+
+def simulate_saved_device_before_reboot(release):
+    receipt = release / ownership.INVENTORY
+    inventory = json.loads(receipt.read_bytes())
+    old_device = inventory["anchors"][0][0] + 1
+    for vector in (
+        *inventory["anchors"],
+        *(inventory[key] for key in ("lock", "upgrade", "receipt")),
+    ):
+        vector[0] = old_device
+    for parent, stamp, _ in inventory["artifacts"].values():
+        parent[0] = stamp[0] = old_device
+    write_inventory(receipt, inventory)
+    return receipt
+
+
 class FlatOwnershipTests(unittest.TestCase):
     def setUp(self):
         stack = contextlib.ExitStack()
@@ -54,6 +85,200 @@ class FlatOwnershipTests(unittest.TestCase):
 
     def review(self, release):
         return ownership.review_installation(release, home=self.home)
+
+    def test_inventory_records_persistent_handles_for_pinned_activation_directories(
+        self,
+    ):
+        observed = []
+
+        def capture(fd):
+            proof = synthetic_vfs(fd)
+            observed.append(
+                (Path(os.readlink(f"/proc/self/fd/{fd}")), proof[1]["handle"])
+            )
+            return proof
+
+        with patch.object(
+            ownership.workspace_identity, "snapshot_fd", side_effect=capture
+        ):
+            release = self.install()
+            receipt = release / ownership.INVENTORY
+            inventory = json.loads(receipt.read_bytes())
+            self.assertEqual(inventory["version"], 2)
+            self.assertEqual(
+                [path for path, _ in observed],
+                [self.home, self.target, release.parent, release, self.launcher.parent],
+            )
+            self.assertEqual(
+                inventory["vfs_identity"],
+                {
+                    "method": "linux-file-handle-v1",
+                    "fsid": "abc123",
+                    "handles": [handle for _, handle in observed],
+                },
+            )
+            self.assertEqual(self.review(release).release, release)
+            self.assertEqual(
+                ownership.inspect_active_installation(self.home, release).build[
+                    "commit"
+                ],
+                "a" * 40,
+            )
+
+    def test_no_joint_proof_records_legacy_v2_and_never_adopts_a_mismatched_device(
+        self,
+    ):
+        for failure in ("unsupported", "different-filesystem"):
+            with self.subTest(failure=failure):
+
+                def partial(fd):
+                    identity, proof = synthetic_vfs(fd)
+                    if Path(os.readlink(f"/proc/self/fd/{fd}")) == self.launcher.parent:
+                        if failure == "unsupported":
+                            return identity, None
+                        proof["fsid"] = "def456"
+                    return identity, proof
+
+                with patch.object(
+                    ownership.workspace_identity, "snapshot_fd", side_effect=partial
+                ):
+                    release = self.install()
+                receipt = release / ownership.INVENTORY
+                original = receipt.read_bytes()
+                self.assertNotIn("vfs_identity", json.loads(original))
+                with patch.object(
+                    ownership.workspace_identity,
+                    "snapshot_fd",
+                    side_effect=synthetic_vfs,
+                ) as vfs:
+                    self.assertEqual(self.review(release).release, release)
+                    ownership.inspect_active_installation(self.home, release)
+                    self.assertEqual(receipt.read_bytes(), original)
+                    simulate_saved_device_before_reboot(release)
+                    stale = receipt.read_bytes()
+                    with self.assertRaises(ownership.OwnershipError):
+                        ownership.inspect_active_installation(self.home, release)
+                    vfs.assert_not_called()
+                    self.assertEqual(receipt.read_bytes(), stale)
+
+    def test_recorded_vfs_must_match_even_at_the_original_device(self):
+        with patch.object(
+            ownership.workspace_identity, "snapshot_fd", side_effect=synthetic_vfs
+        ):
+            release = self.install()
+        receipt = release / ownership.INVENTORY
+        original = receipt.read_bytes()
+        for failure in ("unsupported", "filesystem", "handle", "split", "inode"):
+            with self.subTest(failure=failure):
+
+                def changed(fd):
+                    identity, proof = synthetic_vfs(fd)
+                    if failure == "unsupported":
+                        return identity, None
+                    if failure == "filesystem":
+                        proof["fsid"] = "def456"
+                    if Path(os.readlink(f"/proc/self/fd/{fd}")) == self.launcher.parent:
+                        if failure == "handle":
+                            proof["handle"]["bytes"] = "ab"
+                        elif failure == "split":
+                            proof["fsid"] = "def456"
+                        elif failure == "inode":
+                            identity[1] += 1
+                    return identity, proof
+
+                with patch.object(
+                    ownership.workspace_identity, "snapshot_fd", side_effect=changed
+                ):
+                    with self.assertRaises(ownership.OwnershipError):
+                        ownership.inspect_active_installation(self.home, release)
+                    with self.assertRaises(ownership.OwnershipError):
+                        self.review(release)
+        self.assertEqual(receipt.read_bytes(), original)
+
+    def test_activation_rebases_only_coherent_device_numbers_and_uses_live_lock_stamps(
+        self,
+    ):
+        with patch.object(
+            ownership.workspace_identity, "snapshot_fd", side_effect=synthetic_vfs
+        ):
+            release = self.install()
+            receipt = simulate_saved_device_before_reboot(release)
+            stale = receipt.read_bytes()
+            original_mount = ownership._mount
+            with patch.object(
+                ownership, "_mount", side_effect=lambda fd: original_mount(fd) + 1
+            ):
+                active = ownership.inspect_active_installation(self.home, release)
+            for value, path in (
+                (active.install_lock, self.target / layout.INSTALL_LOCK),
+                (active.upgrade_lock, self.target / ownership.UPGRADE_LOCK),
+                (active.use_lock, release / ownership.USE_LOCK),
+            ):
+                self.assertEqual(value, ownership._stamp(path.lstat()))
+            with self.assertRaises(ownership.OwnershipError):
+                self.review(release)
+            self.assertEqual(receipt.read_bytes(), stale)
+            for field, column in (
+                (("anchors", 3), 0),
+                (("anchors", 3), 1),
+                (("lock",), 0),
+                (("upgrade",), 0),
+                (("receipt",), 0),
+                (("artifacts", str(layout.LAUNCHER), 0), 0),
+                (("artifacts", str(layout.LAUNCHER), 1), 0),
+                (
+                    (
+                        "artifacts",
+                        str((release / "build-info.json").relative_to(self.home)),
+                        1,
+                    ),
+                    0,
+                ),
+            ):
+                with self.subTest(field=field, column=column):
+                    altered = json.loads(stale)
+                    vector = altered
+                    for part in field:
+                        vector = vector[part]
+                    vector[column] -= 1
+                    write_inventory(receipt, altered)
+                    with self.assertRaises(ownership.OwnershipError):
+                        ownership.inspect_active_installation(self.home, release)
+
+    def test_renumbered_activation_refuses_replaced_files_and_same_device_mount(self):
+        with patch.object(
+            ownership.workspace_identity, "snapshot_fd", side_effect=synthetic_vfs
+        ):
+            for kind in ("wrapper", "manifest", "lock", "mount"):
+                with self.subTest(kind=kind):
+                    release = self.install()
+                    simulate_saved_device_before_reboot(release)
+                    if kind == "mount":
+                        original_mount = ownership._mount
+
+                        def mount(fd):
+                            return original_mount(fd) + (
+                                Path(os.readlink(f"/proc/self/fd/{fd}"))
+                                == self.launcher.parent
+                            )
+
+                        with patch.object(ownership, "_mount", side_effect=mount):
+                            with self.assertRaises(ownership.OwnershipError):
+                                ownership.inspect_active_installation(
+                                    self.home, release
+                                )
+                    else:
+                        path = {
+                            "wrapper": self.launcher,
+                            "manifest": release / "build-info.json",
+                            "lock": self.target / layout.INSTALL_LOCK,
+                        }[kind]
+                        replacement = path.with_name("synthetic-replacement")
+                        replacement.write_bytes(path.read_bytes())
+                        replacement.chmod(path.stat().st_mode & 0o777)
+                        os.replace(replacement, path)
+                        with self.assertRaises(ownership.OwnershipError):
+                            ownership.inspect_active_installation(self.home, release)
 
     def test_inventory_leaves_older_releases_and_all_state_outside_the_plan(self):
         old = self.install()

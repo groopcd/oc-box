@@ -164,7 +164,11 @@ def current_install(root):
     return get_version_info(target if (target / "build-info.json").is_file() else root)
 
 
-def upgrade(root, *, check=False, channel=None, with_vault=False, with_tui=False):
+def upgrade(
+    root, *, check=False, channel=None, with_vault=False, with_tui=False, force=False
+):
+    if force and check:
+        raise UpdateError("--check and --force cannot be combined.")
     managed = package_managed(root)
     if managed and editable_source_root() == Path(root).resolve():
         raise UpdateError(package_upgrade_message(root))
@@ -183,6 +187,7 @@ def upgrade(root, *, check=False, channel=None, with_vault=False, with_tui=False
             channel=channel,
             with_vault=with_vault,
             with_tui=with_tui,
+            **({"force": True} if force else {}),
         )
     if check:
         return _github_upgrade(
@@ -201,6 +206,10 @@ def upgrade(root, *, check=False, channel=None, with_vault=False, with_tui=False
         raise UpdateError("The oc-box installation root must not be a symlink.")
     runtime = Path(root)
     pinned = install_ownership._runtime_home(runtime) is not None
+    if force and not pinned:
+        raise UpdateError(
+            "Reinstall with --force from the active GitHub or Python-package launcher, not a source checkout."
+        )
 
     def require_active():
         try:
@@ -222,7 +231,11 @@ def upgrade(root, *, check=False, channel=None, with_vault=False, with_tui=False
         if pinned:
             require_active()
         return _github_upgrade(
-            root, channel=channel, with_vault=with_vault, with_tui=with_tui
+            root,
+            channel=channel,
+            with_vault=with_vault,
+            with_tui=with_tui,
+            **({"force": True} if force else {}),
         )
 
 
@@ -234,6 +247,7 @@ def _github_upgrade(
     with_vault=False,
     with_tui=False,
     expected_active=None,
+    force=False,
 ):
     previous_channel = selected_channel()
     chosen = selected_channel(channel)
@@ -315,14 +329,16 @@ def _github_upgrade(
         if same_commit:
             if current["version"].split("+", 1)[0] != desired:
                 raise UpdateError("Installed commit has a different release identity.")
-            if not missing_features:
+            if not missing_features and not force:
                 if requested and not check:
                     remember_channel(chosen)
                 print("oc-box is up to date.")
                 return None
         print(
             (
-                "Adding optional support to release "
+                "Reinstalling verified release "
+                if same_commit and force
+                else "Adding optional support to release "
                 if same_commit
                 else "GitHub has a different release at "
             )
@@ -475,6 +491,11 @@ def _github_upgrade(
             raise UpdateError("Installed version does not match the downloaded commit.")
         if expected_active is None:
             installed_root = (target / "current").resolve(strict=True)
+        if force and installed_root == current_root:
+            raise UpdateError(
+                "The installer did not activate a new release directory. "
+                "Channel and feature preferences were not saved."
+            )
         if any(
             not (
                 installed_root / (option.removeprefix("--with-") + "-support.json")
@@ -700,6 +721,7 @@ def automatic_upgrade(root, *, launch_args=None):
         return None
     except owner.OwnershipError:
         raise UpdateError(
-            "Automatic update could not verify the active installation or handoff. Use the active launcher."
+            "Automatic update could not verify the active installation or handoff. "
+            "Use the active launcher to run 'oc-box upgrade --force', or rerun the verified GitHub installer."
         ) from None
     return None

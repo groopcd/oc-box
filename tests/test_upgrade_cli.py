@@ -61,7 +61,7 @@ class UpgradeCliTests(unittest.TestCase):
         self.message.assert_not_called()
 
     def test_channel_flags_cannot_change_workspace_or_informational_commands(self):
-        for channel in ("--stable", "--devel"):
+        for channel in ("--stable", "--devel", "--force"):
             for args in ([], ["start"], ["stop"], ["reset"], ["status"], ["--version"]):
                 with self.subTest(args=args, channel=channel):
                     with self.assertRaisesRegex(box.BoxError, "only to upgrade"):
@@ -80,12 +80,37 @@ class UpgradeCliTests(unittest.TestCase):
 
     def test_autoupdate_options_cannot_be_combined_with_preview_or_channel(self):
         for value in ("on", "off"):
-            for extra in ("--check", "--stable", "--devel", "--vault", "--tui"):
+            for extra in (
+                "--check",
+                "--force",
+                "--stable",
+                "--devel",
+                "--vault",
+                "--tui",
+            ):
                 with self.assertRaisesRegex(box.BoxError, "cannot be combined"):
                     box.main(["upgrade", "--auto-update", value, extra])
         self.packaged.assert_not_called()
         self.settings.assert_not_called()
         self.upgrade.assert_not_called()
+
+    def test_force_routes_only_explicit_verified_reinstall_requests(self):
+        with (
+            patch.object(box, "find_workspace") as workspace,
+            self.assertRaisesRegex(box.BoxError, "--check and --force"),
+        ):
+            box.main(["upgrade", "--force", "--check"])
+        workspace.assert_not_called()
+        self.upgrade.assert_not_called()
+        self.assertEqual(box.main(["upgrade", "--force", "--devel", "--vault"]), 0)
+        self.upgrade.assert_called_once_with(
+            box.APP,
+            check=False,
+            channel="devel",
+            with_vault=True,
+            with_tui=False,
+            force=True,
+        )
 
     def test_channel_selectors_refuse_unrelated_workspace_options(self):
         for channel in ("--stable", "--devel"):
