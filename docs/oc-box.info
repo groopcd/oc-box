@@ -1804,9 +1804,13 @@ same-user debugger, swap or recording protection is not promised.
 Secrets never enter clipboard actions, widget values/messages, protocol
 metadata, argv, environment, plaintext files or journals.  Private
 operations refuse Textual debug, developer tools and event-file logging.
-Clipboard/navigation shortcuts are fenced until child exit.  For
-password confirmation, click its box or Shift+Tab before typing; queued
-first-password text is discarded.
+Clipboard/navigation shortcuts are fenced until child exit.  Dashboard
+backup, inspection and restore also require a verifiable file-based
+Linux core-dump policy and a zero soft core-file size limit.  Piped,
+socket or unverified policies are refused before password input.  oc-box
+does not change the host's crash policy or fall back to a different
+prompt.  For password confirmation, click its box or Shift+Tab before
+typing; queued first-password text is discarded.
 
 The operation modal shows the actual stage and elapsed time.  Full and
 portable backup creation shows measured encrypted bytes during
@@ -5750,20 +5754,20 @@ Node: Name769
 Node: Synopsis930
 Node: Description5431
 Node: Commands11251
-Node: Options172379
-Node: Lifecycle and persistence239893
-Node: Distribution images242193
-Node: Sessions and recovery247270
-Node: Devices and host permissions253855
-Node: Resource reports256201
-Node: Configuration and environment258312
-Node: Files269693
-Node: Exit status280603
-Node: Examples282011
-Node: Troubleshooting284150
-Node: Installation and manuals296642
-Node: Authors and license306832
-Node: See also307439
+Node: Options172676
+Node: Lifecycle and persistence240190
+Node: Distribution images242490
+Node: Sessions and recovery247567
+Node: Devices and host permissions254152
+Node: Resource reports256498
+Node: Configuration and environment258609
+Node: Files269990
+Node: Exit status280900
+Node: Examples282308
+Node: Troubleshooting284447
+Node: Installation and manuals296939
+Node: Authors and license307129
+Node: See also307736
 
 End Tag Table
 

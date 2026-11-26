@@ -1351,9 +1351,12 @@ observations include:
   private in-dashboard masked editing backed by the actual child controlling
   TTY; no password can enter selectable Input/widget values/messages, UI
   selection/copy, protocol metadata, argv/env, plaintext files, logs or journals.
-  Verify debug/developer/event-logging refusal, core-dump suppression, prompt
-  readiness/echo fences, confirmation focus and queued-input isolation, Enter
-  refusal on the next authenticated metadata review, global clipboard/help/
+  Verify debug/developer/event-logging refusal, pre-prompt refusal for piped,
+  socket and unverifiable core policies, and a verified zero soft core-file
+  limit under file-mode policy in both manager and private child. Keep the
+  hard limit unchanged; it does not prove suppression for piped crashes.
+  Check prompt readiness/echo fences, confirmation focus and queued-input
+  isolation, Enter refusal on the next authenticated metadata review, global clipboard/help/
   palette/clear/navigation fences through child exit, and local focus traversal.
   Read-only/demo gates apply again
   at execution and source changes invalidate reviews.

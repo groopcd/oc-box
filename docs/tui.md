@@ -786,11 +786,17 @@ without an extra confirmation click or keystroke. The prompt then shows
 automatic key-management problem that the dashboard silently resolves.
 
 The manager's transient private editor is part of the secret-memory trust
-boundary. Core dumps are disabled before private input, but Python memory
-erasure, same-user debugger, swap or terminal-recording protection is not
-guaranteed. Passwords are never stored as widget values/reactives/messages,
-protocol metadata, argv/env, plaintext files, clipboard content or journal
-entries. Private operations refuse Textual debugging, developer tools and
+boundary. Dashboard backup, inspection and restore require a verifiable
+file-based Linux core-dump policy. The manager and child verify a zero soft
+core-file limit before accepting input; stock helpers such as `age` inherit it.
+Piped or socket-based crash collectors can ignore that limit, so these or
+unverifiable policies are refused before password entry. oc-box does not
+change host crash settings; the trusted host policy must remain stable during
+the operation. This does not guarantee Python memory erasure or protection
+against a same-user debugger, swap or terminal recording. Passwords are never
+stored as widget values/reactives/messages, protocol metadata, argv/env,
+plaintext files, clipboard content or journal entries. Private operations refuse
+Textual debugging, developer tools and
 event-file logging because those facilities can record input before widget
 handlers. Global copy/paste, help, palette and navigation are fenced through
 child exit, including gaps between dialogs; local focus traversal remains usable.

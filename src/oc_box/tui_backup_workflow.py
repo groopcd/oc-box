@@ -1,5 +1,6 @@
 """Optional dashboard backup presentation, with private non-Input secret editing."""
 
+from dataclasses import asdict
 import json
 import signal
 import time
@@ -16,10 +17,12 @@ from textual.widgets import Button, Input, ProgressBar, Static
 if __package__:
     from . import secret_prompt, tui_operation_io
     from .status_report import byte_size
+    from .tui_notifications import CORE_DUMP_POLICY_MESSAGE, failure_notice
 else:
     import secret_prompt
     import tui_operation_io
     from status_report import byte_size
+    from tui_notifications import CORE_DUMP_POLICY_MESSAGE, failure_notice
 
 
 def private_ui_allowed(app):
@@ -30,7 +33,7 @@ def private_ui_allowed(app):
         or getattr(app, "devtools", None) is not None
     ):
         raise tui_operation_io.OperationIOError()
-    tui_operation_io.disable_core_dumps()
+    tui_operation_io.protect_private_input()
 
 
 class SecretEditor(Widget, can_focus=True):
@@ -188,11 +191,13 @@ class PrivateSecretScreen(_PrivateOperationModal):
     def on_mount(self):
         try:
             private_ui_allowed(self.app)
-        except Exception:
+        except Exception as error:
             self.query_one(SecretEditor).disabled = True
             self.transport.cancel()
             self.query_one("#private-secret-status", Static).update(
-                "Private input requires dashboard debug, developer tools, and event logging disabled. Cancelling…"
+                CORE_DUMP_POLICY_MESSAGE
+                if isinstance(error, tui_operation_io.CoreDumpPolicyError)
+                else "Private input requires dashboard debug, developer tools, and event logging disabled. Cancelling…"
             )
             return
         for widget in self.walk_children():
@@ -250,6 +255,10 @@ class PrivateSecretScreen(_PrivateOperationModal):
             self.transport.submit_secret(self.prompt_id, content)
             self.query_one("#private-secret-status", Static).update(
                 "Password submitted. Waiting for the backup operation…"
+            )
+        except tui_operation_io.CoreDumpPolicyError:
+            self.query_one("#private-secret-status", Static).update(
+                CORE_DUMP_POLICY_MESSAGE
             )
         except Exception:
             self.query_one("#private-secret-status", Static).update(
@@ -423,6 +432,7 @@ class BackupWorkflow(_PrivateOperationModal):
         self.transport = tui_operation_io.OperationProcess(runtime, request)
         self.result = None
         self.finished = False
+        self._policy_refused = False
         self.started = time.monotonic()
         self._details = []
         self._measured = request.get("action") == "workspace-backup"
@@ -489,6 +499,10 @@ class BackupWorkflow(_PrivateOperationModal):
         try:
             self.transport.start()
             result = self.transport.run(self._from_worker)
+        except tui_operation_io.CoreDumpPolicyError as error:
+            # Local refusal before the worker was started, not a child
+            # acknowledgement or an uncertain change to the user's data.
+            result = {"code": 1, "notice": asdict(failure_notice("mutation", error))}
         except Exception:
             pass  # fixed failure only; never render/log exception or private locals
         finally:
@@ -532,6 +546,12 @@ class BackupWorkflow(_PrivateOperationModal):
                     f"{label}: {size}"
                 )
         elif kind == "prompt":
+            try:
+                tui_operation_io.protect_private_input()
+            except tui_operation_io.CoreDumpPolicyError:
+                self._policy_refused = True
+                self.transport.cancel()
+                return
             self.app.push_screen(PrivateSecretScreen(self.transport, event))
         elif kind == "prompt-closed":
             screen = self.app.screen
@@ -594,6 +614,8 @@ class BackupWorkflow(_PrivateOperationModal):
                 if notice
                 else "Operation did not complete."
             )
+        if self._policy_refused and CORE_DUMP_POLICY_MESSAGE not in status:
+            status += " " + CORE_DUMP_POLICY_MESSAGE
         self.query_one("#backup-operation-stage", Static).update(status)
         self.query_one("#backup-operation-close", Button).focus()
 

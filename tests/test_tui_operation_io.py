@@ -21,7 +21,6 @@ import unittest
 from unittest.mock import Mock, patch
 
 from oc_box import (
-    oc_box as box,
     private_memory,
     tui_operation_io as channel,
     tui_operations,
@@ -65,6 +64,10 @@ for fd in fds:
   assert interaction.review({"format":"session","session_count":1})
  elif scenario=="short-unlock":
   assert secret_prompt.read_secret("Backup passphrase: ",purpose="backup-unlock")=="x"
+ elif scenario=="blocked-prompt":
+  interaction.stage("backup-key")
+  with patch.object(channel,"_read_core_pattern",return_value=b"|/synthetic-handler\n"):
+   secret_prompt.read_secret("Backup passphrase: ",purpose="backup-unlock")
  elif scenario=="zero":
   return 0
  elif scenario=="complete":
@@ -106,8 +109,150 @@ for fd in fds:
  interaction.inspection({"format":"session","session_count":1})
  progress(completed=True)
  return 0
-sys.exit(channel.child(None,fds,execute=execute,check_request=tui_operations._checked_memory_fd))
+with patch.object(channel,"_read_core_pattern",return_value=PATTERN):
+ sys.exit(channel.child(None,fds,execute=execute,check_request=tui_operations._checked_memory_fd))
 '''
+
+
+def write_fixture(root, *, pattern=b"core\n"):
+    source = (
+        FIXTURE.replace("SOURCE", repr(str(SOURCE)))
+        .replace("VALUE", repr(VALUE))
+        .replace("PATTERN", repr(pattern))
+    )
+    (root / "tui_operations.py").write_text(source)
+
+
+class CoreDumpPolicyTests(unittest.TestCase):
+    def assert_refused_before_limit(self):
+        with (
+            patch.object(resource, "getrlimit", return_value=(0, 0)) as get_limit,
+            patch.object(resource, "setrlimit") as set_limit,
+            self.assertRaises(channel.CoreDumpPolicyError) as caught,
+        ):
+            channel.protect_private_input()
+        self.assertEqual(caught.exception.reason, "core-dump-policy")
+        self.assertEqual(str(caught.exception), channel.CORE_DUMP_POLICY_MESSAGE)
+        get_limit.assert_not_called()
+        set_limit.assert_not_called()
+
+    def test_only_bounded_single_line_printable_file_patterns_are_admitted(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "core_pattern"
+            with patch.object(channel, "_CORE_PATTERN", path):
+                for pattern in (
+                    b"core\n",
+                    b"/synthetic/core files/core.%p\n",
+                    b"x" * 127 + b"\n",
+                ):
+                    with (
+                        self.subTest(pattern=pattern),
+                        patch.object(
+                            resource, "getrlimit", side_effect=[(1024, 2048), (0, 2048)]
+                        ) as get_limit,
+                        patch.object(resource, "setrlimit") as set_limit,
+                    ):
+                        path.write_bytes(pattern)
+                        channel.protect_private_input()
+                        set_limit.assert_called_once_with(
+                            resource.RLIMIT_CORE, (0, 2048)
+                        )
+                        self.assertEqual(get_limit.call_count, 2)
+                for pattern in (
+                    b"|/synthetic-handler %p\n",
+                    b"@/synthetic-socket\n",
+                    b"@@/synthetic-socket\n",
+                    b" |/synthetic-handler\n",
+                    b"",
+                    b"\n",
+                    b"core",
+                    b"core\nsecond\n",
+                    b"core\r\n",
+                    b"core\x00\n",
+                    b"core\xff\n",
+                    b"x" * 128 + b"\n",
+                ):
+                    with self.subTest(pattern=pattern):
+                        path.write_bytes(pattern)
+                        self.assert_refused_before_limit()
+
+    def test_missing_nonregular_linked_and_unreadable_policy_refuse(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            valid = root / "valid"
+            valid.write_bytes(b"core\n")
+            link = root / "link"
+            link.symlink_to(valid)
+            for path in (root / "missing", root, link):
+                with (
+                    self.subTest(path=path),
+                    patch.object(channel, "_CORE_PATTERN", path),
+                ):
+                    self.assert_refused_before_limit()
+        with patch.object(
+            channel,
+            "_read_core_pattern",
+            side_effect=PermissionError(errno.EACCES, "synthetic raw path"),
+        ):
+            self.assert_refused_before_limit()
+
+    def test_file_policy_still_requires_verified_zero_soft_limit(self):
+        with (
+            patch.object(channel, "_read_core_pattern", return_value=b"core\n"),
+            patch.object(resource, "getrlimit", return_value=(1024, 2048)),
+            patch.object(resource, "setrlimit") as set_limit,
+            self.assertRaises(channel.CoreDumpPolicyError),
+        ):
+            channel.protect_private_input()
+        set_limit.assert_called_once_with(resource.RLIMIT_CORE, (0, 2048))
+
+    def test_parent_refuses_before_allocating_private_transport(self):
+        process = channel.OperationProcess(None, {"action": "workspace-backup"})
+        with (
+            patch.object(
+                channel, "_read_core_pattern", return_value=b"|/synthetic-handler\n"
+            ),
+            patch.object(channel.pty, "openpty") as open_pty,
+            patch.object(channel.os, "pipe2") as make_pipe,
+            patch.object(private_memory, "create") as make_request,
+            patch.object(subprocess, "Popen") as spawn,
+            self.assertRaises(channel.CoreDumpPolicyError),
+        ):
+            process.start()
+        for allocate in (open_pty, make_pipe, make_request, spawn):
+            allocate.assert_not_called()
+        self.assertIsNone(process.process)
+
+    def test_parent_recheck_refuses_without_delivery_and_clears_submission(self):
+        process = channel.OperationProcess(None, {})
+        process.master, process.slave = pty.openpty()
+        self.addCleanup(process.close)
+        attrs = termios.tcgetattr(process.slave)
+        attrs[3] &= ~(termios.ECHO | termios.ECHONL | termios.ICANON)
+        termios.tcsetattr(process.slave, termios.TCSANOW, attrs)
+        process._accept({"version": 1, "seq": 1, "kind": "started"})
+        process._accept(
+            {
+                "version": 1,
+                "seq": 2,
+                "kind": "prompt",
+                "id": 1,
+                "purpose": "backup-new",
+                "maximum": 1024,
+            }
+        )
+        content = bytearray(b"synthetic-not-delivered")
+        with (
+            patch.object(
+                channel, "_read_core_pattern", return_value=b"@/synthetic-socket\n"
+            ),
+            patch.object(channel.os, "write") as write,
+            self.assertRaises(channel.CoreDumpPolicyError),
+        ):
+            process.submit_secret(1, content)
+        write.assert_not_called()
+        self.assertEqual(content, bytearray())
+        self.assertTrue(process._cancelled)
 
 
 class PrivateProtocolTests(unittest.TestCase):
@@ -181,6 +326,7 @@ class PrivateProtocolTests(unittest.TestCase):
             event("started")
             event("prompt", id=1, purpose="backup-new", maximum=1024)
             with (
+                patch.object(channel, "_read_core_pattern", return_value=b"core\n"),
                 patch.object(channel.os, "write", side_effect=delayed_write),
                 ThreadPoolExecutor(max_workers=1) as pool,
             ):
@@ -482,16 +628,53 @@ class PrivateProtocolTests(unittest.TestCase):
             )
         child.assert_not_called()
 
+    def test_production_embedded_child_still_refuses_container_without_guard_bypass(
+        self,
+    ):
+        if not (
+            os.environ.get("OC_BOX_CONTAINER") == "1"
+            or Path("/run/.containerenv").exists()
+            or Path("/.dockerenv").exists()
+            or os.geteuid() == 0
+        ):
+            self.skipTest("requires a real production host refusal environment")
+        # Invoke the production child entrypoint directly. Parent policy admission
+        # must not mask this independent host guard; no real descriptors are passed.
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-I",
+                "-B",
+                tui_operations.__file__,
+                "--request-fd",
+                "0",
+                "--event-fd",
+                "1",
+                "--control-fd",
+                "2",
+                "--tty-fd",
+                "3",
+            ],
+            env={"OC_BOX_CONTAINER": os.environ.get("OC_BOX_CONTAINER", "0")},
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        notice = channel.failure_notice("mutation", reason="host-only")
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stdout.strip(), f"{notice.title}: {notice.message}")
+        self.assertEqual(result.stderr, "")
+
 
 class PrivateProcessTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix="oc-box-private-operation-")
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
-        code = FIXTURE.replace("SOURCE", repr(str(SOURCE))).replace(
-            "VALUE", repr(VALUE)
-        )
-        (self.root / "tui_operations.py").write_text(code)
+        write_fixture(self.root)
+        policy = patch.object(channel, "_read_core_pattern", return_value=b"core\n")
+        policy.start()
+        self.addCleanup(policy.stop)
         self.runtime = SimpleNamespace(
             PACKAGE=self.root,
             state_root=lambda: self.root / "state",
@@ -570,6 +753,41 @@ class PrivateProcessTests(unittest.TestCase):
             process.cancel()
             process.process.wait(timeout=10)
         process.close()
+
+    def test_child_rechecks_before_execute_and_again_before_advertising_a_real_prompt(
+        self,
+    ):
+        for scenario, pattern, kinds in (
+            (
+                "complete",
+                b"|/synthetic-handler\n",
+                ["started", "result"],
+            ),
+            (
+                "blocked-prompt",
+                b"core\n",
+                ["started", "stage", "result"],
+            ),
+        ):
+            with self.subTest(scenario=scenario):
+                write_fixture(self.root, pattern=pattern)
+                process = self.launch(scenario)
+                events = []
+
+                def received(event):
+                    events.append(event)
+                    if event["kind"] == "prompt":
+                        process.cancel()  # do not hang if a regression allows input
+
+                result = process.run(received)
+                self.assertEqual([event["kind"] for event in events], kinds)
+                self.assertEqual(result["code"], 1)
+                for flag in ("dispatched", "completed", "uncertain", "cancelled"):
+                    self.assertFalse(result[flag])
+                self.assertEqual(
+                    result["notice"]["message"], channel.CORE_DUMP_POLICY_MESSAGE
+                )
+                self.assertNotIn("synthetic-handler", json.dumps(events))
 
     def test_original_controlling_tty_editor_complete_submission_and_explicit_review(
         self,
@@ -754,22 +972,6 @@ class PrivateProcessTests(unittest.TestCase):
                 result = process.run(events.append)
                 self.assertNotEqual(result["code"], 0)
                 self.assertNotIn("PRIVATE_RAW_ERROR", json.dumps(events))
-
-    def test_production_embedded_child_still_refuses_container_without_guard_bypass(
-        self,
-    ):
-        if not (
-            os.environ.get("OC_BOX_CONTAINER") == "1"
-            or Path("/run/.containerenv").exists()
-            or Path("/.dockerenv").exists()
-            or os.geteuid() == 0
-        ):
-            self.skipTest("requires a real production host refusal environment")
-        process = channel.OperationProcess(box, {"version": 1})
-        process.start()
-        self.addCleanup(self.finish_process, process)
-        with self.assertRaises(channel.OperationIOError):
-            process.run(lambda _: self.fail("guard refusal emitted an operation event"))
 
 
 if __name__ == "__main__":
