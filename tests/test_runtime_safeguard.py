@@ -482,7 +482,7 @@ class RuntimeSafeguardTests(unittest.TestCase):
             ),
             patch.object(guard.entrypoint_migration, "require_local_engine") as local,
             patch.object(
-                box, "inspect_owned", side_effect=[running, running, stopped]
+                box, "inspect_owned", side_effect=[running, stopped]
             ) as inspect,
             patch.object(box, "podman") as podman,
             patch.object(guard.guarded_devices, "verify") as devices,
@@ -490,14 +490,18 @@ class RuntimeSafeguardTests(unittest.TestCase):
             box._stop_selected(self.path, data, admitted=True)
         local.assert_called_once_with(box, engine)
         devices.assert_not_called()
-        self.assertEqual(inspect.call_count, 3)
-        for index, call in enumerate(inspect.call_args_list):
+        self.assertEqual(inspect.call_count, 2)
+        for call, selector in zip(
+            inspect.call_args_list, (data["container"], CONTAINER)
+        ):
+            self.assertEqual(call.args, ({**data, "container": selector},))
             self.assertEqual(
                 call.kwargs,
                 {
                     "local_only": True,
                     "env": engine,
-                    **({"private": True, "timeout": 15} if index != 1 else {}),
+                    "private": True,
+                    "timeout": 15,
                 },
             )
         podman.assert_called_once_with(
@@ -507,6 +511,8 @@ class RuntimeSafeguardTests(unittest.TestCase):
             "10",
             CONTAINER,
             capture=True,
+            private=True,
+            timeout=15,
             env=engine,
         )
 
@@ -683,23 +689,132 @@ class RuntimeSafeguardTests(unittest.TestCase):
             patch.object(
                 workspace_control,
                 "admission",
-                side_effect=workspace_control.ControlError("admission-timeout"),
+                side_effect=workspace_control.ControlError("control-timeout"),
             ),
             patch.object(guard.entrypoint_migration, "stop_staged") as stop,
-            self.assertRaisesRegex(box.BoxError, "stop was not admitted"),
+            self.assertRaisesRegex(box.BoxError, "control-timeout"),
         ):
             box._stop_v2(self.path, data)
         stop.assert_not_called()
 
     def test_v2_staged_stop_does_not_repeat_when_uncertainty_remains(self):
+        data = {**self.data, guard.entrypoint_migration.RETIRE: {}}
         workspace_control.capture(self.path)
         workspace_control.mark_uncertain(self.path)
         with (
+            patch.object(box, "check_backend") as backend,
             patch.object(box, "_stop_selected") as stop,
             self.assertRaisesRegex(box.BoxError, "uncertain-control"),
         ):
+            box._stop_v2(self.path, data)
+        backend.assert_not_called()
+        stop.assert_called_once_with(
+            self.path,
+            data,
+            admitted=True,
+            guard_binding=box._stop_guard_binding(self.path, data),
+        )
+
+    def test_v2_bound_guard_cannot_stop_after_control_failure(self):
+        self.seed()
+        for operation, category in (
+            ("request_stop", "control-unavailable"),
+            ("admission", "control-timeout"),
+        ):
+            with (
+                self.subTest(operation=operation),
+                patch.object(
+                    workspace_control,
+                    operation,
+                    side_effect=workspace_control.ControlError(category),
+                ),
+                patch.object(box, "check_backend") as backend,
+                patch.object(guard, "load") as load,
+                patch.object(box, "podman") as engine,
+                self.assertRaisesRegex(box.BoxError, category),
+            ):
+                box._stop_v2(self.path, self.data)
+            for operation in (backend, load, engine):
+                operation.assert_not_called()
+
+    def test_v2_guard_binding_changes_do_not_use_the_ordinary_stop_path(self):
+        sidecar = self.path.with_name("native-runtime-guard.json")
+        for change in ("appeared", "removed", "replaced"):
+            with self.subTest(change=change):
+                if change != "appeared":
+                    self.seed()
+
+                def change_guard(path):
+                    if change != "appeared":
+                        sidecar.unlink()
+                    if change != "removed":
+                        sidecar.symlink_to(self.root / "missing-target")
+                    token = request_stop(path)
+                    if change == "appeared":
+                        # The ordinary best-effort path must recheck the binding.
+                        raise workspace_control.ControlError("control-unavailable")
+                    return token
+
+                request_stop = workspace_control.request_stop
+                with (
+                    patch.object(
+                        box, "find_workspace", return_value=(self.path, self.data)
+                    ),
+                    patch.object(
+                        workspace_control, "request_stop", side_effect=change_guard
+                    ),
+                    patch.object(box, "check_backend") as backend,
+                    patch.object(guard, "load") as load,
+                    patch.object(box, "stop_container") as stop,
+                    patch.object(box, "podman") as engine,
+                    self.assertRaisesRegex(box.BoxError, "stop binding changed"),
+                ):
+                    box._stop_v2(self.path, self.data)
+                self.assertEqual(backend.call_count, int(change == "appeared"))
+                for operation in (load, stop, engine):
+                    operation.assert_not_called()
+                sidecar.unlink(missing_ok=True)
+
+    def test_dangling_guard_entry_is_not_an_ordinary_stop(self):
+        self.path.with_name("native-runtime-guard.json").symlink_to(
+            self.root / "missing-target"
+        )
+        token = workspace_control.capture(self.path)
+        with (
+            patch.object(box, "find_workspace", return_value=(self.path, self.data)),
+            patch.object(box, "check_backend") as backend,
+            patch.object(box, "stop_container") as stop,
+            patch.object(box, "podman") as engine,
+            self.assertRaisesRegex(
+                box.BoxError, "Native runtime guard storage is unsafe"
+            ),
+        ):
             box._stop_v2(self.path, self.data)
-        stop.assert_called_once_with(self.path, self.data, admitted=True)
+        self.assertFalse(workspace_control.unchanged(self.path, token))
+        for operation in (backend, stop, engine):
+            operation.assert_not_called()
+
+    def test_completed_conversion_without_guard_record_cannot_stop_as_ordinary(self):
+        data = {
+            **self.data,
+            guard.entrypoint_migration.RECEIPT: {
+                "id": CONTAINER,
+                "bootstrap": False,
+                "volume": [1, 2],
+            },
+        }
+        token = workspace_control.capture(self.path)
+        with (
+            patch.object(box, "find_workspace", return_value=(self.path, data)),
+            patch.object(box, "check_backend") as backend,
+            patch.object(box, "stop_container") as stop,
+            patch.object(box, "podman") as engine,
+            self.assertRaisesRegex(box.BoxError, "guarded stop record is missing"),
+        ):
+            box._stop_v2(self.path, data)
+        self.assertFalse(workspace_control.unchanged(self.path, token))
+        for operation in (backend, stop, engine):
+            operation.assert_not_called()
 
     def test_partial_marker_blocks_start_and_sync_without_preparing_environment(self):
         data = {**self.data, guard.entrypoint_migration.RETIRE: {"synthetic": True}}
@@ -1327,17 +1442,24 @@ class RuntimeSafeguardTests(unittest.TestCase):
     def test_explicit_stop_publishes_intent_before_reading_guard_state(self):
         baseline = self.seed()
         token = workspace_control.capture(self.path)
+        load_guard = native_runtime_guard.load
 
-        def guarded_record(_box, path):
+        def guarded_record(path):
             self.assertEqual(path, self.path)
             self.assertFalse(workspace_control.unchanged(self.path, token))
-            return baseline
+            with self.assertRaises(workspace_control.ControlError):
+                with workspace_control.admission(path, timeout=0):
+                    self.fail("Guard read was outside lifecycle admission.")
+            self.assertEqual(record := load_guard(path), baseline)
+            return record
 
         with (
-            patch.object(box, "check_backend"),
+            patch.object(box, "check_backend") as backend,
             patch.object(box, "state_root", return_value=self.root),
             patch.object(box, "find_workspace", return_value=(self.path, self.data)),
-            patch.object(guard, "load", side_effect=guarded_record),
+            patch.object(
+                native_runtime_guard, "load", side_effect=guarded_record
+            ) as load,
             patch.object(guard.entrypoint_migration, "require_local_engine"),
             patch.object(
                 box,
@@ -1356,11 +1478,9 @@ class RuntimeSafeguardTests(unittest.TestCase):
             patch.object(box, "stop_container") as stop,
         ):
             self.assertEqual(box.main(["stop", "--project", str(self.project)]), 0)
-        stop.assert_called_once_with(
-            {**self.data, "container": CONTAINER},
-            local_only=True,
-            env=guard.entrypoint_migration.engine_environment(box),
-        )
+        load.assert_called_once_with(self.path)
+        backend.assert_not_called()
+        stop.assert_not_called()
 
     def test_live_config_copy_cannot_spawn_after_stop_is_published(self):
         baseline = self.seed()

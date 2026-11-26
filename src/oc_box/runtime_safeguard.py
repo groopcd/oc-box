@@ -360,15 +360,21 @@ def _host_release(box, binary):
     return read_version(box, binary.command(box))
 
 
-def load(box, path):
+def guard_stamp(box, path):
+    """Observe the guard entry without following a link or reading its record."""
     # Do not impose the new sidecar schema on ordinary legacy workspaces.
     # lstat also detects a dangling link; it is not an absent preference.
     try:
-        path.with_name("native-runtime-guard.json").lstat()
+        return _signature(path.with_name("native-runtime-guard.json").lstat())
     except FileNotFoundError:
         return None
     except OSError:
         raise box.BoxError("Cannot safely inspect the native runtime guard.") from None
+
+
+def load(box, path):
+    if guard_stamp(box, path) is None:
+        return None
     try:
         return native_runtime_guard.load(path)
     except native_runtime_guard.GuardError as exc:
