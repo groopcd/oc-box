@@ -5608,8 +5608,8 @@ def launch_client(path, data, args, version, exported, owner=None):
                     interactive=True,
                     ui_owner=True,
                     file_preview=file_open,
-                    activity_timeline=activity_timeline,
-                    inline_timestamps=inline_timestamps,
+                    **({"activity_timeline": True} if activity_timeline else {}),
+                    **({"inline_timestamps": True} if inline_timestamps else {}),
                 )
                 if owner
                 else exec_command(data, command, interactive=True),
