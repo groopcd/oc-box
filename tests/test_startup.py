@@ -341,6 +341,12 @@ class ConfigCacheTests(unittest.TestCase):
 
 
 class V2PluginReadinessTests(unittest.TestCase):
+    def test_optional_plugin_without_a_state_does_not_gate_active_build(self):
+        active = {"id": "oc-box.build-permissions", "state": {"status": "active"}}
+        optional = {"id": "optional-fixture", "state": None}
+        request = mock.Mock(side_effect=[{}, {"data": [optional, active]}])
+        self.assertEqual(v2.ready_plugins(request, "/project"), [optional, active])
+
     def test_empty_early_catalog_can_settle_but_never_counts_as_ready(self):
         active = {"id": "oc-box.build-permissions", "state": {"status": "active"}}
         request = mock.Mock(side_effect=[{}, {"data": []}, {"data": [active]}])

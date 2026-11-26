@@ -321,7 +321,7 @@ def require_local_engine(box, env):
         )
     except (OSError, ValueError, KeyError, TypeError, AttributeError, box.BoxError):
         raise box.BoxError(
-            "Cannot verify a local rootless Podman engine for the staged replacement."
+            "Cannot verify a local rootless Podman engine for this guarded operation."
         ) from None
 
 

@@ -491,8 +491,15 @@ class RuntimeSafeguardTests(unittest.TestCase):
         local.assert_called_once_with(box, engine)
         devices.assert_not_called()
         self.assertEqual(inspect.call_count, 3)
-        for call in inspect.call_args_list:
-            self.assertEqual(call.kwargs, {"local_only": True, "env": engine})
+        for index, call in enumerate(inspect.call_args_list):
+            self.assertEqual(
+                call.kwargs,
+                {
+                    "local_only": True,
+                    "env": engine,
+                    **({"private": True, "timeout": 15} if index != 1 else {}),
+                },
+            )
         podman.assert_called_once_with(
             "--remote=false",
             "stop",
@@ -1285,11 +1292,29 @@ class RuntimeSafeguardTests(unittest.TestCase):
             patch.object(box, "state_root", return_value=self.root),
             patch.object(box, "find_workspace", return_value=(self.path, self.data)),
             patch.object(guard, "load", side_effect=guarded_record),
-            patch.object(box, "inspect_owned", return_value={"Id": CONTAINER}),
+            patch.object(guard.entrypoint_migration, "require_local_engine"),
+            patch.object(
+                box,
+                "inspect_owned",
+                return_value={
+                    "Id": CONTAINER,
+                    "State": {
+                        "Status": "exited",
+                        "Running": False,
+                        "Paused": False,
+                        "Restarting": False,
+                        "Pid": 0,
+                    },
+                },
+            ),
             patch.object(box, "stop_container") as stop,
         ):
             self.assertEqual(box.main(["stop", "--project", str(self.project)]), 0)
-        stop.assert_called_once_with({**self.data, "container": CONTAINER})
+        stop.assert_called_once_with(
+            {**self.data, "container": CONTAINER},
+            local_only=True,
+            env=guard.entrypoint_migration.engine_environment(box),
+        )
 
     def test_live_config_copy_cannot_spawn_after_stop_is_published(self):
         baseline = self.seed()

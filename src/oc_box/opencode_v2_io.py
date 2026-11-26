@@ -1637,7 +1637,10 @@ def ready_plugins(request, directory, *, startup_deadline=None):
             plugins = response.get("data") if isinstance(response, dict) else None
             if not isinstance(plugins, list) or any(
                 not isinstance(plugin, dict)
-                or not isinstance(plugin.get("state"), dict)
+                or (
+                    not isinstance(plugin.get("id"), str)
+                    and not isinstance(plugin.get("state"), dict)
+                )
                 for plugin in plugins
             ):
                 raise FixedError(READINESS)
@@ -1647,8 +1650,11 @@ def ready_plugins(request, directory, *, startup_deadline=None):
                 if plugin.get("id") == "oc-box.build-permissions"
             ]
             if required:
-                status = required[0]["state"].get("status")
-                if len(required) != 1 or status not in ("active", "failed"):
+                state = required[0].get("state")
+                if len(required) != 1 or not isinstance(state, dict):
+                    raise FixedError(READINESS)
+                status = state.get("status")
+                if status not in ("active", "failed"):
                     raise FixedError(READINESS)
                 if status == "failed":
                     raise FixedError(BUILD_PLUGIN_FAILED)
@@ -1790,9 +1796,16 @@ def main(argv):
         history_worker()
     elif action == "plugins":
         with server(binary) as request:
+            unknown_status = False
             for plugin in ready_plugins(request, os.getcwd()):
-                if plugin.get("state", {}).get("status") == "failed":
+                state = plugin.get("state")
+                if not isinstance(state, dict):
+                    unknown_status = True
+                    continue
+                if state.get("status") == "failed":
                     source = plugin.get("source", {})
+                    if not isinstance(source, dict):
+                        source = {}
                     name = (
                         source.get("target")
                         or source.get("path")
@@ -1804,7 +1817,7 @@ def main(argv):
                         + str(name)
                         + "; port this plugin to the V2 API or install its V2-compatible release."
                     )
-                    error = str(plugin.get("state", {}).get("error", ""))
+                    error = str(state.get("error", ""))
                     if "oc-box V1 adapter: unsupported hooks " in error:
                         import re
 
@@ -1817,6 +1830,10 @@ def main(argv):
                                 "oc-box: OpenCode 2.x plugin unavailable: unsupported legacy hooks: "
                                 + match[1][:300]
                             )
+            if unknown_status:
+                print(
+                    "oc-box: OpenCode 2.x plugin unavailable: optional plugin status could not be verified."
+                )
     else:
         raise ValueError("Unknown private OpenCode operation.")
 

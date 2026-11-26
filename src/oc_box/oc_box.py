@@ -6537,33 +6537,31 @@ def _stop_selected(path, data, *, admitted=False):
         )
         return
     elif record:
-        if data.get("devices"):
-            # Stop the same owned object even when a device has disappeared.
-            env = migration.engine_environment(sys.modules[__name__])
-            migration.require_local_engine(sys.modules[__name__], env)
-            info = inspect_owned(data, local_only=True, env=env)
-        else:
-            env = None
-            info = inspect_owned(data)
+        # Stop the same owned object without depending on optional devices,
+        # native startup, or hardware access.
+        env = migration.engine_environment(sys.modules[__name__])
+        migration.require_local_engine(sys.modules[__name__], env)
+        info = inspect_owned(data, local_only=True, env=env, private=True, timeout=15)
         if not info or info.get("Id") != record.container:
             raise BoxError(
                 "The guarded container identity changed; no substitute was stopped."
             )
         data = {**data, "container": record.container}
-        if env is not None:
-            stop_container(data, env=env, local_only=True)
-            final = inspect_owned(data, local_only=True, env=env)
-            if (
-                not final
-                or final.get("Id") != record.container
-                or not migration._stopped(
-                    final, ("created", "configured", "exited", "stopped")
-                )
-            ):
-                raise BoxError(
-                    "Could not verify the guarded device workspace stopped on its local engine."
-                )
-            return
+        stop_container(data, env=env, local_only=True)
+        final = inspect_owned(data, local_only=True, env=env, private=True, timeout=15)
+        if (
+            not final
+            or final.get("Id") != record.container
+            or not migration._stopped(
+                final, ("created", "configured", "exited", "stopped")
+            )
+        ):
+            raise BoxError(
+                "Could not verify the guarded workspace stopped on its local engine."
+            )
+        return
+    if opencode_compat.major(data.get("opencode_version", "1.0.0")) == 2:
+        check_backend()
     stop_container(data)
 
 
@@ -7087,18 +7085,14 @@ def _main_command(args, argv):
     web_selection = None
     web_attach_only = False
     stop_selection = None
-    stop_engine = None
+    stop_v2 = False
     if args.command == "stop":
         stop_selection = find_workspace(args.project, args.workspace)
-        path, selected = stop_selection
-        if (
+        _, selected = stop_selection
+        stop_v2 = bool(
             selected
-            and selected.get("devices")
-            and runtime_safeguard.load(sys.modules[__name__], path) is not None
-        ):
-            stop_engine = runtime_safeguard.entrypoint_migration.engine_environment(
-                sys.modules[__name__]
-            )
+            and opencode_compat.major(selected.get("opencode_version", "1.0.0")) == 2
+        )
     if args.command == "web":
         web_selection = find_workspace(args.project, args.workspace)
         _, selected = web_selection
@@ -7110,13 +7104,11 @@ def _main_command(args, argv):
         if not web_attach_only:
             args._opencode_release = detect_opencode_release(isolated=True)
             _validate_web_release(args, args._opencode_release)
-    if not args.repair_private_home:
+    if not args.repair_private_home and not stop_v2:
         with loading_stage("Checking rootless Podman", stage="backend"):
             check_backend(
                 **(
-                    {"env": stop_engine, "local_only": True}
-                    if stop_engine is not None
-                    else {"env": maintenance_host_env()}
+                    {"env": maintenance_host_env()}
                     if args.command == "terminal" or getattr(args, "persisted", False)
                     else {}
                 ),
