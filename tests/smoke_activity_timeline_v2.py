@@ -157,6 +157,11 @@ def native_fixture(binary, root, *, include_addons):
             "Unexpected native credentials.",
         )
         seed(native, project)
+        seeded = native("GET", f"/api/session/{SESSION}")["data"]
+        require(
+            isinstance(seeded, dict) and seeded.get("id") == SESSION,
+            "The synthetic session was not visible after import.",
+        )
         yield project, env, cli_config, native
 
 

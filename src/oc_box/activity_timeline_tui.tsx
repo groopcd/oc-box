@@ -4,9 +4,12 @@ import { activityEvents, localTimestamp, MAX_EVENTS } from "./activity_timeline_
 
 const PANEL = "oc-box.activity-timeline"
 
+function ownsPanel(panel: { readonly name?: string } | null | undefined) {
+  try { return panel?.name === PANEL } catch { return false }
+}
+
 function ActivityPanel(props: { context: Context; panel: PanelInput; unavailable: () => void }) {
   const { context } = props
-  const events = createMemo(() => activityEvents(context.data.session.message.list(props.panel.sessionID) ?? []))
   context.keymap.layer(() => ({
     commands: [{
       bind: "escape",
@@ -15,6 +18,16 @@ function ActivityPanel(props: { context: Context; panel: PanelInput; unavailable
       },
     }],
   }))
+  return (
+    <ErrorBoundary fallback={<text>Activity timeline unavailable in this TUI. Esc closes.</text>}>
+      <ActivityEntries context={context} sessionID={props.panel.sessionID} />
+    </ErrorBoundary>
+  )
+}
+
+function ActivityEntries(props: { context: Context; sessionID: string }) {
+  const { context } = props
+  const events = createMemo(() => activityEvents(context.data.session.message.list(props.sessionID) ?? []))
   return (
     <box flexDirection="column" flexGrow={1} minHeight={0} paddingLeft={1} paddingRight={1}>
       <text fg={context.theme.text.base}>Activity timeline</text>
@@ -52,7 +65,7 @@ export function install(context: Context, unavailable: () => void) {
   const stop = context.ui.slot({
     append: "session.panel",
     render: (panel) => (
-      <Show when={panel.name === PANEL}>
+      <Show when={ownsPanel(panel)}>
         <ErrorBoundary fallback={<text>Activity timeline unavailable in this TUI.</text>}>
           <ActivityPanel context={context} panel={panel} unavailable={unavailable} />
         </ErrorBoundary>
@@ -81,6 +94,8 @@ export function install(context: Context, unavailable: () => void) {
     throw error
   }
   return () => {
-    try { context.ui.panel.close() } finally { stop() }
+    try {
+      if (ownsPanel(context.ui.panel.current?.())) context.ui.panel.close()
+    } finally { stop() }
   }
 }
