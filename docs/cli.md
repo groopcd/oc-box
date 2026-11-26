@@ -337,6 +337,11 @@ admits a changed version. Guarded `web`,
 workspaces. An existing private owner still serves additional clients without
 starting a preflight or refreshing its credentials.
 
+Guarded startup preserves the selected local Podman environment. A forwarded
+setting may reuse an identical engine value, such as `USER`, but may not
+override engine selectors or replace a different engine value. Those conflicts
+are reported before starting the workspace or advancing its runtime floor.
+
 A guarded launch can keep already registered plain accelerator and render
 character devices (`/dev/accel/accelN` and `/dev/dri/renderDN`) and the exact
 `/dev/kvm:rw` binding when local rootless Podman can verify both the saved and

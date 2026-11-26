@@ -413,6 +413,12 @@ maintenance and ‘start --import-session’ are unavailable on guarded
 workspaces.  An existing private owner still serves additional clients
 without starting a preflight or refreshing its credentials.
 
+Guarded startup preserves the selected local Podman environment.  A
+forwarded setting may reuse an identical engine value, such as ‘USER’,
+but may not override engine selectors or replace a different engine
+value.  Those conflicts are reported before starting the workspace or
+advancing its runtime floor.
+
 A guarded launch can keep already registered plain accelerator and
 render character devices (‘/dev/accel/accelN’ and ‘/dev/dri/renderDN’)
 and the exact ‘/dev/kvm:rw’ binding when local rootless Podman can
@@ -5663,20 +5669,20 @@ Node: Name769
 Node: Synopsis930
 Node: Description5350
 Node: Commands11170
-Node: Options167347
-Node: Lifecycle and persistence234861
-Node: Distribution images237161
-Node: Sessions and recovery242238
-Node: Devices and host permissions248823
-Node: Resource reports251169
-Node: Configuration and environment253280
-Node: Files264661
-Node: Exit status275571
-Node: Examples276979
-Node: Troubleshooting279118
-Node: Installation and manuals291610
-Node: Authors and license301800
-Node: See also302407
+Node: Options167658
+Node: Lifecycle and persistence235172
+Node: Distribution images237472
+Node: Sessions and recovery242549
+Node: Devices and host permissions249134
+Node: Resource reports251480
+Node: Configuration and environment253591
+Node: Files264972
+Node: Exit status275882
+Node: Examples277290
+Node: Troubleshooting279429
+Node: Installation and manuals291921
+Node: Authors and license302111
+Node: See also302718
 
 End Tag Table
 

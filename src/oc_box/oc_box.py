@@ -2372,6 +2372,46 @@ def maintenance_terminal(path, data):
                 stop_container(data, env=environment)
 
 
+_CONTAINER_ONLY_EXEC_ENV = frozenset(
+    {
+        "HOME",
+        "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME",
+        "XDG_STATE_HOME",
+        "XDG_CACHE_HOME",
+        "SHELL",
+        "PWD",
+        "OPENCODE_DISABLE_SANDBOX",
+        "OC_BOX_CONTAINER",
+        "OPENCODE_CONFIG",
+        "OPENCODE_DISABLE_AUTOUPDATE",
+        "OPENCODE_CONFIG_CONTENT",
+        "OPENCODE_DB",
+    }
+)
+
+
+def _check_bound_exec_environment(forwarded, environment, *, history_source=False):
+    for key, value in forwarded.items():
+        if key in _CONTAINER_ONLY_EXEC_ENV:
+            continue
+        if (
+            key.startswith(("CONTAINER_", "CONTAINERS_", "PODMAN_", "STORAGE_", "LD_"))
+            or key in {"DOCKER_HOST", "SSH_AUTH_SOCK", "BASH_ENV", "ENV", "GCONV_PATH"}
+            or (key in environment and (history_source or environment[key] != value))
+        ):
+            raise BoxError(
+                "A forwarded setting overlaps the bound history source engine environment."
+                if history_source
+                else "A forwarded setting overlaps the bound Podman engine environment."
+            )
+
+
+def check_guarded_exec_environment(data, engine_env):
+    if engine_env is not None:
+        _check_bound_exec_environment(container_env(data), engine_env)
+
+
 def exec_command(data, command, *, interactive=False, isolated_owner_env=None):
     if _bound_overlap() is not None:
         raise BoxError("Forwarded execution is unavailable in the bound history pass.")
@@ -2411,40 +2451,16 @@ def exec_command(data, command, *, interactive=False, isolated_owner_env=None):
     # Keep container HOME/XDG/config settings from changing the host Podman
     # process's storage/config discovery. Only these non-secret settings belong
     # in argv; credentials/custom forwarded values use inherited environment.
-    container_only = {
-        "HOME",
-        "XDG_CONFIG_HOME",
-        "XDG_DATA_HOME",
-        "XDG_STATE_HOME",
-        "XDG_CACHE_HOME",
-        "SHELL",
-        "PWD",
-        "OPENCODE_DISABLE_SANDBOX",
-        "OC_BOX_CONTAINER",
-        "OPENCODE_CONFIG",
-        "OPENCODE_DISABLE_AUTOUPDATE",
-        "OPENCODE_CONFIG_CONTENT",
-        "OPENCODE_DB",
-    }
+    if binding is not None or pinned is not None:
+        _check_bound_exec_environment(
+            forwarded, environment, history_source=binding is not None
+        )
     for key, value in forwarded.items():
         if (
-            (binding is not None or pinned is not None)
-            and key not in container_only
-            and (
-                key in environment
-                or key.startswith(
-                    ("CONTAINER_", "CONTAINERS_", "PODMAN_", "STORAGE_", "LD_")
-                )
-                or key
-                in {"DOCKER_HOST", "SSH_AUTH_SOCK", "BASH_ENV", "ENV", "GCONV_PATH"}
-            )
+            isolated_owner
+            and key in isolated_owner_env
+            and key not in _CONTAINER_ONLY_EXEC_ENV
         ):
-            raise BoxError(
-                "A forwarded setting overlaps the bound history source engine environment."
-                if binding is not None
-                else "A forwarded setting overlaps the bound Podman engine environment."
-            )
-        if isolated_owner and key in isolated_owner_env and key not in container_only:
             raise BoxError("Studio owner engine and workspace environments overlap.")
         if isolated_owner and (
             key.startswith(
@@ -2453,7 +2469,7 @@ def exec_command(data, command, *, interactive=False, isolated_owner_env=None):
             or key in {"DOCKER_HOST", "SSH_AUTH_SOCK", "BASH_ENV", "ENV", "GCONV_PATH"}
         ):
             raise BoxError("Unsupported Studio owner environment setting.")
-        if key in container_only:
+        if key in _CONTAINER_ONLY_EXEC_ENV:
             result.extend(["--env", f"{key}={value}"])
         else:
             environment[key] = value
@@ -5030,6 +5046,7 @@ def launch_environment(
     if _first_history is not None and (not quiet_24_candidate or args.import_session):
         raise BoxError("Invalid ownership for the bound first history pass.")
     if guarded:
+        check_guarded_exec_environment(data, guarded.engine_env)
         guarded.begin(sys.modules[__name__], data)
     if data.get("opencode_version") != version:
         data["opencode_version"] = version
@@ -5711,6 +5728,8 @@ def purge(path, data, args):
             + "' to retain project files and host history."
         )
     guarded = runtime_safeguard.current()
+    if guarded:
+        check_guarded_exec_environment(data, guarded.engine_env)
     if not data.get("restore_incomplete") or args.all or args.delete_sessions:
         release = guarded.record.version if guarded else detect_opencode_release()
         if opencode_compat.major(release) != opencode_compat.major(
