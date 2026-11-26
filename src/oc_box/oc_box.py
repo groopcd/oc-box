@@ -1539,8 +1539,12 @@ def refresh_workspace_identity(path, data):
         atomic_json(path, data)
 
 
-def inspect_owned(data, *, env=None, local_only=False):
+def inspect_owned(data, *, env=None, local_only=False, private=False, timeout=None):
     options = {"env": env} if env is not None else {}
+    if private:
+        options["private"] = True
+    if timeout is not None:
+        options["timeout"] = timeout
     prefix = ("--remote=false",) if local_only else ()
     result = podman(
         *prefix,
@@ -5943,6 +5947,12 @@ def parser():
         help="select a registered workspace by ID; takes precedence over --project",
     )
     result.add_argument(
+        "--private-home",
+        dest="repair_private_home",
+        action="store_true",
+        help="with repair, confirm a persistent identity for an existing converted private home",
+    )
+    result.add_argument(
         "--persisted",
         action="store_true",
         help="with sync, use only a guarded snapshot of an existing stopped workspace",
@@ -6576,6 +6586,20 @@ def _stop_v2(path, data):
 
 
 def _main_command(args, argv):
+    if getattr(args, "repair_private_home", False) and (
+        args.command != "repair" or not args.workspace or args.project is not None
+    ):
+        raise BoxError(
+            "--private-home requires 'oc-box repair --workspace WORKSPACE_ID'."
+        )
+    if getattr(args, "repair_private_home", False) and (
+        sys.platform != "linux"
+        or os.geteuid() == 0
+        or os.environ.get("OC_BOX_CONTAINER") == "1"
+        or os.path.lexists("/.dockerenv")
+        or os.path.lexists("/run/.containerenv")
+    ):
+        raise BoxError("Run private-home repair on the host as your regular user.")
     if getattr(args, "cleanup", False):
         baseline = vars(parser().parse_args(["purge"]))
         if args.command != "purge" or any(
@@ -7086,21 +7110,22 @@ def _main_command(args, argv):
         if not web_attach_only:
             args._opencode_release = detect_opencode_release(isolated=True)
             _validate_web_release(args, args._opencode_release)
-    with loading_stage("Checking rootless Podman", stage="backend"):
-        check_backend(
-            **(
-                {"env": stop_engine, "local_only": True}
-                if stop_engine is not None
-                else {"env": maintenance_host_env()}
-                if args.command == "terminal" or getattr(args, "persisted", False)
-                else {}
-            ),
-            **(
-                {"feature": "launch"}
-                if args.command in ("start", "reset", "sync", "web")
-                else {}
-            ),
-        )
+    if not args.repair_private_home:
+        with loading_stage("Checking rootless Podman", stage="backend"):
+            check_backend(
+                **(
+                    {"env": stop_engine, "local_only": True}
+                    if stop_engine is not None
+                    else {"env": maintenance_host_env()}
+                    if args.command == "terminal" or getattr(args, "persisted", False)
+                    else {}
+                ),
+                **(
+                    {"feature": "launch"}
+                    if args.command in ("start", "reset", "sync", "web")
+                    else {}
+                ),
+            )
     image_preview_snapshot = None
     if not getattr(args, "persisted", False):
         state_root().mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -7436,6 +7461,10 @@ def _locked_workspace_command(path, data, args, launch_context, image_preview_sn
     if args.command == "terminal":
         return maintenance_terminal(path, data)
     if args.command == "repair":
+        if args.repair_private_home:
+            return runtime_safeguard.repair_private_home(
+                sys.modules[__name__], path, data
+            )
         repair_workspace(path, data)
         return 0
     if args.command in ("start", "reset", "sync", "web"):

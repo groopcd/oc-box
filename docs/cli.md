@@ -12,6 +12,7 @@ oc-box stop [--project PATH | --workspace ID] [LIFECYCLE-LOG-OPTIONS]
 oc-box sync [--project PATH | --workspace ID] [--persisted | [--cpus N] [--memory SIZE] [--pids-limit N]] [LIFECYCLE-LOG-OPTIONS]
 oc-box reset [--project PATH | --workspace ID] [RESET-OPTIONS] [LIFECYCLE-LOG-OPTIONS]
 oc-box repair [--project PATH | --workspace ID]
+oc-box repair --workspace ID --private-home
 oc-box terminal [--project PATH | --workspace ID] [--maintenance] [LIFECYCLE-LOG-OPTIONS]
 oc-box share PATH [--project PATH | --workspace ID] [--acknowledge-risk]
 oc-box attach PATH --session ID [--project PATH | --workspace ID] [--text TEXT] [--send] [--acknowledge-risk]
@@ -348,6 +349,9 @@ On a verified stopped container, Podman's own hostname, hosts, resolver, and
 container-environment runtime files may already have been cleaned up. Missing
 files are tolerated only at that exact container's known runtime paths; a
 missing project mount, unknown bind source, or device node still refuses.
+Once the existing container and its core mounts are usable, a failed optional
+in-container device-access check warns instead of blocking startup. A staged
+replacement must still verify access before retiring the original.
 
 New containers use an absolute `/bin/sleep` path for their passive entrypoint.
 The safeguard refuses older containers whose stored entrypoint would look up
@@ -1738,12 +1742,27 @@ oc-box repair --project ~/devel/demo
 oc-box --project ~/devel/demo --resume
 ```
 
-Accepts only `--project` or `--workspace` selectors, besides help. With neither,
+For project repair, use `--project` or `--workspace`. With neither,
 use the current directory. If a missing marker has exactly one registered
 workspace for this path, `--project` selects it. If several records reference
 the path, repair refuses to choose: inspect `--status` and supply `--workspace
 ID` explicitly. With `--workspace`, check the registered path and restore its
 missing marker rather than using the current directory.
+
+`oc-box repair --workspace ID --private-home` is a separate, one-time repair
+for older converted-home receipts that predate persistent filesystem identity.
+It requires the full workspace ID, a completed guarded conversion, the exact
+stopped container and its own private home, a matching directory inode number,
+and kernel support for persistent filesystem identity. The inode number alone
+does not prove this is the original volume. Review the resources on the
+controlling terminal and type `REPAIR HOME ID` only if you know it is the
+original private home. The command records the filesystem ID and handle for
+future verification after
+checking the same resources again; it does not start Podman resources, renew
+credentials, change the runtime floor, or move any conversations. A mismatching
+previously recorded persistent identity or an unfinished transition cannot be
+repaired this way. When already recorded, a matching persistent identity allows
+ordinary device renumbering without another repair.
 
 ### purge
 
@@ -2073,6 +2092,11 @@ the activated release. An older flat installation is migrated; its old manuals
 are preserved as `legacy-docs`. No workspaces or credentials are migrated/deleted.
 
 GitHub automatic updates are off by default and follow the saved release channel.
+On supported filesystems, new installer receipts retain persistent filesystem
+identity so a device-number change alone does not interrupt verified handoff.
+An older receipt that already mismatches cannot prove that identity; use
+`oc-box upgrade --force` from the active GitHub launcher, or rerun the verified
+installer once. This does not change workspace registrations.
 `--auto-update on` saves `auto_update: true` in the existing host oc-box
 configuration, retaining settings such as `pass_env`.
 The verified active launcher checks before Podman/workspace setup. The installer

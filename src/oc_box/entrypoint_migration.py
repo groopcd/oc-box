@@ -27,6 +27,7 @@ else:
 
 FIELD = "entrypoint_conversion"
 RECEIPT = "converted_entrypoint"
+HOME_IDENTITY = "converted_home_filesystem_identity"
 RETIRE = "entrypoint_retirement"
 _LABEL = "io.oc-box.entrypoint-conversion"
 _MANAGED = "io.oc-box.managed"
@@ -141,6 +142,29 @@ def volume_stamp(path):
     metadata = os.lstat(path)
     _require(stat.S_ISDIR(metadata.st_mode))
     return [metadata.st_dev, metadata.st_ino]
+
+
+def volume_identity_matches(data, identity, stable=None):
+    recorded = data[RECEIPT]["volume"]
+    if HOME_IDENTITY not in data:
+        return list(identity) == recorded
+    return workspace_identity.matches(
+        {
+            "project_identity": recorded,
+            workspace_identity.STABLE_IDENTITY_KEY: data[HOME_IDENTITY],
+        },
+        identity,
+        stable,
+    )
+
+
+def volume_matches(data, path):
+    observed = (
+        workspace_identity.snapshot(path)
+        if HOME_IDENTITY in data
+        else (volume_stamp(path), None)
+    )
+    return volume_identity_matches(data, *observed)
 
 
 def initialized_volume(volume):

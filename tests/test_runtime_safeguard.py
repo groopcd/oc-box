@@ -17,7 +17,7 @@ from unittest.mock import patch
 from oc_box import native_preflight, native_runtime_guard
 from oc_box import oc_box as box
 from oc_box import runtime_safeguard as guard
-from oc_box import workspace_control, workspace_service
+from oc_box import uninstall_tty, workspace_control, workspace_service
 
 
 OLD = "2.3.2"
@@ -208,20 +208,121 @@ class RuntimeSafeguardTests(unittest.TestCase):
             stamp.return_value = [17, 2]
             with self.assertRaisesRegex(box.BoxError, "conversion-home-identity"):
                 guard._inspect(box, self.path, data, running=False)
+            stable = {
+                "method": "linux-file-handle-v1",
+                "fsid": "1234",
+                "handle": {"type": 1, "bytes": "00010203"},
+            }
+            data[migration.HOME_IDENTITY] = stable
+            with patch.object(
+                guard.workspace_identity, "snapshot", return_value=([17, 2], stable)
+            ) as snapshot:
+                self.assertEqual(
+                    guard._inspect(box, self.path, data, running=False)[0], CONTAINER
+                )
+                snapshot.return_value = ([17, 2], {**stable, "fsid": "4321"})
+                with self.assertRaisesRegex(box.BoxError, "conversion-home-identity"):
+                    guard._inspect(box, self.path, data, running=False)
             info["State"]["Status"] = "initialized"
             podman.reset_mock()
             with self.assertRaisesRegex(box.BoxError, "container-state"):
                 guard._inspect(box, self.path, data, running=False)
             podman.assert_not_called()
 
+    def test_explicit_private_home_repair_preserves_floor_and_rechecks_after_review(
+        self,
+    ):
+        baseline = self.seed()
+        migration = guard.entrypoint_migration
+        data = {
+            **self.data,
+            "container": "oc-box-" + self.data["id"],
+            migration.RECEIPT: {
+                "id": CONTAINER,
+                "bootstrap": False,
+                "volume": [1, 2],
+            },
+        }
+        box.atomic_json(self.path, data)
+        workspace_control.capture(self.path)
+        stable = {
+            "method": "linux-file-handle-v1",
+            "fsid": "a1b2",
+            "handle": {"type": 1, "bytes": "00010203"},
+        }
+        identity = ([17, 2], stable)
+        current = identity
+
+        def inspect(_box, path, selected, *, running, engine_env, home_review):
+            self.assertEqual((path, selected, running), (self.path, data, False))
+            home_review.append(current)
+            return CONTAINER, (
+                data["project"],
+                data["project"],
+                str(self.root / "volume"),
+                data["home"],
+            )
+
+        def changed(*_):
+            nonlocal current
+            current = ([19, 2], stable)
+            return True
+
+        with (
+            patch.object(migration, "require_local_engine"),
+            patch.object(guard, "_inspect", side_effect=inspect),
+            patch.object(
+                box,
+                "podman",
+                return_value=subprocess.CompletedProcess([], 0, CONTAINER + "\n"),
+            ) as podman,
+            patch.object(uninstall_tty, "confirm_review") as confirm,
+        ):
+            confirm.return_value = False
+            with self.assertRaisesRegex(box.BoxError, "not confirmed"):
+                guard.repair_private_home(box, self.path, data)
+            self.assertEqual(box.read_json(self.path), data)
+            confirm.side_effect = changed
+            with self.assertRaisesRegex(box.BoxError, "changed"):
+                guard.repair_private_home(box, self.path, data)
+            self.assertEqual(box.read_json(self.path), data)
+
+            current = identity
+            confirm.side_effect = None
+            confirm.return_value = True
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(guard.repair_private_home(box, self.path, data), 0)
+            self.assertEqual(confirm.call_args.args[1], "REPAIR HOME " + data["id"])
+            self.assertTrue(
+                all(
+                    call.args[:2] == ("--remote=false", "ps")
+                    for call in podman.call_args_list
+                )
+            )
+        repaired = box.read_json(self.path)
+        self.assertEqual(repaired.pop(migration.HOME_IDENTITY), stable)
+        self.assertEqual(repaired[migration.RECEIPT]["volume"], [17, 2])
+        repaired[migration.RECEIPT]["volume"] = [1, 2]
+        self.assertEqual(repaired, data)
+        self.assertEqual(guard.load(box, self.path), baseline)
+
     def test_retirement_requires_successful_start_and_mount_access(self):
         marker = guard.entrypoint_migration.RETIRE
-        for failure in ("start", "inconsistent", "mount", "device-access", None):
+        for failure in (
+            "start",
+            "inconsistent",
+            "mount",
+            "device-access",
+            "optional-device-access",
+            None,
+        ):
             with self.subTest(failure=failure), tempfile.TemporaryDirectory() as name:
                 path = Path(name) / "workspace.json"
                 data = {**self.data, marker: {"synthetic": True}}
-                if failure == "device-access":
+                if failure in ("device-access", "optional-device-access"):
                     data["devices"] = ["/dev/accel/accel0"]
+                if failure == "optional-device-access":
+                    del data[marker]
                 box.atomic_json(path, data)
                 token = workspace_control.capture(path)
                 env = {
@@ -306,8 +407,9 @@ class RuntimeSafeguardTests(unittest.TestCase):
                         "verify_retirement",
                         side_effect=retire,
                     ),
+                    contextlib.redirect_stderr(io.StringIO()) as warning,
                 ):
-                    if failure:
+                    if failure and failure != "optional-device-access":
                         message = (
                             "staged replacement running"
                             if failure == "inconsistent"
@@ -320,8 +422,14 @@ class RuntimeSafeguardTests(unittest.TestCase):
                     else:
                         scope.start(box, data)
                 self.assertEqual(
+                    "Continuing with the existing container" in warning.getvalue(),
+                    failure == "optional-device-access",
+                )
+                self.assertEqual(
                     calls,
-                    ["verify-parked", "start"]
+                    ["start", "mount", "device-access"]
+                    if failure == "optional-device-access"
+                    else ["verify-parked", "start"]
                     if failure in ("start", "inconsistent")
                     else ["verify-parked", "start", "mount"]
                     if failure == "mount"
