@@ -1,14 +1,19 @@
 import type { Context, PanelInput } from "@opencode/plugin/tui/context"
-import { createMemo, Index, Show } from "solid-js"
+import { createMemo, ErrorBoundary, Index, Show } from "solid-js"
 import { activityEvents, localTimestamp, MAX_EVENTS } from "./activity_timeline_events.mjs"
 
 const PANEL = "oc-box.activity-timeline"
 
-function ActivityPanel(props: { context: Context; panel: PanelInput }) {
+function ActivityPanel(props: { context: Context; panel: PanelInput; unavailable: () => void }) {
   const { context } = props
   const events = createMemo(() => activityEvents(context.data.session.message.list(props.panel.sessionID) ?? []))
   context.keymap.layer(() => ({
-    commands: [{ bind: "escape", run: () => { props.panel.close() } }],
+    commands: [{
+      bind: "escape",
+      run: () => {
+        try { props.panel.close() } catch { props.unavailable() }
+      },
+    }],
   }))
   return (
     <box flexDirection="column" flexGrow={1} minHeight={0} paddingLeft={1} paddingRight={1}>
@@ -32,33 +37,50 @@ function ActivityPanel(props: { context: Context; panel: PanelInput }) {
   )
 }
 
-export function install(context: Context) {
+export function install(context: Context, unavailable: () => void) {
   // Older V2 releases can load TUI plugins without providing session panels.
-  if (typeof context.ui.panel?.open !== "function" || typeof context.data.session?.message?.list !== "function") {
+  if (
+    typeof context.ui?.panel?.open !== "function" ||
+    typeof context.ui.panel.close !== "function" ||
+    typeof context.ui.slot !== "function" ||
+    typeof context.ui.router?.current !== "function" ||
+    typeof context.keymap?.layer !== "function" ||
+    typeof context.data?.session?.message?.list !== "function"
+  ) {
     throw new Error("Session panels unavailable")
   }
   const stop = context.ui.slot({
     append: "session.panel",
     render: (panel) => (
       <Show when={panel.name === PANEL}>
-        <ActivityPanel context={context} panel={panel} />
+        <ErrorBoundary fallback={<text>Activity timeline unavailable in this TUI.</text>}>
+          <ActivityPanel context={context} panel={panel} unavailable={unavailable} />
+        </ErrorBoundary>
       </Show>
     ),
   })
-  context.keymap.layer(() => ({
-    mode: "global",
-    commands: [{
-      id: PANEL,
-      title: "Open activity timeline",
-      group: "Session",
-      palette: true,
-      slash: { name: "activity-timeline" },
-      enabled: () => context.ui.router.current().type === "session",
-      run: () => { context.ui.panel.open(PANEL) },
-    }],
-  }))
-  return () => {
-    context.ui.panel.close()
+  try {
+    context.keymap.layer(() => ({
+      mode: "global",
+      commands: [{
+        id: PANEL,
+        title: "Open activity timeline",
+        group: "Session",
+        palette: true,
+        slash: { name: "activity-timeline" },
+        enabled: () => {
+          try { return context.ui.router.current().type === "session" } catch { return false }
+        },
+        run: () => {
+          try { context.ui.panel.open(PANEL) } catch { unavailable() }
+        },
+      }],
+    }))
+  } catch (error) {
     stop()
+    throw error
+  }
+  return () => {
+    try { context.ui.panel.close() } finally { stop() }
   }
 }

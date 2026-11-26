@@ -81,16 +81,23 @@ def package_sources(package, *, include_addons=False):
             "./rpc": "./ui_state_rpc.js",
         },
     }
-    return {
+    files = {
         "package.json": (json.dumps(manifest) + "\n").encode(),
-        **{
-            name: (Path(package) / name).read_bytes()
-            for name in (
-                *RESOURCES,
-                *(ACTIVITY_TIMELINE_RESOURCES if include_addons else ()),
-            )
-        },
+        **{name: (Path(package) / name).read_bytes() for name in RESOURCES},
     }
+    if include_addons:
+        try:
+            activity = {
+                name: (Path(package) / name).read_bytes()
+                for name in ACTIVITY_TIMELINE_RESOURCES
+            }
+        except OSError:
+            # An incomplete optional add-on must not block base UI-state
+            # preparation. Omit it atomically; the TUI handles a failed import.
+            pass
+        else:
+            files.update(activity)
+    return files
 
 
 def _output(value):

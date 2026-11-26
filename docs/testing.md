@@ -828,8 +828,8 @@ rootless-Podman lifecycle, real-provider or security acceptance.
 
 ### Previewing the native Activity Timeline
 
-From the checkout, run either mode with an unmodified OpenCode 2.4.0 or 2.4.1
-binary in a terminal:
+From the checkout, run either mode in a terminal with the OpenCode binary you
+want to try:
 
 ```sh
 python3 -B tests/smoke_activity_timeline_v2.py --opencode "$(command -v opencode)" --demo on
@@ -842,9 +842,13 @@ Ctrl+P and select **Open activity timeline**; in the disabled demo, the command
 is absent. Press Esc to close the panel and use **Exit the app** to leave. The
 client connects through a read-only loopback proxy with no configured model
 provider or credentials. The temporary registration, server and history are
-discarded on exit. This is a demo of the add-on and switch, not a Podman launch
-or an external-host acceptance run. Omitting `--demo` runs the automated
-provider-free fixture instead.
+discarded on exit. The demo has no release allowlist: it attempts the native
+private service and synthetic session import, then opens the native TUI even
+if the add-on is unavailable. An executable without the private service/import
+behavior cannot show that synthetic session. This is a demo of the add-on and
+switch, not a Podman launch or an external-host acceptance run. Omitting
+`--demo` runs the automated provider-free fixture, including a deliberately
+missing add-on module.
 
 ### Experimental host-image attachments
 

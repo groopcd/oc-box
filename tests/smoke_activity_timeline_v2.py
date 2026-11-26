@@ -1,4 +1,4 @@
-"""Smoke-test or preview the real OpenCode 2.4.x activity panel in private synthetic state."""
+"""Smoke-test or preview the native Activity Timeline in private synthetic state."""
 
 import argparse
 from contextlib import contextmanager
@@ -9,13 +9,14 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import time
 from unittest.mock import patch
 
 from smoke_native_preferences_v2 import Client
-from smoke_session_sync_v2 import bounded, exported, private_environment, require
-from smoke_ui_state_v2 import LocalTransport, Observer
+from smoke_session_sync_v2 import FixtureFailure, exported, private_environment, require
+from smoke_ui_state_v2 import Observer
 
-from oc_box import opencode_compat, opencode_v2_io, ui_state
+from oc_box import opencode_v2_io, ui_state
 from oc_box import oc_box as box
 
 
@@ -108,9 +109,9 @@ def seed(request, project):
 
 
 def select_command(client, query, title):
-    client.watch("Search commands")
+    client.watch("Search commands", "Commands")
     client.send(b"\x10")
-    client.wait(lambda: client.labels["Search commands"], "command palette")
+    client.wait(lambda: any(client.labels.values()), "command palette")
     client.watch(title)
     client.send(query.encode())
     client.wait(lambda: client.labels[title], title)
@@ -123,11 +124,6 @@ def native_fixture(binary, root, *, include_addons):
     env = private_environment(root / "native")
     env.update(TERM="xterm-256color", COLORTERM="truecolor", TZ="UTC")
     env["OC_BOX_STATE_HOME"] = str(root / "oc-box-state")
-    release = opencode_compat.version(bounded([binary, "--version"], env, project))
-    require(
-        release in {"2.4.0", "2.4.1"},
-        "The native fixture targets OpenCode 2.4.0/2.4.1.",
-    )
     config = Path(env["XDG_CONFIG_HOME"]) / "opencode"
     config.mkdir(exist_ok=True)
     destination = config / "plugins/oc-box-ui-state"
@@ -154,31 +150,32 @@ def native_fixture(binary, root, *, include_addons):
     with (
         project_cwd(project),
         patch.dict(os.environ, env, clear=True),
-        opencode_v2_io.server(binary) as native,
+        opencode_v2_io.server(binary, startup_deadline=time.monotonic() + 30) as native,
     ):
         require(
             native("GET", "/api/credential") == {"data": []},
             "Unexpected native credentials.",
         )
         seed(native, project)
-        connection = {**native.endpoint, "version": release, "workspace": "a" * 32}
-        transport = LocalTransport(binary, env, project, connection)
-        require(
-            ui_state.available(transport.box, transport.data, connection, timeout=10),
-            "The native service did not load the bundled UI helper.",
-        )
-        yield project, env, cli_config, release, native
+        yield project, env, cli_config, native
 
 
 def exercise(binary, root):
     with native_fixture(binary, root, include_addons=True) as fixture:
-        project, env, cli_config, _release, native = fixture
+        project, env, cli_config, native = fixture
         before = exported(native, SESSION)
         inbox = f"/api/session/{SESSION}/inbox"
         checks = [native("GET", route) for route in (inbox, "/api/session/active")]
         with Observer(native.endpoint) as observer:
             endpoint = {**native.endpoint, "url": observer.url}
-            for enabled in (True, False):
+            for enabled, missing in ((True, False), (False, False), (True, True)):
+                if missing:
+                    # The prior clients have exited. Only remove the optional
+                    # module from this run's fresh synthetic plugin package.
+                    (
+                        cli_config.parent
+                        / "plugins/oc-box-ui-state/activity_timeline_tui.tsx"
+                    ).unlink()
                 client = Client(
                     binary,
                     {**env, **({"OC_BOX_ACTIVITY_TIMELINE": "1"} if enabled else {})},
@@ -193,9 +190,12 @@ def exercise(binary, root):
                         lambda: client.labels["Synthetic activity reply"],
                         "synthetic session",
                     )
-                    ready = "Open activity timeline" if enabled else "No results found"
+                    available = enabled and not missing
+                    ready = (
+                        "Open activity timeline" if available else "No results found"
+                    )
                     select_command(client, "activity timeline", ready)
-                    if enabled:
+                    if available:
                         labels = (
                             "Loaded transcript",
                             "2026-11-26 14:32:07 +00:00",
@@ -252,11 +252,9 @@ def exercise(binary, root):
 
 def demo(binary, root, setting):
     with native_fixture(binary, root, include_addons=setting == "on") as fixture:
-        project, env, _cli_config, release, native = fixture
+        project, env, _cli_config, native = fixture
         path, workspace = box.create_workspace(project, "tumbleweed")
-        print(
-            f"Activity Timeline demo · native OpenCode {release} · read-only synthetic session"
-        )
+        print("Activity Timeline demo · native OpenCode · read-only synthetic session")
         require(
             box.main(["addon", "activity-timeline", setting]) == 0,
             "The synthetic add-on preference could not be saved.",
@@ -266,7 +264,7 @@ def demo(binary, root, setting):
         ]
         if enabled:
             print(
-                "Inside the TUI: Ctrl+P → Open activity timeline (or /activity-timeline)."
+                "Look for Open activity timeline in Ctrl+P. If the add-on is unavailable, the TUI still opens normally."
             )
         else:
             print(
@@ -303,10 +301,27 @@ def main():
         parser.error("--demo needs an interactive terminal")
     with tempfile.TemporaryDirectory(prefix="oc-box-activity-timeline-") as directory:
         if args.demo is not None:
-            return demo(args.opencode, Path(directory), args.demo)
+            try:
+                return demo(args.opencode, Path(directory), args.demo)
+            except KeyboardInterrupt:
+                return 130
+            except (
+                FixtureFailure,
+                OSError,
+                ValueError,
+                KeyError,
+                subprocess.SubprocessError,
+            ):
+                print(
+                    "Could not open the isolated demo: this OpenCode did not provide "
+                    "the required private service or session-import behavior. "
+                    "This does not prevent normal oc-box use.",
+                    file=sys.stderr,
+                )
+                return 1
         exercise(args.opencode, Path(directory))
     print(
-        "Native activity panel: on/off, dates and invocation times verified; messages, tokens and work state unchanged."
+        "Native activity panel: on/off, dates, invocation times and load-failure fallback verified; messages, tokens and work state unchanged."
     )
     return 0
 

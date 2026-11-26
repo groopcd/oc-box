@@ -47,19 +47,27 @@ export default Plugin.define({
 function setupActivity(context) {
   let stopped = false
   let dispose
-  void import("./activity_timeline_tui.tsx").then(({ install }) => {
-    if (!stopped) dispose = install(context)
-  }).catch(() => {
-    if (!stopped) {
+  const unavailable = () => {
+    if (stopped) return
+    try {
       context.ui.toast.show({
-        message: "Activity timeline unavailable: this OpenCode TUI does not provide a compatible session panel.",
+        message: "Activity timeline could not load; continuing without it.",
         variant: "warning",
       })
+    } catch {
+      // Older SDKs may not provide compatible notifications either.
     }
-  })
+  }
+  void import("./activity_timeline_tui.tsx").then(({ install }) => {
+    if (!stopped) dispose = install(context, unavailable)
+  }).catch(unavailable)
   return () => {
     stopped = true
-    dispose?.()
+    try {
+      dispose?.()
+    } catch {
+      // Optional panel teardown must not interrupt reporter/preview cleanup.
+    }
   }
 }
 

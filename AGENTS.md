@@ -448,7 +448,9 @@ their checkout ownership distinct from unrelated source and flat installations.
   mutates native config, starts a workspace, or changes running/attached
   clients. Load it only for opted-in future native TUI owners. Never change
   model input or history, or add server hooks. Distinguish tool call creation
-  from native invocation and never substitute completion.
+  from native invocation and never substitute completion. Use a best-effort
+  capability check, not release pins. Add-on loading, rendering or missing
+  assets must not prevent ordinary startup or relax unrelated runtime guards.
 - `ui_state.py` / `ui_state_*.js`: public-SDK container TUI/server/RPC reports,
   installed only during normal eligible V2 owning preparation, never on attach.
   Canonical stable native `2.x.y` is eligible, not proof of SDK compatibility.

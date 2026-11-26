@@ -256,7 +256,10 @@ start Podman, unlock credentials, or change OpenCode configuration.  It
 applies to the next owning native TUI launch, not to an already open
 client or an attach-only client.  ‘off’ disables the add-on; no
 uninstall or config edit is needed.  When enabled, oc-box prints a
-one-line startup notice.
+one-line startup request, not a confirmation that the native TUI loaded
+it.  There is no exact-version requirement for the add-on.  If the
+native TUI cannot load it or lacks its session-panel APIs, the ordinary
+launch continues and the saved switch is unchanged.
 
 In an open session, use ‘Ctrl+P’ and select ‘Open activity timeline’, or
 use ‘/activity-timeline’.  The panel shows full local dates, times to
@@ -272,9 +275,9 @@ considering the last 128 parts of each assistant message.  It does not
 fetch older messages, traverse child sessions, or display prompt text,
 tool arguments, or tool results.  It reads the TUI's existing message
 metadata without changing messages or making any requests to a model, so
-it adds no model tokens.  It requires the public V2 session-panel API
-(tested with native 2.4.0 and 2.4.1) and does not affect OpenCode 1.x,
-the browser UI, or the oc-box manager.
+it adds no model tokens.  It uses the public V2 session-panel API when
+available and does not affect OpenCode 1.x, the browser UI, or the
+oc-box manager.
 
 4.3 doctor
 ==========
@@ -5656,20 +5659,20 @@ Node: Name769
 Node: Synopsis930
 Node: Description5372
 Node: Commands11192
-Node: Options167864
-Node: Lifecycle and persistence234395
-Node: Distribution images236695
-Node: Sessions and recovery241772
-Node: Devices and host permissions248357
-Node: Resource reports250703
-Node: Configuration and environment252814
-Node: Files264195
-Node: Exit status275105
-Node: Examples276513
-Node: Troubleshooting278652
-Node: Installation and manuals291144
-Node: Authors and license301334
-Node: See also301941
+Node: Options168076
+Node: Lifecycle and persistence234607
+Node: Distribution images236907
+Node: Sessions and recovery241984
+Node: Devices and host permissions248569
+Node: Resource reports250915
+Node: Configuration and environment253026
+Node: Files264407
+Node: Exit status275317
+Node: Examples276725
+Node: Troubleshooting278864
+Node: Installation and manuals291356
+Node: Authors and license301546
+Node: See also302153
 
 End Tag Table
 

@@ -4,10 +4,11 @@ import json
 import os
 from pathlib import Path
 import tempfile
+import tarfile
 import unittest
 from unittest.mock import patch
 
-from oc_box import oc_box as box, workspace_preferences, workspace_service
+from oc_box import oc_box as box, ui_state, workspace_preferences, workspace_service
 
 
 class AddonTests(unittest.TestCase):
@@ -98,7 +99,7 @@ class AddonTests(unittest.TestCase):
         for requested, owner, ready, flag, notice in (
             (False, True, True, None, None),
             (True, True, True, "1", "Activity timeline requested"),
-            (True, True, False, None, "Activity timeline unavailable"),
+            (True, True, False, "1", "Activity timeline requested"),
             (True, False, True, None, None),
         ):
             with (
@@ -122,9 +123,30 @@ class AddonTests(unittest.TestCase):
                 )
                 env = json.loads(command[command.index("-c") + 2])
                 self.assertEqual(env.get("OC_BOX_ACTIVITY_TIMELINE"), flag)
+                self.assertEqual("OC_BOX_UI_STATE_CLIENT" in env, ready)
                 self.assertNotIn("OPENCODE_CLI_CONFIG_CONTENT", env)
                 if notice is None:
                     line.assert_not_called()
                 else:
                     line.assert_called_once()
                     self.assertIn(notice, line.call_args.args[0])
+
+    def test_incomplete_addon_does_not_block_preparing_the_base_config(self):
+        source = box.PACKAGE
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for name in (*ui_state.RESOURCES, ui_state.ACTIVITY_TIMELINE_RESOURCES[0]):
+                (root / name).write_bytes((source / name).read_bytes())
+            with (
+                patch.object(box, "PACKAGE", root),
+                patch.dict(os.environ, {"XDG_CONFIG_HOME": str(root / "config")}),
+            ):
+                archive = box.config_archive(
+                    {"opencode_version": "2.4.2", "home": "/synthetic/home"},
+                    activity_timeline=True,
+                )
+            with tarfile.open(fileobj=io.BytesIO(archive), mode="r:gz") as config:
+                prefix = "plugins/oc-box-ui-state/"
+                self.assertIn(prefix + "ui_state_tui.js", config.getnames())
+                for name in ui_state.ACTIVITY_TIMELINE_RESOURCES:
+                    self.assertNotIn(prefix + name, config.getnames())
