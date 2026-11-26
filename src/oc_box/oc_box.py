@@ -1539,8 +1539,12 @@ def refresh_workspace_identity(path, data):
         atomic_json(path, data)
 
 
-def inspect_owned(data, *, env=None, local_only=False):
+def inspect_owned(data, *, env=None, local_only=False, private=False, timeout=None):
     options = {"env": env} if env is not None else {}
+    if private:
+        options["private"] = True
+    if timeout is not None:
+        options["timeout"] = timeout
     prefix = ("--remote=false",) if local_only else ()
     result = podman(
         *prefix,
@@ -5863,6 +5867,12 @@ def parser():
         action="store_true",
         help="with upgrade, preview the selected published channel without installing",
     )
+    result.add_argument(
+        "--force",
+        dest="upgrade_force",
+        action="store_true",
+        help="with upgrade, reinstall the selected published release even when current",
+    )
     channel = result.add_mutually_exclusive_group()
     channel.add_argument(
         "--stable",
@@ -5904,6 +5914,12 @@ def parser():
         "--workspace",
         metavar="ID",
         help="select a registered workspace by ID; takes precedence over --project",
+    )
+    result.add_argument(
+        "--private-home",
+        dest="repair_private_home",
+        action="store_true",
+        help="with repair, confirm a persistent identity for an existing converted private home",
     )
     result.add_argument(
         "--persisted",
@@ -6490,33 +6506,31 @@ def _stop_selected(path, data, *, admitted=False):
         )
         return
     elif record:
-        if data.get("devices"):
-            # Stop the same owned object even when a device has disappeared.
-            env = migration.engine_environment(sys.modules[__name__])
-            migration.require_local_engine(sys.modules[__name__], env)
-            info = inspect_owned(data, local_only=True, env=env)
-        else:
-            env = None
-            info = inspect_owned(data)
+        # Stop the same owned object without depending on optional devices,
+        # native startup, or hardware access.
+        env = migration.engine_environment(sys.modules[__name__])
+        migration.require_local_engine(sys.modules[__name__], env)
+        info = inspect_owned(data, local_only=True, env=env, private=True, timeout=15)
         if not info or info.get("Id") != record.container:
             raise BoxError(
                 "The guarded container identity changed; no substitute was stopped."
             )
         data = {**data, "container": record.container}
-        if env is not None:
-            stop_container(data, env=env, local_only=True)
-            final = inspect_owned(data, local_only=True, env=env)
-            if (
-                not final
-                or final.get("Id") != record.container
-                or not migration._stopped(
-                    final, ("created", "configured", "exited", "stopped")
-                )
-            ):
-                raise BoxError(
-                    "Could not verify the guarded device workspace stopped on its local engine."
-                )
-            return
+        stop_container(data, env=env, local_only=True)
+        final = inspect_owned(data, local_only=True, env=env, private=True, timeout=15)
+        if (
+            not final
+            or final.get("Id") != record.container
+            or not migration._stopped(
+                final, ("created", "configured", "exited", "stopped")
+            )
+        ):
+            raise BoxError(
+                "Could not verify the guarded workspace stopped on its local engine."
+            )
+        return
+    if opencode_compat.major(data.get("opencode_version", "1.0.0")) == 2:
+        check_backend()
     stop_container(data)
 
 
@@ -6539,6 +6553,20 @@ def _stop_v2(path, data):
 
 
 def _main_command(args, argv):
+    if getattr(args, "repair_private_home", False) and (
+        args.command != "repair" or not args.workspace or args.project is not None
+    ):
+        raise BoxError(
+            "--private-home requires 'oc-box repair --workspace WORKSPACE_ID'."
+        )
+    if getattr(args, "repair_private_home", False) and (
+        sys.platform != "linux"
+        or os.geteuid() == 0
+        or os.environ.get("OC_BOX_CONTAINER") == "1"
+        or os.path.lexists("/.dockerenv")
+        or os.path.lexists("/run/.containerenv")
+    ):
+        raise BoxError("Run private-home repair on the host as your regular user.")
     if getattr(args, "cleanup", False):
         baseline = vars(parser().parse_args(["purge"]))
         if args.command != "purge" or any(
@@ -6734,6 +6762,7 @@ def _main_command(args, argv):
                 args.about,
                 args.version,
                 args.check,
+                args.upgrade_force,
                 args.auto_update is not None,
                 args.update_channel is not None,
                 args.distro,
@@ -6758,10 +6787,13 @@ def _main_command(args, argv):
             )
         return credentials_command(args)
     if (
-        args.check or args.auto_update is not None or args.update_channel is not None
+        args.check
+        or args.upgrade_force
+        or args.auto_update is not None
+        or args.update_channel is not None
     ) and args.command != "upgrade":
         raise BoxError(
-            "--check, --auto-update, --stable and --devel apply only to upgrade."
+            "--check, --force, --auto-update, --stable and --devel apply only to upgrade."
         )
     if args.command == "upgrade":
         if any(
@@ -6790,17 +6822,20 @@ def _main_command(args, argv):
             )
         ):
             raise BoxError(
-                "Upgrade accepts only --check, --stable/--devel, --vault, --tui or --auto-update on/off."
+                "Upgrade accepts only --check, --force, --stable/--devel, --vault, --tui or --auto-update on/off."
             )
         if args.auto_update is not None and (
             args.check
+            or args.upgrade_force
             or args.update_channel is not None
             or args.upgrade_vault
             or args.upgrade_tui
         ):
             raise BoxError(
-                "--auto-update cannot be combined with --check, --stable, --devel, --vault or --tui."
+                "--auto-update cannot be combined with --check, --force, --stable, --devel, --vault or --tui."
             )
+        if args.check and args.upgrade_force:
+            raise BoxError("--check and --force cannot be combined.")
         if os.environ.get("OC_BOX_CONTAINER") == "1":
             raise BoxError(
                 "Run 'oc-box upgrade' on the host; the container cannot update its host launcher."
@@ -6844,6 +6879,7 @@ def _main_command(args, argv):
                 channel=args.update_channel,
                 with_vault=args.upgrade_vault,
                 with_tui=args.upgrade_tui,
+                **({"force": True} if args.upgrade_force else {}),
             )
         except UpdateError as exc:
             raise BoxError(str(exc)) from exc
@@ -7012,24 +7048,20 @@ def _main_command(args, argv):
             automatic_upgrade(APP, launch_args=sys.argv[1:] if argv is None else argv)
         except (UpdateError, OSError, ValueError) as exc:
             startup_output.line(
-                f"oc-box: automatic update unavailable: {exc}; continuing with the installed version.",
+                f"oc-box: automatic update unavailable: {str(exc).rstrip('.')}; continuing with the installed version.",
                 file=sys.stderr,
             )
     web_selection = None
     web_attach_only = False
     stop_selection = None
-    stop_engine = None
+    stop_v2 = False
     if args.command == "stop":
         stop_selection = find_workspace(args.project, args.workspace)
-        path, selected = stop_selection
-        if (
+        _, selected = stop_selection
+        stop_v2 = bool(
             selected
-            and selected.get("devices")
-            and runtime_safeguard.load(sys.modules[__name__], path) is not None
-        ):
-            stop_engine = runtime_safeguard.entrypoint_migration.engine_environment(
-                sys.modules[__name__]
-            )
+            and opencode_compat.major(selected.get("opencode_version", "1.0.0")) == 2
+        )
     if args.command == "web":
         web_selection = find_workspace(args.project, args.workspace)
         _, selected = web_selection
@@ -7041,21 +7073,20 @@ def _main_command(args, argv):
         if not web_attach_only:
             args._opencode_release = detect_opencode_release(isolated=True)
             _validate_web_release(args, args._opencode_release)
-    with loading_stage("Checking rootless Podman", stage="backend"):
-        check_backend(
-            **(
-                {"env": stop_engine, "local_only": True}
-                if stop_engine is not None
-                else {"env": maintenance_host_env()}
-                if args.command == "terminal" or getattr(args, "persisted", False)
-                else {}
-            ),
-            **(
-                {"feature": "launch"}
-                if args.command in ("start", "reset", "sync", "web")
-                else {}
-            ),
-        )
+    if not args.repair_private_home and not stop_v2:
+        with loading_stage("Checking rootless Podman", stage="backend"):
+            check_backend(
+                **(
+                    {"env": maintenance_host_env()}
+                    if args.command == "terminal" or getattr(args, "persisted", False)
+                    else {}
+                ),
+                **(
+                    {"feature": "launch"}
+                    if args.command in ("start", "reset", "sync", "web")
+                    else {}
+                ),
+            )
     image_preview_snapshot = None
     if not getattr(args, "persisted", False):
         state_root().mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -7318,17 +7349,6 @@ def _locked_workspace_command(path, data, args, launch_context, image_preview_sn
             and args.command in ("start", "reset", "sync", "web", "terminal", "purge")
         )
     )
-    if (
-        not guard
-        and data.get("ready") is True
-        and runtime_safeguard.release_key(data.get("opencode_version")) is not None
-        and args.command in ("start", "reset", "sync", "web", "purge")
-    ):
-        release = getattr(args, "_opencode_release", None) or detect_opencode_release(
-            isolated=True
-        )
-        args._opencode_release = release
-        guard = runtime_safeguard.version_upgrade(data.get("opencode_version"), release)
     credentials_open = False
 
     def open_credentials():
@@ -7402,6 +7422,10 @@ def _locked_workspace_command(path, data, args, launch_context, image_preview_sn
     if args.command == "terminal":
         return maintenance_terminal(path, data)
     if args.command == "repair":
+        if args.repair_private_home:
+            return runtime_safeguard.repair_private_home(
+                sys.modules[__name__], path, data
+            )
         repair_workspace(path, data)
         return 0
     if args.command in ("start", "reset", "sync", "web"):

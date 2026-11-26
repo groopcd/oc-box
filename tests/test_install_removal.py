@@ -89,7 +89,22 @@ class FlatRemovalTests(unittest.TestCase):
     def test_installer_rechecks_source_when_current_changes_during_automatic_fetch(
         self,
     ):
+        self.check_installer_rechecks_source()
+
+    def test_installer_rechecks_renumbered_source_when_current_changes_during_fetch(
+        self,
+    ):
+        with patch.object(
+            ownership.workspace_identity,
+            "snapshot_fd",
+            side_effect=fixtures.synthetic_vfs,
+        ):
+            self.check_installer_rechecks_source(rebooted=True)
+
+    def check_installer_rechecks_source(self, *, rebooted=False):
         older = self.install()
+        if rebooted:
+            fixtures.simulate_saved_device_before_reboot(older)
         self.opt_into_updates()
         token = ownership.inspect_active_installation(self.home, older).token
 
@@ -111,10 +126,53 @@ class FlatRemovalTests(unittest.TestCase):
             self.assertIsNone(updater.automatic_upgrade(older))
         fetch.assert_called_once()
 
+    def test_auto_update_refuses_legacy_renumbering_before_fetch(self):
+        def unavailable(fd):
+            return fixtures.synthetic_vfs(fd)[0], None
+
+        with patch.object(
+            ownership.workspace_identity, "snapshot_fd", side_effect=unavailable
+        ):
+            release = self.install()
+        self.opt_into_updates()
+        receipt = fixtures.simulate_saved_device_before_reboot(release)
+        stale = receipt.read_bytes()
+        with (
+            patch.object(updater, "_regular_user", return_value=True),
+            patch.object(updater, "_github_upgrade") as fetch,
+            patch.object(
+                ownership.workspace_identity,
+                "snapshot_fd",
+                side_effect=fixtures.synthetic_vfs,
+            ),
+            self.assertRaisesRegex(updater.UpdateError, "could not verify"),
+        ):
+            updater.automatic_upgrade(release)
+        fetch.assert_not_called()
+        self.assertEqual(receipt.read_bytes(), stale)
+        self.assertEqual((self.target / "current").resolve(), release)
+
     def test_real_exec_handoff_keeps_updated_release_leased_and_original_arguments(
         self,
     ):
+        self.check_real_exec_handoff()
+
+    def test_real_exec_handoff_after_device_renumbering(self):
+        with patch.object(
+            ownership.workspace_identity,
+            "snapshot_fd",
+            side_effect=fixtures.synthetic_vfs,
+        ):
+            self.check_real_exec_handoff(rebooted=True)
+
+    def check_real_exec_handoff(self, *, rebooted=False):
         older = self.install()
+        receipt = (
+            fixtures.simulate_saved_device_before_reboot(older)
+            if rebooted
+            else older / ownership.INVENTORY
+        )
+        original_receipt = receipt.read_bytes()
         self.opt_into_updates()
         package_parent = str(Path(ownership.__file__).resolve().parents[1])
         (self.source / "oc_box.py").write_text(
@@ -132,9 +190,12 @@ class FlatRemovalTests(unittest.TestCase):
         script = (
             "import contextlib, io, sys\n"
             "from pathlib import Path\n"
-            "sys.path.insert(0, sys.argv[1])\n"
+            "sys.path[:0] = sys.argv[1:3]\n"
             "from oc_box import install_ownership as owner, installation, updater\n"
-            "source, older = map(Path, sys.argv[2:])\n"
+            "source, older = map(Path, sys.argv[3:5])\n"
+            "if sys.argv[5] == '1':\n"
+            " from test_install_ownership import synthetic_vfs\n"
+            " owner.workspace_identity.snapshot_fd = synthetic_vfs\n"
             "updater._regular_user = lambda: True\n"
             "installation.shutil.which = lambda *a, **k: None\n"
             "def local_upgrade(root, *, expected_active):\n"
@@ -152,8 +213,10 @@ class FlatRemovalTests(unittest.TestCase):
                 "-c",
                 script,
                 package_parent,
+                str(Path(__file__).resolve().parent),
                 str(self.source),
                 str(older),
+                str(int(rebooted)),
             ],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
@@ -171,6 +234,7 @@ class FlatRemovalTests(unittest.TestCase):
                 _, error = child.communicate(input=b"", timeout=5)
                 self.assertEqual((child.returncode, error), (0, b""))
         self.assertEqual(self.review(current), plan)
+        self.assertEqual(receipt.read_bytes(), original_receipt)
 
     def test_cli_executes_exact_review_under_the_launchers_own_lease(self):
         kept_release = self.install()

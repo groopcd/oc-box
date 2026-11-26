@@ -114,6 +114,38 @@ class ChannelUpdaterTests(unittest.TestCase):
         self.assertEqual(len(self.commands), 1)
         self.assertFalse(channels.config_path().exists())
 
+    def test_force_reinstalls_same_github_release_with_existing_features(self):
+        release = self.target / "releases/fixture"
+        release.mkdir(parents=True)
+        self.current.update(version="1.6.2+gaaaaaaa", commit="a" * 40, commit_count=31)
+        (self.target / "current/vault-support.json").write_text("{}")
+        installed = self.target / "releases/fixture-reinstall"
+
+        def restage(command, **kwargs):
+            result = self.install(command, **kwargs)
+            (self.target / "current").rename(installed)
+            (self.target / "current").symlink_to(installed, target_is_directory=True)
+            return result
+
+        with (
+            patch.object(updater.install_ownership, "verify_active_launcher") as verify,
+            patch.object(updater.subprocess, "run", side_effect=restage),
+            contextlib.redirect_stdout(io.StringIO()) as output,
+        ):
+            updater.upgrade(release, force=True)
+        self.assertIn("Reinstalling verified release", output.getvalue())
+        self.assertEqual(verify.call_count, 2)
+        self.assertEqual(len(self.installs), 1)
+        self.assertIn("--with-vault", self.installs[0][0])
+        self.assertTrue(any("merge-base" in args for args in self.commands))
+        self.assertEqual((self.target / "current").resolve(), installed)
+
+    def test_force_is_not_available_from_a_source_checkout(self):
+        with self.assertRaisesRegex(updater.UpdateError, "not a source checkout"):
+            self.run_upgrade(force=True)
+        self.assertFalse(self.installs)
+        self.assertFalse(self.commands)
+
     def test_saved_development_and_explicit_stable_round_trip_with_features(self):
         self.chosen = "devel"
         self.run_upgrade(channel="devel")

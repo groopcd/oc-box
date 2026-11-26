@@ -86,10 +86,13 @@ or SDK. It substitutes a local process for `podman exec`; distro package
 selection and live Podman behavior still need their own checks.
 
 The exact incident regression also runs `2.3.2 → 2.4.0` in that native
-fixture. The runtime safeguard unit fixtures separately exercise isolated
-refusal, prior runtime retention, patch rechecks, and durable forward
-admission. They are not external-host Podman acceptance or proof that an
-older helper can safely reopen the normal host store.
+fixture. A focused native `2.4.1 → 2.4.2` run also verified the scoped SDK
+overrides, retained session, Build plugin, and warm cache. The runtime
+safeguard unit fixtures separately exercise ordinary startup without enrollment
+(including saved device mappings), strict opt-in preflight, and warning-only
+probe policy on an already enrolled workspace with a durable forward floor.
+These are not external-host Podman acceptance or proof that an older helper can
+safely reopen the normal host store.
 
 `tools/test_entrypoint_migration_podman.py` is an opt-in fixture for a fresh VM
 with local rootless Podman and a disposable user/store. It uses the production
@@ -194,8 +197,8 @@ override rather than replacing that selection.
 The npm upgrade fixture audits the generated public plugin SDK dependency tree at all
 reported severities before installing the resolved tree. An advisory or
 failed audit fails the job and therefore blocks PyPI publication through the
-reusable source gate. The managed SDK graphs for 2.2.6–2.2.7 and
-2.3.0–2.4.1 (the tested releases) scope fixes for
+reusable source gate. The selected V2 SDK scopes fixes to the affected
+dependency ranges for
 [glob](https://github.com/advisories/GHSA-3g3m-2fjr-6pw4) and
 [minimatch](https://github.com/advisories/GHSA-g3hv-75wg-m249) to the SDK;
 old SDK caches prepared without those fixes are not reused. Deprecation

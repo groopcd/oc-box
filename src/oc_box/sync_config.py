@@ -20,16 +20,17 @@ V2_PLUGIN_PACKAGE = "@opencode/plugin"
 
 
 def sdk_security_overrides(runtime_version):
-    # These audited SDKs include affected glob/minimatch versions on multiple
-    # paths. Scope the fix to the selected SDK, not the user's other packages.
+    # Apply the advisories to the selected V2 SDK's dependency ranges, not to
+    # a list of SDK releases or to unrelated top-level packages. Exact newer
+    # fixed requirements do not match these selectors.
     # GHSA-3g3m-2fjr-6pw4 and GHSA-g3hv-75wg-m249.
-    if runtime_version in (
-        "2.2.6", "2.2.7", "2.3.0", "2.3.1", "2.3.2", "2.4.0", "2.4.1",
+    if isinstance(runtime_version, str) and re.fullmatch(
+        r"2\.\d+\.\d+(?:[-+][A-Za-z0-9._-]+)?", runtime_version
     ):
         return {
             f"@opencode/plugin@{runtime_version}": {
-                "glob": "14.0.2",
-                "minimatch": "11.0.1",
+                "glob@>=9.0.0 <14.0.2": "14.0.2",
+                "minimatch@>=7.0.0 <11.0.1": "11.0.1",
             }
         }
     return {}
@@ -81,7 +82,9 @@ def sdk_lock_packages(lockfile, version):
             continue
         release = item.get("version")
         # Refuse unknown/prerelease identities rather than treating them as fixed.
-        if not isinstance(release, str) or not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", release):
+        if not isinstance(release, str) or not re.fullmatch(
+            r"[0-9]+\.[0-9]+\.[0-9]+", release
+        ):
             return None
         triplet = tuple(map(int, release.split(".")))
         if "glob" in names and (9, 0, 0) <= triplet < (14, 0, 2):
@@ -108,6 +111,16 @@ def sdk_modules_match(config, version):
     installed = sdk_lock_packages(config / "node_modules/.package-lock.json", version)
     if manifest is None or installed is None:
         return False
+    for location, item in manifest.items():
+        if (
+            location == f"node_modules/{V2_PLUGIN_PACKAGE}"
+            or sdk_lock_names(location, item) & {"glob", "minimatch"}
+        ) and location not in installed:
+            # npm can omit optional nodes for another platform, but an
+            # unlisted on-disk copy is not evidence that the checked version
+            # was installed. Even a dangling link is not a clean omission.
+            if item.get("optional") is not True or os.path.lexists(config / location):
+                return False
     for location, item in installed.items():
         names = sdk_lock_names(location, item)
         if (
@@ -217,7 +230,9 @@ def sync_config(home, payload, runtime_version=None):
         previous = read_json(config / "package.json")
         security_overrides = sdk_security_overrides(runtime_version)
         effective = (
-            runtime_manifest(manifest, plugin_package, runtime_version, security_overrides)
+            runtime_manifest(
+                manifest, plugin_package, runtime_version, security_overrides
+            )
             if runtime_version is not None
             else None
         )

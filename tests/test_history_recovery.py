@@ -390,7 +390,10 @@ class HistoryRecoveryTests(unittest.TestCase):
         self.assertEqual(refusals, ["startup-path-unverified"])
         # Covers a stopped inspection at guarded admission independently
         # of Reader capture; no engine probe, preparation or start follows.
-        stopped = {**self.info, "State": {"Running": False, "Status": "exited"}}
+        stopped = {
+            **self.info,
+            "State": {"Running": False, "Status": "exited", "Pid": 0},
+        }
         with (
             patch.object(box, "inspect_owned", return_value=stopped),
             patch.object(box, "podman") as podman,
@@ -411,7 +414,10 @@ class HistoryRecoveryTests(unittest.TestCase):
     def test_running_legacy_owner_can_bind_another_client_without_start_authority(self):
         self.info["Config"]["Cmd"] = ["-c", "exec sleep infinity"]
         volume = self.data["home_volume"]
-        running = {**self.info, "State": {"Running": True, "Status": "running"}}
+        running = {
+            **self.info,
+            "State": {"Running": True, "Status": "running", "Pid": 123},
+        }
         record = SimpleNamespace(
             ready=True,
             version=self.data["opencode_version"],

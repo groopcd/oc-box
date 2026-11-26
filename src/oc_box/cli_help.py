@@ -107,6 +107,7 @@ _OPTION_GROUPS = {
         ("log_dir", "journald", "lifecycle_diagnostics", "verbose"),
     ),
     "terminal": ("Terminal mode", ("maintenance",)),
+    "private-home": ("Private home", ("repair_private_home",)),
     "status": ("Output", ("json", "table")),
     "purge": (
         "Removal options",
@@ -118,7 +119,7 @@ _OPTION_GROUPS = {
     ),
     "release": (
         "Release selection",
-        ("check", "update_channel", "upgrade_vault", "upgrade_tui"),
+        ("check", "upgrade_force", "update_channel", "upgrade_vault", "upgrade_tui"),
     ),
     "auto-update": ("Automatic updates", ("auto_update",)),
     "help": ("Help", ("-h",)),
@@ -131,7 +132,7 @@ _COMMAND_SCOPES = {
     "stop": ("workspace", "logging"),
     "sync": ("workspace", "sync-mode", "sync-resources", "logging"),
     "terminal": ("workspace", "terminal", "logging"),
-    "repair": ("workspace",),
+    "repair": ("workspace", "private-home"),
     "purge": ("workspace", "purge"),
     "credentials": ("workspace", "credentials"),
     "upgrade": ("release", "auto-update"),

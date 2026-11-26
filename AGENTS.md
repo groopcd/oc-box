@@ -238,7 +238,8 @@ their checkout ownership distinct from unrelated source and flat installations.
   Never publish engine selectors in socket replies or forward provider secrets
   to the Reader, tab probes, or mount rechecks.
 - `guarded_devices.py`: narrow owning admission for previously registered
-  direct accelerator/render character nodes only. Require local rootless
+  direct accelerator/render character nodes and the exact `/dev/kvm:rw` binding.
+  Keep workspace devices out of isolated native preflight. Require local rootless
   overlay inspection, declared Podman Specgen devices and effective OCI
   bindings once booted. Do not trust saved create argv alone. A staged
   replacement suppresses ambient device defaults only during its create,
