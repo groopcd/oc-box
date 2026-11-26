@@ -193,9 +193,10 @@ their checkout ownership distinct from unrelated source and flat installations.
   no automatic retry, blind process-group kill or unacknowledged success.
   Session cancellation retains attempted versus verified/observed fresh IDs,
   never deletes them or imports more history to manufacture rollback. Require a
-  verifiable file-based Linux core-dump policy and soft core-file limit zero
-  before dashboard backup work and password prompts/submission; child helpers
-  inherit the limit. Refuse pipe, socket, unreadable or unknown collectors
+  verifiable file-based Linux core-dump policy from the live procfs sysctl and
+  soft core-file limit zero before dashboard backup work and password
+  prompts/submission; child helpers inherit the limit. Refuse pipe, socket,
+  shadowed, unreadable or unknown policies
   without altering host policy. The trusted kernel policy must remain stable;
   this does not protect against a same-user debugger, swap, terminal recording
   or all memory copies.

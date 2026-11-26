@@ -138,8 +138,13 @@ class CoreDumpPolicyTests(unittest.TestCase):
 
     def test_only_bounded_single_line_printable_file_patterns_are_admitted(self):
         with tempfile.TemporaryDirectory() as temporary:
-            path = Path(temporary) / "core_pattern"
-            with patch.object(channel, "_CORE_PATTERN", path):
+            root = Path(temporary)
+            path = root / "core_pattern"
+            with (
+                patch.object(channel, "_PROC_ROOT", root),
+                patch.object(channel, "_CORE_ENTRY", b"core_pattern"),
+                patch.object(channel.file_preview_io, "_procfs", return_value=True),
+            ):
                 for pattern in (
                     b"core\n",
                     b"/synthetic/core files/core.%p\n",
@@ -183,10 +188,12 @@ class CoreDumpPolicyTests(unittest.TestCase):
             valid.write_bytes(b"core\n")
             link = root / "link"
             link.symlink_to(valid)
-            for path in (root / "missing", root, link):
+            for entry in (b"missing", b".", b"link"):
                 with (
-                    self.subTest(path=path),
-                    patch.object(channel, "_CORE_PATTERN", path),
+                    self.subTest(entry=entry),
+                    patch.object(channel, "_PROC_ROOT", root),
+                    patch.object(channel, "_CORE_ENTRY", entry),
+                    patch.object(channel.file_preview_io, "_procfs", return_value=True),
                 ):
                     self.assert_refused_before_limit()
         with patch.object(
@@ -195,6 +202,32 @@ class CoreDumpPolicyTests(unittest.TestCase):
             side_effect=PermissionError(errno.EACCES, "synthetic raw path"),
         ):
             self.assert_refused_before_limit()
+
+    def test_regular_file_on_other_filesystem_cannot_supply_core_policy(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "core_pattern").write_bytes(b"core\n")
+            with (
+                patch.object(channel, "_PROC_ROOT", root),
+                patch.object(channel, "_CORE_ENTRY", b"core_pattern"),
+                patch.object(channel.file_preview_io, "_openat2") as open_sysctl,
+            ):
+                self.assert_refused_before_limit()
+                open_sysctl.assert_not_called()
+
+    def test_core_entry_requires_mount_confined_lookup(self):
+        with (
+            patch.object(channel.file_preview_io, "_procfs", return_value=True),
+            patch.object(
+                channel.file_preview_io,
+                "_openat2",
+                side_effect=channel.file_preview_io.Refused(),
+            ) as open_sysctl,
+        ):
+            self.assert_refused_before_limit()
+        args, keywords = open_sysctl.call_args
+        self.assertEqual(args[1], b"sys/kernel/core_pattern")
+        self.assertFalse(keywords.get("cross", False))
 
     def test_file_policy_still_requires_verified_zero_soft_limit(self):
         with (
