@@ -180,6 +180,34 @@ class PackageUpdateTests(unittest.TestCase):
         self.assertEqual(self.settings(), {})
         self.assertFalse((self.prefix / ".oc-box-upgrade.lock").exists())
 
+    def test_force_reinstalls_same_selected_version_through_the_verified_manager(self):
+        for kind in ("pip", "pipx", "uv"):
+            with self.subTest(kind=kind):
+                self.kind = kind
+                extras = [] if kind == "pip" else ["vault"]
+                self.installed("1.6.2", extras)
+                self.assertIn("up to date", self.upgrade())
+                self.assertFalse(self.calls)
+                self.upgrade(force=True)
+                self.assertEqual(len(self.calls), 1)
+                command = self.calls[0][0]
+                self.assertIn(
+                    "oc-box" + ("[vault]" if extras else "") + "==1.6.2", command
+                )
+                if kind == "pip":
+                    self.assertIn("--force-reinstall", command)
+                elif kind == "pipx":
+                    self.assertIn("--force", command)
+                    self.assertEqual(
+                        shlex.split(command[command.index("--pip-args") + 1]),
+                        updates.PIP_FLAGS,
+                    )
+                else:
+                    flag = command.index("--reinstall-package")
+                    self.assertEqual(
+                        command[flag : flag + 2], ["--reinstall-package", "oc-box"]
+                    )
+
     def test_explicit_extra_channel_upgrade_matrix(self):
         for origin, version in (
             ("stable-to-devel", "1.6.1"),

@@ -71,7 +71,7 @@ File: oc-box.info,  Node: Synopsis,  Next: Description,  Prev: Name,  Up: Top
      oc-box logs [--journald | --log-dir PATH] [--project PATH | --workspace ID] [--level LEVEL | --verbose[=LEVEL]] [--limit N] [--tail] [-f | --follow] [--json | --table]
      oc-box logs [--log-dir PATH] --path
      oc-box tui [--project PATH | --workspace ID] [--read-only] [--demo]
-     oc-box upgrade [--check] [--stable | --devel] [--vault] [--tui]
+     oc-box upgrade [--check | --force] [--stable | --devel] [--vault] [--tui]
      oc-box upgrade --auto-update on|off
      oc-box --uninstall [--dry-run]
      oc-box --uninstall --full [--dry-run]  # reports incomplete cleanup
@@ -2238,6 +2238,7 @@ does not save a new preference.
      oc-box upgrade --devel --tui    # Add dashboard dependencies independently
      oc-box upgrade --devel --vault --tui
      oc-box upgrade                  # Follow the saved channel
+     oc-box upgrade --force          # Reinstall from the owning channel
      oc-box upgrade --stable
      oc-box upgrade --auto-update on
      oc-box upgrade --auto-update off
@@ -2250,6 +2251,13 @@ editable checkout receives manual guidance rather than a guessed
 installation target.  Verified uv/pipx owners can receive additive
 package-extra requests.  Plain pip cannot prove prior requested extras,
 so ambiguous extras still refuse rather than guessing what to preserve.
+
+‘--force’ reinstalls the selected published release even when already
+current.  It stages a new GitHub release directory, or reinstalls the
+exact PyPI version through the verified owning package manager.  It does
+not change installation method, permit an implicit downgrade, or bypass
+ownership verification.  It cannot be combined with ‘--check’ or
+‘--auto-update’.
 
 ‘--vault’ and ‘--tui’ independently request optional installer
 dependencies.  They work from stable or development installations and
@@ -5625,22 +5633,22 @@ Tag Table:
 Node: Top210
 Node: Name769
 Node: Synopsis930
-Node: Description5291
-Node: Commands11111
-Node: Options166486
-Node: Lifecycle and persistence233093
-Node: Distribution images235393
-Node: Sessions and recovery240470
-Node: Devices and host permissions247055
-Node: Resource reports249401
-Node: Configuration and environment251512
-Node: Files262893
-Node: Exit status273803
-Node: Examples275211
-Node: Troubleshooting277350
-Node: Installation and manuals289842
-Node: Authors and license300032
-Node: See also300639
+Node: Description5301
+Node: Commands11121
+Node: Options166949
+Node: Lifecycle and persistence233556
+Node: Distribution images235856
+Node: Sessions and recovery240933
+Node: Devices and host permissions247518
+Node: Resource reports249864
+Node: Configuration and environment251975
+Node: Files263356
+Node: Exit status274266
+Node: Examples275674
+Node: Troubleshooting277813
+Node: Installation and manuals290305
+Node: Authors and license300495
+Node: See also301102
 
 End Tag Table
 

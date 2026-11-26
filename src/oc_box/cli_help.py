@@ -118,7 +118,7 @@ _OPTION_GROUPS = {
     ),
     "release": (
         "Release selection",
-        ("check", "update_channel", "upgrade_vault", "upgrade_tui"),
+        ("check", "upgrade_force", "update_channel", "upgrade_vault", "upgrade_tui"),
     ),
     "auto-update": ("Automatic updates", ("auto_update",)),
     "help": ("Help", ("-h",)),

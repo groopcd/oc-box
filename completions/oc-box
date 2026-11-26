@@ -144,7 +144,7 @@ _oc_box()
         purge) options="$help $selectors --delete-sessions --all -y --yes --discard-guarded --cleanup" ;;
         credentials) options="$help $selectors --credential-mode --env-secret --vault-secret --clear-credentials" ;;
         preferences) options="$help $selectors --host-drop --host-clipboard --host-clipboard-symlinks --host-file-open --image-preview --startup-logo --json --table" ;;
-        upgrade) options="$help --check --stable --devel --vault --tui --auto-update" ;;
+        upgrade) options="$help --check --force --stable --devel --vault --tui --auto-update" ;;
         doctor) options="$help --json --table --feature" ;;
         backup) options="$help $selectors --output --portable --host --opencode-auth-export --recipient --min-passphrase-length" ;;
         backup-info) options="$help --identity --json --table" ;;
@@ -160,7 +160,7 @@ _oc_box()
             options=$help
             (( positional == 0 )) && options+=' bash' ;;
         list|distros|runtime-check) options=$help ;;
-        *) options="$commands $help $selectors $launch $launch_logs --runtime-guard --convert-legacy-container --rebuild-legacy-container --persisted --status --about --version --json --table --check --stable --devel --vault --tui --auto-update --credential-mode --env-secret --vault-secret --clear-credentials --delete-sessions --all -y --yes --discard-guarded --cleanup --maintenance" ;;
+        *) options="$commands $help $selectors $launch $launch_logs --runtime-guard --convert-legacy-container --rebuild-legacy-container --persisted --status --about --version --json --table --check --force --stable --devel --vault --tui --auto-update --credential-mode --env-secret --vault-secret --clear-credentials --delete-sessions --all -y --yes --discard-guarded --cleanup --maintenance" ;;
     esac
     if (( ! ended )); then
         _oc_box_words "$options"

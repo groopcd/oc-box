@@ -5894,6 +5894,12 @@ def parser():
         action="store_true",
         help="with upgrade, preview the selected published channel without installing",
     )
+    result.add_argument(
+        "--force",
+        dest="upgrade_force",
+        action="store_true",
+        help="with upgrade, reinstall the selected published release even when current",
+    )
     channel = result.add_mutually_exclusive_group()
     channel.add_argument(
         "--stable",
@@ -6765,6 +6771,7 @@ def _main_command(args, argv):
                 args.about,
                 args.version,
                 args.check,
+                args.upgrade_force,
                 args.auto_update is not None,
                 args.update_channel is not None,
                 args.distro,
@@ -6789,10 +6796,13 @@ def _main_command(args, argv):
             )
         return credentials_command(args)
     if (
-        args.check or args.auto_update is not None or args.update_channel is not None
+        args.check
+        or args.upgrade_force
+        or args.auto_update is not None
+        or args.update_channel is not None
     ) and args.command != "upgrade":
         raise BoxError(
-            "--check, --auto-update, --stable and --devel apply only to upgrade."
+            "--check, --force, --auto-update, --stable and --devel apply only to upgrade."
         )
     if args.command == "upgrade":
         if any(
@@ -6821,17 +6831,20 @@ def _main_command(args, argv):
             )
         ):
             raise BoxError(
-                "Upgrade accepts only --check, --stable/--devel, --vault, --tui or --auto-update on/off."
+                "Upgrade accepts only --check, --force, --stable/--devel, --vault, --tui or --auto-update on/off."
             )
         if args.auto_update is not None and (
             args.check
+            or args.upgrade_force
             or args.update_channel is not None
             or args.upgrade_vault
             or args.upgrade_tui
         ):
             raise BoxError(
-                "--auto-update cannot be combined with --check, --stable, --devel, --vault or --tui."
+                "--auto-update cannot be combined with --check, --force, --stable, --devel, --vault or --tui."
             )
+        if args.check and args.upgrade_force:
+            raise BoxError("--check and --force cannot be combined.")
         if os.environ.get("OC_BOX_CONTAINER") == "1":
             raise BoxError(
                 "Run 'oc-box upgrade' on the host; the container cannot update its host launcher."
@@ -6875,6 +6888,7 @@ def _main_command(args, argv):
                 channel=args.update_channel,
                 with_vault=args.upgrade_vault,
                 with_tui=args.upgrade_tui,
+                **({"force": True} if args.upgrade_force else {}),
             )
         except UpdateError as exc:
             raise BoxError(str(exc)) from exc
@@ -7043,7 +7057,7 @@ def _main_command(args, argv):
             automatic_upgrade(APP, launch_args=sys.argv[1:] if argv is None else argv)
         except (UpdateError, OSError, ValueError) as exc:
             startup_output.line(
-                f"oc-box: automatic update unavailable: {exc}; continuing with the installed version.",
+                f"oc-box: automatic update unavailable: {str(exc).rstrip('.')}; continuing with the installed version.",
                 file=sys.stderr,
             )
     web_selection = None

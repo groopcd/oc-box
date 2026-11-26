@@ -29,7 +29,7 @@ oc-box status [--project PATH | --workspace ID] [--json | --table]
 oc-box logs [--journald | --log-dir PATH] [--project PATH | --workspace ID] [--level LEVEL | --verbose[=LEVEL]] [--limit N] [--tail] [-f | --follow] [--json | --table]
 oc-box logs [--log-dir PATH] --path
 oc-box tui [--project PATH | --workspace ID] [--read-only] [--demo]
-oc-box upgrade [--check] [--stable | --devel] [--vault] [--tui]
+oc-box upgrade [--check | --force] [--stable | --devel] [--vault] [--tui]
 oc-box upgrade --auto-update on|off
 oc-box --uninstall [--dry-run]
 oc-box --uninstall --full [--dry-run]  # reports incomplete cleanup
@@ -2011,6 +2011,7 @@ oc-box upgrade --devel --vault  # Add vault dependencies independently
 oc-box upgrade --devel --tui    # Add dashboard dependencies independently
 oc-box upgrade --devel --vault --tui
 oc-box upgrade                  # Follow the saved channel
+oc-box upgrade --force          # Reinstall from the owning channel
 oc-box upgrade --stable
 oc-box upgrade --auto-update on
 oc-box upgrade --auto-update off
@@ -2023,6 +2024,12 @@ An ambiguous owner or editable checkout receives manual guidance rather than
 a guessed installation target. Verified uv/pipx owners can receive additive
 package-extra requests. Plain pip cannot prove prior requested extras, so
 ambiguous extras still refuse rather than guessing what to preserve.
+
+`--force` reinstalls the selected published release even when already current.
+It stages a new GitHub release directory, or reinstalls the exact PyPI version
+through the verified owning package manager. It does not change installation
+method, permit an implicit downgrade, or bypass ownership verification.
+It cannot be combined with `--check` or `--auto-update`.
 
 `--vault` and `--tui` independently request optional installer dependencies.
 They work from stable or development installations and can be combined with
