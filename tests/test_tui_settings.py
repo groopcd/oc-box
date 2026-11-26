@@ -56,6 +56,26 @@ class InlineSettingsTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreater(geometry.region.height, 0)
         self.assertEqual(geometry.region.intersection(geometry.clip), geometry.region)
 
+    async def test_settings_shortcuts_leave_focused_text_input_in_place(self):
+        app = DashboardApp(SettingsDemo(), read_only=True, demo=True)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await self.ready(app, pilot)
+            await pilot.press("ctrl+l")
+            search = app.query_one("#log-search", Input)
+            sections = app.query_one("#content", TabbedContent)
+            self.assertIs(app.focused, search)
+            self.assertEqual(sections.active, "logs")
+
+            await pilot.press("s", "f2")
+            self.assertIs(app.focused, search)
+            self.assertEqual(search.value, "s")
+            self.assertEqual(sections.active, "logs")
+
+            app.query_one("#refresh", Button).focus()
+            await pilot.pause()
+            await pilot.press("f2")
+            self.assertEqual(sections.active, "settings")
+
     async def test_every_topic_and_field_is_inline_and_reachable_at_narrow_and_wide_sizes(
         self,
     ):

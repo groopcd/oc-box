@@ -32,6 +32,7 @@ from textual.widgets import (
     Switch,
     TabbedContent,
     TabPane,
+    TextArea,
 )
 
 if __package__:
@@ -3135,6 +3136,10 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
             "focus_next",
             "focus_previous",
         }:
+            return False
+        # F2 is otherwise handled by the app when the text field has no
+        # matching binding. Keep editing focus instead of opening Settings.
+        if action == "settings" and isinstance(self.focused, (Input, TextArea)):
             return False
         if (
             self._terminal_widget
