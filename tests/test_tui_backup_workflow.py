@@ -1,5 +1,6 @@
 """Private editor and embedded workflow presentation, without lifecycle I/O."""
 
+from dataclasses import asdict
 import importlib.util
 import json
 import os
@@ -470,6 +471,66 @@ class PrivateEditorTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("synthetic-socket", status)
             self.assertFalse(app._private_interaction)
             workflow.dismiss()
+
+    async def test_policy_refusal_survives_prompt_closure_and_keeps_child_uncertainty(
+        self,
+    ):
+        app = DashboardApp(DemoBackend(), demo=True)
+        async with app.run_test(size=(110, 40)) as pilot:
+            await self.begin(app, pilot)
+            for phase in ("mount", "submission"):
+                with self.subTest(phase=phase):
+                    self.policy.return_value = b"core\n"
+                    workflow = BackupWorkflow(None, {"action": "workspace-backup"})
+                    app._embedded_operation = workflow
+                    with patch.object(BackupWorkflow, "_run"):
+                        await app.push_screen(workflow, app._embedded_finished)
+                        await pilot.pause()
+                    event = {"kind": "prompt", "id": 1, "purpose": "backup-new"}
+                    if phase == "mount":
+                        screen = PrivateSecretScreen(
+                            workflow.transport,
+                            event,
+                            on_policy_refusal=workflow._record_policy_refusal,
+                        )
+                        self.policy.return_value = b"|/synthetic-handler\n"
+                        await app.push_screen(screen)
+                    else:
+                        workflow._apply(event)
+                        await pilot.pause()
+                        screen = app.screen
+                        self.assertIsInstance(screen, PrivateSecretScreen)
+                        await pilot.press("x")
+                        workflow.transport._prompt = event["id"]
+                        self.policy.return_value = b"|/synthetic-handler\n"
+                        screen.submit()
+                    await pilot.pause()
+                    self.assertTrue(workflow.transport._cancelled)
+                    self.assertFalse(workflow.finished)
+                    self.assertTrue(app._private_interaction)
+                    child = workflow_ui.failure_notice(
+                        "backup", reason="cancelled", dispatched=True, uncertain=True
+                    )
+                    result = {"code": 130, "notice": asdict(child)}
+                    workflow._finished(result)
+                    await pilot.pause()
+                    self.assertIs(workflow.result, result)
+                    self.assertEqual(result["notice"], asdict(child))
+                    status = str(
+                        workflow.query_one("#backup-operation-stage", Static).render()
+                    )
+                    self.assertIn("outcome unverified", status)
+                    self.assertIn("core-dump policy", status)
+                    with (
+                        patch.object(app, "_management_refresh"),
+                        patch.object(app, "action_refresh"),
+                    ):
+                        workflow.dismiss(result)
+                        await pilot.pause()
+                    notice = str(app.query_one("#notice", Static).render())
+                    self.assertIn("outcome unverified", notice)
+                    self.assertIn("core-dump policy", notice)
+                    self.assertNotIn("synthetic-handler", notice)
 
     async def test_real_private_process_roundtrip_stays_inside_dashboard(self):
         from tests.test_tui_operation_io import VALUE as CHILD_VALUE, write_fixture

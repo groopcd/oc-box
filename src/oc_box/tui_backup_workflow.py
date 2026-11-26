@@ -151,12 +151,13 @@ class PrivateSecretScreen(_PrivateOperationModal):
     PrivateSecretScreen Horizontal { height: 3; margin-top: 1; }
     """
 
-    def __init__(self, transport, event):
+    def __init__(self, transport, event, *, on_policy_refusal=None):
         tui_operation_io.disable_core_dumps()
         super().__init__()
         self.transport, self.prompt_id = transport, event["id"]
         self.purpose = event["purpose"]
         self._submitted = False
+        self._on_policy_refusal = on_policy_refusal
 
     def compose(self) -> ComposeResult:
         with Vertical():
@@ -193,10 +194,13 @@ class PrivateSecretScreen(_PrivateOperationModal):
             private_ui_allowed(self.app)
         except Exception as error:
             self.query_one(SecretEditor).disabled = True
+            core_refusal = isinstance(error, tui_operation_io.CoreDumpPolicyError)
+            if core_refusal and self._on_policy_refusal is not None:
+                self._on_policy_refusal()
             self.transport.cancel()
             self.query_one("#private-secret-status", Static).update(
                 CORE_DUMP_POLICY_MESSAGE
-                if isinstance(error, tui_operation_io.CoreDumpPolicyError)
+                if core_refusal
                 else "Private input requires dashboard debug, developer tools, and event logging disabled. Cancelling…"
             )
             return
@@ -257,6 +261,8 @@ class PrivateSecretScreen(_PrivateOperationModal):
                 "Password submitted. Waiting for the backup operation…"
             )
         except tui_operation_io.CoreDumpPolicyError:
+            if self._on_policy_refusal is not None:
+                self._on_policy_refusal()
             self.query_one("#private-secret-status", Static).update(
                 CORE_DUMP_POLICY_MESSAGE
             )
@@ -515,6 +521,9 @@ class BackupWorkflow(_PrivateOperationModal):
             return
         self.app.call_from_thread(self._apply, event)
 
+    def _record_policy_refusal(self):
+        self._policy_refused = True
+
     def _apply(self, event):
         kind = event["kind"]
         if kind == "stage":
@@ -549,10 +558,14 @@ class BackupWorkflow(_PrivateOperationModal):
             try:
                 tui_operation_io.protect_private_input()
             except tui_operation_io.CoreDumpPolicyError:
-                self._policy_refused = True
+                self._record_policy_refusal()
                 self.transport.cancel()
                 return
-            self.app.push_screen(PrivateSecretScreen(self.transport, event))
+            self.app.push_screen(
+                PrivateSecretScreen(
+                    self.transport, event, on_policy_refusal=self._record_policy_refusal
+                )
+            )
         elif kind == "prompt-closed":
             screen = self.app.screen
             if (

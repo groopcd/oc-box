@@ -787,7 +787,8 @@ automatic key-management problem that the dashboard silently resolves.
 
 The manager's transient private editor is part of the secret-memory trust
 boundary. Dashboard backup, inspection and restore require a verifiable
-file-based Linux core-dump policy. The manager and child verify a zero soft
+file-based Linux core-dump policy from the live kernel sysctl. The manager
+and child verify a zero soft
 core-file limit before accepting input; stock helpers such as `age` inherit it.
 Piped or socket-based crash collectors can ignore that limit, so these or
 unverifiable policies are refused before password entry. oc-box does not

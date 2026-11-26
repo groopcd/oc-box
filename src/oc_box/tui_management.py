@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 import sys
 from pathlib import Path
 
@@ -1020,6 +1021,7 @@ class ManagementActions:
         operation = tui_operations.operation_tag(
             self._embedded_operation.transport.request["action"]
         )
+        policy_refused = getattr(self._embedded_operation, "_policy_refused", False)
         self._embedded_operation = None
         self._private_interaction = self._maintenance_busy = False
         if result is not None and result["code"] == 0:
@@ -1029,14 +1031,24 @@ class ManagementActions:
             )
         elif result is not None and result.get("notice"):
             if __package__:
-                from .tui_notifications import FailureNotice
+                from .tui_notifications import CORE_DUMP_POLICY_MESSAGE, FailureNotice
             else:
-                from tui_notifications import FailureNotice
+                from tui_notifications import CORE_DUMP_POLICY_MESSAGE, FailureNotice
 
-            self._show_failure_notice(FailureNotice(**result["notice"]))
+            notice = FailureNotice(**result["notice"])
+            if policy_refused and CORE_DUMP_POLICY_MESSAGE not in notice.message:
+                # This is local context, not a child acknowledgement. Preserve
+                # the child notice's cancellation/uncertainty and severity.
+                notice = replace(
+                    notice, message=f"{notice.message} {CORE_DUMP_POLICY_MESSAGE}"
+                )
+            self._show_failure_notice(notice)
         else:
             self._operation_failure(
-                operation=operation, dispatched=True, uncertain=True
+                operation=operation,
+                reason="core-dump-policy" if policy_refused else None,
+                dispatched=True,
+                uncertain=True,
             )
         self._management_refresh()
         self.action_refresh()

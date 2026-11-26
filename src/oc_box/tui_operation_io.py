@@ -5,6 +5,7 @@ Protocol frames contain allowlisted metadata, never passwords or tool output.
 No Textual dependency is imported here.
 """
 
+from contextlib import ExitStack
 from dataclasses import asdict
 import errno
 import fcntl
@@ -27,9 +28,10 @@ import threading
 import time
 
 if __package__:
-    from . import private_memory, secret_prompt
+    from . import file_preview_io, private_memory, secret_prompt
     from .tui_notifications import CORE_DUMP_POLICY_MESSAGE, failure_notice
 else:
+    import file_preview_io
     import private_memory
     import secret_prompt
     from tui_notifications import CORE_DUMP_POLICY_MESSAGE, failure_notice
@@ -39,7 +41,8 @@ MAX_TRAFFIC = 2 * 1024 * 1024
 MAX_EVENTS = 4096
 MAX_PROGRESS_EVENTS = 1024
 MAX_PROGRESS_BYTES = 128 * 1024**4
-_CORE_PATTERN = Path("/proc/sys/kernel/core_pattern")
+_PROC_ROOT = Path("/proc")
+_CORE_ENTRY = b"sys/kernel/core_pattern"
 _MAX_CORE_PATTERN = 127
 STAGES = frozenset(
     {
@@ -322,15 +325,22 @@ def disable_core_dumps():
 
 
 def _read_core_pattern():
-    fd = os.open(
-        _CORE_PATTERN, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK
-    )
-    try:
+    with ExitStack() as stack:
+        if os.uname().machine not in file_preview_io.ARCHITECTURES:
+            raise CoreDumpPolicyError()
+        proc = os.open(
+            _PROC_ROOT, os.O_PATH | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW
+        )
+        stack.callback(os.close, proc)
+        if not file_preview_io._procfs(proc):
+            raise CoreDumpPolicyError()
+        # Pin the procfs directory and stay on that mount. Even a procfs entry
+        # bind-mounted over this sysctl is not evidence of its kernel policy.
+        fd = file_preview_io._openat2(proc, _CORE_ENTRY, os.O_RDONLY | os.O_NONBLOCK)
+        stack.callback(os.close, fd)
         if not stat.S_ISREG(os.fstat(fd).st_mode):
             raise CoreDumpPolicyError()
         return os.read(fd, _MAX_CORE_PATTERN + 2)
-    finally:
-        os.close(fd)
 
 
 def protect_private_input():
@@ -349,7 +359,7 @@ def protect_private_input():
         ):
             raise CoreDumpPolicyError()
         disable_core_dumps()
-    except (OSError, OperationIOError):
+    except (OSError, OperationIOError, file_preview_io.Refused):
         raise CoreDumpPolicyError() from None
 
 
