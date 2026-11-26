@@ -62,7 +62,9 @@ class RuntimeSafeguardTests(unittest.TestCase):
         self.binary = guard.HostBinary(10, (), DIGEST)
 
     def args(self, command="start", **values):
-        return argparse.Namespace(command=command, runtime_guard=False, **values)
+        return argparse.Namespace(
+            **{"command": command, "runtime_guard": False, **values}
+        )
 
     @contextlib.contextmanager
     def synthetic_admission(self, version=NEW):
@@ -88,20 +90,6 @@ class RuntimeSafeguardTests(unittest.TestCase):
             native_runtime_guard.publish(self.path, pending, self.record)
             return self.record
         return pending
-
-    def test_every_stable_v2_upgrade_triggers_check(self):
-        for item, expected in (
-            ("2.3.2", False),
-            ("2.3.3", True),
-            ("2.4.0", True),
-            ("2.10.0", True),
-            ("2.2.9", False),
-            ("1.19.5", False),
-            ("3.0.0", False),
-            ("2.4.0-beta.1", False),
-        ):
-            with self.subTest(candidate=item):
-                self.assertIs(guard.version_upgrade(OLD, item), expected)
 
     def test_resource_refusals_identify_the_specific_fix_before_engine_access(self):
         cases = (
@@ -159,6 +147,72 @@ class RuntimeSafeguardTests(unittest.TestCase):
                     box, self.path, data, running=False, engine_env=engine
                 )
         self.assertEqual(box.read_json(self.path)["devices"], data["devices"])
+
+    def test_guarded_stopped_inspection_checks_current_resources_not_boot_metadata(
+        self,
+    ):
+        project = str(self.project)
+        home_source = str(self.root / "volume")
+        migration = guard.entrypoint_migration
+        data = {
+            **self.data,
+            migration.RECEIPT: {
+                "id": CONTAINER,
+                "bootstrap": False,
+                "volume": [1, 2],
+            },
+        }
+        recovery = guard.history_recovery
+        info = {
+            "Id": CONTAINER,
+            "State": {"Status": "exited", "Running": False, "Paused": False, "Pid": 0},
+            "Mounts": [
+                {"Type": "bind", "Source": project, "Destination": project},
+                {
+                    "Type": "volume",
+                    "Name": VOLUME,
+                    "Source": home_source,
+                    "Destination": data["home"],
+                },
+            ],
+            "Config": {
+                "Labels": {box.LABEL: data["id"]},
+                "Entrypoint": [recovery.PASSIVE_ENTRYPOINT],
+                "Cmd": ["-c", recovery.PASSIVE_COMMAND],
+                "Env": ["PATH=" + recovery.history_reader.PATH],
+                "CreateCommand": ["--volume", f"{VOLUME}:{data['home']}:rw,nocopy"],
+            },
+            "HostConfig": {"PidMode": "private"},
+        }
+        volume = {
+            "Name": VOLUME,
+            "Mountpoint": home_source,
+            "Driver": "local",
+            "Labels": {box.LABEL: data["id"]},
+        }
+        with (
+            patch.object(box, "validate_project", return_value=self.project),
+            patch.object(box, "find_workspace", return_value=(self.path, data)),
+            patch.object(guard.workspace_identity, "same_project", return_value=True),
+            patch.object(box, "inspect_owned", return_value=info),
+            patch.object(box, "podman") as podman,
+            patch.object(migration, "volume_stamp", return_value=[1, 2]) as stamp,
+        ):
+            podman.return_value.stdout = json.dumps([volume])
+            self.assertEqual(
+                guard._inspect(box, self.path, data, running=False),
+                (CONTAINER, (project, project, home_source, data["home"])),
+            )
+            # An old receipt has no persistent filesystem baseline. Do not
+            # silently rebind it on the strength of the inode alone.
+            stamp.return_value = [17, 2]
+            with self.assertRaisesRegex(box.BoxError, "conversion-home-identity"):
+                guard._inspect(box, self.path, data, running=False)
+            info["State"]["Status"] = "initialized"
+            podman.reset_mock()
+            with self.assertRaisesRegex(box.BoxError, "container-state"):
+                guard._inspect(box, self.path, data, running=False)
+            podman.assert_not_called()
 
     def test_retirement_requires_successful_start_and_mount_access(self):
         marker = guard.entrypoint_migration.RETIRE
@@ -725,7 +779,38 @@ class RuntimeSafeguardTests(unittest.TestCase):
         ):
             self.assertIn(f"runtime-check: {task}", logs.getvalue())
 
-    def test_default_upgrade_refusal_precedes_credential_and_live_paths(self):
+    def test_ordinary_start_with_new_runtime_does_not_enroll_or_require_probe(self):
+        for devices in ([], ["/dev/kvm:rw"], ["/dev/accel/accel0"]):
+            data = {**self.data, "devices": devices}
+            with (
+                self.subTest(devices=devices),
+                patch.object(box, "check_backend"),
+                patch.object(box, "state_root", return_value=self.root),
+                patch.object(box, "find_workspace", return_value=(self.path, data)),
+                patch.object(box, "detect_opencode_release", return_value="2.4.2"),
+                patch.object(
+                    workspace_service, "controller_running", return_value=False
+                ),
+                patch.object(
+                    box, "launch_credentials", return_value=contextlib.nullcontext()
+                ) as unlock,
+                patch.object(box, "refresh_workspace_identity") as identity,
+                patch.object(
+                    box, "workspace_ui_preferences", return_value={"host_drop": False}
+                ),
+                patch.object(box, "launch", return_value=0) as launch,
+                patch.object(guard, "admit") as admit,
+                patch.object(native_preflight, "check") as check,
+            ):
+                self.assertEqual(box.main(["start", "--project", str(self.project)]), 0)
+                self.assertEqual(launch.call_args.args[1]["devices"], devices)
+                unlock.assert_called_once()
+                identity.assert_called_once()
+                admit.assert_not_called()
+                check.assert_not_called()
+                self.assertIsNone(native_runtime_guard.load(self.path))
+
+    def test_explicit_enrollment_refusal_precedes_credential_and_live_paths(self):
         category = next(iter(native_preflight.CONFIRMED_REFUSALS))
         before = self.path.read_bytes()
         with (
@@ -744,12 +829,12 @@ class RuntimeSafeguardTests(unittest.TestCase):
                 side_effect=native_preflight.Refusal(category, proof=DIGEST),
             ) as check,
         ):
-            for expected in (
-                "not supported.*github.com/groopcd/oc-box/issues/new",
-                "previously refused",
+            with self.assertRaisesRegex(
+                box.BoxError, "not supported.*github.com/groopcd/oc-box/issues/new"
             ):
-                with self.assertRaisesRegex(box.BoxError, expected):
-                    box.main(["start", "--project", str(self.project)])
+                box.main(["start", "--project", str(self.project), "--runtime-guard"])
+            with self.assertRaisesRegex(box.BoxError, "previously refused"):
+                guard._candidate_digest(box, self.path, self.binary, NEW, recheck=False)
         check.assert_called_once()
         for call in (credentials, start, launch):
             call.assert_not_called()
@@ -900,7 +985,9 @@ class RuntimeSafeguardTests(unittest.TestCase):
                 box.BoxError, "artifact.*not a recorded compatibility failure"
             ),
         ):
-            with guard.admit(box, self.path, self.data, self.args(), baseline):
+            with guard.admit(
+                box, self.path, self.data, self.args(runtime_guard=True), baseline
+            ):
                 self.fail("mismatched proof was admitted")
         self.assertIsNone(native_runtime_guard.rejected(self.path))
         self.assertEqual(native_runtime_guard.load(self.path), baseline)
@@ -917,31 +1004,45 @@ class RuntimeSafeguardTests(unittest.TestCase):
             ),
             self.assertRaisesRegex(box.BoxError, "not supported"),
         ):
-            with guard.admit(box, self.path, self.data, self.args(), baseline):
+            with guard.admit(
+                box, self.path, self.data, self.args(runtime_guard=True), baseline
+            ):
                 self.fail("unsupported release was admitted")
         self.assertEqual(native_runtime_guard.load(self.path), baseline)
         with (
             self.synthetic_admission("2.4.1"),
             patch.object(native_preflight, "check", return_value=DIGEST) as check,
         ):
-            with guard.admit(box, self.path, self.data, self.args(), baseline) as scope:
+            with guard.admit(
+                box, self.path, self.data, self.args(runtime_guard=True), baseline
+            ) as scope:
                 scope.begin(box, self.data)
                 scope.ready(box, self.data)
             check.assert_called_once_with(box, "2.4.1")
         self.assertEqual(native_runtime_guard.load(self.path).version, "2.4.1")
 
-    def test_write_floor_precedes_native_open_and_persists_without_readiness(self):
+    def test_guarded_upgrade_warns_without_probe_and_publishes_floor_before_open(self):
         previous = self.seed()
         with (
-            self.synthetic_admission(),
-            patch.object(native_preflight, "check", return_value=DIGEST),
+            self.synthetic_admission("2.4.2"),
+            patch.object(
+                native_preflight, "check", side_effect=native_preflight.Refusal("sdk")
+            ) as check,
+            patch.object(guard, "_official_digest", return_value=DIGEST) as official,
+            contextlib.redirect_stderr(io.StringIO()) as warning,
         ):
             with guard.admit(box, self.path, self.data, self.args(), previous) as scope:
                 self.assertEqual(native_runtime_guard.load(self.path), previous)
                 scope.begin(box, self.data)
                 self.assertEqual(native_runtime_guard.load(self.path), scope.record)
                 self.assertFalse(scope.record.ready)
-                self.assertEqual(scope.record.version, NEW)
+                self.assertEqual(scope.record.version, "2.4.2")
+                self.assertEqual(scope.record.digest, self.binary.digest)
+            check.assert_not_called()
+            official.assert_called_once_with(box, "2.4.2", self.binary.digest)
+            self.assertIn(
+                "Continuing with runtime and workspace verification", warning.getvalue()
+            )
         with (
             self.synthetic_admission(OLD),
             self.assertRaisesRegex(box.BoxError, "will not launch below"),
@@ -955,13 +1056,57 @@ class RuntimeSafeguardTests(unittest.TestCase):
             ):
                 self.fail("an older binary passed the durable version floor")
 
+    def test_artifact_mismatch_cannot_strand_a_protected_workspace(self):
+        previous = self.seed()
+        with (
+            self.synthetic_admission("2.4.2"),
+            patch.object(
+                box,
+                "run",
+                return_value=subprocess.CompletedProcess([], 0, "0" * 64 + "\n"),
+            ) as download,
+            patch.object(native_preflight, "check") as probe,
+            self.assertRaisesRegex(
+                box.BoxError, "existing protected runtime was not changed"
+            ),
+        ):
+            with guard.admit(box, self.path, self.data, self.args(), previous):
+                self.fail("unverified artifact reached the workspace")
+        self.assertEqual(native_runtime_guard.load(self.path), previous)
+        self.assertEqual(
+            download.call_args.kwargs["env"],
+            {
+                "PATH": guard._HOST_PROBE_PATH,
+                "LANG": "C.UTF-8",
+            },
+        )
+        probe.assert_not_called()
+
+    def test_explicit_recheck_of_a_pending_floor_is_not_skipped(self):
+        previous = self.seed(ready=False)
+        with (
+            self.synthetic_admission(OLD),
+            patch.object(
+                native_preflight, "check", side_effect=native_preflight.Refusal("sdk")
+            ) as check,
+            self.assertRaisesRegex(box.BoxError, "isolated preflight did not pass"),
+        ):
+            with guard.admit(
+                box, self.path, self.data, self.args(runtime_guard=True), previous
+            ):
+                self.fail("explicit isolated check was skipped")
+        check.assert_called_once_with(box, OLD)
+        self.assertEqual(native_runtime_guard.load(self.path), previous)
+
     def test_stop_after_probe_cannot_publish_new_floor(self):
         previous = self.seed()
         with (
             self.synthetic_admission(),
             patch.object(native_preflight, "check", return_value=DIGEST),
         ):
-            with guard.admit(box, self.path, self.data, self.args(), previous) as scope:
+            with guard.admit(
+                box, self.path, self.data, self.args(runtime_guard=True), previous
+            ) as scope:
                 workspace_control.request_stop(self.path)
                 with self.assertRaisesRegex(box.BoxError, "Stop was requested"):
                     scope.begin(box, self.data)

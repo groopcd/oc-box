@@ -298,24 +298,36 @@ at handoff. No badge is added to native UI or subprocess streams, credential
 prompts, or other commands such as `status`, `logs`, `web`, and `terminal`.
 Pipes and `TERM=dumb` receive neither badge nor padding.
 The container OpenCode version is verified against the host on every launch;
-there is no automatic switch to another release. On an existing stopped
-standard V2 workspace, a forward stable `2.x.y` update (including a patch
-update) must pass isolated preflight before normal preparation. To enroll
-without changing versions, use `oc-box start --runtime-guard`. After preflight
-and admission, the workspace remembers the exact runtime artifact; unchanged
-launches do not repeat package downloads or the synthetic check.
+there is no automatic switch to another release. Routine OpenCode upgrades do
+not enroll a workspace into the runtime safeguard or require the disposable
+probe. Use `oc-box runtime-check VERSION` to run that check independently, or
+`oc-box start --runtime-guard` to require it when enrolling or advancing a
+protected workspace.
 
-A confirmed required-plugin failure is remembered for
+On an already enrolled workspace, plain owning `start` warns on a forward
+stable OpenCode change and continues without the disposable probe. It still
+verifies the existing workspace, pins the selected host executable, requires
+the public npm artifact to match before recording the new version floor, and
+verifies the matching container executable and actual private service and
+required Build plugin. The artifact check does not need a separate Podman
+image or run any npm scripts. Unchanged launches reuse the recorded runtime
+checks without
+repeating the synthetic check. An in-progress legacy replacement still
+requires the isolated proof and its own review.
+
+A confirmed required-plugin failure from guarded preflight is remembered for
 that exact release, host artifact, and probe code. It leaves the existing
 runtime in place and prints a GitHub issue link. A different candidate, such as
 `2.4.1` after a refusal of `2.4.0`, gets its own check. An explicit
-`--runtime-guard` rechecks a remembered refusal rather than bypassing it.
+`--runtime-guard` reruns the isolated check for a new runtime instead of
+reusing a remembered refusal. A remembered result is not used to block a
+routine upgrade.
 Unavailable downloads, timeouts, uncertain cleanup and artifact mismatches are
 not recorded as proof that an upstream version is unsupported. Report the
 versions and fixed refusal category, not private output.
 
-Guarded admission currently requires the official native host executable with
-the same bytes as the verified container artifact and a standard stopped
+Guarded admission currently requires the native host executable with
+the same bytes as the official container artifact and a standard stopped
 container/home pair on a glibc-based catalog distribution. Alpine, script shims
 and custom Podman arguments are not supported. Only owning `start`
 admits a changed version. Guarded `web`,
@@ -3562,7 +3574,8 @@ opens with or without this flag. The old compact session index is not served.
 ### --runtime-guard
 
 Enroll an existing stopped standard OpenCode 2.x workspace on an owning
-`start`, even without a version change. Rechecks an isolated refusal rather
+`start`, even without a version change, or require isolated preflight when
+advancing an already enrolled workspace. Rechecks an isolated refusal rather
 than overriding it. The guard persists after runtime admission; there is no
 switch to delete the version fence. This option is not a request for rollback,
 and does not apply to attach-only clients or `reset`.

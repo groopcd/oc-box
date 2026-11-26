@@ -1,4 +1,6 @@
+import base64
 import contextlib
+import gzip
 import hashlib
 import io
 import json
@@ -68,6 +70,62 @@ class FingerprintTests(unittest.TestCase):
         program.write_bytes(self.native)
         program.chmod(0o755)
         return package, program
+
+    def test_artifact_only_package_proves_bytes_without_extracting_or_running(self):
+        context = {"__name__": "fixture"}
+        exec(preflight.ARTIFACT_SOURCE, context)
+        package = "@opencode/cli-linux-x64"
+        path = f"/{package}/-/cli-linux-x64-{VERSION}.tgz"
+        for variant in ("exact", "integrity", "extra-member", "wrong-release"):
+            with self.subTest(variant=variant):
+                metadata = json.dumps(
+                    {
+                        "name": package,
+                        "version": VERSION if variant != "wrong-release" else "2.0.0",
+                    }
+                ).encode()
+                files = {
+                    "package/package.json": metadata,
+                    "package/bin/opencode": self.native,
+                }
+                if variant == "extra-member":
+                    files["package/extra"] = b"unwanted"
+                raw = io.BytesIO()
+                with tarfile.open(fileobj=raw, mode="w") as archive:
+                    for name, content in files.items():
+                        member = tarfile.TarInfo(name)
+                        member.size = len(content)
+                        archive.addfile(member, io.BytesIO(content))
+                content = gzip.compress(raw.getvalue())
+                proof = hashlib.sha512(
+                    content if variant != "integrity" else b"other"
+                ).digest()
+                manifest = {
+                    "dist": {
+                        "tarball": "https://registry.npmjs.org" + path,
+                        "integrity": "sha512-" + base64.b64encode(proof).decode(),
+                    },
+                }
+
+                @contextlib.contextmanager
+                def response(request):
+                    self.assertEqual(request, path)
+                    yield io.BytesIO(content)
+
+                with patch.dict(
+                    context,
+                    {
+                        "release_manifest": lambda *_: manifest,
+                        "public_response": response,
+                    },
+                ):
+                    if variant == "exact":
+                        self.assertEqual(
+                            context["payload_digest"](package, VERSION), self.digest
+                        )
+                    else:
+                        with self.assertRaises(ValueError):
+                            context["payload_digest"](package, VERSION)
 
     def call(self, *arguments):
         return subprocess.run(

@@ -14,6 +14,7 @@ import re
 import shutil
 import stat
 import subprocess
+import sys
 import tempfile
 
 if __package__:
@@ -74,11 +75,6 @@ with tempfile.TemporaryDirectory(prefix="oc-box-native-install-") as home:
 def release_key(version):
     match = _RELEASE.fullmatch(version) if isinstance(version, str) else None
     return tuple(map(int, match.groups())) if match else None
-
-
-def version_upgrade(previous, candidate):
-    old, new = release_key(previous), release_key(candidate)
-    return old is not None and new is not None and new > old
 
 
 def cli(box, arguments):
@@ -218,6 +214,36 @@ def _candidate_digest(box, path, host, version, *, recheck):
         ) from None
 
 
+def _official_digest(box, version, expected):
+    """Verify the public CLI package before any new protected floor is written."""
+    error = (
+        f"Cannot verify the host OpenCode {version} against the official package. "
+        "The existing protected runtime was not changed. Check registry access "
+        "and use the official native executable."
+    )
+    try:
+        with (
+            box.loading_stage("Verifying OpenCode package", stage="version")
+            if lifecycle_output.concise()
+            else contextlib.nullcontext()
+        ):
+            result = box.run(
+                [*SYSTEM_HELPER, "-c", native_preflight.ARTIFACT_SOURCE, version],
+                cwd="/",
+                env={"PATH": _HOST_PROBE_PATH, "LANG": "C.UTF-8"},
+                stdin=subprocess.DEVNULL,
+                timeout=120,
+                capture=True,
+                private=True,
+                check=False,
+            )
+            if result.returncode != 0 or result.stdout != expected + "\n":
+                raise ValueError
+    except (OSError, ValueError, box.BoxError):
+        raise box.BoxError(error) from None
+    return expected
+
+
 def _signature(info):
     return (
         info.st_dev,
@@ -337,6 +363,7 @@ def load(box, path):
 
 def _inspect(box, path, data, *, running, attach_only=False, engine_env=None):
     """Keep the guarded operation on the same passive, ordinary resources."""
+    check = "project-identity"
     try:
         if attach_only and running is not True:
             raise ValueError
@@ -350,13 +377,15 @@ def _inspect(box, path, data, *, running, attach_only=False, engine_env=None):
         options = {"env": engine_env} if engine_env is not None else {}
         staged = entrypoint_migration.RETIRE in data
         prefix = ("--remote=false",) if staged or saved else ()
+        check = "container-inspection"
         info = box.inspect_owned(
             data, **({"local_only": True} if prefix else {}), **options
         )
+        if not isinstance(info, dict) or not _HASH.fullmatch(info["Id"]):
+            raise ValueError
+        check = "container-state"
         if (
-            not isinstance(info, dict)
-            or not _HASH.fullmatch(info["Id"])
-            or info["State"]["Running"] is not running
+            info["State"]["Running"] is not running
             or info["State"].get("Paused") is True
             or (
                 staged
@@ -368,16 +397,17 @@ def _inspect(box, path, data, *, running, attach_only=False, engine_env=None):
                 not in (("running",) if running else ("exited", "stopped"))
                 and (running or not entrypoint_migration.fresh_replacement(data, info))
             )
-            or len(info["Mounts"]) != 2
-            or (
-                entrypoint_migration.RECEIPT in data
-                and (
-                    not entrypoint_migration.replacement_matches(data, info)
-                    or not entrypoint_migration.no_copy_binding(data, info)
-                )
-            )
         ):
             raise ValueError
+        check = "container-mounts"
+        if len(info["Mounts"]) != 2:
+            raise ValueError
+        if entrypoint_migration.RECEIPT in data:
+            check = "conversion-receipt"
+            if not entrypoint_migration.replacement_matches(
+                data, info
+            ) or not entrypoint_migration.no_copy_binding(data, info):
+                raise ValueError
         devices = (
             guarded_devices.verify(
                 box,
@@ -394,7 +424,9 @@ def _inspect(box, path, data, *, running, attach_only=False, engine_env=None):
             if attach_only
             else history_recovery.passive_workspace_mounts
         )
+        check = "passive-container"
         signature = validate_mounts(box, data, info)
+        check = "private-volume"
         volumes = json.loads(
             box.podman(
                 *prefix,
@@ -414,16 +446,18 @@ def _inspect(box, path, data, *, running, attach_only=False, engine_env=None):
             or volumes[0].get("Options")
             or volumes[0]["Labels"].get(box.LABEL) != data["id"]
             or volumes[0]["Mountpoint"] != signature[2]
-            or (
-                entrypoint_migration.RECEIPT in data
-                and (
-                    not entrypoint_migration.initialized_volume(volumes[0])
-                    or entrypoint_migration.volume_stamp(signature[2])
-                    != data[entrypoint_migration.RECEIPT]["volume"]
-                )
-            )
         ):
             raise ValueError
+        if entrypoint_migration.RECEIPT in data:
+            check = "conversion-home-state"
+            if not entrypoint_migration.initialized_volume(volumes[0]):
+                raise ValueError
+            check = "conversion-home-identity"
+            if (
+                entrypoint_migration.volume_stamp(signature[2])
+                != data[entrypoint_migration.RECEIPT]["volume"]
+            ):
+                raise ValueError
         return (info["Id"], signature, devices) if devices else (info["Id"], signature)
     except guarded_devices.DeviceError as exc:
         raise box.BoxError(str(exc)) from None
@@ -447,8 +481,11 @@ def _inspect(box, path, data, *, running, attach_only=False, engine_env=None):
             error.legacy_entrypoint = info["Id"]
             raise error from None
         mode = "running" if running else "stopped"
+        if isinstance(exc, history_recovery.RecoveryError) and exc.reason == "mounts":
+            check = "container-mounts"
         raise box.BoxError(
-            f"Cannot verify the same {mode} workspace and private home for the runtime safeguard."
+            f"Cannot verify the same {mode} workspace and private home for the "
+            f"runtime safeguard ({check}). No alternate resources were admitted."
         ) from None
 
 
@@ -963,13 +1000,33 @@ def admit(
             raise box.BoxError(
                 "The guarded runtime has not completed owner readiness; retry owning start."
             )
-        digest = (
-            _candidate_digest(
-                box, path, host, version, recheck=getattr(args, "runtime_guard", False)
+        recheck = getattr(args, "runtime_guard", False)
+        if not transition and not (recheck and not previous.ready):
+            digest = previous.digest
+        elif (
+            previous is None
+            or recheck
+            or entrypoint_migration.RETIRE in data
+            or entrypoint_migration.needs_bootstrap(data)
+        ):
+            # Enrollment and migration keep the isolated proof. Advancing an
+            # existing floor does not depend on the disposable SDK installer.
+            digest = _candidate_digest(box, path, host, version, recheck=recheck)
+            if not transition and digest != previous.digest:
+                raise box.BoxError(
+                    "The host OpenCode is not the exact recorded native artifact; guarded startup refused."
+                )
+        else:
+            # Do not let a repackaged binary strand the workspace at an
+            # uninstalled digest. Confirm the official bytes first, then
+            # enforce them as usual on the installed runtime and native helpers.
+            digest = _official_digest(box, version, host.digest)
+            startup_output.line(
+                f"oc-box: OpenCode {version} has not been checked in isolation for "
+                "this upgrade. Continuing with runtime and workspace verification.",
+                file=sys.stderr,
+                flush=True,
             )
-            if transition
-            else previous.digest
-        )
         if digest != host.digest:
             raise box.BoxError(
                 "The host OpenCode is not the exact verified native artifact; guarded startup refused."
@@ -1054,7 +1111,7 @@ def container_digest(box, data, *, materialize=False):
 def verify_container(box, data):
     if container_digest(box, data) != current().record.digest:
         raise box.BoxError(
-            "Live container OpenCode did not match the preflight artifact. "
+            "Live container OpenCode did not match the admitted artifact. "
             "The guarded version remains reserved; no older binary was started."
         )
 

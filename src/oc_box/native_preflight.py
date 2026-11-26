@@ -226,7 +226,7 @@ def fingerprint(prefix):
         return proof
 
 
-def platform_package():
+def platform_package(*, glibc_runtime=False):
     machine = os.uname().machine
     platform = {"x86_64": "x64", "aarch64": "arm64"}.get(machine)
     if platform is None:
@@ -239,7 +239,7 @@ def platform_package():
             raise ValueError()
         if not re.search(rb"(^|\s)avx2(\s|$)", flags, re.IGNORECASE):
             variant = "-baseline"
-    if not os.confstr("CS_GNU_LIBC_VERSION"):
+    if not glibc_runtime and not os.confstr("CS_GNU_LIBC_VERSION"):
         variant += "-musl"
     return "@opencode/cli-linux-" + platform + variant
 
@@ -275,6 +275,22 @@ def platform_binary(base, package, version):
         yield stack.enter_context(directory(package_dir, "bin"))
 
 
+def wrapper_commands(metadata, package, version):
+    commands = metadata.get("bin")
+    dependencies = metadata.get("optionalDependencies")
+    if (
+        metadata.get("name") != "@opencode/cli" or metadata.get("version") != version
+        or not isinstance(commands, dict)
+        or commands.get("opencode") not in ("./bin/opencode.exe", "bin/opencode.exe")
+        or set(commands) != {"opencode", "opencode2"}
+        or commands.get("opencode2") != commands["opencode"]
+        or metadata.get("opencodeSourceBinary", "opencode") != "opencode"
+        or not isinstance(dependencies, dict) or dependencies.get(package) != version
+    ):
+        raise ValueError()
+    return commands
+
+
 def materialize(prefix, version, expected=None):
     if not _VERSION.fullmatch(version) or (
         expected is not None and not _SHA.fullmatch(expected)
@@ -282,19 +298,7 @@ def materialize(prefix, version, expected=None):
         raise ValueError()
     package = platform_package()
     with prefix_directory(prefix) as base, directory(base, _CLI) as cli:
-        metadata = package_json(cli)
-        commands = metadata.get("bin")
-        dependencies = metadata.get("optionalDependencies")
-        if (
-            metadata.get("name") != "@opencode/cli" or metadata.get("version") != version
-            or not isinstance(commands, dict)
-            or commands.get("opencode") not in ("./bin/opencode.exe", "bin/opencode.exe")
-            or set(commands) != {"opencode", "opencode2"}
-            or commands.get("opencode2") != commands["opencode"]
-            or metadata.get("opencodeSourceBinary", "opencode") != "opencode"
-            or not isinstance(dependencies, dict) or dependencies.get(package) != version
-        ):
-            raise ValueError()
+        commands = wrapper_commands(package_json(cli), package, version)
         with platform_binary(base, package, version) as origin:
             fd = os.open("opencode", _FILE, dir_fd=origin)
             try:
@@ -377,6 +381,129 @@ try:
         os.execvpe(command[0], command, os.environ)
 except Exception:
     raise SystemExit(126) from None
+"""
+)
+
+
+# A plain upgrade of an enrolled workspace still needs a positive artifact
+# match before the durable floor can change. Fetch public package bytes only;
+# do not start a Podman scratch container, run npm, or open either native store.
+ARTIFACT_SOURCE = (
+    FINGERPRINT_SOURCE.split('\n\nif __name__ == "__main__":', 1)[0]
+    + r"""
+import base64
+import gzip
+import http.client
+import tarfile
+import tempfile
+
+REGISTRY = "registry.npmjs.org"
+TRANSFER_LIMIT = 256 * 1024 * 1024
+BLOCK = 1024 * 1024
+
+
+@contextlib.contextmanager
+def public_response(path):
+    with contextlib.closing(http.client.HTTPSConnection(REGISTRY, timeout=15)) as conn:
+        # A fixed origin with no redirects, ambient proxies, cookies or credentials.
+        conn.request("GET", path, headers={"Accept-Encoding": "identity"})
+        with conn.getresponse() as response:
+            if response.status != 200 or response.getheader("Content-Encoding") not in (
+                None, "identity",
+            ):
+                raise ValueError()
+            yield response
+
+
+def release_manifest(package, version):
+    leaf = package.split("/", 1)[1]
+    with public_response("/@opencode%2f" + leaf + "/" + version) as response:
+        raw = response.read(256 * 1024 + 1)
+    if len(raw) > 256 * 1024:
+        raise ValueError()
+    value = json.loads(raw)
+    if value.get("name") != package or value.get("version") != version:
+        raise ValueError()
+    return value
+
+
+def payload_digest(package, version):
+    leaf = package.split("/", 1)[1]
+    manifest = release_manifest(package, version)
+    path = f"/@opencode/{leaf}/-/{leaf}-{version}.tgz"
+    dist = manifest["dist"]
+    algorithm, _, encoded = dist["integrity"].partition("-")
+    if algorithm != "sha512" or dist["tarball"] != "https://" + REGISTRY + path:
+        raise ValueError()
+    integrity = base64.b64decode(encoded, validate=True)
+    if len(integrity) != 64:
+        raise ValueError()
+    with tempfile.TemporaryFile() as archive, public_response(path) as response:
+        checksum = hashlib.sha512()
+        remaining = TRANSFER_LIMIT
+        while chunk := response.read(min(BLOCK, remaining + 1)):
+            remaining -= len(chunk)
+            if remaining < 0:
+                raise ValueError()
+            checksum.update(chunk)
+            archive.write(chunk)
+        if checksum.digest() != integrity:
+            raise ValueError()
+        archive.seek(0)
+        with gzip.GzipFile(fileobj=archive) as unpacked:
+            return platform_payload(unpacked, package, version)
+
+
+def platform_payload(stream, package, version):
+    # Read the two regular files, never extract paths or parse tar extensions.
+    seen = set()
+    proof = None
+    for _ in range(2):
+        member = tarfile.TarInfo.frombuf(stream.read(512), "utf-8", "strict")
+        if not member.isfile() or member.name in seen:
+            raise ValueError()
+        seen.add(member.name)
+        if member.name == "package/package.json" and 0 < member.size <= 65536:
+            manifest = json.loads(stream.read(member.size))
+            if manifest.get("name") != package or manifest.get("version") != version:
+                raise ValueError()
+        elif member.name == "package/bin/opencode" and 64 <= member.size <= _MAX_BINARY:
+            remaining = member.size
+            digest = hashlib.sha256()
+            while remaining:
+                chunk = stream.read(min(BLOCK, remaining))
+                if not chunk:
+                    raise ValueError()
+                digest.update(chunk)
+                remaining -= len(chunk)
+            proof = digest.hexdigest()
+        else:
+            raise ValueError()
+        padding = (-member.size) % 512
+        if stream.read(padding) != bytes(padding):
+            raise ValueError()
+    tail = stream.read(10241)
+    if proof is None or not 1024 <= len(tail) <= 10240 or any(tail):
+        raise ValueError()
+    return proof
+
+
+def official_digest(version):
+    if not _VERSION.fullmatch(version):
+        raise ValueError()
+    # Guarded catalog workspaces are native Linux, on glibc distributions.
+    # Compare against what the destination installer should choose.
+    package = platform_package(glibc_runtime=True)
+    metadata = release_manifest("@opencode/cli", version)
+    wrapper_commands(metadata, package, version)
+    return payload_digest(package, version)
+
+
+if __name__ == "__main__":
+    try:
+        print(official_digest(sys.argv[1]), flush=True)
+    except Exception:
+        raise SystemExit(1) from None
 """
 )
 

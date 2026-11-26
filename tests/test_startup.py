@@ -40,6 +40,20 @@ def archive(files):
 
 
 class ConfigCacheTests(unittest.TestCase):
+    def test_sdk_remediation_scopes_affected_ranges_to_the_selected_v2_sdk(self):
+        for release in ("2.0.0", "2.4.2", "2.58.9"):
+            with self.subTest(release=release):
+                self.assertEqual(
+                    sync.sdk_security_overrides(release),
+                    {
+                        f"@opencode/plugin@{release}": {
+                            "glob@>=9.0.0 <14.0.2": "14.0.2",
+                            "minimatch@>=7.0.0 <11.0.1": "11.0.1",
+                        }
+                    },
+                )
+        self.assertEqual(sync.sdk_security_overrides("1.19.5"), {})
+
     def test_sdk_security_fixes_invalidate_old_cache_without_rewriting_host(self):
         manifest = {
             "dependencies": {"@opencode/plugin": "2.4.0", "custom": "1"},
@@ -67,10 +81,12 @@ class ConfigCacheTests(unittest.TestCase):
             )
             modules.mkdir()
             (modules / "cached").touch()
-            lock = json.dumps({
-                "lockfileVersion": 3,
-                "packages": {"node_modules/@opencode/plugin": {"version": "2.4.0"}},
-            })
+            lock = json.dumps(
+                {
+                    "lockfileVersion": 3,
+                    "packages": {"node_modules/@opencode/plugin": {"version": "2.4.0"}},
+                }
+            )
             (config / "package-lock.json").write_text(lock)
             (modules / ".package-lock.json").write_text(lock)
             sdk = modules / "@opencode/plugin"
@@ -93,16 +109,26 @@ class ConfigCacheTests(unittest.TestCase):
                 ("node_modules/renamed", "11.0.1", True),
             ):
                 with self.subTest(entry=entry, version=version):
-                    path.write_text(json.dumps({
-                        "lockfileVersion": 3,
-                        "packages": {
-                            "node_modules/@opencode/plugin": {"version": "2.4.0"},
-                            entry: {
-                                "version": version,
-                                **({"name": "minimatch"} if entry.endswith("renamed") else {}),
-                            },
-                        },
-                    }))
+                    path.write_text(
+                        json.dumps(
+                            {
+                                "lockfileVersion": 3,
+                                "packages": {
+                                    "node_modules/@opencode/plugin": {
+                                        "version": "2.4.0"
+                                    },
+                                    entry: {
+                                        "version": version,
+                                        **(
+                                            {"name": "minimatch"}
+                                            if entry.endswith("renamed")
+                                            else {}
+                                        ),
+                                    },
+                                },
+                            }
+                        )
+                    )
                     self.assertIs(sync.sdk_lock_safe(path, "2.4.0"), safe)
 
     def test_cold_sync_uses_runtime_sdk_and_drops_incompatible_host_lock(self):
@@ -297,9 +323,12 @@ class V2PluginReadinessTests(unittest.TestCase):
         with mock.patch.object(v2.time, "sleep") as pause:
             self.assertEqual(v2.ready_plugins(request, "/demo project"), [active])
         self.assertEqual(request.call_count, 3)
-        self.assertEqual(request.call_args.args[1], "/api/plugin?directory=%2Fdemo%20project")
         self.assertEqual(
-            request.call_args_list[0].kwargs["deadline"], request.call_args.kwargs["deadline"]
+            request.call_args.args[1], "/api/plugin?directory=%2Fdemo%20project"
+        )
+        self.assertEqual(
+            request.call_args_list[0].kwargs["deadline"],
+            request.call_args.kwargs["deadline"],
         )
         pause.assert_called_once()
 

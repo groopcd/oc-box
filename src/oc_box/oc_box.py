@@ -7349,17 +7349,6 @@ def _locked_workspace_command(path, data, args, launch_context, image_preview_sn
             and args.command in ("start", "reset", "sync", "web", "terminal", "purge")
         )
     )
-    if (
-        not guard
-        and data.get("ready") is True
-        and runtime_safeguard.release_key(data.get("opencode_version")) is not None
-        and args.command in ("start", "reset", "sync", "web", "purge")
-    ):
-        release = getattr(args, "_opencode_release", None) or detect_opencode_release(
-            isolated=True
-        )
-        args._opencode_release = release
-        guard = runtime_safeguard.version_upgrade(data.get("opencode_version"), release)
     credentials_open = False
 
     def open_credentials():
