@@ -179,7 +179,20 @@ def _probe_digest(box, version):
 def _candidate_digest(box, path, host, version, *, recheck):
     try:
         probe = _probe_digest(box, version)
-        previous = native_runtime_guard.rejected(path)
+        try:
+            previous = native_runtime_guard.rejected(path)
+            writable = True
+        except (OSError, native_runtime_guard.GuardError):
+            # A negative cache is not admission authority. Require fresh
+            # proof, without replacing an unreadable or unsafe receipt.
+            previous = None
+            writable = False
+            startup_output.line(
+                "oc-box: A saved OpenCode compatibility refusal could not be read. "
+                "Running a fresh isolated check without changing that record.",
+                file=sys.stderr,
+                flush=True,
+            )
         if (
             not recheck
             and previous is not None
@@ -199,7 +212,8 @@ def _candidate_digest(box, path, host, version, *, recheck):
         except box.BoxError as failure:
             exc = failure.__cause__
             if (
-                isinstance(exc, native_preflight.Refusal)
+                writable
+                and isinstance(exc, native_preflight.Refusal)
                 and exc.category in _INCOMPATIBLE
             ):
                 record = native_runtime_guard.Rejection(
@@ -379,7 +393,9 @@ def _inspect(
         options = {"env": engine_env} if engine_env is not None else {}
         staged = entrypoint_migration.RETIRE in data
         prefix = (
-            ("--remote=false",) if staged or saved or home_review is not None else ()
+            ("--remote=false",)
+            if staged or saved or engine_env is not None or home_review is not None
+            else ()
         )
         check = "container-inspection"
         info = box.inspect_owned(
@@ -391,20 +407,15 @@ def _inspect(
         if not isinstance(info, dict) or not _HASH.fullmatch(info["Id"]):
             raise ValueError
         check = "container-state"
-        if (
-            info["State"]["Running"] is not running
-            or info["State"].get("Paused") is True
-            or (
-                staged
-                and running
-                and not entrypoint_migration.running_replacement(info)
-            )
-            or (
-                info["State"].get("Status")
-                not in (("running",) if running else ("exited", "stopped"))
-                and (running or not entrypoint_migration.fresh_replacement(data, info))
-            )
+        state_ok = (
+            history_recovery.verified_container_state(info, running=running)
+            and info["State"].get("Dead", False) is False
+        )
+        if not state_ok and not (
+            not running and entrypoint_migration.fresh_replacement(data, info)
         ):
+            raise ValueError
+        if staged and running and not entrypoint_migration.running_replacement(info):
             raise ValueError
         if home_review is not None and not entrypoint_migration._stopped(
             info, ("exited", "stopped")
@@ -748,7 +759,7 @@ class Admission:
         try:
             staged = entrypoint_migration.RETIRE in data
             saved = guarded_devices.paths(data)
-            local = staged or bool(saved)
+            local = staged or bool(saved) or self.engine_env is not None
             prefix = ("--remote=false",) if local else ()
             engine_options = self._engine_options()
             mount_env = (
@@ -842,8 +853,10 @@ class Admission:
                         self.record.container,
                         "/bin/sh",
                         "-c",
-                        'for node; do test -c "$node" && test -r "$node" '
-                        '&& test -w "$node" || exit 1; done',
+                        'denied=0; for node; do test -c "$node" || exit 1; '
+                        'if ! test -r "$node" || ! test -w "$node"; then denied=1; fi; '
+                        'done; if test "$denied" = 1; then '
+                        'printf "oc-box-device-permission\\n"; exit 52; fi',
                         "oc-box",
                         *saved,
                     ],
@@ -853,12 +866,17 @@ class Admission:
                 result = box.run(
                     device_check, capture=True, private=True, timeout=30, check=False
                 )
-                if result.returncode:
+                if result.returncode != 0:
                     if staged:
                         raise box.BoxError(
                             f"{guarded_devices.DeviceError('access')} "
                             "This attempt did not retire the original."
                         )
+                    if (result.returncode, result.stdout) != (
+                        52,
+                        "oc-box-device-permission\n",
+                    ):
+                        raise box.BoxError(str(guarded_devices.DeviceError("access")))
                     startup_output.line(
                         "oc-box: Could not verify access to a saved device. "
                         "Continuing with the existing container; tools may not be able "
@@ -1068,6 +1086,12 @@ def admit(
             "by this path. To discard a stopped workspace without starting it, use "
             "'oc-box purge --workspace WORKSPACE_ID --discard-guarded' and confirm."
         )
+    if retirement_env is None:
+        retirement_env = (
+            engine_env
+            if engine_env is not None
+            else entrypoint_migration.engine_environment(box)
+        )
     source_id = None
     if pending:
         resources = None
@@ -1078,13 +1102,7 @@ def admit(
                 path,
                 data,
                 running=False,
-                **(
-                    {"engine_env": retirement_env}
-                    if retirement_env is not None
-                    else {"engine_env": engine_env}
-                    if engine_env is not None
-                    else {}
-                ),
+                engine_env=retirement_env,
             )
         except box.BoxError as exc:
             if command != "start" or not getattr(exc, "legacy_entrypoint", False):
@@ -1148,7 +1166,6 @@ def admit(
             ) from None
         raise box.BoxError(str(exc)) from None
     if converting:
-        retirement_env = entrypoint_migration.engine_environment(box)
         if saved and "CONTAINERS_CONF_OVERRIDE" in retirement_env:
             raise box.BoxError(str(guarded_devices.DeviceError("override")))
         entrypoint_migration.consent(box, args, data)

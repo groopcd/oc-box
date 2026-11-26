@@ -119,7 +119,7 @@ class FingerprintTests(unittest.TestCase):
                         "public_response": response,
                     },
                 ):
-                    if variant == "exact":
+                    if variant in ("exact", "extra-member"):
                         self.assertEqual(
                             context["payload_digest"](package, VERSION), self.digest
                         )

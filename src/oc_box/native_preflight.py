@@ -282,8 +282,12 @@ def wrapper_commands(metadata, package, version):
         metadata.get("name") != "@opencode/cli" or metadata.get("version") != version
         or not isinstance(commands, dict)
         or commands.get("opencode") not in ("./bin/opencode.exe", "bin/opencode.exe")
-        or set(commands) != {"opencode", "opencode2"}
         or commands.get("opencode2") != commands["opencode"]
+        or not all(
+            re.fullmatch(r"opencode(?:[0-9]+|-[A-Za-z0-9_-]+)?", alias)
+            and target == commands["opencode"]
+            for alias, target in commands.items()
+        )
         or metadata.get("opencodeSourceBinary", "opencode") != "opencode"
         or not isinstance(dependencies, dict) or dependencies.get(package) != version
     ):
@@ -455,12 +459,23 @@ def payload_digest(package, version):
 
 
 def platform_payload(stream, package, version):
-    # Read the two regular files, never extract paths or parse tar extensions.
+    # Read the required regular files, never extract paths or parse tar
+    # extensions. Bounded extra package files cannot affect the executable.
     seen = set()
     proof = None
-    for _ in range(2):
-        member = tarfile.TarInfo.frombuf(stream.read(512), "utf-8", "strict")
-        if not member.isfile() or member.name in seen:
+    extra = 1024 * 1024
+    for _ in range(33):
+        header = stream.read(512)
+        if header == bytes(512):
+            break
+        member = tarfile.TarInfo.frombuf(header, "utf-8", "strict")
+        if (
+            not member.isfile()
+            or member.size < 0
+            or member.name in seen
+            or not member.name.startswith("package/")
+            or any(part in ("", ".", "..") for part in member.name.split("/"))
+        ):
             raise ValueError()
         seen.add(member.name)
         if member.name == "package/package.json" and 0 < member.size <= 65536:
@@ -477,13 +492,22 @@ def platform_payload(stream, package, version):
                 digest.update(chunk)
                 remaining -= len(chunk)
             proof = digest.hexdigest()
-        else:
+        elif member.name in ("package/package.json", "package/bin/opencode"):
             raise ValueError()
+        else:
+            extra -= member.size
+            if extra < 0 or len(stream.read(member.size)) != member.size:
+                raise ValueError()
         padding = (-member.size) % 512
         if stream.read(padding) != bytes(padding):
             raise ValueError()
+    else:
+        raise ValueError()
     tail = stream.read(10241)
-    if proof is None or not 1024 <= len(tail) <= 10240 or any(tail):
+    if (
+        proof is None or "package/package.json" not in seen
+        or not 512 <= len(tail) <= 10240 or any(tail)
+    ):
         raise ValueError()
     return proof
 

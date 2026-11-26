@@ -111,6 +111,16 @@ def sdk_modules_match(config, version):
     installed = sdk_lock_packages(config / "node_modules/.package-lock.json", version)
     if manifest is None or installed is None:
         return False
+    for location, item in manifest.items():
+        if (
+            location == f"node_modules/{V2_PLUGIN_PACKAGE}"
+            or sdk_lock_names(location, item) & {"glob", "minimatch"}
+        ) and location not in installed:
+            # npm can omit optional nodes for another platform, but an
+            # unlisted on-disk copy is not evidence that the checked version
+            # was installed. Even a dangling link is not a clean omission.
+            if item.get("optional") is not True or os.path.lexists(config / location):
+                return False
     for location, item in installed.items():
         names = sdk_lock_names(location, item)
         if (

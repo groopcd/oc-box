@@ -40,6 +40,30 @@ def archive(files):
 
 
 class ConfigCacheTests(unittest.TestCase):
+    def test_hidden_npm_lock_cannot_hide_a_stale_managed_package(self):
+        with tempfile.TemporaryDirectory() as name:
+            config = Path(name)
+            sdk = "node_modules/@opencode/plugin"
+            glob = sdk + "/node_modules/glob"
+            packages = {sdk: {"version": "2.4.2"}, glob: {"version": "14.0.2"}}
+            for path, version in ((sdk, "2.4.2"), (glob, "13.0.5")):
+                folder = config / path
+                folder.mkdir(parents=True)
+                (folder / "package.json").write_text(json.dumps({"version": version}))
+            lock = config / "package-lock.json"
+            installed = config / "node_modules/.package-lock.json"
+            lock.write_text(json.dumps({"lockfileVersion": 3, "packages": packages}))
+            installed.write_text(
+                json.dumps({"lockfileVersion": 3, "packages": {sdk: packages[sdk]}})
+            )
+            self.assertFalse(sync.sdk_modules_match(config, "2.4.2"))
+            packages[glob]["optional"] = True
+            lock.write_text(json.dumps({"lockfileVersion": 3, "packages": packages}))
+            self.assertFalse(sync.sdk_modules_match(config, "2.4.2"))
+            (config / glob / "package.json").unlink()
+            (config / glob).rmdir()
+            self.assertTrue(sync.sdk_modules_match(config, "2.4.2"))
+
     def test_sdk_remediation_scopes_affected_ranges_to_the_selected_v2_sdk(self):
         for release in ("2.0.0", "2.4.2", "2.58.9"):
             with self.subTest(release=release):

@@ -292,6 +292,7 @@ def engine_environment(box):
         "CONTAINERS_CONF_OVERRIDE",
         "CONTAINERS_CONF_MODULES",
         "CONTAINERS_STORAGE_CONF",
+        "CONTAINERS_STORAGE_CONF_OVERRIDE",
         "STORAGE_DRIVER",
         "STORAGE_OPTS",
     ):

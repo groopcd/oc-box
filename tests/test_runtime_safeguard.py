@@ -314,14 +314,19 @@ class RuntimeSafeguardTests(unittest.TestCase):
             "mount",
             "device-access",
             "optional-device-access",
+            "missing-device-target",
             None,
         ):
             with self.subTest(failure=failure), tempfile.TemporaryDirectory() as name:
                 path = Path(name) / "workspace.json"
                 data = {**self.data, marker: {"synthetic": True}}
-                if failure in ("device-access", "optional-device-access"):
+                if failure in (
+                    "device-access",
+                    "optional-device-access",
+                    "missing-device-target",
+                ):
                     data["devices"] = ["/dev/accel/accel0"]
-                if failure == "optional-device-access":
+                if failure in ("optional-device-access", "missing-device-target"):
                     del data[marker]
                 box.atomic_json(path, data)
                 token = workspace_control.capture(path)
@@ -365,7 +370,13 @@ class RuntimeSafeguardTests(unittest.TestCase):
                     if command[-1] in data.get("devices", []):
                         self.assertFalse(kwargs["check"])
                         calls.append("device-access")
-                        return subprocess.CompletedProcess(command, 1)
+                        return subprocess.CompletedProcess(
+                            command,
+                            1 if failure == "missing-device-target" else 52,
+                            ""
+                            if failure == "missing-device-target"
+                            else "oc-box-device-permission\n",
+                        )
                     self.assertEqual(
                         list(command[-2:]), [data["project"], data["home"]]
                     )
@@ -414,7 +425,7 @@ class RuntimeSafeguardTests(unittest.TestCase):
                             "staged replacement running"
                             if failure == "inconsistent"
                             else "saved device nodes"
-                            if failure == "device-access"
+                            if failure in ("device-access", "missing-device-target")
                             else failure
                         )
                         with self.assertRaisesRegex(box.BoxError, message):
@@ -428,7 +439,7 @@ class RuntimeSafeguardTests(unittest.TestCase):
                 self.assertEqual(
                     calls,
                     ["start", "mount", "device-access"]
-                    if failure == "optional-device-access"
+                    if failure in ("optional-device-access", "missing-device-target")
                     else ["verify-parked", "start"]
                     if failure in ("start", "inconsistent")
                     else ["verify-parked", "start", "mount"]
@@ -1077,6 +1088,46 @@ class RuntimeSafeguardTests(unittest.TestCase):
                         self.fail("unavailable scratch probe was admitted")
         self.assertEqual(check.call_count, 2)
         self.assertIsNone(native_runtime_guard.rejected(self.path))
+
+    def test_bad_negative_cache_cannot_block_a_fresh_verification(self):
+        with (
+            self.synthetic_admission(),
+            patch.object(
+                native_runtime_guard,
+                "rejected",
+                side_effect=native_runtime_guard.GuardError("invalid-record"),
+            ),
+            patch.object(native_runtime_guard, "publish_rejection") as publish,
+            patch.object(native_preflight, "check", return_value=DIGEST) as check,
+            contextlib.redirect_stderr(io.StringIO()) as warning,
+        ):
+            self.assertEqual(
+                guard._candidate_digest(
+                    box,
+                    self.path,
+                    self.binary,
+                    NEW,
+                    recheck=True,
+                ),
+                DIGEST,
+            )
+            self.assertIn("without changing that record", warning.getvalue())
+        check.assert_called_once_with(box, NEW)
+        publish.assert_not_called()
+
+    def test_device_free_admission_retains_selected_runtime_engine(self):
+        previous = self.seed()
+        env = {"CONTAINERS_STORAGE_CONF_OVERRIDE": "/synthetic/local-storage.conf"}
+        with (
+            self.synthetic_admission(OLD),
+            guard.admit(
+                box, self.path, self.data, self.args(), previous, engine_env=env
+            ) as scope,
+        ):
+            scope.require_live(box, self.data, running=True)
+            self.assertIs(scope.engine_env, env)
+            for call in guard._inspect.call_args_list:
+                self.assertIs(call.kwargs["engine_env"], env)
 
     def test_build_failure_of_different_artifact_does_not_flag_host_release(self):
         baseline = self.seed()
