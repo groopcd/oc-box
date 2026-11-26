@@ -390,7 +390,10 @@ class HistoryRecoveryTests(unittest.TestCase):
         self.assertEqual(refusals, ["startup-path-unverified"])
         # Covers a stopped inspection at guarded admission independently
         # of Reader capture; no engine probe, preparation or start follows.
-        stopped = {**self.info, "State": {"Running": False, "Status": "exited"}}
+        stopped = {
+            **self.info,
+            "State": {"Running": False, "Status": "exited", "Pid": 0},
+        }
         with (
             patch.object(box, "inspect_owned", return_value=stopped),
             patch.object(box, "podman") as podman,
@@ -411,7 +414,10 @@ class HistoryRecoveryTests(unittest.TestCase):
     def test_running_legacy_owner_can_bind_another_client_without_start_authority(self):
         self.info["Config"]["Cmd"] = ["-c", "exec sleep infinity"]
         volume = self.data["home_volume"]
-        running = {**self.info, "State": {"Running": True, "Status": "running"}}
+        running = {
+            **self.info,
+            "State": {"Running": True, "Status": "running", "Pid": 123},
+        }
         record = SimpleNamespace(
             ready=True,
             version=self.data["opencode_version"],
@@ -1845,22 +1851,31 @@ for line in sys.stdin:
     def test_explicit_stop_publishes_intent_before_admission_without_launch_work(self):
         admission = workspace_control.admission
 
+        def preflight():
+            self.assertTrue(workspace_control.unchanged(self.path, self.token))
+            with admission(self.path, timeout=0):
+                pass
+
         @contextlib.contextmanager
         def ordered(path, *, timeout):
             self.assertFalse(workspace_control.unchanged(path, self.token))
             with admission(path, timeout=timeout):
                 yield
 
-        def stop(_data):
+        def inspect(data, *, timeout):
+            self.assertEqual(data, self.data)
+            self.assertEqual(timeout, 30)
             with self.assertRaises(workspace_control.ControlError):
                 with admission(self.path, timeout=0):
                     self.fail("Explicit stop did not hold recovery admission.")
+            return {"State": {"Running": True}}
 
         output = io.StringIO()
         with (
-            patch.object(box, "check_backend"),
+            patch.object(box, "check_backend", side_effect=preflight) as backend,
             patch.object(workspace_control, "admission", side_effect=ordered),
-            patch.object(box, "stop_container", side_effect=stop) as stopped,
+            patch.object(box, "inspect_owned", side_effect=inspect) as inspected,
+            patch.object(box, "podman") as stopped,
             patch.object(box, "start_container") as start,
             patch.object(box, "prepare_runtime") as prepare,
             patch.object(box, "launch_credentials") as credentials,
@@ -1869,10 +1884,45 @@ for line in sys.stdin:
             contextlib.redirect_stderr(io.StringIO()),
         ):
             self.assertEqual(box.main(["stop", "--workspace", self.data["id"]]), 0)
-        stopped.assert_called_once()
+        backend.assert_called_once_with()
+        inspected.assert_called_once_with(self.data, timeout=30)
+        stopped.assert_called_once_with(
+            "stop", "--time", "10", self.data["container"], capture=True, timeout=30
+        )
         for operation in (start, prepare, credentials, reader):
             operation.assert_not_called()
         self.assertIn("Container stopped", output.getvalue())
+
+    def test_ordinary_v2_backend_failure_leaves_token_and_container_untouched(self):
+        with (
+            patch.object(
+                box, "check_backend", side_effect=box.BoxError("backend unavailable")
+            ) as backend,
+            patch.object(workspace_control, "admission") as admission,
+            patch.object(box, "stop_container") as stop,
+            self.assertRaisesRegex(box.BoxError, "backend unavailable"),
+        ):
+            box.main(["stop", "--workspace", self.data["id"]])
+        backend.assert_called_once_with()
+        admission.assert_not_called()
+        stop.assert_not_called()
+        self.assertTrue(workspace_control.unchanged(self.path, self.token))
+
+    def test_ordinary_v2_control_failure_still_attempts_best_effort_stop(self):
+        with (
+            patch.object(box, "check_backend") as backend,
+            patch.object(
+                workspace_control,
+                "admission",
+                side_effect=workspace_control.ControlError("control-timeout"),
+            ),
+            patch.object(box, "stop_container") as stop,
+            self.assertRaisesRegex(box.BoxError, "control-timeout"),
+        ):
+            box.main(["stop", "--workspace", self.data["id"]])
+        backend.assert_called_once_with()
+        stop.assert_called_once_with(self.data)
+        self.assertFalse(workspace_control.unchanged(self.path, self.token))
 
     def test_explicit_stop_cannot_claim_success_after_an_indeterminate_start(self):
         workspace_control.mark_uncertain(self.path)
@@ -1902,7 +1952,7 @@ for line in sys.stdin:
             contextlib.redirect_stderr(io.StringIO()),
         ):
             self.assertEqual(box.main(["stop", "--workspace", self.data["id"]]), 0)
-        stop.assert_called_once()
+        stop.assert_called_once_with(self.data)
         intent.assert_not_called()
         admission.assert_not_called()
 

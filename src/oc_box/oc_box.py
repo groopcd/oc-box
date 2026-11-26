@@ -1539,8 +1539,12 @@ def refresh_workspace_identity(path, data):
         atomic_json(path, data)
 
 
-def inspect_owned(data, *, env=None, local_only=False):
+def inspect_owned(data, *, env=None, local_only=False, private=False, timeout=None):
     options = {"env": env} if env is not None else {}
+    if private:
+        options["private"] = True
+    if timeout is not None:
+        options["timeout"] = timeout
     prefix = ("--remote=false",) if local_only else ()
     result = podman(
         *prefix,
@@ -2001,7 +2005,7 @@ def _live_limit_transition_gate(data):
         raise BoxError(str(exc)) from None
 
 
-def stop_container(data, *, env=None, local_only=False):
+def stop_container(data, *, env=None, local_only=False, timeout=None):
     guarded = runtime_safeguard.current()
     migration = runtime_safeguard.entrypoint_migration
     if migration.RETIRE in data:
@@ -2021,6 +2025,8 @@ def stop_container(data, *, env=None, local_only=False):
     if guarded is not None:
         data = {**data, "container": guarded.record.container}
     options = {"env": env} if env is not None else {}
+    if timeout is not None:
+        options["timeout"] = timeout
     if local_only:
         info = inspect_owned(data, local_only=True, **options)
     else:
@@ -2393,6 +2399,46 @@ def maintenance_terminal(path, data):
                 stop_container(data, env=environment)
 
 
+_CONTAINER_ONLY_EXEC_ENV = frozenset(
+    {
+        "HOME",
+        "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME",
+        "XDG_STATE_HOME",
+        "XDG_CACHE_HOME",
+        "SHELL",
+        "PWD",
+        "OPENCODE_DISABLE_SANDBOX",
+        "OC_BOX_CONTAINER",
+        "OPENCODE_CONFIG",
+        "OPENCODE_DISABLE_AUTOUPDATE",
+        "OPENCODE_CONFIG_CONTENT",
+        "OPENCODE_DB",
+    }
+)
+
+
+def _check_bound_exec_environment(forwarded, environment, *, history_source=False):
+    for key, value in forwarded.items():
+        if key in _CONTAINER_ONLY_EXEC_ENV:
+            continue
+        if (
+            key.startswith(("CONTAINER_", "CONTAINERS_", "PODMAN_", "STORAGE_", "LD_"))
+            or key in {"DOCKER_HOST", "SSH_AUTH_SOCK", "BASH_ENV", "ENV", "GCONV_PATH"}
+            or (key in environment and (history_source or environment[key] != value))
+        ):
+            raise BoxError(
+                "A forwarded setting overlaps the bound history source engine environment."
+                if history_source
+                else "A forwarded setting overlaps the bound Podman engine environment."
+            )
+
+
+def check_guarded_exec_environment(data, engine_env):
+    if engine_env is not None:
+        _check_bound_exec_environment(container_env(data), engine_env)
+
+
 def exec_command(data, command, *, interactive=False, isolated_owner_env=None):
     if _bound_overlap() is not None:
         raise BoxError("Forwarded execution is unavailable in the bound history pass.")
@@ -2432,40 +2478,16 @@ def exec_command(data, command, *, interactive=False, isolated_owner_env=None):
     # Keep container HOME/XDG/config settings from changing the host Podman
     # process's storage/config discovery. Only these non-secret settings belong
     # in argv; credentials/custom forwarded values use inherited environment.
-    container_only = {
-        "HOME",
-        "XDG_CONFIG_HOME",
-        "XDG_DATA_HOME",
-        "XDG_STATE_HOME",
-        "XDG_CACHE_HOME",
-        "SHELL",
-        "PWD",
-        "OPENCODE_DISABLE_SANDBOX",
-        "OC_BOX_CONTAINER",
-        "OPENCODE_CONFIG",
-        "OPENCODE_DISABLE_AUTOUPDATE",
-        "OPENCODE_CONFIG_CONTENT",
-        "OPENCODE_DB",
-    }
+    if binding is not None or pinned is not None:
+        _check_bound_exec_environment(
+            forwarded, environment, history_source=binding is not None
+        )
     for key, value in forwarded.items():
         if (
-            (binding is not None or pinned is not None)
-            and key not in container_only
-            and (
-                key in environment
-                or key.startswith(
-                    ("CONTAINER_", "CONTAINERS_", "PODMAN_", "STORAGE_", "LD_")
-                )
-                or key
-                in {"DOCKER_HOST", "SSH_AUTH_SOCK", "BASH_ENV", "ENV", "GCONV_PATH"}
-            )
+            isolated_owner
+            and key in isolated_owner_env
+            and key not in _CONTAINER_ONLY_EXEC_ENV
         ):
-            raise BoxError(
-                "A forwarded setting overlaps the bound history source engine environment."
-                if binding is not None
-                else "A forwarded setting overlaps the bound Podman engine environment."
-            )
-        if isolated_owner and key in isolated_owner_env and key not in container_only:
             raise BoxError("Studio owner engine and workspace environments overlap.")
         if isolated_owner and (
             key.startswith(
@@ -2474,7 +2496,7 @@ def exec_command(data, command, *, interactive=False, isolated_owner_env=None):
             or key in {"DOCKER_HOST", "SSH_AUTH_SOCK", "BASH_ENV", "ENV", "GCONV_PATH"}
         ):
             raise BoxError("Unsupported Studio owner environment setting.")
-        if key in container_only:
+        if key in _CONTAINER_ONLY_EXEC_ENV:
             result.extend(["--env", f"{key}={value}"])
         else:
             environment[key] = value
@@ -5052,6 +5074,7 @@ def launch_environment(
     if _first_history is not None and (not quiet_24_candidate or args.import_session):
         raise BoxError("Invalid ownership for the bound first history pass.")
     if guarded:
+        check_guarded_exec_environment(data, guarded.engine_env)
         guarded.begin(sys.modules[__name__], data)
     if data.get("opencode_version") != version:
         data["opencode_version"] = version
@@ -5738,6 +5761,8 @@ def purge(path, data, args):
             + "' to retain project files and host history."
         )
     guarded = runtime_safeguard.current()
+    if guarded:
+        check_guarded_exec_environment(data, guarded.engine_env)
     if not data.get("restore_incomplete") or args.all or args.delete_sessions:
         release = guarded.record.version if guarded else detect_opencode_release()
         if opencode_compat.major(release) != opencode_compat.major(
@@ -5894,6 +5919,12 @@ def parser():
         action="store_true",
         help="with upgrade, preview the selected published channel without installing",
     )
+    result.add_argument(
+        "--force",
+        dest="upgrade_force",
+        action="store_true",
+        help="with upgrade, reinstall the selected published release even when current",
+    )
     channel = result.add_mutually_exclusive_group()
     channel.add_argument(
         "--stable",
@@ -5935,6 +5966,12 @@ def parser():
         "--workspace",
         metavar="ID",
         help="select a registered workspace by ID; takes precedence over --project",
+    )
+    result.add_argument(
+        "--private-home",
+        dest="repair_private_home",
+        action="store_true",
+        help="with repair, confirm a persistent identity for an existing converted private home",
     )
     result.add_argument(
         "--persisted",
@@ -6500,15 +6537,37 @@ def _validate_web_release(args, version):
             raise BoxError(web_attachments.UNVERIFIED_RELEASE)
 
 
-def _stop_selected(path, data, *, admitted=False):
+def _stop_guard_binding(path, data):
+    migration = runtime_safeguard.entrypoint_migration
+    durable = tuple(
+        (key, data[key])
+        for key in (migration.FIELD, migration.RETIRE, migration.RECEIPT)
+        if key in data
+    )
+    return durable, runtime_safeguard.guard_stamp(sys.modules[__name__], path)
+
+
+def _stop_selected(path, data, *, admitted=False, guard_binding=None):
     selected, current = find_workspace(None, data["id"])
     if selected != path or not current:
         raise BoxError("The workspace registration changed; no substitute was stopped.")
     migration = runtime_safeguard.entrypoint_migration
+    changed = "The guarded stop binding changed; no substitute was stopped."
+    if (
+        guard_binding is not None
+        and _stop_guard_binding(path, current) != guard_binding
+    ):
+        raise BoxError(changed)
     if migration.FIELD in current:
         raise BoxError(migration.PENDING)
     data = current
     record = runtime_safeguard.load(sys.modules[__name__], path)
+    if guard_binding is not None and (
+        (record is None) != (guard_binding[1] is None)
+        or runtime_safeguard.guard_stamp(sys.modules[__name__], path)
+        != guard_binding[1]
+    ):
+        raise BoxError(changed)
     if migration.RETIRE in data:
         if not admitted:
             raise BoxError(
@@ -6521,55 +6580,93 @@ def _stop_selected(path, data, *, admitted=False):
         )
         return
     elif record:
-        if data.get("devices"):
-            # Stop the same owned object even when a device has disappeared.
-            env = migration.engine_environment(sys.modules[__name__])
-            migration.require_local_engine(sys.modules[__name__], env)
-            info = inspect_owned(data, local_only=True, env=env)
-        else:
-            env = None
-            info = inspect_owned(data)
+        if not admitted:
+            raise BoxError("Guarded stop was not admitted; no substitute was stopped.")
+        # Stop the same owned object without depending on optional devices,
+        # native startup, or hardware access.
+        env = migration.engine_environment(sys.modules[__name__])
+        migration.require_local_engine(sys.modules[__name__], env)
+        info = inspect_owned(data, local_only=True, env=env, private=True, timeout=15)
         if not info or info.get("Id") != record.container:
             raise BoxError(
                 "The guarded container identity changed; no substitute was stopped."
             )
-        data = {**data, "container": record.container}
-        if env is not None:
-            stop_container(data, env=env, local_only=True)
-            final = inspect_owned(data, local_only=True, env=env)
-            if (
-                not final
-                or final.get("Id") != record.container
-                or not migration._stopped(
-                    final, ("created", "configured", "exited", "stopped")
+        if info["State"]["Running"]:
+            with _live_limit_transition_gate(data):
+                podman(
+                    "--remote=false",
+                    "stop",
+                    "--time",
+                    "10",
+                    record.container,
+                    capture=True,
+                    private=True,
+                    timeout=15,
+                    env=env,
                 )
-            ):
-                raise BoxError(
-                    "Could not verify the guarded device workspace stopped on its local engine."
-                )
-            return
-    stop_container(data)
+        final = inspect_owned(
+            {**data, "container": record.container},
+            local_only=True,
+            env=env,
+            private=True,
+            timeout=15,
+        )
+        if (
+            not final
+            or final.get("Id") != record.container
+            or not migration._stopped(
+                final, ("created", "configured", "exited", "stopped")
+            )
+        ):
+            raise BoxError(
+                "Could not verify the guarded workspace stopped on its local engine."
+            )
+        return
+    if migration.durable_registry(data):
+        raise BoxError("The guarded stop record is missing; no substitute was stopped.")
+    if admitted:
+        stop_container(data, timeout=30)
+    else:
+        stop_container(data)
 
 
 def _stop_v2(path, data):
+    binding = _stop_guard_binding(path, data)
+    guarded = bool(binding[0]) or binding[1] is not None
+    if not guarded:
+        with loading_stage("Checking rootless Podman", stage="backend"):
+            check_backend()
     stopped = False
     try:
-        # Publish before inspecting the independent runtime sidecar. A pending
+        # Publish before reading the independent runtime sidecar. A pending
         # replacement must never cancel a stop request.
         workspace_control.request_stop(path)
         with workspace_control.admission(path, timeout=45):
-            _stop_selected(path, data, admitted=True)
+            _stop_selected(path, data, admitted=True, guard_binding=binding)
             stopped = True
             workspace_control.require_certain(path)
     except workspace_control.ControlError as exc:
-        # Preserve ordinary best-effort stop, but never dispatch a staged
-        # stop without admission or repeat an already completed stop.
-        if not stopped:
-            _stop_selected(path, data)
+        # Best effort remains available only for a still-ordinary target.
+        if not stopped and not guarded:
+            _stop_selected(path, data, guard_binding=binding)
         raise BoxError(str(exc)) from None
 
 
 def _main_command(args, argv):
+    if getattr(args, "repair_private_home", False) and (
+        args.command != "repair" or not args.workspace or args.project is not None
+    ):
+        raise BoxError(
+            "--private-home requires 'oc-box repair --workspace WORKSPACE_ID'."
+        )
+    if getattr(args, "repair_private_home", False) and (
+        sys.platform != "linux"
+        or os.geteuid() == 0
+        or os.environ.get("OC_BOX_CONTAINER") == "1"
+        or os.path.lexists("/.dockerenv")
+        or os.path.lexists("/run/.containerenv")
+    ):
+        raise BoxError("Run private-home repair on the host as your regular user.")
     if getattr(args, "cleanup", False):
         baseline = vars(parser().parse_args(["purge"]))
         if args.command != "purge" or any(
@@ -6765,6 +6862,7 @@ def _main_command(args, argv):
                 args.about,
                 args.version,
                 args.check,
+                args.upgrade_force,
                 args.auto_update is not None,
                 args.update_channel is not None,
                 args.distro,
@@ -6789,10 +6887,13 @@ def _main_command(args, argv):
             )
         return credentials_command(args)
     if (
-        args.check or args.auto_update is not None or args.update_channel is not None
+        args.check
+        or args.upgrade_force
+        or args.auto_update is not None
+        or args.update_channel is not None
     ) and args.command != "upgrade":
         raise BoxError(
-            "--check, --auto-update, --stable and --devel apply only to upgrade."
+            "--check, --force, --auto-update, --stable and --devel apply only to upgrade."
         )
     if args.command == "upgrade":
         if any(
@@ -6821,17 +6922,20 @@ def _main_command(args, argv):
             )
         ):
             raise BoxError(
-                "Upgrade accepts only --check, --stable/--devel, --vault, --tui or --auto-update on/off."
+                "Upgrade accepts only --check, --force, --stable/--devel, --vault, --tui or --auto-update on/off."
             )
         if args.auto_update is not None and (
             args.check
+            or args.upgrade_force
             or args.update_channel is not None
             or args.upgrade_vault
             or args.upgrade_tui
         ):
             raise BoxError(
-                "--auto-update cannot be combined with --check, --stable, --devel, --vault or --tui."
+                "--auto-update cannot be combined with --check, --force, --stable, --devel, --vault or --tui."
             )
+        if args.check and args.upgrade_force:
+            raise BoxError("--check and --force cannot be combined.")
         if os.environ.get("OC_BOX_CONTAINER") == "1":
             raise BoxError(
                 "Run 'oc-box upgrade' on the host; the container cannot update its host launcher."
@@ -6875,6 +6979,7 @@ def _main_command(args, argv):
                 channel=args.update_channel,
                 with_vault=args.upgrade_vault,
                 with_tui=args.upgrade_tui,
+                **({"force": True} if args.upgrade_force else {}),
             )
         except UpdateError as exc:
             raise BoxError(str(exc)) from exc
@@ -7043,24 +7148,20 @@ def _main_command(args, argv):
             automatic_upgrade(APP, launch_args=sys.argv[1:] if argv is None else argv)
         except (UpdateError, OSError, ValueError) as exc:
             startup_output.line(
-                f"oc-box: automatic update unavailable: {exc}; continuing with the installed version.",
+                f"oc-box: automatic update unavailable: {str(exc).rstrip('.')}; continuing with the installed version.",
                 file=sys.stderr,
             )
     web_selection = None
     web_attach_only = False
     stop_selection = None
-    stop_engine = None
+    stop_v2 = False
     if args.command == "stop":
         stop_selection = find_workspace(args.project, args.workspace)
-        path, selected = stop_selection
-        if (
+        _, selected = stop_selection
+        stop_v2 = bool(
             selected
-            and selected.get("devices")
-            and runtime_safeguard.load(sys.modules[__name__], path) is not None
-        ):
-            stop_engine = runtime_safeguard.entrypoint_migration.engine_environment(
-                sys.modules[__name__]
-            )
+            and opencode_compat.major(selected.get("opencode_version", "1.0.0")) == 2
+        )
     if args.command == "web":
         web_selection = find_workspace(args.project, args.workspace)
         _, selected = web_selection
@@ -7072,21 +7173,20 @@ def _main_command(args, argv):
         if not web_attach_only:
             args._opencode_release = detect_opencode_release(isolated=True)
             _validate_web_release(args, args._opencode_release)
-    with loading_stage("Checking rootless Podman", stage="backend"):
-        check_backend(
-            **(
-                {"env": stop_engine, "local_only": True}
-                if stop_engine is not None
-                else {"env": maintenance_host_env()}
-                if args.command == "terminal" or getattr(args, "persisted", False)
-                else {}
-            ),
-            **(
-                {"feature": "launch"}
-                if args.command in ("start", "reset", "sync", "web")
-                else {}
-            ),
-        )
+    if not args.repair_private_home and not stop_v2:
+        with loading_stage("Checking rootless Podman", stage="backend"):
+            check_backend(
+                **(
+                    {"env": maintenance_host_env()}
+                    if args.command == "terminal" or getattr(args, "persisted", False)
+                    else {}
+                ),
+                **(
+                    {"feature": "launch"}
+                    if args.command in ("start", "reset", "sync", "web")
+                    else {}
+                ),
+            )
     image_preview_snapshot = None
     if not getattr(args, "persisted", False):
         state_root().mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -7349,17 +7449,6 @@ def _locked_workspace_command(path, data, args, launch_context, image_preview_sn
             and args.command in ("start", "reset", "sync", "web", "terminal", "purge")
         )
     )
-    if (
-        not guard
-        and data.get("ready") is True
-        and runtime_safeguard.release_key(data.get("opencode_version")) is not None
-        and args.command in ("start", "reset", "sync", "web", "purge")
-    ):
-        release = getattr(args, "_opencode_release", None) or detect_opencode_release(
-            isolated=True
-        )
-        args._opencode_release = release
-        guard = runtime_safeguard.version_upgrade(data.get("opencode_version"), release)
     credentials_open = False
 
     def open_credentials():
@@ -7433,6 +7522,10 @@ def _locked_workspace_command(path, data, args, launch_context, image_preview_sn
     if args.command == "terminal":
         return maintenance_terminal(path, data)
     if args.command == "repair":
+        if args.repair_private_home:
+            return runtime_safeguard.repair_private_home(
+                sys.modules[__name__], path, data
+            )
         repair_workspace(path, data)
         return 0
     if args.command in ("start", "reset", "sync", "web"):

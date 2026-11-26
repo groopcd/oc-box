@@ -17,7 +17,7 @@ from unittest.mock import patch
 from oc_box import native_preflight, native_runtime_guard
 from oc_box import oc_box as box
 from oc_box import runtime_safeguard as guard
-from oc_box import workspace_control, workspace_service
+from oc_box import uninstall_tty, workspace_control, workspace_service
 
 
 OLD = "2.3.2"
@@ -62,7 +62,9 @@ class RuntimeSafeguardTests(unittest.TestCase):
         self.binary = guard.HostBinary(10, (), DIGEST)
 
     def args(self, command="start", **values):
-        return argparse.Namespace(command=command, runtime_guard=False, **values)
+        return argparse.Namespace(
+            **{"command": command, "runtime_guard": False, **values}
+        )
 
     @contextlib.contextmanager
     def synthetic_admission(self, version=NEW):
@@ -88,20 +90,6 @@ class RuntimeSafeguardTests(unittest.TestCase):
             native_runtime_guard.publish(self.path, pending, self.record)
             return self.record
         return pending
-
-    def test_every_stable_v2_upgrade_triggers_check(self):
-        for item, expected in (
-            ("2.3.2", False),
-            ("2.3.3", True),
-            ("2.4.0", True),
-            ("2.10.0", True),
-            ("2.2.9", False),
-            ("1.19.5", False),
-            ("3.0.0", False),
-            ("2.4.0-beta.1", False),
-        ):
-            with self.subTest(candidate=item):
-                self.assertIs(guard.version_upgrade(OLD, item), expected)
 
     def test_resource_refusals_identify_the_specific_fix_before_engine_access(self):
         cases = (
@@ -160,14 +148,186 @@ class RuntimeSafeguardTests(unittest.TestCase):
                 )
         self.assertEqual(box.read_json(self.path)["devices"], data["devices"])
 
+    def test_guarded_stopped_inspection_checks_current_resources_not_boot_metadata(
+        self,
+    ):
+        project = str(self.project)
+        home_source = str(self.root / "volume")
+        migration = guard.entrypoint_migration
+        data = {
+            **self.data,
+            migration.RECEIPT: {
+                "id": CONTAINER,
+                "bootstrap": False,
+                "volume": [1, 2],
+            },
+        }
+        recovery = guard.history_recovery
+        info = {
+            "Id": CONTAINER,
+            "State": {"Status": "exited", "Running": False, "Paused": False, "Pid": 0},
+            "Mounts": [
+                {"Type": "bind", "Source": project, "Destination": project},
+                {
+                    "Type": "volume",
+                    "Name": VOLUME,
+                    "Source": home_source,
+                    "Destination": data["home"],
+                },
+            ],
+            "Config": {
+                "Labels": {box.LABEL: data["id"]},
+                "Entrypoint": [recovery.PASSIVE_ENTRYPOINT],
+                "Cmd": ["-c", recovery.PASSIVE_COMMAND],
+                "Env": ["PATH=" + recovery.history_reader.PATH],
+                "CreateCommand": ["--volume", f"{VOLUME}:{data['home']}:rw,nocopy"],
+            },
+            "HostConfig": {"PidMode": "private"},
+        }
+        volume = {
+            "Name": VOLUME,
+            "Mountpoint": home_source,
+            "Driver": "local",
+            "Labels": {box.LABEL: data["id"]},
+        }
+        with (
+            patch.object(box, "validate_project", return_value=self.project),
+            patch.object(box, "find_workspace", return_value=(self.path, data)),
+            patch.object(guard.workspace_identity, "same_project", return_value=True),
+            patch.object(box, "inspect_owned", return_value=info),
+            patch.object(box, "podman") as podman,
+            patch.object(migration, "volume_stamp", return_value=[1, 2]) as stamp,
+        ):
+            podman.return_value.stdout = json.dumps([volume])
+            self.assertEqual(
+                guard._inspect(box, self.path, data, running=False),
+                (CONTAINER, (project, project, home_source, data["home"])),
+            )
+            # An old receipt has no persistent filesystem baseline. Do not
+            # silently rebind it on the strength of the inode alone.
+            stamp.return_value = [17, 2]
+            with self.assertRaisesRegex(box.BoxError, "conversion-home-identity"):
+                guard._inspect(box, self.path, data, running=False)
+            stable = {
+                "method": "linux-file-handle-v1",
+                "fsid": "1234",
+                "handle": {"type": 1, "bytes": "00010203"},
+            }
+            data[migration.HOME_IDENTITY] = stable
+            with patch.object(
+                guard.workspace_identity, "snapshot", return_value=([17, 2], stable)
+            ) as snapshot:
+                self.assertEqual(
+                    guard._inspect(box, self.path, data, running=False)[0], CONTAINER
+                )
+                snapshot.return_value = ([17, 2], {**stable, "fsid": "4321"})
+                with self.assertRaisesRegex(box.BoxError, "conversion-home-identity"):
+                    guard._inspect(box, self.path, data, running=False)
+            info["State"]["Status"] = "initialized"
+            podman.reset_mock()
+            with self.assertRaisesRegex(box.BoxError, "container-state"):
+                guard._inspect(box, self.path, data, running=False)
+            podman.assert_not_called()
+
+    def test_explicit_private_home_repair_preserves_floor_and_rechecks_after_review(
+        self,
+    ):
+        baseline = self.seed()
+        migration = guard.entrypoint_migration
+        data = {
+            **self.data,
+            "container": "oc-box-" + self.data["id"],
+            migration.RECEIPT: {
+                "id": CONTAINER,
+                "bootstrap": False,
+                "volume": [1, 2],
+            },
+        }
+        box.atomic_json(self.path, data)
+        workspace_control.capture(self.path)
+        stable = {
+            "method": "linux-file-handle-v1",
+            "fsid": "a1b2",
+            "handle": {"type": 1, "bytes": "00010203"},
+        }
+        identity = ([17, 2], stable)
+        current = identity
+
+        def inspect(_box, path, selected, *, running, engine_env, home_review):
+            self.assertEqual((path, selected, running), (self.path, data, False))
+            home_review.append(current)
+            return CONTAINER, (
+                data["project"],
+                data["project"],
+                str(self.root / "volume"),
+                data["home"],
+            )
+
+        def changed(*_):
+            nonlocal current
+            current = ([19, 2], stable)
+            return True
+
+        with (
+            patch.object(migration, "require_local_engine"),
+            patch.object(guard, "_inspect", side_effect=inspect),
+            patch.object(
+                box,
+                "podman",
+                return_value=subprocess.CompletedProcess([], 0, CONTAINER + "\n"),
+            ) as podman,
+            patch.object(uninstall_tty, "confirm_review") as confirm,
+        ):
+            confirm.return_value = False
+            with self.assertRaisesRegex(box.BoxError, "not confirmed"):
+                guard.repair_private_home(box, self.path, data)
+            self.assertEqual(box.read_json(self.path), data)
+            confirm.side_effect = changed
+            with self.assertRaisesRegex(box.BoxError, "changed"):
+                guard.repair_private_home(box, self.path, data)
+            self.assertEqual(box.read_json(self.path), data)
+
+            current = identity
+            confirm.side_effect = None
+            confirm.return_value = True
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(guard.repair_private_home(box, self.path, data), 0)
+            self.assertEqual(confirm.call_args.args[1], "REPAIR HOME " + data["id"])
+            self.assertTrue(
+                all(
+                    call.args[:2] == ("--remote=false", "ps")
+                    for call in podman.call_args_list
+                )
+            )
+        repaired = box.read_json(self.path)
+        self.assertEqual(repaired.pop(migration.HOME_IDENTITY), stable)
+        self.assertEqual(repaired[migration.RECEIPT]["volume"], [17, 2])
+        repaired[migration.RECEIPT]["volume"] = [1, 2]
+        self.assertEqual(repaired, data)
+        self.assertEqual(guard.load(box, self.path), baseline)
+
     def test_retirement_requires_successful_start_and_mount_access(self):
         marker = guard.entrypoint_migration.RETIRE
-        for failure in ("start", "inconsistent", "mount", "device-access", None):
+        for failure in (
+            "start",
+            "inconsistent",
+            "mount",
+            "device-access",
+            "optional-device-access",
+            "missing-device-target",
+            None,
+        ):
             with self.subTest(failure=failure), tempfile.TemporaryDirectory() as name:
                 path = Path(name) / "workspace.json"
                 data = {**self.data, marker: {"synthetic": True}}
-                if failure == "device-access":
+                if failure in (
+                    "device-access",
+                    "optional-device-access",
+                    "missing-device-target",
+                ):
                     data["devices"] = ["/dev/accel/accel0"]
+                if failure in ("optional-device-access", "missing-device-target"):
+                    del data[marker]
                 box.atomic_json(path, data)
                 token = workspace_control.capture(path)
                 env = {
@@ -210,7 +370,13 @@ class RuntimeSafeguardTests(unittest.TestCase):
                     if command[-1] in data.get("devices", []):
                         self.assertFalse(kwargs["check"])
                         calls.append("device-access")
-                        return subprocess.CompletedProcess(command, 1)
+                        return subprocess.CompletedProcess(
+                            command,
+                            1 if failure == "missing-device-target" else 52,
+                            ""
+                            if failure == "missing-device-target"
+                            else "oc-box-device-permission\n",
+                        )
                     self.assertEqual(
                         list(command[-2:]), [data["project"], data["home"]]
                     )
@@ -252,13 +418,14 @@ class RuntimeSafeguardTests(unittest.TestCase):
                         "verify_retirement",
                         side_effect=retire,
                     ),
+                    contextlib.redirect_stderr(io.StringIO()) as warning,
                 ):
-                    if failure:
+                    if failure and failure != "optional-device-access":
                         message = (
                             "staged replacement running"
                             if failure == "inconsistent"
                             else "saved device nodes"
-                            if failure == "device-access"
+                            if failure in ("device-access", "missing-device-target")
                             else failure
                         )
                         with self.assertRaisesRegex(box.BoxError, message):
@@ -266,8 +433,14 @@ class RuntimeSafeguardTests(unittest.TestCase):
                     else:
                         scope.start(box, data)
                 self.assertEqual(
+                    "Continuing with the existing container" in warning.getvalue(),
+                    failure == "optional-device-access",
+                )
+                self.assertEqual(
                     calls,
-                    ["verify-parked", "start"]
+                    ["start", "mount", "device-access"]
+                    if failure in ("optional-device-access", "missing-device-target")
+                    else ["verify-parked", "start"]
                     if failure in ("start", "inconsistent")
                     else ["verify-parked", "start", "mount"]
                     if failure == "mount"
@@ -309,7 +482,7 @@ class RuntimeSafeguardTests(unittest.TestCase):
             ),
             patch.object(guard.entrypoint_migration, "require_local_engine") as local,
             patch.object(
-                box, "inspect_owned", side_effect=[running, running, stopped]
+                box, "inspect_owned", side_effect=[running, stopped]
             ) as inspect,
             patch.object(box, "podman") as podman,
             patch.object(guard.guarded_devices, "verify") as devices,
@@ -317,9 +490,20 @@ class RuntimeSafeguardTests(unittest.TestCase):
             box._stop_selected(self.path, data, admitted=True)
         local.assert_called_once_with(box, engine)
         devices.assert_not_called()
-        self.assertEqual(inspect.call_count, 3)
-        for call in inspect.call_args_list:
-            self.assertEqual(call.kwargs, {"local_only": True, "env": engine})
+        self.assertEqual(inspect.call_count, 2)
+        for call, selector in zip(
+            inspect.call_args_list, (data["container"], CONTAINER)
+        ):
+            self.assertEqual(call.args, ({**data, "container": selector},))
+            self.assertEqual(
+                call.kwargs,
+                {
+                    "local_only": True,
+                    "env": engine,
+                    "private": True,
+                    "timeout": 15,
+                },
+            )
         podman.assert_called_once_with(
             "--remote=false",
             "stop",
@@ -327,6 +511,8 @@ class RuntimeSafeguardTests(unittest.TestCase):
             "10",
             CONTAINER,
             capture=True,
+            private=True,
+            timeout=15,
             env=engine,
         )
 
@@ -503,23 +689,132 @@ class RuntimeSafeguardTests(unittest.TestCase):
             patch.object(
                 workspace_control,
                 "admission",
-                side_effect=workspace_control.ControlError("admission-timeout"),
+                side_effect=workspace_control.ControlError("control-timeout"),
             ),
             patch.object(guard.entrypoint_migration, "stop_staged") as stop,
-            self.assertRaisesRegex(box.BoxError, "stop was not admitted"),
+            self.assertRaisesRegex(box.BoxError, "control-timeout"),
         ):
             box._stop_v2(self.path, data)
         stop.assert_not_called()
 
     def test_v2_staged_stop_does_not_repeat_when_uncertainty_remains(self):
+        data = {**self.data, guard.entrypoint_migration.RETIRE: {}}
         workspace_control.capture(self.path)
         workspace_control.mark_uncertain(self.path)
         with (
+            patch.object(box, "check_backend") as backend,
             patch.object(box, "_stop_selected") as stop,
             self.assertRaisesRegex(box.BoxError, "uncertain-control"),
         ):
+            box._stop_v2(self.path, data)
+        backend.assert_not_called()
+        stop.assert_called_once_with(
+            self.path,
+            data,
+            admitted=True,
+            guard_binding=box._stop_guard_binding(self.path, data),
+        )
+
+    def test_v2_bound_guard_cannot_stop_after_control_failure(self):
+        self.seed()
+        for operation, category in (
+            ("request_stop", "control-unavailable"),
+            ("admission", "control-timeout"),
+        ):
+            with (
+                self.subTest(operation=operation),
+                patch.object(
+                    workspace_control,
+                    operation,
+                    side_effect=workspace_control.ControlError(category),
+                ),
+                patch.object(box, "check_backend") as backend,
+                patch.object(guard, "load") as load,
+                patch.object(box, "podman") as engine,
+                self.assertRaisesRegex(box.BoxError, category),
+            ):
+                box._stop_v2(self.path, self.data)
+            for operation in (backend, load, engine):
+                operation.assert_not_called()
+
+    def test_v2_guard_binding_changes_do_not_use_the_ordinary_stop_path(self):
+        sidecar = self.path.with_name("native-runtime-guard.json")
+        for change in ("appeared", "removed", "replaced"):
+            with self.subTest(change=change):
+                if change != "appeared":
+                    self.seed()
+
+                def change_guard(path):
+                    if change != "appeared":
+                        sidecar.unlink()
+                    if change != "removed":
+                        sidecar.symlink_to(self.root / "missing-target")
+                    token = request_stop(path)
+                    if change == "appeared":
+                        # The ordinary best-effort path must recheck the binding.
+                        raise workspace_control.ControlError("control-unavailable")
+                    return token
+
+                request_stop = workspace_control.request_stop
+                with (
+                    patch.object(
+                        box, "find_workspace", return_value=(self.path, self.data)
+                    ),
+                    patch.object(
+                        workspace_control, "request_stop", side_effect=change_guard
+                    ),
+                    patch.object(box, "check_backend") as backend,
+                    patch.object(guard, "load") as load,
+                    patch.object(box, "stop_container") as stop,
+                    patch.object(box, "podman") as engine,
+                    self.assertRaisesRegex(box.BoxError, "stop binding changed"),
+                ):
+                    box._stop_v2(self.path, self.data)
+                self.assertEqual(backend.call_count, int(change == "appeared"))
+                for operation in (load, stop, engine):
+                    operation.assert_not_called()
+                sidecar.unlink(missing_ok=True)
+
+    def test_dangling_guard_entry_is_not_an_ordinary_stop(self):
+        self.path.with_name("native-runtime-guard.json").symlink_to(
+            self.root / "missing-target"
+        )
+        token = workspace_control.capture(self.path)
+        with (
+            patch.object(box, "find_workspace", return_value=(self.path, self.data)),
+            patch.object(box, "check_backend") as backend,
+            patch.object(box, "stop_container") as stop,
+            patch.object(box, "podman") as engine,
+            self.assertRaisesRegex(
+                box.BoxError, "Native runtime guard storage is unsafe"
+            ),
+        ):
             box._stop_v2(self.path, self.data)
-        stop.assert_called_once_with(self.path, self.data, admitted=True)
+        self.assertFalse(workspace_control.unchanged(self.path, token))
+        for operation in (backend, stop, engine):
+            operation.assert_not_called()
+
+    def test_completed_conversion_without_guard_record_cannot_stop_as_ordinary(self):
+        data = {
+            **self.data,
+            guard.entrypoint_migration.RECEIPT: {
+                "id": CONTAINER,
+                "bootstrap": False,
+                "volume": [1, 2],
+            },
+        }
+        token = workspace_control.capture(self.path)
+        with (
+            patch.object(box, "find_workspace", return_value=(self.path, data)),
+            patch.object(box, "check_backend") as backend,
+            patch.object(box, "stop_container") as stop,
+            patch.object(box, "podman") as engine,
+            self.assertRaisesRegex(box.BoxError, "guarded stop record is missing"),
+        ):
+            box._stop_v2(self.path, data)
+        self.assertFalse(workspace_control.unchanged(self.path, token))
+        for operation in (backend, stop, engine):
+            operation.assert_not_called()
 
     def test_partial_marker_blocks_start_and_sync_without_preparing_environment(self):
         data = {**self.data, guard.entrypoint_migration.RETIRE: {"synthetic": True}}
@@ -725,7 +1020,38 @@ class RuntimeSafeguardTests(unittest.TestCase):
         ):
             self.assertIn(f"runtime-check: {task}", logs.getvalue())
 
-    def test_default_upgrade_refusal_precedes_credential_and_live_paths(self):
+    def test_ordinary_start_with_new_runtime_does_not_enroll_or_require_probe(self):
+        for devices in ([], ["/dev/kvm:rw"], ["/dev/accel/accel0"]):
+            data = {**self.data, "devices": devices}
+            with (
+                self.subTest(devices=devices),
+                patch.object(box, "check_backend"),
+                patch.object(box, "state_root", return_value=self.root),
+                patch.object(box, "find_workspace", return_value=(self.path, data)),
+                patch.object(box, "detect_opencode_release", return_value="2.4.2"),
+                patch.object(
+                    workspace_service, "controller_running", return_value=False
+                ),
+                patch.object(
+                    box, "launch_credentials", return_value=contextlib.nullcontext()
+                ) as unlock,
+                patch.object(box, "refresh_workspace_identity") as identity,
+                patch.object(
+                    box, "workspace_ui_preferences", return_value={"host_drop": False}
+                ),
+                patch.object(box, "launch", return_value=0) as launch,
+                patch.object(guard, "admit") as admit,
+                patch.object(native_preflight, "check") as check,
+            ):
+                self.assertEqual(box.main(["start", "--project", str(self.project)]), 0)
+                self.assertEqual(launch.call_args.args[1]["devices"], devices)
+                unlock.assert_called_once()
+                identity.assert_called_once()
+                admit.assert_not_called()
+                check.assert_not_called()
+                self.assertIsNone(native_runtime_guard.load(self.path))
+
+    def test_explicit_enrollment_refusal_precedes_credential_and_live_paths(self):
         category = next(iter(native_preflight.CONFIRMED_REFUSALS))
         before = self.path.read_bytes()
         with (
@@ -744,12 +1070,12 @@ class RuntimeSafeguardTests(unittest.TestCase):
                 side_effect=native_preflight.Refusal(category, proof=DIGEST),
             ) as check,
         ):
-            for expected in (
-                "not supported.*github.com/groopcd/oc-box/issues/new",
-                "previously refused",
+            with self.assertRaisesRegex(
+                box.BoxError, "not supported.*github.com/groopcd/oc-box/issues/new"
             ):
-                with self.assertRaisesRegex(box.BoxError, expected):
-                    box.main(["start", "--project", str(self.project)])
+                box.main(["start", "--project", str(self.project), "--runtime-guard"])
+            with self.assertRaisesRegex(box.BoxError, "previously refused"):
+                guard._candidate_digest(box, self.path, self.binary, NEW, recheck=False)
         check.assert_called_once()
         for call in (credentials, start, launch):
             call.assert_not_called()
@@ -885,6 +1211,46 @@ class RuntimeSafeguardTests(unittest.TestCase):
         self.assertEqual(check.call_count, 2)
         self.assertIsNone(native_runtime_guard.rejected(self.path))
 
+    def test_bad_negative_cache_cannot_block_a_fresh_verification(self):
+        with (
+            self.synthetic_admission(),
+            patch.object(
+                native_runtime_guard,
+                "rejected",
+                side_effect=native_runtime_guard.GuardError("invalid-record"),
+            ),
+            patch.object(native_runtime_guard, "publish_rejection") as publish,
+            patch.object(native_preflight, "check", return_value=DIGEST) as check,
+            contextlib.redirect_stderr(io.StringIO()) as warning,
+        ):
+            self.assertEqual(
+                guard._candidate_digest(
+                    box,
+                    self.path,
+                    self.binary,
+                    NEW,
+                    recheck=True,
+                ),
+                DIGEST,
+            )
+            self.assertIn("without changing that record", warning.getvalue())
+        check.assert_called_once_with(box, NEW)
+        publish.assert_not_called()
+
+    def test_device_free_admission_retains_selected_runtime_engine(self):
+        previous = self.seed()
+        env = {"CONTAINERS_STORAGE_CONF_OVERRIDE": "/synthetic/local-storage.conf"}
+        with (
+            self.synthetic_admission(OLD),
+            guard.admit(
+                box, self.path, self.data, self.args(), previous, engine_env=env
+            ) as scope,
+        ):
+            scope.require_live(box, self.data, running=True)
+            self.assertIs(scope.engine_env, env)
+            for call in guard._inspect.call_args_list:
+                self.assertIs(call.kwargs["engine_env"], env)
+
     def test_build_failure_of_different_artifact_does_not_flag_host_release(self):
         baseline = self.seed()
         with (
@@ -900,7 +1266,9 @@ class RuntimeSafeguardTests(unittest.TestCase):
                 box.BoxError, "artifact.*not a recorded compatibility failure"
             ),
         ):
-            with guard.admit(box, self.path, self.data, self.args(), baseline):
+            with guard.admit(
+                box, self.path, self.data, self.args(runtime_guard=True), baseline
+            ):
                 self.fail("mismatched proof was admitted")
         self.assertIsNone(native_runtime_guard.rejected(self.path))
         self.assertEqual(native_runtime_guard.load(self.path), baseline)
@@ -917,31 +1285,91 @@ class RuntimeSafeguardTests(unittest.TestCase):
             ),
             self.assertRaisesRegex(box.BoxError, "not supported"),
         ):
-            with guard.admit(box, self.path, self.data, self.args(), baseline):
+            with guard.admit(
+                box, self.path, self.data, self.args(runtime_guard=True), baseline
+            ):
                 self.fail("unsupported release was admitted")
         self.assertEqual(native_runtime_guard.load(self.path), baseline)
         with (
             self.synthetic_admission("2.4.1"),
             patch.object(native_preflight, "check", return_value=DIGEST) as check,
         ):
-            with guard.admit(box, self.path, self.data, self.args(), baseline) as scope:
+            with guard.admit(
+                box, self.path, self.data, self.args(runtime_guard=True), baseline
+            ) as scope:
                 scope.begin(box, self.data)
                 scope.ready(box, self.data)
             check.assert_called_once_with(box, "2.4.1")
         self.assertEqual(native_runtime_guard.load(self.path).version, "2.4.1")
 
-    def test_write_floor_precedes_native_open_and_persists_without_readiness(self):
-        previous = self.seed()
+    def test_guarded_exec_can_forward_an_unchanged_engine_environment_value(self):
+        baseline = self.seed()
+        engine = {"PATH": "/usr/bin", "USER": "synthetic-guarded-user"}
+        with (
+            self.synthetic_admission(OLD),
+            guard.admit(
+                box, self.path, self.data, self.args(), baseline, engine_env=engine
+            ),
+            patch.object(box, "container_env", return_value={"USER": engine["USER"]}),
+        ):
+            command = box.exec_command(self.data, [box.CONTAINER_OPENCODE, "--version"])
+        self.assertEqual(command.environment, engine)
+        self.assertIn("USER", command)
+        self.assertNotIn(engine["USER"], command)
+        with self.assertRaisesRegex(box.BoxError, "overlaps the bound Podman engine"):
+            box._check_bound_exec_environment(
+                {"CONTAINERS_CONF": "/synthetic/config"},
+                {"CONTAINERS_CONF": "/synthetic/config"},
+            )
+
+    def test_guarded_forwarded_conflict_precedes_runtime_floor_and_container_start(
+        self,
+    ):
+        baseline = self.seed()
+        engine = {"PATH": "/usr/bin", "USER": "synthetic-engine"}
+        args = box.parser().parse_args(["start"])
         with (
             self.synthetic_admission(),
-            patch.object(native_preflight, "check", return_value=DIGEST),
+            patch.object(guard, "_official_digest", return_value=DIGEST),
+            guard.admit(
+                box, self.path, self.data, args, baseline, engine_env=engine
+            ) as scope,
+            patch.object(
+                box, "container_env", return_value={"USER": "synthetic-workspace"}
+            ),
+            patch.object(box, "check_private_output"),
+            patch.object(scope, "begin") as begin,
+            patch.object(scope, "start") as start,
+            self.assertRaisesRegex(box.BoxError, "overlaps the bound Podman engine"),
+        ):
+            box.launch_environment(self.path, self.data, args)
+        begin.assert_not_called()
+        start.assert_not_called()
+        self.assertEqual(guard.load(box, self.path), baseline)
+        self.assertEqual(box.read_json(self.path)["opencode_version"], OLD)
+
+    def test_guarded_upgrade_warns_without_probe_and_publishes_floor_before_open(self):
+        previous = self.seed()
+        with (
+            self.synthetic_admission("2.4.2"),
+            patch.object(
+                native_preflight, "check", side_effect=native_preflight.Refusal("sdk")
+            ) as check,
+            patch.object(guard, "_official_digest", return_value=DIGEST) as official,
+            contextlib.redirect_stderr(io.StringIO()) as warning,
         ):
             with guard.admit(box, self.path, self.data, self.args(), previous) as scope:
                 self.assertEqual(native_runtime_guard.load(self.path), previous)
                 scope.begin(box, self.data)
                 self.assertEqual(native_runtime_guard.load(self.path), scope.record)
                 self.assertFalse(scope.record.ready)
-                self.assertEqual(scope.record.version, NEW)
+                self.assertEqual(scope.record.version, "2.4.2")
+                self.assertEqual(scope.record.digest, self.binary.digest)
+            check.assert_not_called()
+            official.assert_called_once_with(box, "2.4.2", self.binary.digest)
+            self.assertIn(
+                "Continuing with runtime and workspace verification", warning.getvalue()
+            )
         with (
             self.synthetic_admission(OLD),
             self.assertRaisesRegex(box.BoxError, "will not launch below"),
@@ -955,13 +1383,57 @@ class RuntimeSafeguardTests(unittest.TestCase):
             ):
                 self.fail("an older binary passed the durable version floor")
 
+    def test_artifact_mismatch_cannot_strand_a_protected_workspace(self):
+        previous = self.seed()
+        with (
+            self.synthetic_admission("2.4.2"),
+            patch.object(
+                box,
+                "run",
+                return_value=subprocess.CompletedProcess([], 0, "0" * 64 + "\n"),
+            ) as download,
+            patch.object(native_preflight, "check") as probe,
+            self.assertRaisesRegex(
+                box.BoxError, "existing protected runtime was not changed"
+            ),
+        ):
+            with guard.admit(box, self.path, self.data, self.args(), previous):
+                self.fail("unverified artifact reached the workspace")
+        self.assertEqual(native_runtime_guard.load(self.path), previous)
+        self.assertEqual(
+            download.call_args.kwargs["env"],
+            {
+                "PATH": guard._HOST_PROBE_PATH,
+                "LANG": "C.UTF-8",
+            },
+        )
+        probe.assert_not_called()
+
+    def test_explicit_recheck_of_a_pending_floor_is_not_skipped(self):
+        previous = self.seed(ready=False)
+        with (
+            self.synthetic_admission(OLD),
+            patch.object(
+                native_preflight, "check", side_effect=native_preflight.Refusal("sdk")
+            ) as check,
+            self.assertRaisesRegex(box.BoxError, "isolated preflight did not pass"),
+        ):
+            with guard.admit(
+                box, self.path, self.data, self.args(runtime_guard=True), previous
+            ):
+                self.fail("explicit isolated check was skipped")
+        check.assert_called_once_with(box, OLD)
+        self.assertEqual(native_runtime_guard.load(self.path), previous)
+
     def test_stop_after_probe_cannot_publish_new_floor(self):
         previous = self.seed()
         with (
             self.synthetic_admission(),
             patch.object(native_preflight, "check", return_value=DIGEST),
         ):
-            with guard.admit(box, self.path, self.data, self.args(), previous) as scope:
+            with guard.admit(
+                box, self.path, self.data, self.args(runtime_guard=True), previous
+            ) as scope:
                 workspace_control.request_stop(self.path)
                 with self.assertRaisesRegex(box.BoxError, "Stop was requested"):
                     scope.begin(box, self.data)
@@ -970,22 +1442,45 @@ class RuntimeSafeguardTests(unittest.TestCase):
     def test_explicit_stop_publishes_intent_before_reading_guard_state(self):
         baseline = self.seed()
         token = workspace_control.capture(self.path)
+        load_guard = native_runtime_guard.load
 
-        def guarded_record(_box, path):
+        def guarded_record(path):
             self.assertEqual(path, self.path)
             self.assertFalse(workspace_control.unchanged(self.path, token))
-            return baseline
+            with self.assertRaises(workspace_control.ControlError):
+                with workspace_control.admission(path, timeout=0):
+                    self.fail("Guard read was outside lifecycle admission.")
+            self.assertEqual(record := load_guard(path), baseline)
+            return record
 
         with (
-            patch.object(box, "check_backend"),
+            patch.object(box, "check_backend") as backend,
             patch.object(box, "state_root", return_value=self.root),
             patch.object(box, "find_workspace", return_value=(self.path, self.data)),
-            patch.object(guard, "load", side_effect=guarded_record),
-            patch.object(box, "inspect_owned", return_value={"Id": CONTAINER}),
+            patch.object(
+                native_runtime_guard, "load", side_effect=guarded_record
+            ) as load,
+            patch.object(guard.entrypoint_migration, "require_local_engine"),
+            patch.object(
+                box,
+                "inspect_owned",
+                return_value={
+                    "Id": CONTAINER,
+                    "State": {
+                        "Status": "exited",
+                        "Running": False,
+                        "Paused": False,
+                        "Restarting": False,
+                        "Pid": 0,
+                    },
+                },
+            ),
             patch.object(box, "stop_container") as stop,
         ):
             self.assertEqual(box.main(["stop", "--project", str(self.project)]), 0)
-        stop.assert_called_once_with({**self.data, "container": CONTAINER})
+        load.assert_called_once_with(self.path)
+        backend.assert_not_called()
+        stop.assert_not_called()
 
     def test_live_config_copy_cannot_spawn_after_stop_is_published(self):
         baseline = self.seed()

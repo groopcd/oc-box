@@ -629,8 +629,12 @@ def _operation_lock(prefix, check):
         ) from exc
 
 
-def upgrade(root, *, check=False, channel=None, with_vault=False, with_tui=False):
+def upgrade(
+    root, *, check=False, channel=None, with_vault=False, with_tui=False, force=False
+):
     """Update only a positively verified package owner; never create a launcher."""
+    if force and check:
+        raise PackageUpdateError("--check and --force cannot be combined.")
     if os.geteuid() == 0:
         raise PackageUpdateError(
             "Run oc-box upgrade as your regular user, without sudo."
@@ -768,7 +772,7 @@ def upgrade(root, *, check=False, channel=None, with_vault=False, with_tui=False
         if target_order < current_order and not switched:
             print("Installed build is ahead of this channel; leaving it installed.")
             return None
-        if target_order == current_order and not adding_extras:
+        if target_order == current_order and not adding_extras and not force:
             print("oc-box is up to date.")
             if channel is not None:
                 _remember(owner, selected, extras)
@@ -797,6 +801,7 @@ def upgrade(root, *, check=False, channel=None, with_vault=False, with_tui=False
                 "tool",
                 "install",
                 "--force",
+                *(("--reinstall-package", "oc-box") if force else ()),
                 requirement,
                 "--no-config",
                 "--python",
@@ -817,6 +822,7 @@ def upgrade(root, *, check=False, channel=None, with_vault=False, with_tui=False
                 "--isolated",
                 "install",
                 "--upgrade",
+                *(("--force-reinstall",) if force else ()),
                 *PIP_FLAGS,
                 requirement,
             ]
@@ -828,7 +834,7 @@ def upgrade(root, *, check=False, channel=None, with_vault=False, with_tui=False
             raise PackageUpdateError(
                 "Updated environment ownership changed; preferences were not saved."
             )
-        if adding_extras:
+        if adding_extras or (force and kind in ("pipx", "uv")):
             # Provides-Extra is only advertised capability, not evidence that an
             # equal-version manager operation honored the added requirements.
             try:

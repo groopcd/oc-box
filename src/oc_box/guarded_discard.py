@@ -94,14 +94,22 @@ def _absolute(path):
     )
 
 
-def _identity(path):
+def _identity(path, *, persistent=False):
     uid = os.geteuid()
     with workspace_podman._path_fd(str(path), uid, directory=True) as (fd, info):
         _require(
             info.st_uid == uid,
             "An owned storage directory could not be verified.",
         )
-        return info.st_dev, info.st_ino, workspace_uninstall._mount_id(fd)
+        stamp = info.st_dev, info.st_ino, workspace_uninstall._mount_id(fd)
+        if not persistent:
+            return stamp
+        observed, stable = workspace_identity.snapshot_fd(fd)
+        _require(
+            list(stamp[:2]) == observed,
+            "The original private home filesystem identity could not be verified.",
+        )
+        return stamp, stable
 
 
 def _absent(path):
@@ -1012,7 +1020,10 @@ def _volume(data, scope, volume, selected, known, *, stale=False):
             "The original unused private home could not be verified.",
         )
         receipt = data.get(entrypoint_migration.RECEIPT)
-        stamp = _identity(mount)
+        if receipt is not None and entrypoint_migration.HOME_IDENTITY in data:
+            stamp, stable = _identity(mount, persistent=True)
+        else:
+            stamp, stable = _identity(mount), None
         parent = _identity(directory)
         binding = (name, stamp, volume["CreatedAt"], parent)
         _require(
@@ -1023,7 +1034,10 @@ def _volume(data, scope, volume, selected, known, *, stale=False):
             and (
                 stale or selected is not None or receipt is not None or known == binding
             )
-            and (receipt is None or list(stamp[:2]) == receipt["volume"]),
+            and (
+                receipt is None
+                or entrypoint_migration.volume_identity_matches(data, stamp[:2], stable)
+            ),
             "The original private home filesystem identity could not be verified.",
         )
         if selected is not None:

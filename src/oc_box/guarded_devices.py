@@ -1,4 +1,4 @@
-"""Verify ordinary saved accelerator/render bindings without opening a device."""
+"""Verify supported saved Podman device bindings without opening a device."""
 
 import contextlib
 import json
@@ -10,6 +10,9 @@ import tempfile
 
 
 _PATH = re.compile(r"/dev/(?:accel/accel[0-9]{1,6}|dri/renderD[0-9]{1,6})")
+_KVM_PATH = "/dev/kvm"
+_KVM_MAPPING = _KVM_PATH + ":rw"
+_KVM_DEVICE = os.makedev(10, 232)  # Linux misc major and KVM_MINOR.
 _ID = re.compile(r"[a-f0-9]{64}")
 _LIMIT = 1024 * 1024
 _DIR = os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW
@@ -23,12 +26,13 @@ _RUN_FILES = {
 _MESSAGES = {
     "unsupported": (
         "Guarded startup supports saved plain accelerator and render-node paths "
-        "only, not aliases, remaps, permission overrides, or CDI. Inspect "
+        "and the exact /dev/kvm:rw mapping. Other permission overrides, aliases, "
+        "remaps, and CDI are unsupported. Inspect "
         "'oc-box status --table'; preserve the existing workspace."
     ),
     "missing": (
-        "A registered accelerator or render device is missing or is no longer "
-        "a direct character device. Reconnect or enable the saved devices, "
+        "A registered accelerator, render, or KVM device is missing or is not "
+        "the expected direct character device. Reconnect or enable the saved devices, "
         "then retry without changing the registered mappings."
     ),
     "engine": (
@@ -81,15 +85,20 @@ class DeviceError(ValueError):
 
 
 def paths(data):
+    """Return node paths for the permitted saved Podman argument spellings."""
     saved = data.get("devices", [])
     if (
         type(saved) is not list
         or len(saved) > 16
-        or not all(type(path) is str and _PATH.fullmatch(path) for path in saved)
+        or not all(
+            type(mapping) is str
+            and (mapping == _KVM_MAPPING or _PATH.fullmatch(mapping))
+            for mapping in saved
+        )
         or len(saved) != len(set(saved))
     ):
         raise DeviceError("unsupported")
-    return tuple(saved)
+    return tuple(_KVM_PATH if mapping == _KVM_MAPPING else mapping for mapping in saved)
 
 
 def _node(path):
@@ -98,12 +107,16 @@ def _node(path):
     with contextlib.ExitStack() as stack:
         dev = os.open("/dev", os.O_PATH | _DIR)
         stack.callback(os.close, dev)
-        group = os.open(prefix.removeprefix("/dev/"), os.O_PATH | _DIR, dir_fd=dev)
-        stack.callback(os.close, group)
+        group = dev
+        if prefix != "/dev":
+            group = os.open(prefix.removeprefix("/dev/"), os.O_PATH | _DIR, dir_fd=dev)
+            stack.callback(os.close, group)
         node = os.open(name, os.O_PATH | _FD, dir_fd=group)
         stack.callback(os.close, node)
         info = os.fstat(node)
-        if not stat.S_ISCHR(info.st_mode):
+        if not stat.S_ISCHR(info.st_mode) or (
+            path == _KVM_PATH and info.st_rdev != _KVM_DEVICE
+        ):
             raise DeviceError("missing")
         return info.st_dev, info.st_ino, info.st_rdev
 
@@ -298,6 +311,9 @@ def verify(box, data, info, env, *, fresh=False):
     saved = paths(data)
     if not saved:
         return ()
+    # Podman records the argument spelling (including :rw) in CreateCommand
+    # and Specgen, but the effective rootless bind uses the bare node path.
+    mappings = data["devices"]
     try:
         ident, host = info["Id"], info["HostConfig"]
         create = info["Config"]["CreateCommand"]
@@ -315,7 +331,7 @@ def verify(box, data, info, env, *, fresh=False):
                 for item in create
                 if item == "--device" or item.startswith("--device=")
             ]
-            != [f"--device={path}" for path in saved]
+            != [f"--device={mapping}" for mapping in mappings]
         ):
             raise ValueError
     except (TypeError, KeyError, ValueError, AttributeError):
@@ -330,17 +346,17 @@ def verify(box, data, info, env, *, fresh=False):
         raise DeviceError("contract")
     if (
         not isinstance(declared, list)
-        or len(declared) != len(saved)
+        or len(declared) != len(mappings)
         or not all(
             type(row) is dict
             and set(row) == {"path", "type", "major", "minor"}
-            and row["path"] == path
+            and row["path"] == mapping
             and row["type"] == ""
             and type(row["major"]) is int
             and row["major"] == 0
             and type(row["minor"]) is int
             and row["minor"] == 0
-            for row, path in zip(declared, saved)
+            for row, mapping in zip(declared, mappings)
         )
     ):
         raise DeviceError("mismatch")
@@ -362,5 +378,6 @@ def creation_env(env, saved):
         override = Path(directory) / "devices.conf"
         with override.open("x", encoding="ascii") as file:
             os.fchmod(file.fileno(), 0o600)
-            file.write("[containers]\ndevices = []\n")
+            # An earlier containers.conf may have enabled append behavior.
+            file.write("[containers]\ndevices = [{append = false}]\n")
         yield {**env, "CONTAINERS_CONF_OVERRIDE": str(override)}

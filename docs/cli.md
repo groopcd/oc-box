@@ -12,6 +12,7 @@ oc-box stop [--project PATH | --workspace ID] [LIFECYCLE-LOG-OPTIONS]
 oc-box sync [--project PATH | --workspace ID] [--persisted | [--cpus N] [--memory SIZE] [--pids-limit N]] [LIFECYCLE-LOG-OPTIONS]
 oc-box reset [--project PATH | --workspace ID] [RESET-OPTIONS] [LIFECYCLE-LOG-OPTIONS]
 oc-box repair [--project PATH | --workspace ID]
+oc-box repair --workspace ID --private-home
 oc-box terminal [--project PATH | --workspace ID] [--maintenance] [LIFECYCLE-LOG-OPTIONS]
 oc-box share PATH [--project PATH | --workspace ID] [--acknowledge-risk]
 oc-box attach PATH --session ID [--project PATH | --workspace ID] [--text TEXT] [--send] [--acknowledge-risk]
@@ -29,7 +30,7 @@ oc-box status [--project PATH | --workspace ID] [--json | --table]
 oc-box logs [--journald | --log-dir PATH] [--project PATH | --workspace ID] [--level LEVEL | --verbose[=LEVEL]] [--limit N] [--tail] [-f | --follow] [--json | --table]
 oc-box logs [--log-dir PATH] --path
 oc-box tui [--project PATH | --workspace ID] [--read-only] [--demo]
-oc-box upgrade [--check] [--stable | --devel] [--vault] [--tui]
+oc-box upgrade [--check | --force] [--stable | --devel] [--vault] [--tui]
 oc-box upgrade --auto-update on|off
 oc-box --uninstall [--dry-run]
 oc-box --uninstall --full [--dry-run]  # reports incomplete cleanup
@@ -298,24 +299,36 @@ at handoff. No badge is added to native UI or subprocess streams, credential
 prompts, or other commands such as `status`, `logs`, `web`, and `terminal`.
 Pipes and `TERM=dumb` receive neither badge nor padding.
 The container OpenCode version is verified against the host on every launch;
-there is no automatic switch to another release. On an existing stopped
-standard V2 workspace, a forward stable `2.x.y` update (including a patch
-update) must pass isolated preflight before normal preparation. To enroll
-without changing versions, use `oc-box start --runtime-guard`. After preflight
-and admission, the workspace remembers the exact runtime artifact; unchanged
-launches do not repeat package downloads or the synthetic check.
+there is no automatic switch to another release. Routine OpenCode upgrades do
+not enroll a workspace into the runtime safeguard or require the disposable
+probe. Use `oc-box runtime-check VERSION` to run that check independently, or
+`oc-box start --runtime-guard` to require it when enrolling or advancing a
+protected workspace.
 
-A confirmed required-plugin failure is remembered for
+On an already enrolled workspace, plain owning `start` warns on a forward
+stable OpenCode change and continues without the disposable probe. It still
+verifies the existing workspace, pins the selected host executable, requires
+the public npm artifact to match before recording the new version floor, and
+verifies the matching container executable and actual private service and
+required Build plugin. The artifact check does not need a separate Podman
+image or run any npm scripts. Unchanged launches reuse the recorded runtime
+checks without
+repeating the synthetic check. An in-progress legacy replacement still
+requires the isolated proof and its own review.
+
+A confirmed required-plugin failure from guarded preflight is remembered for
 that exact release, host artifact, and probe code. It leaves the existing
 runtime in place and prints a GitHub issue link. A different candidate, such as
 `2.4.1` after a refusal of `2.4.0`, gets its own check. An explicit
-`--runtime-guard` rechecks a remembered refusal rather than bypassing it.
+`--runtime-guard` reruns the isolated check for a new runtime instead of
+reusing a remembered refusal. A remembered result is not used to block a
+routine upgrade.
 Unavailable downloads, timeouts, uncertain cleanup and artifact mismatches are
 not recorded as proof that an upstream version is unsupported. Report the
 versions and fixed refusal category, not private output.
 
-Guarded admission currently requires the official native host executable with
-the same bytes as the verified container artifact and a standard stopped
+Guarded admission currently requires the native host executable with
+the same bytes as the official container artifact and a standard stopped
 container/home pair on a glibc-based catalog distribution. Alpine, script shims
 and custom Podman arguments are not supported. Only owning `start`
 admits a changed version. Guarded `web`,
@@ -324,18 +337,29 @@ admits a changed version. Guarded `web`,
 workspaces. An existing private owner still serves additional clients without
 starting a preflight or refreshing its credentials.
 
+Guarded startup preserves the selected local Podman environment. A forwarded
+setting may reuse an identical engine value, such as `USER`, but may not
+override engine selectors or replace a different engine value. Those conflicts
+are reported before starting the workspace or advancing its runtime floor.
+
 A guarded launch can keep already registered plain accelerator and render
-character devices (`/dev/accel/accelN` and `/dev/dri/renderDN`) when local
-rootless Podman can verify both the saved and effective bindings. It requires
-an overlay store and `podman generate spec` support. The paths must be direct
-nodes, not aliases, directory expansions, remaps, permission overrides, or CDI
-names. No device or host policy is changed. Reconnect any missing mapped device
+character devices (`/dev/accel/accelN` and `/dev/dri/renderDN`) and the exact
+`/dev/kvm:rw` binding when local rootless Podman can verify both the saved and
+effective bindings. It requires an overlay store and `podman generate spec`
+support. The paths must be direct nodes, not aliases, directory expansions,
+remaps, other permission overrides, or CDI names. The isolated native preflight
+does not receive these devices. No device or host policy is changed.
+Reconnect any missing mapped device
 and retry with the saved settings; `oc-box status --table` lists those settings.
 Guarded purge and `sync --persisted` do not admit these device-backed workspaces.
 On a verified stopped container, Podman's own hostname, hosts, resolver, and
 container-environment runtime files may already have been cleaned up. Missing
 files are tolerated only at that exact container's known runtime paths; a
 missing project mount, unknown bind source, or device node still refuses.
+Once the existing container and its core mounts are usable and the mapped
+character nodes are visible, limited read/write permission warns instead of
+blocking startup. A missing or unverified binding still refuses. A staged
+replacement must verify access before retiring the original.
 
 New containers use an absolute `/bin/sleep` path for their passive entrypoint.
 The safeguard refuses older containers whose stored entrypoint would look up
@@ -1726,12 +1750,27 @@ oc-box repair --project ~/devel/demo
 oc-box --project ~/devel/demo --resume
 ```
 
-Accepts only `--project` or `--workspace` selectors, besides help. With neither,
+For project repair, use `--project` or `--workspace`. With neither,
 use the current directory. If a missing marker has exactly one registered
 workspace for this path, `--project` selects it. If several records reference
 the path, repair refuses to choose: inspect `--status` and supply `--workspace
 ID` explicitly. With `--workspace`, check the registered path and restore its
 missing marker rather than using the current directory.
+
+`oc-box repair --workspace ID --private-home` is a separate, one-time repair
+for older converted-home receipts that predate persistent filesystem identity.
+It requires the full workspace ID, a completed guarded conversion, the exact
+stopped container and its own private home, a matching directory inode number,
+and kernel support for persistent filesystem identity. The inode number alone
+does not prove this is the original volume. Review the resources on the
+controlling terminal and type `REPAIR HOME ID` only if you know it is the
+original private home. The command records the filesystem ID and handle for
+future verification after
+checking the same resources again; it does not start Podman resources, renew
+credentials, change the runtime floor, or move any conversations. A mismatching
+previously recorded persistent identity or an unfinished transition cannot be
+repaired this way. When already recorded, a matching persistent identity allows
+ordinary device renumbering without another repair.
 
 ### purge
 
@@ -1999,6 +2038,7 @@ oc-box upgrade --devel --vault  # Add vault dependencies independently
 oc-box upgrade --devel --tui    # Add dashboard dependencies independently
 oc-box upgrade --devel --vault --tui
 oc-box upgrade                  # Follow the saved channel
+oc-box upgrade --force          # Reinstall from the owning channel
 oc-box upgrade --stable
 oc-box upgrade --auto-update on
 oc-box upgrade --auto-update off
@@ -2011,6 +2051,12 @@ An ambiguous owner or editable checkout receives manual guidance rather than
 a guessed installation target. Verified uv/pipx owners can receive additive
 package-extra requests. Plain pip cannot prove prior requested extras, so
 ambiguous extras still refuse rather than guessing what to preserve.
+
+`--force` reinstalls the selected published release even when already current.
+It stages a new GitHub release directory, or reinstalls the exact PyPI version
+through the verified owning package manager. It does not change installation
+method, permit an implicit downgrade, or bypass ownership verification.
+It cannot be combined with `--check` or `--auto-update`.
 
 `--vault` and `--tui` independently request optional installer dependencies.
 They work from stable or development installations and can be combined with
@@ -2054,6 +2100,11 @@ the activated release. An older flat installation is migrated; its old manuals
 are preserved as `legacy-docs`. No workspaces or credentials are migrated/deleted.
 
 GitHub automatic updates are off by default and follow the saved release channel.
+On supported filesystems, new installer receipts retain persistent filesystem
+identity so a device-number change alone does not interrupt verified handoff.
+An older receipt that already mismatches cannot prove that identity; use
+`oc-box upgrade --force` from the active GitHub launcher, or rerun the verified
+installer once. This does not change workspace registrations.
 `--auto-update on` saves `auto_update: true` in the existing host oc-box
 configuration, retaining settings such as `pass_env`.
 The verified active launcher checks before Podman/workspace setup. The installer
@@ -2787,6 +2838,15 @@ OpenCode session IDs. Example: `oc-box --status --workspace WORKSPACE_ID`.
 For `logs`, this is an exact workspace ID filter and cannot be combined with
 `--project`.
 
+### --private-home
+
+With `repair --workspace ID`, record the persistent filesystem identity of an
+existing converted private home after typed confirmation. The workspace must
+be stopped, and an older receipt must not already have a persistent baseline.
+Matching the old inode number does not prove past identity; confirm only if you
+independently know this is the original volume. This does not start the
+container, change its runtime floor, or move conversations.
+
 ### --status
 
 Report CPU, RAM, storage, state, limits, and sessions without opening OpenCode.
@@ -2964,8 +3024,16 @@ and validate support for requested `--vault`/`--tui` extras without installing
 or persisting channel/extra preferences. Returns success when a version is
 available or the installation is current; it is not an update-available exit
 code. Network errors or unsupported requested extras return nonzero. Cannot be
-combined with `--auto-update`, workspace selectors or other commands.
+combined with `--auto-update`, `--force`, workspace selectors or other commands.
 Example: `oc-box upgrade --devel --tui --check`.
+
+### --force
+
+With `upgrade`, reinstall the selected published release even when already
+current. This uses the verified GitHub installation or the verified Python
+package manager and preserves supported extras. It does not permit an implicit
+downgrade or change workspace state. Cannot be combined with `--check` or
+`--auto-update`. Example: `oc-box upgrade --force`.
 
 ### --stable
 
@@ -3562,7 +3630,8 @@ opens with or without this flag. The old compact session index is not served.
 ### --runtime-guard
 
 Enroll an existing stopped standard OpenCode 2.x workspace on an owning
-`start`, even without a version change. Rechecks an isolated refusal rather
+`start`, even without a version change, or require isolated preflight when
+advancing an already enrolled workspace. Rechecks an isolated refusal rather
 than overriding it. The guard persists after runtime admission; there is no
 switch to delete the version fence. This option is not a request for rollback,
 and does not apply to attach-only clients or `reset`.

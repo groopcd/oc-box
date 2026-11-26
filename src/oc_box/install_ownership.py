@@ -18,11 +18,14 @@ import sys
 
 if __package__:
     from . import host_file_open_policy as layout
+    from . import workspace_identity
 else:
     import host_file_open_policy as layout
+    import workspace_identity
 
 
 INVENTORY = ".install-inventory-v2.json"
+_VFS_IDENTITY = "vfs_identity"
 UPGRADE_LOCK = ".upgrade.lock"
 USE_LOCK = ".install-use.lock"
 HANDOFF_FD = "OC_BOX_INSTALL_USE_FD"
@@ -121,6 +124,46 @@ def _mount(fd):
 
 def _anchor(fd):
     return (*_identity(os.fstat(fd)), _mount(fd))
+
+
+def _inventory_vfs(mount, descriptors):
+    """Prove one filesystem for the four inventory anchors and wrapper parent."""
+    device = descriptors[0][1][0]
+    filesystem = None
+    handles = []
+    for fd, anchor in descriptors:
+        if anchor[-1] != mount:
+            raise OwnershipError("An installation anchor crosses a mount boundary.")
+        if anchor[0] != device:
+            return None
+        identity, stable = workspace_identity.snapshot_fd(fd)
+        if tuple(identity) != anchor[:2] or _anchor(fd) != anchor:
+            raise OwnershipError("An installation anchor changed during verification.")
+        if stable is None:
+            return None
+        observed = stable["method"], stable["fsid"]
+        if filesystem is None:
+            filesystem = observed
+        if observed != filesystem:
+            return None
+        handles.append(stable["handle"])
+    method, fsid = filesystem
+    return {"method": method, "fsid": fsid, "handles": handles}
+
+
+def _matches_inventory_stamp(recorded, observed, device_remap):
+    if (
+        not isinstance(recorded, list)
+        or len(recorded) != len(observed)
+        or any(type(value) is not int for value in recorded)
+    ):
+        return False
+    if device_remap is not None:
+        previous, current = device_remap
+        if observed[0] != current:
+            return False
+        observed = (previous, *observed[1:])
+    return recorded == list(observed)
 
 
 def _owner(info, *, private=False):
@@ -404,7 +447,9 @@ def _artifact(parent, path, info, link=None):
     return InstallArtifact(path, _anchor(parent), _stamp(info), link)
 
 
-def _inventory_bytes(home, release, anchors, lock, upgrade, receipt, artifacts):
+def _inventory_bytes(
+    home, release, anchors, lock, upgrade, receipt, artifacts, *, vfs_identity
+):
     return (
         json.dumps(
             {
@@ -416,6 +461,7 @@ def _inventory_bytes(home, release, anchors, lock, upgrade, receipt, artifacts):
                 "lock": _stamp(lock),
                 "upgrade": _stamp(upgrade),
                 "receipt": _identity(receipt),
+                **({_VFS_IDENTITY: vfs_identity} if vfs_identity is not None else {}),
                 "artifacts": {
                     str(item.path.relative_to(home)): [
                         item.parent[:-1],
@@ -560,7 +606,8 @@ def _snapshot(
             _directory(releases, release.name, mount, private=True)
         )
         lock = _lock_info(root, layout.INSTALL_LOCK, mount)
-        anchors = (_anchor(owner), _anchor(root), _anchor(releases), _anchor(pinned))
+        anchor_fds = (owner, root, releases, pinned)
+        anchors = tuple(map(_anchor, anchor_fds))
         current = f"releases/{release.name}"
         if recording:
             if _stamp(os.fstat(pinned)) != staging.directory or (
@@ -591,8 +638,52 @@ def _snapshot(
             expected = ledger["artifacts"]
             if not isinstance(expected, dict) or len(expected) > _MAX_ENTRIES:
                 raise OwnershipError("The release inventory is invalid.")
+            if activation:
+                recorded_anchors = ledger.get("anchors")
+                if not isinstance(recorded_anchors, list) or len(
+                    recorded_anchors
+                ) != len(anchors):
+                    raise OwnershipError("The activation inventory is invalid.")
         upgrade = _lock_info(root, UPGRADE_LOCK, mount)
         use_lock = _lock_info(pinned, USE_LOCK, mount, private=True)
+        wrapper_parent = below(owner, layout.LAUNCHER.parent.parts)
+        vfs_identity = None
+        device_remap = None
+        # A legacy receipt can only be used as recorded; a live probe cannot
+        # establish where older st_dev values came from.
+        if recording or _VFS_IDENTITY in ledger:
+            vfs_identity = _inventory_vfs(
+                mount,
+                (*zip(anchor_fds, anchors), (wrapper_parent, _anchor(wrapper_parent))),
+            )
+            if not recording:
+                recorded_vfs = ledger[_VFS_IDENTITY]
+                if (
+                    vfs_identity is None
+                    or recorded_vfs != vfs_identity
+                    or any(
+                        type(handle["type"]) is not int
+                        for handle in recorded_vfs["handles"]
+                    )
+                ):
+                    raise OwnershipError(
+                        "The filesystem identity no longer matches the installation inventory."
+                    )
+                if activation:
+                    old_home = recorded_anchors[0]
+                    if (
+                        not isinstance(old_home, list)
+                        or not old_home
+                        or type(old_home[0]) is not int
+                    ):
+                        raise OwnershipError("The activation inventory is invalid.")
+                    if old_home[0] != anchors[0][0]:
+                        # Rebase comparisons to the historical number only. Live
+                        # stamps, mount checks and the handoff token stay exact.
+                        device_remap = (old_home[0], anchors[0][0])
+
+        def matches(recorded, observed):
+            return _matches_inventory_stamp(recorded, observed, device_remap)
 
         def add(parent, path, info, link=None, *, output=False):
             item = _artifact(parent, path, info, link)
@@ -607,14 +698,18 @@ def _snapshot(
                     raise OwnershipError(
                         "The installed release changed after it was staged."
                     )
-            elif expected.get(str(path.relative_to(home))) != [
-                list(item.parent[:-1]),
-                list(item.stamp),
-                item.link,
-            ]:
-                raise OwnershipError(
-                    "The installation no longer matches its inventory."
-                )
+            else:
+                entry = expected.get(str(path.relative_to(home)))
+                if (
+                    not isinstance(entry, list)
+                    or len(entry) != 3
+                    or not matches(entry[0], item.parent[:-1])
+                    or not matches(entry[1], item.stamp)
+                    or entry[2] != item.link
+                ):
+                    raise OwnershipError(
+                        "The installation no longer matches its inventory."
+                    )
             artifacts.append(item)
 
         path = install / "current"
@@ -632,7 +727,11 @@ def _snapshot(
         for relative in (
             (layout.LAUNCHER,) if activation else (layout.LAUNCHER, *layout._AUXILIARY)
         ):
-            parent = below(owner, relative.parent.parts)
+            parent = (
+                wrapper_parent
+                if relative == layout.LAUNCHER
+                else below(owner, relative.parent.parts)
+            )
             path = home / relative
             info = _inspect(parent, path.name, mount)
             add(parent, path, info, output=True)
@@ -655,10 +754,13 @@ def _snapshot(
                 ledger.get("version") != 2
                 or ledger.get("capture") != "before-activation"
                 or ledger.get("release") != str(release)
-                or ledger.get("anchors") != [list(anchor[:-1]) for anchor in anchors]
-                or ledger.get("lock") != list(_stamp(lock))
-                or ledger.get("upgrade") != list(_stamp(upgrade))
-                or ledger.get("receipt") != list(_identity(receipt))
+                or not all(
+                    matches(recorded, anchor[:-1])
+                    for recorded, anchor in zip(recorded_anchors, anchors)
+                )
+                or not matches(ledger.get("lock"), _stamp(lock))
+                or not matches(ledger.get("upgrade"), _stamp(upgrade))
+                or not matches(ledger.get("receipt"), _identity(receipt))
             ):
                 raise OwnershipError("The activation inventory no longer matches.")
             for name in ("oc_box.py", "build-info.json", USE_LOCK):
@@ -698,7 +800,14 @@ def _snapshot(
 
         def encode(marker):
             data = _inventory_bytes(
-                home, release, anchors, lock, upgrade, marker, artifacts
+                home,
+                release,
+                anchors,
+                lock,
+                upgrade,
+                marker,
+                artifacts,
+                vfs_identity=vfs_identity,
             )
             if len(data) > _LIMIT:
                 raise OwnershipError("The release inventory exceeds its review limits.")
