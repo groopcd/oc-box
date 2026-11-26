@@ -872,6 +872,7 @@ def client_command(
     force_tty=False,
     ui_owner=False,
     file_preview=False,
+    activity_timeline=False,
     engine_env=None,
 ):
     """No host pass_env, auth refresh, profiles, or vault unlock on attach.
@@ -965,6 +966,18 @@ def client_command(
                 binding["ownerClient"] if ui_owner else secrets.token_hex(16)
             )
             names["OC_BOX_UI_STATE_GENERATION"] = binding["generation"]
+        if ui_owner and activity_timeline:
+            if binding is None:
+                startup_output.line(
+                    "oc-box: Activity timeline unavailable: the native UI helper did not load. Check the workspace OpenCode version and plug-in policy.",
+                    flush=True,
+                )
+            else:
+                names["OC_BOX_ACTIVITY_TIMELINE"] = "1"
+                startup_output.line(
+                    "oc-box: Activity timeline on (Ctrl+P: Open activity timeline).",
+                    flush=True,
+                )
         if file_preview:
             if __package__:
                 from . import file_preview as preview, file_preview_host

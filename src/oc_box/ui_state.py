@@ -37,6 +37,10 @@ RESOURCES = (
     "file_preview_io.py",
     "file_preview_png.py",
 )
+ACTIVITY_TIMELINE_RESOURCES = (
+    "activity_timeline_tui.tsx",
+    "activity_timeline_events.mjs",
+)
 
 
 @dataclass(frozen=True)
@@ -66,7 +70,7 @@ def _id(value):
     )
 
 
-def package_sources(package):
+def package_sources(package, *, include_addons=False):
     """Generated private container package; never write a host plugin/config."""
     manifest = {
         "name": "oc-box-ui-state",
@@ -79,7 +83,13 @@ def package_sources(package):
     }
     return {
         "package.json": (json.dumps(manifest) + "\n").encode(),
-        **{name: (Path(package) / name).read_bytes() for name in RESOURCES},
+        **{
+            name: (Path(package) / name).read_bytes()
+            for name in (
+                *RESOURCES,
+                *(ACTIVITY_TIMELINE_RESOURCES if include_addons else ()),
+            )
+        },
     }
 
 

@@ -24,6 +24,7 @@ oc\-box distros
 oc\-box doctor [\-\-json | \-\-table] [\-\-feature FEATURE]...
 oc\-box runtime\-check VERSION
 oc\-box completion bash
+oc\-box addon [NAME [on|off]] [\-\-project PATH | \-\-workspace ID]
 oc\-box web [\-\-project PATH | \-\-workspace ID] [\-\-session ID] [\-\-port N] [\-\-no\-open] [\-\-no\-vault] [\-\-attachments] [\-\-workspace\-layout] [LIFECYCLE\-LOG\-OPTIONS]
 oc\-box \-\-status [\-\-project PATH | \-\-workspace ID] [\-\-json | \-\-table]
 oc\-box status [\-\-project PATH | \-\-workspace ID] [\-\-json | \-\-table]
@@ -50,7 +51,7 @@ oc\-box COMMAND \-\-help
 .fam T
 .fi
 .PP
-The command defaults to \fBstart\fR\&. For the shared launcher commands, such as \fBstart\fR, \fBreset\fR, \fBstop\fR, \fBsync\fR and \fBterminal\fR, options may appear before or after the command. Put dedicated commands (\fBattach\fR, \fBbackup\fR, \fBbackup\-info\fR, \fBcompletion\fR, \fBdoctor\fR, \fBlogs\fR, \fBpreferences\fR, \fBrestore\fR, \fBsecrets\fR, \fBshare\fR, \fBtui\fR and \fBweb\fR) first. Run the launcher on the host as your regular user, without sudo. It manages rootless Podman; container root is mapped to the unprivileged host user.
+The command defaults to \fBstart\fR\&. For the shared launcher commands, such as \fBstart\fR, \fBreset\fR, \fBstop\fR, \fBsync\fR and \fBterminal\fR, options may appear before or after the command. Put dedicated commands (\fBaddon\fR, \fBattach\fR, \fBbackup\fR, \fBbackup\-info\fR, \fBcompletion\fR, \fBdoctor\fR, \fBlogs\fR, \fBpreferences\fR, \fBrestore\fR, \fBsecrets\fR, \fBshare\fR, \fBtui\fR and \fBweb\fR) first. Run the launcher on the host as your regular user, without sudo. It manages rootless Podman; container root is mapped to the unprivileged host user.
 .PP
 \fBSTART\-OPTIONS\fR cover session selection, model, container setup, native TUI features and credential delivery. \fBRESET\-OPTIONS\fR use the corresponding reset options but do not import a host session. See [start](#start) and [reset](#reset) for their effects, or \fBoc\-box start \-\-help\fR and \fBoc\-box reset \-\-help\fR for the scoped flags. \fBCREDENTIAL\-OPTIONS\fR are \fB\-\-credential\-mode\fR, \fB\-\-env\-secret\fR, \fB\-\-vault\-secret\fR and \fB\-\-clear\-credentials\fR; see [credentials](#credentials).
 .PP
@@ -88,6 +89,23 @@ Print the bundled shell completion script to stdout. Bash is currently the only 
 source <(oc\-box completion bash)
 .fam T
 .fi
+.SS addon
+.PP
+List the bundled native TUI add\-ons, each with its saved workspace setting and default. By default the command selects the current directory's registered workspace. Without a registered workspace it can list defaults, but saving a switch requires an existing workspace. \fB\-\-project PATH\fR and \fB\-\-workspace ID\fR select a different workspace. Activity Timeline is disabled by default.
+.PP
+.nf
+.fam C
+oc\-box addon
+oc\-box addon activity\-timeline on
+oc\-box addon activity\-timeline off
+.fam T
+.fi
+.PP
+The switch persists in host\-only workspace preferences. It does not start Podman, unlock credentials, or change OpenCode configuration. It applies to the next owning native TUI launch, not to an already open client or an attach\-only client. \fBoff\fR disables the add\-on; no uninstall or config edit is needed. When enabled, oc\-box prints a one\-line startup notice.
+.PP
+In an open session, use \fBCtrl+P\fR and select \fBOpen activity timeline\fR, or use \fB/\:activity\-timeline\fR\&. The panel shows full local dates, times to the second, and UTC offsets for prompt and assistant message creation and tool invocations. A tool invocation timestamp is the native recorded call time, not an independently observed execution start. If only creation was recorded, the panel labels the invocation time unknown rather than using the completion time.
+.PP
+This is a recent\-activity view, not an audit log: it shows up to 200 events from the newest 200 loaded messages in the current session, considering the last 128 parts of each assistant message. It does not fetch older messages, traverse child sessions, or display prompt text, tool arguments, or tool results. It reads the TUI's existing message metadata without changing messages or making any requests to a model, so it adds no model tokens. It requires the public V2 session\-panel API (tested with native 2.4.0 and 2.4.1) and does not affect OpenCode 1.x, the browser UI, or the oc\-box manager.
 .SS doctor
 .PP
 Report prerequisites by feature, missing commands, and installation commands for the OS running doctor. It is read\-only: no packages installed, network requests, Podman operations, workspace/config changes, or secret prompts. Run on the host for host advice. Inside oc\-box it explicitly reports \fBcurrent\-container\fR; this cannot inspect host packages. A workspace's selected distro does not determine host package guidance. Unknown hosts list required providers without guessing a package manager from the default workspace image or executing os\-release text.

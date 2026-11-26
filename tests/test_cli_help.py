@@ -14,6 +14,7 @@ from oc_box import activity_log
 from oc_box import oc_box as box
 
 _COMMANDS = (
+    "addon",
     "attach",
     "backup",
     "backup-info",

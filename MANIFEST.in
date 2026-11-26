@@ -7,6 +7,7 @@ recursive-include docs/assets *.png
 include docs/assets/tui/manifest.json
 include completions/oc-box
 recursive-include src *.py *.js *.tsx
+include src/oc_box/activity_timeline_events.mjs
 include src/oc_box/web_sessions.css
 include src/oc_box/web_studio_shell.css src/oc_box/web_studio_shell.mjs
 include src/oc_box/web_studio_transcript.css src/oc_box/web_studio_transcript.mjs

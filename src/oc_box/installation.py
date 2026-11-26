@@ -139,6 +139,8 @@ RUNTIME_FILES = (
     "file_preview.py",
     "file_preview_io.py",
     "file_preview_tui.tsx",
+    "activity_timeline_tui.tsx",
+    "activity_timeline_events.mjs",
     "file_preview_png.py",
     "file_preview_host.py",
     "file_open_formats.py",

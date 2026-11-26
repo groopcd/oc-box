@@ -7,8 +7,12 @@ export default Plugin.define({
   id: "oc-box.ui-state.tui",
   setup(context) {
     const stopReporter = setupReporter(context)
+    const stopActivity = process.env.OC_BOX_ACTIVITY_TIMELINE === "1" ? setupActivity(context) : undefined
     if (!process.env.OC_BOX_FILE_PREVIEW_ROOTS) {
-      return stopReporter
+      return stopActivity ? async () => {
+        stopActivity()
+        await stopReporter?.()
+      } : stopReporter
     }
     let stopped = false
     let stopPreview
@@ -34,10 +38,30 @@ export default Plugin.define({
     return async () => {
       stopped = true
       stopPreview?.()
+      stopActivity?.()
       await stopReporter?.()
     }
   },
 })
+
+function setupActivity(context) {
+  let stopped = false
+  let dispose
+  void import("./activity_timeline_tui.tsx").then(({ install }) => {
+    if (!stopped) dispose = install(context)
+  }).catch(() => {
+    if (!stopped) {
+      context.ui.toast.show({
+        message: "Activity timeline unavailable: this OpenCode TUI does not provide a compatible session panel.",
+        variant: "warning",
+      })
+    }
+  })
+  return () => {
+    stopped = true
+    dispose?.()
+  }
+}
 
 function setupReporter(context) {
   // The launcher supplies NONSECRET per-process labels only to native TUI

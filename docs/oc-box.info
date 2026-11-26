@@ -65,6 +65,7 @@ File: oc-box.info,  Node: Synopsis,  Next: Description,  Prev: Name,  Up: Top
      oc-box doctor [--json | --table] [--feature FEATURE]...
      oc-box runtime-check VERSION
      oc-box completion bash
+     oc-box addon [NAME [on|off]] [--project PATH | --workspace ID]
      oc-box web [--project PATH | --workspace ID] [--session ID] [--port N] [--no-open] [--no-vault] [--attachments] [--workspace-layout] [LIFECYCLE-LOG-OPTIONS]
      oc-box --status [--project PATH | --workspace ID] [--json | --table]
      oc-box status [--project PATH | --workspace ID] [--json | --table]
@@ -91,7 +92,7 @@ File: oc-box.info,  Node: Synopsis,  Next: Description,  Prev: Name,  Up: Top
 
 The command defaults to ‘start’.  For the shared launcher commands, such
 as ‘start’, ‘reset’, ‘stop’, ‘sync’ and ‘terminal’, options may appear
-before or after the command.  Put dedicated commands (‘attach’,
+before or after the command.  Put dedicated commands (‘addon’, ‘attach’,
 ‘backup’, ‘backup-info’, ‘completion’, ‘doctor’, ‘logs’, ‘preferences’,
 ‘restore’, ‘secrets’, ‘share’, ‘tui’ and ‘web’) first.  Run the launcher
 on the host as your regular user, without sudo.  It manages rootless
@@ -236,7 +237,46 @@ edits shell startup files automatically.
 
      source <(oc-box completion bash)
 
-4.2 doctor
+4.2 addon
+=========
+
+List the bundled native TUI add-ons, each with its saved workspace
+setting and default.  By default the command selects the current
+directory's registered workspace.  Without a registered workspace it can
+list defaults, but saving a switch requires an existing workspace.
+‘--project PATH’ and ‘--workspace ID’ select a different workspace.
+Activity Timeline is disabled by default.
+
+     oc-box addon
+     oc-box addon activity-timeline on
+     oc-box addon activity-timeline off
+
+The switch persists in host-only workspace preferences.  It does not
+start Podman, unlock credentials, or change OpenCode configuration.  It
+applies to the next owning native TUI launch, not to an already open
+client or an attach-only client.  ‘off’ disables the add-on; no
+uninstall or config edit is needed.  When enabled, oc-box prints a
+one-line startup notice.
+
+In an open session, use ‘Ctrl+P’ and select ‘Open activity timeline’, or
+use ‘/activity-timeline’.  The panel shows full local dates, times to
+the second, and UTC offsets for prompt and assistant message creation
+and tool invocations.  A tool invocation timestamp is the native
+recorded call time, not an independently observed execution start.  If
+only creation was recorded, the panel labels the invocation time unknown
+rather than using the completion time.
+
+This is a recent-activity view, not an audit log: it shows up to 200
+events from the newest 200 loaded messages in the current session,
+considering the last 128 parts of each assistant message.  It does not
+fetch older messages, traverse child sessions, or display prompt text,
+tool arguments, or tool results.  It reads the TUI's existing message
+metadata without changing messages or making any requests to a model, so
+it adds no model tokens.  It requires the public V2 session-panel API
+(tested with native 2.4.0 and 2.4.1) and does not affect OpenCode 1.x,
+the browser UI, or the oc-box manager.
+
+4.3 doctor
 ==========
 
 Report prerequisites by feature, missing commands, and installation
@@ -284,7 +324,7 @@ ordinary V1 launches without vault values and attach-only clients do
 not.  It is separate from the version-neutral ‘launch’ prerequisites:
 doctor does not start OpenCode to infer its version.
 
-4.3 runtime-check
+4.4 runtime-check
 =================
 
 Test an exact stable OpenCode 2.x release before installing it on the
@@ -305,7 +345,7 @@ platform, or future OpenCode integration.  The console prints one result
 line; ‘oc-box logs --tail’ shows the staging, offline probe, and cleanup
 outcomes and timings.  Raw native and installer output is not saved.
 
-4.4 start
+4.5 start
 =========
 
 Create or resume an environment.  This is the default when no command is
@@ -513,7 +553,7 @@ future workspace TUI clients, or ‘--no-host-clipboard’ to disable it.
 Only that shortcut reads the clipboard; enabling the preference or
 starting a client does not read it.
 
-4.5 preferences
+4.6 preferences
 ===============
 
 Read or change host-only UI preferences for an **existing registered
@@ -577,7 +617,7 @@ archived authority: backup/restore into a fresh workspace does not
 reactivate these host preferences.  The new workspace uses the defaults
 above until explicitly changed.
 
-4.6 stop
+4.7 stop
 ========
 
 Stop a registered container without deleting the project, container OS,
@@ -601,7 +641,7 @@ stop behavior is unchanged.
 
      oc-box stop --project ~/devel/demo
 
-4.7 share
+4.8 share
 =========
 
 **Experimental, V2 only:** temporarily give a running workspace live
@@ -670,7 +710,7 @@ configuration.  It is not a promise of compatibility with every V2
 version or an accepted live host pass; see the focused validation
 requirements in ‘docs/testing.md’.
 
-4.8 attach
+4.9 attach
 ==========
 
 **Experimental, host-only, OpenCode V2:** disclose one host image to an
@@ -771,8 +811,8 @@ These experimental workflows have separate validation requirements in
 ‘docs/testing.md’; earlier ‘share’ host acceptance does not accept this
 attachment feature.
 
-4.9 sync
-========
+4.10 sync
+=========
 
 Refresh host conversation archives without opening the TUI. Requires an
 existing workspace and an intact project directory.  It starts or
@@ -899,7 +939,7 @@ private state.
      oc-box sync --workspace WORKSPACE_ID
      oc-box sync --persisted --project ~/devel/demo
 
-4.10 web — browser interface
+4.11 web — browser interface
 ============================
 
 Open Studio around the native OpenCode 2.x browser UI for a workspace.
@@ -1425,7 +1465,7 @@ strategy](testing.md#reviewed-focused-recovery-host-acceptance).
 attached web client rejects it and never changes the owner's credential
 snapshot.
 
-4.11 tui — experimental workspace manager
+4.12 tui — experimental workspace manager
 =========================================
 
 Open the optional Textual workspace dashboard, separate from the native
@@ -1798,7 +1838,7 @@ disable search.  See ‘docs/tui.md’ for design, installation and safety
 boundaries.  Demo/headless/native offline checks are not host
 acceptance.
 
-4.12 terminal
+4.13 terminal
 =============
 
 On V2, the default connects to the active session's native persistent
@@ -1883,7 +1923,7 @@ For example, after mapping an NPU in an earlier reset:
      xrt-smi examine
      exit
 
-4.13 reset
+4.14 reset
 ==========
 
 Recreate the environment's container OS, then launch OpenCode and resume
@@ -1909,7 +1949,7 @@ distributions, especially to/from Alpine.
      oc-box reset --project ~/devel/demo --distro ubuntu
      oc-box reset --project ~/devel/demo --device /dev/accel/accel0
 
-4.14 repair
+4.15 repair
 ===========
 
 Explicitly accept the current directory identity for an existing
@@ -1947,7 +1987,7 @@ and supply ‘--workspace ID’ explicitly.  With ‘--workspace’, check the
 registered path and restore its missing marker rather than using the
 current directory.
 
-4.15 purge
+4.16 purge
 ==========
 
 Remove this workspace's labeled containers, owned volumes, owned
@@ -2067,7 +2107,7 @@ apply only to purge.
      oc-box purge --project ~/devel/disposable --all
      oc-box purge --workspace WORKSPACE_ID --all --yes
 
-4.16 list
+4.17 list
 =========
 
 List all registered workspaces with aligned headers: WORKSPACE ID,
@@ -2094,7 +2134,7 @@ machine-readable output.
 
      oc-box list
 
-4.17 distros
+4.18 distros
 ============
 
 List supported distro names, image references, and the detected host
@@ -2105,7 +2145,7 @@ workspace.
      oc-box distros
      oc-box --project ~/devel/demo --distro fedora
 
-4.18 status
+4.19 status
 ===========
 
 Alias of ‘--status’.  Report all registered environments unless
@@ -2124,7 +2164,7 @@ See Resource reports for metric interpretation.
      oc-box --status --json
      oc-box status --project ~/devel/demo --table
 
-4.19 logs
+4.20 logs
 =========
 
 Read the [oc-box activity
@@ -2200,7 +2240,7 @@ journal](#dashboard-state-and-activity-journal).
      oc-box logs --journald --level warn --follow --json
      oc-box logs --table --level warn --follow
 
-4.20 upgrade
+4.21 upgrade
 ============
 
 Update the installed launcher/modules and prebuilt manuals from a
@@ -2317,7 +2357,7 @@ for a reviewed alternate deployment.  Updates inside a container are
 refused because its private HOME is not the host installation.  Git is
 required for public updates; build tools are not.
 
-4.21 uninstall
+4.22 uninstall
 ==============
 
 Run ‘oc-box --uninstall’ as the regular host user from the verified
@@ -2360,7 +2400,7 @@ ownership checks and typed confirmation still apply.  For a
 Python-package installation, use the package manager that owns it
 instead.  Neither option completes Podman cleanup.
 
-4.22 secrets
+4.23 secrets
 ============
 
 Manage an optional encrypted credential vault on the host.  This command
@@ -2525,7 +2565,7 @@ This is not a general redaction filter for OpenCode, provider logs, tool
 output, or session archives: an agent can still print, save, or transmit
 a credential it has received.
 
-4.23 credentials
+4.24 credentials
 ================
 
 View or change **names-only** forwarding policy for an existing
@@ -2618,7 +2658,7 @@ container data.  Selection is reduced forwarding, not an isolation
 boundary from secrets already inside the container.  Delivered keys
 remain readable by the agent/tools with normal container permissions.
 
-4.24 backup
+4.25 backup
 ===========
 
 Create one encrypted ‘.ocbox’ file for an existing workspace (available
@@ -2698,7 +2738,7 @@ file may remain: inspect it with ‘backup-info’ before retrying.  The
 source remains stopped, not reset/deleted.  The temporary capture image
 is removed by its unique tag; shared base images remain.
 
-4.25 Include host settings for migration
+4.26 Include host settings for migration
 ========================================
 
 On supporting stable and development releases, ‘backup --host --output
@@ -2737,7 +2777,7 @@ Treat this archive and its age identity/passphrase as sensitive.  The
 vault remains separately encrypted with its original passphrase.  This
 is neither a whole-machine backup nor a credential revocation mechanism.
 
-4.26 backup-info
+4.27 backup-info
 ================
 
 Decrypt/verify a backup's manifest and ciphertext checksums without
@@ -2767,7 +2807,7 @@ authentication chunk.  Wrong keys, corruption, missing/extra components,
 unsupported versions, or unsafe outer envelope paths are rejected before
 restore activation.
 
-4.27 restore
+4.28 restore
 ============
 
 Streaming failures identify the producer/consumer exit code and a fixed
@@ -2868,7 +2908,7 @@ incomplete restores), and retry to a new destination.  Orphan staging
 directories may need manual host removal after inspection; the launcher
 never deletes a caller-supplied tree on marker alone.
 
-4.28 Restore host settings on a new machine
+4.29 Restore host settings on a new machine
 ===========================================
 
 Install oc-box, age and the required OpenCode version on the destination
@@ -5614,22 +5654,22 @@ Tag Table:
 Node: Top210
 Node: Name769
 Node: Synopsis930
-Node: Description5291
-Node: Commands11111
-Node: Options165824
-Node: Lifecycle and persistence232355
-Node: Distribution images234655
-Node: Sessions and recovery239732
-Node: Devices and host permissions246317
-Node: Resource reports248663
-Node: Configuration and environment250774
-Node: Files262155
-Node: Exit status273065
-Node: Examples274473
-Node: Troubleshooting276612
-Node: Installation and manuals289104
-Node: Authors and license299294
-Node: See also299901
+Node: Description5372
+Node: Commands11192
+Node: Options167864
+Node: Lifecycle and persistence234395
+Node: Distribution images236695
+Node: Sessions and recovery241772
+Node: Devices and host permissions248357
+Node: Resource reports250703
+Node: Configuration and environment252814
+Node: Files264195
+Node: Exit status275105
+Node: Examples276513
+Node: Troubleshooting278652
+Node: Installation and manuals291144
+Node: Authors and license301334
+Node: See also301941
 
 End Tag Table
 

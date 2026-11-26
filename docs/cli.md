@@ -23,6 +23,7 @@ oc-box distros
 oc-box doctor [--json | --table] [--feature FEATURE]...
 oc-box runtime-check VERSION
 oc-box completion bash
+oc-box addon [NAME [on|off]] [--project PATH | --workspace ID]
 oc-box web [--project PATH | --workspace ID] [--session ID] [--port N] [--no-open] [--no-vault] [--attachments] [--workspace-layout] [LIFECYCLE-LOG-OPTIONS]
 oc-box --status [--project PATH | --workspace ID] [--json | --table]
 oc-box status [--project PATH | --workspace ID] [--json | --table]
@@ -50,7 +51,7 @@ oc-box COMMAND --help
 
 The command defaults to `start`. For the shared launcher commands, such as
 `start`, `reset`, `stop`, `sync` and `terminal`, options may appear before or
-after the command. Put dedicated commands (`attach`, `backup`, `backup-info`,
+after the command. Put dedicated commands (`addon`, `attach`, `backup`, `backup-info`,
 `completion`, `doctor`, `logs`, `preferences`, `restore`, `secrets`, `share`,
 `tui` and `web`) first. Run the launcher on the host as your regular user,
 without sudo. It manages rootless Podman; container root is mapped to the
@@ -171,6 +172,42 @@ paths. It never edits shell startup files automatically.
 ```bash
 source <(oc-box completion bash)
 ```
+
+### addon
+
+List the bundled native TUI add-ons, each with its saved workspace setting
+and default. By default the command selects the current directory's registered
+workspace. Without a registered workspace it can list defaults, but saving a
+switch requires an existing workspace. `--project PATH` and `--workspace ID`
+select a different workspace. Activity Timeline is disabled by default.
+
+```sh
+oc-box addon
+oc-box addon activity-timeline on
+oc-box addon activity-timeline off
+```
+
+The switch persists in host-only workspace preferences. It does not start
+Podman, unlock credentials, or change OpenCode configuration. It applies to the
+next owning native TUI launch, not to an already open client or an attach-only
+client. `off` disables the add-on; no uninstall or config edit is needed. When
+enabled, oc-box prints a one-line startup notice.
+
+In an open session, use `Ctrl+P` and select `Open activity timeline`, or use
+`/activity-timeline`. The panel shows full local dates, times to the second,
+and UTC offsets for prompt and assistant message creation and tool invocations.
+A tool invocation timestamp is the native recorded call time, not an
+independently observed execution start. If only creation was recorded, the
+panel labels the invocation time unknown rather than using the completion time.
+
+This is a recent-activity view, not an audit log: it shows up to 200 events
+from the newest 200 loaded messages in the current session, considering the
+last 128 parts of each assistant message. It does not fetch older messages,
+traverse child sessions, or display prompt text, tool arguments, or tool results.
+It reads the TUI's existing message metadata without changing messages or
+making any requests to a model, so it adds no model tokens. It requires the
+public V2 session-panel API (tested with native 2.4.0 and 2.4.1) and does not
+affect OpenCode 1.x, the browser UI, or the oc-box manager.
 
 ### doctor
 

@@ -2918,7 +2918,9 @@ def config_archive(
                 # Only normal configuration preparation installs this.
                 # Native/project/managed plugin policy remains authoritative:
                 # unlike the Build helper it gets no final mandatory overlay.
-                for name, content in ui_state.package_sources(PACKAGE).items():
+                for name, content in ui_state.package_sources(
+                    PACKAGE, include_addons=not history_only
+                ).items():
                     add_bytes("plugins/oc-box-ui-state/" + name, content)
     return buffer.getvalue()
 
@@ -5525,6 +5527,12 @@ def launch_client(path, data, args, version, exported, owner=None):
                     flush=True,
                 )
             file_open = effective_host_file_open(args, data)
+            activity_timeline = getattr(args, "_activity_timeline", False)
+            if activity_timeline and owner is None:
+                startup_output.line(
+                    "oc-box: Activity timeline unavailable: a compatible native OpenCode 2.x TUI is required.",
+                    flush=True,
+                )
             if file_open and owner is None:
                 if __package__:
                     from . import file_preview
@@ -5545,6 +5553,7 @@ def launch_client(path, data, args, version, exported, owner=None):
                     interactive=True,
                     ui_owner=True,
                     file_preview=file_open,
+                    activity_timeline=activity_timeline,
                 )
                 if owner
                 else exec_command(data, command, interactive=True),
@@ -5849,6 +5858,7 @@ def parser():
             "logs",
             "doctor",
             "completion",
+            "addon",
             "tui",
             "share",
             "attach",
@@ -6429,6 +6439,12 @@ def main(argv=None):
         completion_parser().parse_args(arguments[1:])
         print((APP / "completions/oc-box").read_text(), end="")
         return 0
+    if arguments and arguments[0] == "addon":
+        if __package__:
+            from .workspace_preferences import addon_cli
+        else:
+            from workspace_preferences import addon_cli
+        return addon_cli(sys.modules[__name__], arguments[1:])
     if arguments and arguments[0] == "doctor":
         return dependencies.cli(arguments[1:])
     if arguments and arguments[0] in ("backup", "backup-info", "restore"):
@@ -6737,6 +6753,8 @@ def _main_command(args, argv):
         )
     if args.command == "completion":
         raise BoxError("Use 'oc-box completion bash' with no workspace options.")
+    if args.command == "addon":
+        raise BoxError("Use 'oc-box addon' first; see its --help.")
     if args.command == "doctor":
         raise BoxError(
             "Use 'oc-box doctor' first, followed by --json, --table or --feature; see its --help."
@@ -7224,6 +7242,11 @@ def _main_command(args, argv):
             with workspace_service.attach(
                 sys.modules[__name__], path, data
             ) as connection:
+                if saved.get("addons", {}).get("activity-timeline", False):
+                    startup_output.line(
+                        "oc-box: Activity timeline is available only on the owning TUI launch.",
+                        flush=True,
+                    )
                 if (
                     saved.get("image_preview") is True
                     and connection.get("image_preview", False) is False
@@ -7400,6 +7423,9 @@ def _locked_workspace_command(path, data, args, launch_context, image_preview_sn
         configure_host_clipboard(args, version)
     if args.command in ("start", "reset"):
         saved = workspace_ui_preferences(path, data)
+        args._activity_timeline = saved.get("addons", {}).get(
+            "activity-timeline", False
+        )
         if args.image_preview is None and saved.get("image_preview") is True:
             # Saved policy applies only to a new owner. V1 keeps ordinary
             # behavior with a notice; invalid V2 CLI settings fail before any preference

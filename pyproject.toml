@@ -70,6 +70,8 @@ oc_box = [
   "ui_state_rpc.js",
   "ui_state_memory.js",
   "file_preview_tui.tsx",
+  "activity_timeline_tui.tsx",
+  "activity_timeline_events.mjs",
 ]
 
 [tool.setuptools.data-files]

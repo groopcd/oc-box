@@ -33,6 +33,7 @@ DEFAULT_HOST_CLIPBOARD = False
 DEFAULT_HOST_CLIPBOARD_SYMLINKS = True
 DEFAULT_STARTUP_LOGO = "graphics"
 STARTUP_LOGOS = ("ascii", "graphics")
+ADDON_DEFAULTS = {"activity-timeline": False}
 FILE_NAME = "ui-preferences.json"
 LOCK_NAME = ".ui-preferences.lock"
 MAX_BYTES = 16 * 1024
@@ -53,6 +54,7 @@ INVALID_VALUE = "Host drop preference must be a boolean."
 INVALID_CLIPBOARD_VALUE = "Host clipboard preferences must be booleans."
 INVALID_HOST_FILE_OPEN = "Host file open preference must be a boolean."
 INVALID_IMAGE_PREVIEW = "Image preview preference must be a boolean."
+INVALID_ADDON = "A known add-on and a boolean setting are required."
 INVALID_STARTUP_LOGO = "Startup logo preference must be ascii or graphics."
 UNSAFE_STORAGE = "Workspace preference storage is unsafe or unavailable."
 BUSY = "Workspace preferences are busy; retry the command."
@@ -358,6 +360,7 @@ def _preferences(directory):
     if raw is None:
         return {"host_drop": DEFAULT_HOST_DROP}, None
     value = _decode(raw)
+    addons = value.get("addons", {}) if isinstance(value, dict) else None
     if (
         not isinstance(value, dict)
         or type(value.get("version")) is not int
@@ -365,6 +368,10 @@ def _preferences(directory):
         or value.get("workspace") != directory.workspace_id
         or type(value.get("host_drop")) is not bool
         or ("startup_logo" in value and value["startup_logo"] not in STARTUP_LOGOS)
+        or not isinstance(addons, dict)
+        or any(
+            name in addons and type(addons[name]) is not bool for name in ADDON_DEFAULTS
+        )
         or any(
             name in value and type(value[name]) is not bool
             for name in (
@@ -556,6 +563,7 @@ def set_preferences(
     host_file_open=None,
     image_preview=None,
     startup_logo=None,
+    addon=None,
 ):
     """Atomically save explicit choices, preserving other fields under the lock."""
     updates = {}
@@ -574,19 +582,30 @@ def set_preferences(
         if startup_logo not in STARTUP_LOGOS:
             raise PreferenceError(INVALID_STARTUP_LOGO)
         updates["startup_logo"] = startup_logo
+    if addon is not None and (
+        not isinstance(addon, tuple)
+        or len(addon) != 2
+        or not isinstance(addon[0], str)
+        or addon[0] not in ADDON_DEFAULTS
+        or type(addon[1]) is not bool
+    ):
+        raise PreferenceError(INVALID_ADDON)
+
+    def apply(current):
+        value = {**current, "version": 1, "workspace": workspace_id, **updates}
+        if addon is not None:
+            name, enabled = addon
+            value["addons"] = {**current.get("addons", {}), name: enabled}
+        return value
+
     with _directory(workspace_path, workspace_id) as directory:
         # Refuse pre-existing unsafe/corrupt state before creating even the lock.
         initial, _ = _preferences(directory)
-        _encode({**initial, "version": 1, "workspace": workspace_id, **updates})
+        _encode(apply(initial))
         with _locked(directory) as lock_fd:
             directory.registration()
             current, previous = _preferences(directory)
-            value = {
-                **current,
-                "version": 1,
-                "workspace": workspace_id,
-                **updates,
-            }
+            value = apply(current)
             _write(directory, lock_fd, value, previous)
             return value
 
@@ -705,25 +724,92 @@ def _table(value, source, changed):
     return status + "\n\n" + cli_table.fields(scope)
 
 
+def _registered(box, project, workspace, *, allow_missing=False):
+    if workspace is not None and not _ID.fullmatch(workspace):
+        raise PreferenceError(INVALID_WORKSPACE)
+    try:
+        path, data = box.find_workspace(project, workspace)
+    except Exception:
+        raise PreferenceError(INVALID_WORKSPACE) from None
+    if allow_missing and path is None and data is None:
+        return None, None
+    ident = data.get("id") if isinstance(data, dict) else None
+    if (
+        path is None
+        or not isinstance(ident, str)
+        or not _ID.fullmatch(ident)
+        or (workspace is not None and ident != workspace)
+    ):
+        raise PreferenceError(INVALID_WORKSPACE)
+    return path, ident
+
+
+def addon_cli(box, args):
+    parser = argparse.ArgumentParser(
+        prog="oc-box addon",
+        description="List native TUI add-ons or save a workspace switch for future owning launches.",
+        allow_abbrev=False,
+    )
+    parser.add_argument("name", nargs="?", choices=tuple(ADDON_DEFAULTS))
+    parser.add_argument("setting", nargs="?", choices=("on", "off"))
+    selectors = parser.add_mutually_exclusive_group()
+    selectors.add_argument("--project", type=Path, metavar="PATH")
+    selectors.add_argument("--workspace", metavar="ID")
+    args = parser.parse_args(args)
+    if os.environ.get("OC_BOX_CONTAINER") == "1":
+        raise box.BoxError("Run 'oc-box addon' on the host.")
+    try:
+        path, ident = _registered(
+            box,
+            args.project,
+            args.workspace,
+            allow_missing=args.setting is None
+            and args.project is None
+            and args.workspace is None,
+        )
+        if args.setting is not None:
+            value = set_preferences(
+                path, ident, addon=(args.name, args.setting == "on")
+            )
+        else:
+            value = read(path, ident) if path is not None else {}
+    except PreferenceError as error:
+        raise box.BoxError(str(error)) from None
+    if __package__:
+        from . import cli_table
+    else:
+        import cli_table
+
+    def status(enabled):
+        return "enabled" if enabled else "disabled"
+
+    print(
+        cli_table.render(
+            ("ADD-ON", "SETTING", "DEFAULT"),
+            (
+                (
+                    name,
+                    status(value.get("addons", {}).get(name, default)),
+                    status(default),
+                )
+                for name, default in ADDON_DEFAULTS.items()
+                if args.name is None or args.name == name
+            ),
+        )
+    )
+    if path is None:
+        print("No registered workspace selected; showing defaults.")
+    elif args.setting is not None:
+        print("Saved for the next owning TUI launch; current clients unchanged.")
+    return 0
+
+
 def cli(box, args):
     args = parser().parse_args(args)
     if os.environ.get("OC_BOX_CONTAINER") == "1":
         raise box.BoxError(HOST_ONLY)
     try:
-        if args.workspace is not None and not _ID.fullmatch(args.workspace):
-            raise PreferenceError(INVALID_WORKSPACE)
-        try:
-            path, data = box.find_workspace(args.project, args.workspace)
-        except Exception:
-            raise PreferenceError(INVALID_WORKSPACE) from None
-        if (
-            path is None
-            or not isinstance(data, dict)
-            or not isinstance(data.get("id"), str)
-            or not _ID.fullmatch(data["id"])
-            or (args.workspace is not None and data["id"] != args.workspace)
-        ):
-            raise PreferenceError(INVALID_WORKSPACE)
+        path, ident = _registered(box, args.project, args.workspace)
         updates = {
             name: getattr(args, name) == "on"
             for name in (
@@ -739,9 +825,7 @@ def cli(box, args):
             updates["startup_logo"] = args.startup_logo
         changed = bool(updates)
         value = (
-            set_preferences(path, data["id"], **updates)
-            if changed
-            else read(path, data["id"])
+            set_preferences(path, ident, **updates) if changed else read(path, ident)
         )
     except PreferenceError as error:
         raise box.BoxError(str(error)) from None

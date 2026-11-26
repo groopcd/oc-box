@@ -60,6 +60,7 @@ oc-box distros
 oc-box doctor [--json | --table] [--feature FEATURE]...
 oc-box runtime-check VERSION
 oc-box completion bash
+oc-box addon [NAME [on|off]] [--project PATH | --workspace ID]
 oc-box web [--project PATH | --workspace ID] [--session ID] [--port N] [--no-open] [--no-vault] [--attachments] [--workspace-layout] [LIFECYCLE-LOG-OPTIONS]
 oc-box --status [--project PATH | --workspace ID] [--json | --table]
 oc-box status [--project PATH | --workspace ID] [--json | --table]
@@ -85,7 +86,7 @@ oc-box -h | --help
 oc-box COMMAND --help
 @end example
 
-The command defaults to @code{start}. For the shared launcher commands, such as @code{start}, @code{reset}, @code{stop}, @code{sync} and @code{terminal}, options may appear before or after the command. Put dedicated commands (@code{attach}, @code{backup}, @code{backup-info}, @code{completion}, @code{doctor}, @code{logs}, @code{preferences}, @code{restore}, @code{secrets}, @code{share}, @code{tui} and @code{web}) first. Run the launcher on the host as your regular user, without sudo. It manages rootless Podman; container root is mapped to the unprivileged host user.
+The command defaults to @code{start}. For the shared launcher commands, such as @code{start}, @code{reset}, @code{stop}, @code{sync} and @code{terminal}, options may appear before or after the command. Put dedicated commands (@code{addon}, @code{attach}, @code{backup}, @code{backup-info}, @code{completion}, @code{doctor}, @code{logs}, @code{preferences}, @code{restore}, @code{secrets}, @code{share}, @code{tui} and @code{web}) first. Run the launcher on the host as your regular user, without sudo. It manages rootless Podman; container root is mapped to the unprivileged host user.
 
 @code{START-OPTIONS} cover session selection, model, container setup, native TUI features and credential delivery. @code{RESET-OPTIONS} use the corresponding reset options but do not import a host session. See [start](#start) and [reset](#reset) for their effects, or @code{oc-box start --help} and @code{oc-box reset --help} for the scoped flags. @code{CREDENTIAL-OPTIONS} are @code{--credential-mode}, @code{--env-secret}, @code{--vault-secret} and @code{--clear-credentials}; see [credentials](#credentials).
 
@@ -128,6 +129,22 @@ Print the bundled shell completion script to stdout. Bash is currently the only 
 @example
 source <(oc-box completion bash)
 @end example
+
+@section addon
+
+List the bundled native TUI add-ons, each with its saved workspace setting and default. By default the command selects the current directory's registered workspace. Without a registered workspace it can list defaults, but saving a switch requires an existing workspace. @code{--project PATH} and @code{--workspace ID} select a different workspace. Activity Timeline is disabled by default.
+
+@example
+oc-box addon
+oc-box addon activity-timeline on
+oc-box addon activity-timeline off
+@end example
+
+The switch persists in host-only workspace preferences. It does not start Podman, unlock credentials, or change OpenCode configuration. It applies to the next owning native TUI launch, not to an already open client or an attach-only client. @code{off} disables the add-on; no uninstall or config edit is needed. When enabled, oc-box prints a one-line startup notice.
+
+In an open session, use @code{Ctrl+P} and select @code{Open activity timeline}, or use @code{/activity-timeline}. The panel shows full local dates, times to the second, and UTC offsets for prompt and assistant message creation and tool invocations. A tool invocation timestamp is the native recorded call time, not an independently observed execution start. If only creation was recorded, the panel labels the invocation time unknown rather than using the completion time.
+
+This is a recent-activity view, not an audit log: it shows up to 200 events from the newest 200 loaded messages in the current session, considering the last 128 parts of each assistant message. It does not fetch older messages, traverse child sessions, or display prompt text, tool arguments, or tool results. It reads the TUI's existing message metadata without changing messages or making any requests to a model, so it adds no model tokens. It requires the public V2 session-panel API (tested with native 2.4.0 and 2.4.1) and does not affect OpenCode 1.x, the browser UI, or the oc-box manager.
 
 @section doctor
 

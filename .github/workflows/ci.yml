@@ -190,6 +190,11 @@ jobs:
             --no-audit --no-fund "@opencode/cli-linux-x64@$NATIVE_VERSION"
           binary="$RUNNER_TEMP/opencode-v24/node_modules/@opencode/cli-linux-x64/bin/opencode"
           printf '%s  %s\n' "$NATIVE_SHA256" "$binary" | sha256sum -c -
+      - name: Native activity timeline dates without session or model input changes
+        run: |
+          node --test tests/opencode_activity_timeline.test.mjs
+          python3 -B tests/smoke_activity_timeline_v2.py \
+            --opencode "$RUNNER_TEMP/opencode-v24/node_modules/@opencode/cli-linux-x64/bin/opencode"
       - name: Native queued input and claim preservation across clean and abrupt exits
         run: |
           binary="$RUNNER_TEMP/opencode-v24/node_modules/@opencode/cli-linux-x64/bin/opencode"

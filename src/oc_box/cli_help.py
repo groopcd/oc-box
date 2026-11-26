@@ -64,6 +64,7 @@ _COMMAND_GROUPS = (
             ("upgrade", "Check for or install a launcher update"),
             ("--uninstall", "Review or remove the verified launcher installation"),
             ("completion", "Print the Bash completion script"),
+            ("addon", "Read or save a workspace add-on switch"),
         ),
     ),
 )

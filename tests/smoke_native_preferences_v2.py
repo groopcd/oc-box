@@ -39,7 +39,15 @@ class Client:
     """Owned bounded PTY; only fixed-label flags and 128 transient ASCII bytes."""
 
     def __init__(
-        self, binary, env, project, endpoint, preferences, *, image_preview=False
+        self,
+        binary,
+        env,
+        project,
+        endpoint,
+        preferences,
+        *,
+        image_preview=False,
+        session_id=None,
     ):
         require(
             "OPENCODE_CLI_CONFIG_CONTENT" not in env,
@@ -74,6 +82,7 @@ class Client:
                     str(project),
                     "--server",
                     endpoint["url"],
+                    *(["--session", session_id] if session_id else []),
                 ],
                 cwd=project,
                 env={**env, "OPENCODE_PASSWORD": endpoint["password"]},

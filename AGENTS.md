@@ -442,6 +442,13 @@ their checkout ownership distinct from unrelated source and flat installations.
   verified private PNG/text/Markdown/static HTML copies. Avoid clipboard
   coupling, active HTML, arbitrary protocol dispatch, and mainline patches.
   Native PTY evidence is not physical Yakuake/Podman acceptance.
+- `activity_timeline_tui.tsx` / `activity_timeline_events.mjs`: optional
+  native TUI add-on using the public session panel and cached message metadata.
+  `addon` lists defaults or saves a host-only workspace switch; it never
+  mutates native config, starts a workspace, or changes running/attached
+  clients. Load it only for opted-in future native TUI owners. Never change
+  model input or history, or add server hooks. Distinguish tool call creation
+  from native invocation and never substitute completion.
 - `ui_state.py` / `ui_state_*.js`: public-SDK container TUI/server/RPC reports,
   installed only during normal eligible V2 owning preparation, never on attach.
   Canonical stable native `2.x.y` is eligible, not proof of SDK compatibility.
