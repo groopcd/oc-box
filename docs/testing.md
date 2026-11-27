@@ -209,7 +209,11 @@ and checks for the two affected ranges locally before `npm ci`; it refuses a
 resolution that reintroduces an affected version, even via a custom override.
 Managed resolution and `npm ci` use the same shallow layout: npm 10 can
 otherwise hoist scoped overrides into a lockfile that its own `ci` rejects.
-The unmanaged install path keeps npm's ordinary strategy.
+The SDK-scoped selectors include each fixed endpoint so npm can match an
+edge whose spec was already rewritten to that pin. SDK dependencies whose
+requirements permit the endpoint can use it; requirements strictly above it
+are unaffected. The affected versions rejected by the lock check are
+unchanged. The unmanaged install path keeps npm's ordinary strategy.
 The CI audit does not inspect dependencies
 bundled inside upstream executables, distro packages, or private/user plugin
 and MCP dependency graphs; no private dependency names are sent to npm audit.

@@ -20,17 +20,17 @@ V2_PLUGIN_PACKAGE = "@opencode/plugin"
 
 
 def sdk_security_overrides(runtime_version):
-    # Apply the advisories to the selected V2 SDK's dependency ranges, not to
-    # a list of SDK releases or to unrelated top-level packages. Exact newer
-    # fixed requirements do not match these selectors.
+    # Scope the advisories to the selected SDK. Include the fixed endpoint:
+    # npm versions that recheck the already-overridden edge during `ci`
+    # must still match that pin. Requirements strictly above it do not match.
     # GHSA-3g3m-2fjr-6pw4 and GHSA-g3hv-75wg-m249.
     if isinstance(runtime_version, str) and re.fullmatch(
         r"2\.\d+\.\d+(?:[-+][A-Za-z0-9._-]+)?", runtime_version
     ):
         return {
             f"@opencode/plugin@{runtime_version}": {
-                "glob@>=9.0.0 <14.0.2": "14.0.2",
-                "minimatch@>=7.0.0 <11.0.1": "11.0.1",
+                "glob@>=9.0.0 <=14.0.2": "14.0.2",
+                "minimatch@>=7.0.0 <=11.0.1": "11.0.1",
             }
         }
     return {}
