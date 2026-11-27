@@ -16,9 +16,8 @@ from dataclasses import dataclass, field
 from queue import Empty, Queue
 
 if __package__:
-    from . import log_config, startup_output
+    from . import startup_output
 else:
-    import log_config
     import startup_output
 
 
@@ -87,11 +86,19 @@ def _activity_log():
     return activity_log
 
 
+def _log_config():
+    if __package__:
+        from . import log_config
+    else:
+        import log_config
+    return log_config
+
+
 def preparation_hint():
     command = (
         "oc-box logs --tail --details" if details_enabled() else "oc-box logs --tail"
     )
-    directory = log_config.overridden_directory()
+    directory = _log_config().overridden_directory()
     if directory is None:
         return command
     path = str(directory)
@@ -130,7 +137,7 @@ class _DetailSink:
         self.failed = threading.Event()
         # Forward the log directory alone. The caller's context can also
         # contain unlocked credentials and lifecycle admission state.
-        directory = log_config.overridden_directory()
+        directory = _log_config().overridden_directory()
         self.worker = threading.Thread(
             target=self._write,
             args=(directory,),
@@ -148,7 +155,7 @@ class _DetailSink:
     def _write(self, directory):
         try:
             activity = _activity_log()
-            with log_config.overrides(directory=directory):
+            with _log_config().overrides(directory=directory):
                 while not self.stopping.is_set() or not self.records.empty():
                     try:
                         root, record = self.records.get(timeout=0.05)
