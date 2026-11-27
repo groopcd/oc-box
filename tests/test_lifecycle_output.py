@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from contextvars import ContextVar
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -145,6 +146,164 @@ with lifecycle_output.invocation("reset", Path(sys.argv[1]), console_level=sys.a
                 )
                 if exception is box.BoxError:
                     self.assertIn("oc-box logs --tail", str(result.exception))
+
+    def test_opt_in_npm_detail_keeps_only_recognized_codes_and_counts(self):
+        command = [
+            sys.executable,
+            "-c",
+            (
+                "import os; "
+                "os.write(1, b'PRIVATE_SYNTHETIC_STDOUT\\n'); "
+                "os.write(2, b'npm error code EUSAGE\\nnpm error PRIVATE_SYNTHETIC_STDERR\\n'); "
+                "raise SystemExit(7)"
+            ),
+        ]
+        destination = self.root.parent / "custom diagnostics"
+        private_context = ContextVar("fixture_private_context", default=None)
+        private_context.set("PRIVATE_SYNTHETIC_CONTEXT")
+        observed_context = []
+        append = activity_log.record_event
+
+        def append_with_context_check(event, **fields):
+            if event == activity_log.PREPARATION_DETAIL_EVENT:
+                observed_context.append(private_context.get())
+            return append(event, **fields)
+
+        with (
+            patch.object(
+                activity_log, "record_event", side_effect=append_with_context_check
+            ),
+            log_config.overrides(directory=destination),
+            lifecycle_output.invocation("start", self.root, capture_preparation=True),
+            contextlib.redirect_stderr(io.StringIO()) as stderr,
+        ):
+            lifecycle_output.bind_workspace(WORKSPACE)
+            with self.assertRaisesRegex(box.BoxError, "exit 7"):
+                box.run(
+                    command,
+                    preparation="plugin-dependencies",
+                    detail_step="npm-install",
+                    timeout=5,
+                )
+        with log_config.overrides(directory=destination):
+            records = activity_log.read_preparation_details(self.root)
+        self.assertTrue(observed_context)
+        self.assertTrue(all(value is None for value in observed_context))
+        self.assertIn(
+            ("stderr", "EUSAGE"), [(row["source"], row["code"]) for row in records]
+        )
+        self.assertIn(
+            ("stdout", "omitted"), [(row["source"], row["code"]) for row in records]
+        )
+        self.assertEqual(records[-1]["exit_code"], 7)
+        self.assertTrue(all(row["workspace"] == WORKSPACE for row in records))
+        self.assertNotIn("PRIVATE_SYNTHETIC", stderr.getvalue())
+        for file in destination.rglob("*.jsonl"):
+            self.assertNotIn(b"PRIVATE_SYNTHETIC", file.read_bytes())
+
+    def test_failed_detail_sink_preserves_the_actual_setup_result(self):
+        logging = activity_log.record_event
+
+        def append(event, **fields):
+            if event == activity_log.PREPARATION_DETAIL_EVENT:
+                raise OSError("PRIVATE_LOG_FAILURE")
+            return logging(event, **fields)
+
+        command = [sys.executable, "-c", "raise SystemExit(0)"]
+        with (
+            lifecycle_output.invocation("sync", self.root, capture_preparation=True),
+            contextlib.redirect_stderr(io.StringIO()) as stderr,
+            patch.object(activity_log, "record_event", side_effect=append),
+        ):
+            completed = box.run(
+                command,
+                preparation="plugin-dependencies",
+                detail_step="npm-install",
+                timeout=5,
+            )
+        self.assertEqual(completed.returncode, 0)
+        self.assertIn("preparation diagnostics are unavailable", stderr.getvalue())
+        self.assertNotIn("PRIVATE_LOG_FAILURE", stderr.getvalue())
+
+    def test_capture_setup_failure_executes_the_original_child_once(self):
+        from oc_box import preparation_capture
+
+        with (
+            lifecycle_output.invocation("start", self.root, capture_preparation=True),
+            contextlib.redirect_stderr(io.StringIO()) as stderr,
+            patch.object(
+                preparation_capture,
+                "capture_npm",
+                side_effect=OSError("PRIVATE_PIPE_FAULT"),
+            ),
+            patch.object(
+                box.subprocess, "run", return_value=subprocess.CompletedProcess([], 3)
+            ) as child,
+            self.assertRaisesRegex(box.BoxError, "exit 3"),
+        ):
+            box.run(
+                ["synthetic"], preparation="plugin-dependencies", detail_step="npm-lock"
+            )
+        child.assert_called_once()
+        self.assertEqual(child.call_args.kwargs["stdout"], subprocess.DEVNULL)
+        self.assertEqual(child.call_args.kwargs["stderr"], subprocess.DEVNULL)
+        self.assertIn("preparation diagnostics are unavailable", stderr.getvalue())
+        self.assertNotIn("PRIVATE_PIPE_FAULT", stderr.getvalue())
+
+    def test_details_do_not_redirect_live_or_unrelated_subprocesses(self):
+        from oc_box import preparation_capture
+
+        with (
+            lifecycle_output.invocation(
+                "start", self.root, console_level="all", capture_preparation=True
+            ),
+            contextlib.redirect_stderr(io.StringIO()),
+            patch.object(preparation_capture, "capture_npm") as capture,
+            patch.object(
+                box.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)
+            ) as child,
+        ):
+            box.run(
+                ["synthetic"],
+                preparation="plugin-dependencies",
+                detail_step="npm-install",
+            )
+            capture.assert_not_called()
+            self.assertNotIn("stdout", child.call_args.kwargs)
+            self.assertNotIn("stderr", child.call_args.kwargs)
+
+        with (
+            lifecycle_output.invocation("start", self.root, capture_preparation=True),
+            contextlib.redirect_stderr(io.StringIO()),
+            patch.object(preparation_capture, "capture_npm") as capture,
+            patch.object(
+                box.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)
+            ) as child,
+        ):
+            box.run(["synthetic"], preparation="baseline-tools")
+            capture.assert_not_called()
+            self.assertEqual(child.call_args.kwargs["stdout"], subprocess.DEVNULL)
+
+    def test_details_do_not_retry_an_admission_refusal(self):
+        command = box.ContainerCommand(["synthetic"], {})
+        command.guarded_spawn = True
+        guarded = SimpleNamespace(
+            engine_env=None,
+            launching=True,
+            spawn=MagicMock(side_effect=box.BoxError("Guarded setup refused.")),
+        )
+        with (
+            lifecycle_output.invocation("start", self.root, capture_preparation=True),
+            contextlib.redirect_stderr(io.StringIO()),
+            patch.object(box.runtime_safeguard, "current", return_value=guarded),
+            patch.object(box.subprocess, "Popen") as spawn,
+            self.assertRaisesRegex(box.BoxError, "Guarded setup refused"),
+        ):
+            box.run(
+                command, preparation="plugin-dependencies", detail_step="npm-install"
+            )
+        guarded.spawn.assert_called_once()
+        spawn.assert_not_called()
 
     def test_unavailable_preparation_journal_does_not_expose_output_or_block_child(
         self,
@@ -560,6 +719,7 @@ with lifecycle_output.invocation("reset", Path(sys.argv[1]), console_level=sys.a
         for index, (prefix, command) in enumerate(cases):
             with self.subTest(command=command, prefix=prefix):
                 selected = self.root.parent / f"override-{index}"
+                capture = command in ("start", "reset", "sync", "web")
 
                 def launch(selected=selected, command=command):
                     self.assertEqual(dict(os.environ), environment)
@@ -568,6 +728,7 @@ with lifecycle_output.invocation("reset", Path(sys.argv[1]), console_level=sys.a
                     self.assertTrue(policy.journald)
                     self.assertEqual(lifecycle_output.command_name(), command)
                     self.assertFalse(lifecycle_output.concise())
+                    self.assertEqual(lifecycle_output.details_enabled(), capture)
                     lifecycle_output.record(
                         "lifecycle.stage", stage="configuration", level="debug"
                     )
@@ -584,6 +745,7 @@ with lifecycle_output.invocation("reset", Path(sys.argv[1]), console_level=sys.a
                             str(selected),
                             "--journald",
                             "--lifecycle-diagnostics",
+                            *(["--capture-preparation"] if capture else []),
                         ],
                     ),
                     patch.object(box, "main", side_effect=launch),
@@ -632,6 +794,9 @@ with lifecycle_output.invocation("reset", Path(sys.argv[1]), console_level=sys.a
             ["upgrade", "--check", "--journa"],
             ["upgrade", "--check", "--verbose=all"],
             ["--status", "--verbose=all"],
+            ["--status", "--capture-preparation"],
+            ["stop", "--capture-preparation"],
+            ["terminal", "--capture-preparation"],
             ["tui", "--read-only", "--log-dir", str(directory)],
             ["backup", "--table"],
         ):

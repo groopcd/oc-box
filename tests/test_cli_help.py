@@ -71,6 +71,7 @@ oc_box.workspace_lock = refuse("workspace lock")
 oc_box.vault.vault_path = refuse("vault")
 activity_log.record_event = refuse("activity journal append")
 activity_log.read_events = refuse("activity journal read")
+activity_log.read_preparation_details = refuse("preparation detail read")
 oc_box.log_config._read_config_file = refuse("host log configuration")
 sys.exit(oc_box.entrypoint())
 """
@@ -195,7 +196,8 @@ class CliHelpTests(unittest.TestCase):
             show="--help --status --version --about",
             hide=(
                 "--new --resume --import-session --cpus --device --no-vault "
-                "--all --delete-sessions --yes --maintenance --log-dir --journald"
+                "--all --delete-sessions --yes --maintenance --log-dir --journald "
+                "--capture-preparation"
             ),
         )
 
@@ -264,6 +266,10 @@ class CliHelpTests(unittest.TestCase):
                     show = f"{show} {conversion}"
                 else:
                     hide = f"{hide} {conversion}"
+                if command in ("start", "reset", "sync", "web"):
+                    show = f"{show} --capture-preparation"
+                else:
+                    hide = f"{hide} --capture-preparation"
                 if command == "preferences":
                     show = f"{show} --host-file-open --image-preview"
                     hide = f"{hide} --no-host-file-open --no-image-preview"
@@ -290,16 +296,20 @@ class CliHelpTests(unittest.TestCase):
             logs,
             show=(
                 f"{_SELECTORS} --journald --log-dir --path --level --verbose "
-                "--limit -f --follow --json --table"
+                "--limit -f --follow --tail --details --json --table"
             ),
-            hide="--no-journald --lifecycle-diagnostics --port --no-open",
+            hide="--no-journald --lifecycle-diagnostics --port --no-open --capture-preparation",
         )
         self.assertRegex(logs, r"(?im)^[ \t]+--journald\b\s+[^\n]*\bread\b")
+        self.assertRegex(logs, r"(?i)requires\s+--tail")
 
         web = self.help("web", "--help", command="web")
         self.assert_options(
             web,
-            show=f"{_SELECTORS} {_LAUNCH_LOGGING} --port --no-open --session --no-vault",
+            show=(
+                f"{_SELECTORS} {_LAUNCH_LOGGING} --capture-preparation "
+                "--port --no-open --session --no-vault"
+            ),
             hide="--path --level --limit -f --follow --json --new",
         )
         self.assertRegex(web, r"(?im)^[ \t]+--journald\b\s+[^\n]*\bmirror\b")
@@ -333,7 +343,7 @@ class CliHelpTests(unittest.TestCase):
         self.assert_options(
             output,
             show=f"{_SELECTORS} --json --table",
-            hide=f"{_LAUNCH_LOGGING} --new --import-session --cpus --all",
+            hide=f"{_LAUNCH_LOGGING} --capture-preparation --new --import-session --cpus --all",
         )
 
 
@@ -341,7 +351,15 @@ class LauncherParserCompatibilityTests(unittest.TestCase):
     def test_implicit_start_preserves_abbreviations_and_types(self):
         parser = box.parser()
         self.assertEqual(parser.parse_args([]).command, "start")
-        options = ["--proj", "sync", "--new", "--pids-limit", "128", "--no-journald"]
+        options = [
+            "--proj",
+            "sync",
+            "--new",
+            "--pids-limit",
+            "128",
+            "--no-journald",
+            "--capture-preparation",
+        ]
         implicit = parser.parse_args(options)
         for explicit in (["start", *options], [*options, "start"]):
             with self.subTest(explicit=explicit):
@@ -350,6 +368,7 @@ class LauncherParserCompatibilityTests(unittest.TestCase):
         self.assertTrue(implicit.new)
         self.assertEqual(implicit.pids_limit, 128)
         self.assertIs(implicit.journald, False)
+        self.assertTrue(implicit.capture_preparation)
         for spelling in ("--ve", "--ver", "--vers", "--version"):
             self.assertTrue(parser.parse_args([spelling]).version)
         previous_tui = parser.parse_args(["upgrade", "--t", "--check"])

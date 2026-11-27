@@ -7,15 +7,18 @@ output, take ownership of the terminal, or change lifecycle outcomes.
 import re
 import shlex
 import sys
+import threading
 import time
 from collections import deque
 from contextlib import contextmanager, suppress
-from contextvars import ContextVar
+from contextvars import Context, ContextVar
 from dataclasses import dataclass, field
+from queue import Empty, Queue
 
 if __package__:
-    from . import startup_output
+    from . import log_config, startup_output
 else:
+    import log_config
     import startup_output
 
 
@@ -25,23 +28,32 @@ class _Invocation:
     root: object
     verbose: bool
     console_level: str | None = None
+    capture_preparation: bool = False
     workspace: str | None = None
     pending: deque = field(default_factory=lambda: deque(maxlen=64))
     console: deque = field(default_factory=lambda: deque(maxlen=64))
+    detail_sink: object = None
+    detail_warning: bool = False
+    detail_records: int = 0
 
 
 _CURRENT: ContextVar[_Invocation | None] = ContextVar(
     "oc_box_lifecycle_output", default=None
 )
+_MAX_PREPARATION_DETAILS = 256
 
 
 @contextmanager
-def invocation(command, root=None, *, verbose=False, console_level=None):
-    token = _CURRENT.set(_Invocation(command, root, verbose, console_level))
+def invocation(
+    command, root=None, *, verbose=False, console_level=None, capture_preparation=False
+):
+    current = _Invocation(command, root, verbose, console_level, capture_preparation)
+    token = _CURRENT.set(current)
     try:
         yield
     finally:
         try:
+            _finish_preparation_details(current)
             flush()
         finally:
             _CURRENT.reset(token)
@@ -76,18 +88,16 @@ def _activity_log():
 
 
 def preparation_hint():
-    if __package__:
-        from .log_config import overridden_directory
-    else:
-        from log_config import overridden_directory
-
-    directory = overridden_directory()
+    command = (
+        "oc-box logs --tail --details" if details_enabled() else "oc-box logs --tail"
+    )
+    directory = log_config.overridden_directory()
     if directory is None:
-        return "oc-box logs --tail"
+        return command
     path = str(directory)
     if not path.isprintable():
-        return "oc-box logs --tail with the same --log-dir"
-    return "oc-box logs --tail --log-dir " + shlex.quote(path)
+        return command + " with the same --log-dir"
+    return command + " --log-dir " + shlex.quote(path)
 
 
 def preparation_failure_hint(report):
@@ -104,6 +114,125 @@ def live_preparation_output():
     """Bare --verbose / --verbose=all restores live output for selected tools."""
     current = _CURRENT.get()
     return not preparing_environment() or current.console_level == "all"
+
+
+class _DetailSink:
+    """Keep optional diagnostic I/O off the subprocess and lifecycle paths."""
+
+    def __init__(self):
+        if __package__:
+            from .preparation_capture import check_descriptor_headroom
+        else:
+            from preparation_capture import check_descriptor_headroom
+        check_descriptor_headroom()
+        self.records = Queue(maxsize=_MAX_PREPARATION_DETAILS)
+        self.stopping = threading.Event()
+        self.failed = threading.Event()
+        # Forward the log directory alone. The caller's context can also
+        # contain unlocked credentials and lifecycle admission state.
+        directory = log_config.overridden_directory()
+        self.worker = threading.Thread(
+            target=self._write,
+            args=(directory,),
+            daemon=True,
+            name="oc-box-log-details",
+        )
+        try:
+            # Free-threaded Python can inherit the context of start().
+            Context().run(self.worker.start)
+        except BaseException:
+            # An interruption may arrive after the thread starts.
+            self.stopping.set()
+            raise
+
+    def _write(self, directory):
+        try:
+            activity = _activity_log()
+            with log_config.overrides(directory=directory):
+                while not self.stopping.is_set() or not self.records.empty():
+                    try:
+                        root, record = self.records.get(timeout=0.05)
+                    except Empty:
+                        continue
+                    if not activity.record_event(root=root, **record):
+                        self.failed.set()
+                        break
+        except Exception:
+            # No exception, raw tool data, or logger path is reported.
+            self.failed.set()
+
+    def finish(self):
+        self.stopping.set()
+        self.worker.join(timeout=0.25)
+        return not self.worker.is_alive() and not self.failed.is_set()
+
+
+def details_enabled():
+    current = _CURRENT.get()
+    return bool(current and current.capture_preparation and preparing_environment())
+
+
+def preparation_diagnostics_unavailable():
+    current = _CURRENT.get()
+    if not details_enabled() or current.detail_warning:
+        return
+    current.detail_warning = True
+    with suppress(Exception):
+        startup_output.line(
+            "oc-box: Some preparation diagnostics are unavailable; setup behavior is unchanged.",
+            file=sys.stderr,
+            flush=True,
+        )
+
+
+def preparation_detail(
+    stage, step, source, code, *, count=None, exit_code=None, duration_ms=None
+):
+    """Queue fixed fields only, never raw subprocess output."""
+    if not details_enabled():
+        return
+    current = _CURRENT.get()
+    try:
+        if current.detail_records >= _MAX_PREPARATION_DETAILS:
+            preparation_diagnostics_unavailable()
+            return
+        activity = _activity_log()
+        record = activity.make_record(
+            activity.PREPARATION_DETAIL_EVENT,
+            command=current.command,
+            workspace=current.workspace,
+            stage=stage,
+            step=step,
+            source=source,
+            code=code,
+            count=count,
+            exit_code=exit_code,
+            duration_ms=duration_ms,
+        )
+        if record is None:
+            preparation_diagnostics_unavailable()
+            return
+        if current.detail_sink is None:
+            current.detail_sink = _DetailSink()
+        if current.detail_sink.failed.is_set():
+            preparation_diagnostics_unavailable()
+            return
+        current.detail_sink.records.put_nowait((current.root, record))
+        current.detail_records += 1
+    except Exception:
+        preparation_diagnostics_unavailable()
+
+
+def _finish_preparation_details(current):
+    if current.detail_sink is None:
+        return
+    try:
+        if not current.detail_sink.finish():
+            preparation_diagnostics_unavailable()
+    except (Exception, KeyboardInterrupt):
+        # A late diagnostic flush cannot replace the original exit.
+        with suppress(KeyboardInterrupt):
+            preparation_diagnostics_unavailable()
 
 
 def preparation_label(task):
@@ -154,6 +283,11 @@ def preparation(task, *, quiet=False, metrics=None):
         report["outcome"] = "cancelled"
         raise
     finally:
+        if details_enabled():
+            detail_sink = current.detail_sink
+            if detail_sink is not None and detail_sink.failed.is_set():
+                with suppress(KeyboardInterrupt):
+                    preparation_diagnostics_unavailable()
         # The child outcome is already known, or its original exception is
         # propagating. An interruption of this optional append cannot replace it.
         report["recorded"] = False

@@ -168,6 +168,56 @@ class ActivityLogTests(ActivityJournalFixture):
                 ["command.started", "command.finished"],
             )
 
+    def test_preparation_details_are_private_fixed_and_separate(self):
+        self.assertEqual(journal.read_preparation_details(self.root), [])
+        self.assertFalse(self.root.exists())
+        fields = {
+            "command": "sync",
+            "workspace": "a" * 32,
+            "stage": "plugin-dependencies",
+            "step": "npm-install",
+            "source": "stderr",
+            "code": "omitted",
+            "count": 3,
+        }
+        with overrides(journald=True), patch.object(journal_output, "emit") as mirror:
+            self.assertTrue(
+                journal.record_event("preparation.detail", root=self.root, **fields)
+            )
+            mirror.assert_not_called()
+        (record,) = journal.read_preparation_details(self.root, workspace="a" * 32)
+        self.assertEqual(
+            journal.format_preparation_detail(record),
+            "sync: Installing npm dependencies · stderr — omitted 3 unrecognized output line(s)",
+        )
+        self.assertEqual(journal.read_preparation_details(self.root, level="info"), [])
+        self.assertEqual(journal.read_events(self.root), [])
+        self.assertEqual(journal.read_events(self.root, preparation_only=True), [])
+        folder = self.log / "preparation-details"
+        detail = folder / "activity.jsonl"
+        self.assertEqual(stat.S_IMODE(folder.stat().st_mode), 0o700)
+        self.assertEqual(stat.S_IMODE(detail.stat().st_mode), 0o600)
+        for invalid in (
+            {"code": "PRIVATE_SYNTHETIC"},
+            {"source": "native"},
+            {"step": "offline-build"},
+            {"count": True},
+            {"reason": "io"},
+        ):
+            with self.subTest(invalid=invalid):
+                self.assertIsNone(
+                    journal.make_record("preparation.detail", **{**fields, **invalid})
+                )
+        standard = self.seed()
+        with detail.open("a") as stream:
+            stream.write(json.dumps(standard) + "\n")
+        original = detail.read_bytes()
+        self.assertFalse(
+            journal.record_event("preparation.detail", root=self.root, **fields)
+        )
+        self.assertEqual(detail.read_bytes(), original)
+        self.assertEqual(journal.read_events(self.root), [standard])
+
     def test_structured_history_record_fits_existing_journal_bounds(self):
         metrics = {name: journal.MAX_METRIC_VALUE for name in journal.METRICS}
         self.assertTrue(

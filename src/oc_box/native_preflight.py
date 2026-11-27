@@ -60,6 +60,33 @@ _PROJECT = "/tmp/preflight-project"
 _PATH = "/usr/local/bin:/usr/bin:/bin"
 _CONTROL_OUTPUT = 16384
 _CATEGORIES_BY_EXIT = {42: "sdk", 43: "artifact", 44: "build-plugin", 45: "cleanup"}
+# The opt-in stage helper uses a closed exit alphabet to refine its original
+# refusal status. Successful helpers still return only the strict fingerprint.
+_STAGE_STEPS = (
+    "cli-package-staging",
+    "cli-artifact-verification",
+    "sdk-lock-generation",
+    "sdk-lock-verification",
+    "sdk-materialization",
+    "sdk-installed-tree-verification",
+)
+_STAGE_DETAIL_EXITS = {
+    61: ("cli-package-staging", "failure", 41),
+    62: ("cli-package-staging", "timeout", 41),
+    63: ("cli-artifact-verification", "failure", 43),
+    64: ("sdk-lock-generation", "failure", 42),
+    65: ("sdk-lock-generation", "timeout", 42),
+    66: ("sdk-lock-verification", "failure", 42),
+    67: ("sdk-materialization", "failure", 42),
+    68: ("sdk-materialization", "timeout", 42),
+    69: ("sdk-installed-tree-verification", "failure", 42),
+}
+_PROBE_STEPS = (
+    "sdk-installed-tree-verification",
+    "cli-artifact-verification",
+    "offline-build",
+    "native-process-cleanup",
+)
 LOG_REASONS = {
     "build-plugin": "build-plugin-failed",
     "unsupported-version": "unsupported-version",
@@ -77,7 +104,7 @@ LOG_REASONS = {
 class Refusal(ValueError):
     """A fixed category; never carry engine, npm or native diagnostic text."""
 
-    def __init__(self, category, *, proof=None, exit_code=None):
+    def __init__(self, category, *, proof=None, exit_code=None, _timed_out=False):
         if category not in REFUSAL_CATEGORIES or (
             proof is not None
             and (category not in CONFIRMED_REFUSALS or not SHA256.fullmatch(proof))
@@ -88,6 +115,7 @@ class Refusal(ValueError):
         self.exit_code = (
             exit_code if type(exit_code) is int and -255 <= exit_code <= 255 else None
         )
+        self._timed_out = _timed_out
         super().__init__(category)
 
 
@@ -112,6 +140,79 @@ def _logged_phase(phase, version=None):
         else:
             report.setdefault("exit_code", 0)
             report["outcome"] = "success"
+
+
+class _Details:
+    def __init__(self):
+        self.warned = False
+        try:
+            self.enabled = lifecycle_output.details_enabled()
+        except (Exception, KeyboardInterrupt):
+            self.enabled = True
+            self.disable()
+
+    def unavailable(self):
+        if self.enabled and not self.warned:
+            self.warned = True
+            with contextlib.suppress(Exception, KeyboardInterrupt):
+                lifecycle_output.preparation_diagnostics_unavailable()
+
+    def disable(self):
+        self.unavailable()
+        self.enabled = False
+
+    def report(self, phase, step, code, *, exit_code=None):
+        if self.enabled:
+            try:
+                lifecycle_output.preparation_detail(
+                    "native-preflight-" + phase,
+                    step,
+                    "launcher",
+                    code,
+                    exit_code=exit_code,
+                )
+            except (Exception, KeyboardInterrupt):
+                self.disable()
+
+    @contextlib.contextmanager
+    def step(self, phase, step):
+        self.report(phase, step, "started")
+        try:
+            yield
+        except BaseException as error:
+            timed_out = isinstance(error, Refusal) and error._timed_out
+            self.report(phase, step, "timeout" if timed_out else "failure")
+            raise
+        else:
+            self.report(phase, step, "success")
+
+    def stage_result(self, failure=None):
+        # A terminal helper status confirms the completed prefix, not its
+        # timing. Publish only the outcomes we know after the helper exits.
+        completed = _STAGE_STEPS
+        if failure is not None:
+            step, code, exit_code = failure
+            completed = completed[: completed.index(step)]
+        for finished in completed:
+            self.report("stage", finished, "success")
+        if failure is not None:
+            self.report("stage", step, code, exit_code=exit_code)
+
+    def probe_result(self, exit_code):
+        if exit_code == 0:
+            for step in _PROBE_STEPS:
+                self.report("probe", step, "success")
+            return
+        # A definitive Build refusal requires confirmed teardown. Conversely
+        # failed teardown does not tell us whether the Build check passed.
+        index = exit_code - 42
+        for step in _PROBE_STEPS[: min(index, 2)]:
+            self.report("probe", step, "success")
+        self.report("probe", _PROBE_STEPS[index], "failure", exit_code=exit_code)
+        if exit_code == 44:
+            self.report("probe", "native-process-cleanup", "success")
+        elif exit_code == 45:
+            self.report("probe", "offline-build", "unavailable")
 
 
 # Reused verbatim by the staging container and by the live runtime admission
@@ -691,6 +792,12 @@ def stage_cli(npm, runtime, wrapper_dir, package, version):
         stream.write(manifest)
 
 
+def stage_refusal(exit_code, step, error):
+    outcome = "timeout" if isinstance(error, subprocess.TimeoutExpired) else "failure"
+    details = globals().get("_STAGE_DETAIL_EXITS", {})
+    return SystemExit(details.get((step, outcome, exit_code), exit_code))
+
+
 def fetch(version):
     resource.setrlimit(resource.RLIMIT_FSIZE, (768 * 1024 * 1024,) * 2)
     os.umask(0o077)
@@ -718,8 +825,11 @@ def fetch(version):
                 cwd="/tmp", check=True, timeout=160,
             )
 
-        package = artifact["platform_package"]()
-        stage_cli(npm, Path("/tmp/runtime"), Path("/tmp/wrapper"), package, version)
+        try:
+            package = artifact["platform_package"]()
+            stage_cli(npm, Path("/tmp/runtime"), Path("/tmp/wrapper"), package, version)
+        except Exception as error:
+            raise stage_refusal(41, "cli-package-staging", error) from None
         try:
             proof = artifact["materialize"]("/tmp/runtime", version)
             # npm extracts into bounded tmpfs. Copy only the verified CLI
@@ -733,8 +843,9 @@ def fetch(version):
             (target / "bin/opencode").symlink_to("../" + executable)
             if artifact["fingerprint"](str(target)) != proof:
                 raise ValueError()
-        except Exception:
-            raise SystemExit(43) from None
+        except Exception as error:
+            raise stage_refusal(43, "cli-artifact-verification", error) from None
+        step = "sdk-lock-generation"
         try:
             config = Path("/tmp/sdk")
             config.mkdir()
@@ -745,14 +856,17 @@ def fetch(version):
             prefix = f"--prefix={config}"
             strategy = "--install-strategy=shallow"
             npm("install", prefix, strategy, "--package-lock-only")
+            step = "sdk-lock-verification"
             if not canonical_lock(config / "package-lock.json", version):
                 raise ValueError()
+            step = "sdk-materialization"
             npm("ci", prefix, strategy)
+            step = "sdk-installed-tree-verification"
             if not sdk["sdk_modules_match"](config, version):
                 raise ValueError()
             publish_sdk(config, "/scratch/sdk")
-        except Exception:
-            raise SystemExit(42) from None
+        except Exception as error:
+            raise stage_refusal(42, step, error) from None
         return proof
 
 
@@ -867,6 +981,10 @@ class _CommandError(Exception):
     pass
 
 
+class _CommandTimeout(_CommandError):
+    pass
+
+
 class _Unreaped(Exception):
     pass
 
@@ -897,7 +1015,7 @@ def _invoke(podman, env, args, *, limit=_CONTROL_OUTPUT, timeout=_CONTROL_SECOND
                 remaining <= 0
                 or not select.select([child.stdout], [], [], remaining)[0]
             ):
-                raise _CommandError()
+                raise _CommandTimeout()
             chunk = os.read(child.stdout.fileno(), min(4096, limit + 1 - len(data)))
             if not chunk:
                 code = child.wait(timeout=max(0, deadline - time.monotonic()))
@@ -921,6 +1039,8 @@ def _invoke(podman, env, args, *, limit=_CONTROL_OUTPUT, timeout=_CONTROL_SECOND
 def _checked(podman, env, args, *, category, **kwargs):
     try:
         return _invoke(podman, env, args, **kwargs)
+    except (_CommandTimeout, subprocess.TimeoutExpired):
+        raise Refusal(category, _timed_out=True) from None
     except (OSError, ValueError, subprocess.SubprocessError, _CommandError):
         raise Refusal(category) from None
 
@@ -1067,7 +1187,61 @@ class _Scratch:
         if code or self.exists(cid) or self.exists(name):
             raise Refusal("cleanup")
 
-    def run(self, phase, script, args, seconds):
+    def attached(self, phase, name, ident, seconds, details, detailed_stage, expected):
+        offline = phase == "probe"
+        observed = False
+        try:
+            with details.step(phase, phase + "-helper"):
+                code, output = self.call(
+                    "start",
+                    "--attach",
+                    ident,
+                    category=phase,
+                    limit=65,
+                    timeout=seconds,
+                )
+                _, state, *_ = self.inspect(ident, name, phase, ident)
+                if (
+                    state.get("Status") not in {"exited", "stopped"}
+                    or state["Running"]
+                    or state["Pid"] != 0
+                    or type(state.get("ExitCode")) is not int
+                    or state["ExitCode"] != code
+                    or state.get("OOMKilled")
+                ):
+                    raise Refusal(phase)
+                if code:
+                    stage_detail = (
+                        _STAGE_DETAIL_EXITS.get(code) if detailed_stage else None
+                    )
+                    if stage_detail is not None:
+                        code = stage_detail[2]
+                    category = _CATEGORIES_BY_EXIT.get(code, phase)
+                    if category in CONFIRMED_REFUSALS and (not offline or output):
+                        category = phase
+                    if details.enabled and not output:
+                        if stage_detail is not None:
+                            details.stage_result(stage_detail)
+                            observed = True
+                        elif offline and code in _CATEGORIES_BY_EXIT:
+                            details.probe_result(code)
+                            observed = True
+                    raise Refusal(category, exit_code=code)
+                proof = _one_line(output, SHA256, phase)
+                if expected is not None and proof != expected:
+                    raise Refusal("artifact")
+                if details.enabled:
+                    if offline:
+                        details.probe_result(0)
+                    else:
+                        details.stage_result()
+                observed = True
+                return proof
+        finally:
+            if not observed:
+                details.unavailable()
+
+    def run(self, phase, script, args, seconds, details, *, expected=None):
         name = f"oc-box-native-preflight-{self.token}-{phase}"
         if self.exists(name):
             raise Refusal("cleanup")
@@ -1076,6 +1250,10 @@ class _Scratch:
         network = "none" if offline else "pasta:--no-map-gw"
         access = "ro" if offline else "rw"
         temporary = 512 if offline else 896
+        detailed_stage = not offline and details.enabled
+        if detailed_stage:
+            exits = {value: key for key, value in _STAGE_DETAIL_EXITS.items()}
+            script = f"_STAGE_DETAIL_EXITS = {exits!r}\n" + script
         try:
             code, output = self.call(
                 "create",
@@ -1129,31 +1307,16 @@ class _Scratch:
                 ident, name, phase, ident
             )
             self.validate_layout(offline, state, mounts, ports, network_mode)
-            code, output = self.call(
-                "start", "--attach", ident, category=phase, limit=65, timeout=seconds
+            return self.attached(
+                phase, name, ident, seconds, details, detailed_stage, expected
             )
-            _, state, *_ = self.inspect(ident, name, phase, ident)
-            if (
-                state.get("Status") not in {"exited", "stopped"}
-                or state["Running"]
-                or state["Pid"] != 0
-                or type(state.get("ExitCode")) is not int
-                or state["ExitCode"] != code
-                or state.get("OOMKilled")
-            ):
-                raise Refusal(phase)
-            if code:
-                category = _CATEGORIES_BY_EXIT.get(code, phase)
-                if category in CONFIRMED_REFUSALS and (not offline or output):
-                    category = phase
-                raise Refusal(category, exit_code=code)
-            return _one_line(output, SHA256, phase)
         except _Unreaped:
             self.retain = True
             raise Refusal("cleanup") from None
         finally:
             try:
-                self.clean(name, phase, ident)
+                with details.step("cleanup", phase + "-container-cleanup"):
+                    self.clean(name, phase, ident)
             except (Refusal, KeyboardInterrupt, _Unreaped):
                 # Do not remove a scratch directory a container may still use.
                 self.retain = True
@@ -1271,6 +1434,7 @@ def check(box, version):
     reference = STAGE_IMAGES.get(os.uname().machine)
     if reference is None:
         raise Refusal("stage-image")
+    details = _Details()
     scratch = None
     retain = False
     with _termination():
@@ -1284,14 +1448,17 @@ def check(box, version):
             with _logged_phase("stage", version):
                 scratch = _backend(root, reference)
                 stage, probe, settings = _scripts(box, version)
-                proof = scratch.run("stage", stage, (version,), _STAGE_SECONDS)
+                proof = scratch.run("stage", stage, (version,), _STAGE_SECONDS, details)
             try:
                 with _logged_phase("probe", version):
-                    observed = scratch.run(
-                        "probe", probe, (version, proof, settings), _PROBE_SECONDS
+                    scratch.run(
+                        "probe",
+                        probe,
+                        (version, proof, settings),
+                        _PROBE_SECONDS,
+                        details,
+                        expected=proof,
                     )
-                    if observed != proof:
-                        raise Refusal("artifact")
             except Refusal as error:
                 if error.category in CONFIRMED_REFUSALS:
                     raise Refusal(
@@ -1308,11 +1475,12 @@ def check(box, version):
             raise Refusal("backend") from None
         finally:
             with _logged_phase("cleanup", version):
-                if retain or (scratch is not None and scratch.retain):
-                    raise Refusal("cleanup") from None
-                try:
-                    shutil.rmtree(root)
-                    if os.path.lexists(root):
-                        raise OSError()
-                except (OSError, KeyboardInterrupt):
-                    raise Refusal("cleanup") from None
+                with details.step("cleanup", "scratch-directory-cleanup"):
+                    if retain or (scratch is not None and scratch.retain):
+                        raise Refusal("cleanup") from None
+                    try:
+                        shutil.rmtree(root)
+                        if os.path.lexists(root):
+                            raise OSError()
+                    except (OSError, KeyboardInterrupt):
+                        raise Refusal("cleanup") from None

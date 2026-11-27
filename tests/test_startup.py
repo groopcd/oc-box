@@ -453,7 +453,11 @@ class StartupOutputTests(unittest.TestCase):
                 if install:
                     self.assertEqual(
                         calls[0].kwargs,
-                        {"timeout": 600, "preparation": "plugin-dependencies"},
+                        {
+                            "timeout": 600,
+                            "preparation": "plugin-dependencies",
+                            "detail_step": "npm-lock",
+                        },
                     )
                 self.assertEqual(out.getvalue(), "")
                 self.assertEqual(

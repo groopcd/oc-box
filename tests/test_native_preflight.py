@@ -13,7 +13,7 @@ import tempfile
 import unittest
 from unittest.mock import Mock, patch
 
-from oc_box import native_preflight as preflight
+from oc_box import activity_log, native_preflight as preflight
 from oc_box import oc_box as box
 from oc_box import opencode_v2_io, sync_config
 
@@ -200,8 +200,11 @@ class _Engine:
     def __init__(self):
         self.calls = []
         self.objects = {}
+        self.stage_status = 0
+        self.stage_output = (PROOF + "\n").encode()
         self.probe_status = 0
         self.probe_output = (PROOF + "\n").encode()
+        self.timeout_phase = None
         self.interrupt = False
         self.refuse_stop = False
         self.refuse_remove = False
@@ -287,8 +290,11 @@ class _Engine:
             if self.interrupt:
                 row["state"].update(Status="running", Running=True, Pid=234)
                 raise KeyboardInterrupt
+            if self.timeout_phase == row["phase"]:
+                row["state"].update(Status="running", Running=True, Pid=234)
+                raise preflight._CommandTimeout()
             status, output = (
-                (0, (PROOF + "\n").encode())
+                (self.stage_status, self.stage_output)
                 if row["phase"] == "stage"
                 else (self.probe_status, self.probe_output)
             )
@@ -362,8 +368,41 @@ class PreflightTests(unittest.TestCase):
         self.assertEqual(str(caught.exception), category)
         return caught.exception
 
+    @contextlib.contextmanager
+    def details(self, enabled=True, *, error=None):
+        output = preflight.lifecycle_output
+        with (
+            patch.object(output, "details_enabled", return_value=enabled) as opt_in,
+            patch.object(output, "preparation_detail", side_effect=error) as reports,
+            patch.object(output, "preparation_diagnostics_unavailable") as unavailable,
+        ):
+            yield reports, unavailable
+        opt_in.assert_called_once_with()
+
+    def detail_rows(self, reports):
+        rows = []
+        for args, kwargs in reports.call_args_list:
+            stage, step, source, code = args
+            self.assertEqual(source, "launcher")
+            self.assertIsNotNone(
+                activity_log.make_record(
+                    "preparation.detail",
+                    command="start",
+                    stage=stage,
+                    step=step,
+                    source=source,
+                    code=code,
+                    **kwargs,
+                )
+            )
+            rows.append((stage.removeprefix("native-preflight-"), step, code))
+        return rows
+
     def test_ordered_staging_then_offline_probe_and_private_environment(self):
-        self.assertEqual(preflight.check(box, VERSION), PROOF)
+        with self.details(enabled=False) as (reports, unavailable):
+            self.assertEqual(preflight.check(box, VERSION), PROOF)
+        reports.assert_not_called()
+        unavailable.assert_not_called()
         commands = [args for _, _, args, _ in self.engine.calls]
         create = [cmd for cmd in commands if cmd[0] == "create"]
         self.assertEqual(len(create), 2)
@@ -386,6 +425,9 @@ class PreflightTests(unittest.TestCase):
         self.assertFalse(any(arg.startswith("--dns") for arg in create[1]))
         self.assertIn(":/scratch:ro,", create[1][create[1].index("--volume") + 1])
         self.assertIn(("rm", "c" * 64), commands[: commands.index(create[1])])
+        stage, probe, _ = preflight._scripts(box, VERSION)
+        self.assertEqual(create[0][-2:], (stage, VERSION))
+        self.assertEqual(create[1][-4:-1], (probe, VERSION, PROOF))
         self.assertEqual(
             json.loads(create[1][-1])["plugin"], box.container_build_plugin(VERSION)
         )
@@ -405,6 +447,107 @@ class PreflightTests(unittest.TestCase):
             self.assertEqual(env["HOME"], str(self.scratch / "home"))
         self.assertFalse(self.scratch.exists())
         self.assertFalse(self.engine.objects)
+
+    def test_details_use_schema_and_leave_probe_protocol_unchanged(self):
+        with self.details() as (reports, unavailable):
+            self.assertEqual(preflight.check(box, VERSION), PROOF)
+        unavailable.assert_not_called()
+        rows = self.detail_rows(reports)
+        self.assertEqual(
+            [
+                step
+                for phase, step, code in rows
+                if phase == "stage" and code == "success"
+            ],
+            [
+                "cli-package-staging",
+                "cli-artifact-verification",
+                "sdk-lock-generation",
+                "sdk-lock-verification",
+                "sdk-materialization",
+                "sdk-installed-tree-verification",
+                "stage-helper",
+            ],
+        )
+        self.assertIn(("probe", "offline-build", "success"), rows)
+        self.assertIn(("probe", "native-process-cleanup", "success"), rows)
+        self.assertEqual(rows[-1], ("cleanup", "scratch-directory-cleanup", "success"))
+        create = [cmd for _, _, cmd, _ in self.engine.calls if cmd[0] == "create"]
+        stage, probe, settings = preflight._scripts(box, VERSION)
+        prefix, staged_source = create[0][-2].split("\n", 1)
+        self.assertTrue(prefix.startswith("_STAGE_DETAIL_EXITS = "))
+        self.assertEqual(staged_source, stage)
+        self.assertEqual(create[1][-4:], (probe, VERSION, PROOF, settings))
+        self.assertTrue(
+            all(
+                limits["limit"] == 65
+                for _, _, args, limits in self.engine.calls
+                if args[0] == "start"
+            )
+        )
+
+    def test_stage_detail_refusals_restore_original_status_before_cleanup(self):
+        for status, output, category, original, step, code in (
+            (63, b"", "artifact", 43, "cli-artifact-verification", "failure"),
+            (66, b"", "sdk", 42, "sdk-lock-verification", "failure"),
+            (68, b"", "sdk", 42, "sdk-materialization", "timeout"),
+            (66, b"private synthetic diagnostic\n", "sdk", 42, None, None),
+            (71, b"", "stage", 71, None, None),
+        ):
+            with self.subTest(status=status, empty=not output):
+                self.scratch.mkdir(exist_ok=True)
+                self.engine.stage_status, self.engine.stage_output = status, output
+                with self.details() as (reports, unavailable):
+                    self.assertEqual(self.refused(category).exit_code, original)
+                rows = self.detail_rows(reports)
+                if step:
+                    self.assertIn(("stage", step, code), rows)
+                    unavailable.assert_not_called()
+                else:
+                    unavailable.assert_called_once_with()
+                    self.assertEqual(
+                        rows,
+                        [
+                            ("stage", "stage-helper", "started"),
+                            ("stage", "stage-helper", "failure"),
+                            ("cleanup", "stage-container-cleanup", "started"),
+                            ("cleanup", "stage-container-cleanup", "success"),
+                            ("cleanup", "scratch-directory-cleanup", "started"),
+                            ("cleanup", "scratch-directory-cleanup", "success"),
+                        ],
+                    )
+                self.assertNotIn(
+                    ("stage", "sdk-installed-tree-verification", "success"), rows
+                )
+                self.assertFalse(self.engine.objects)
+                self.assertFalse(self.scratch.exists())
+
+    def test_diagnostic_failure_does_not_change_encoded_refusal_or_cleanup(self):
+        self.engine.stage_status, self.engine.stage_output = 66, b""
+        with self.details(error=OSError("private synthetic diagnostic")) as (
+            reports,
+            unavailable,
+        ):
+            self.assertEqual(self.refused("sdk").exit_code, 42)
+        reports.assert_called_once()
+        unavailable.assert_called_once_with()
+        self.assertFalse(self.engine.objects)
+        self.assertFalse(self.scratch.exists())
+
+    def test_attach_deadline_keeps_original_refusal_and_runs_exact_cleanup(self):
+        self.engine.timeout_phase = "probe"
+        with self.details() as (reports, unavailable):
+            self.assertIsNone(self.refused("probe").exit_code)
+        unavailable.assert_called_once_with()
+        rows = self.detail_rows(reports)
+        self.assertIn(("probe", "probe-helper", "timeout"), rows)
+        self.assertNotIn(("probe", "offline-build", "success"), rows)
+        self.assertIn(("cleanup", "probe-container-cleanup", "success"), rows)
+        self.assertIn(("cleanup", "scratch-directory-cleanup", "success"), rows)
+        commands = [args for _, _, args, _ in self.engine.calls]
+        self.assertIn(("stop", "--time=3", "d" * 64), commands)
+        self.assertIn(("rm", "d" * 64), commands)
+        self.assertFalse(self.scratch.exists())
 
     def test_noncanonical_and_nested_refuse_before_engine(self):
         for version in ("2.4", "v2.4.1", "2.04.1", "2.4.1-canary", "1.19.5"):
@@ -428,9 +571,25 @@ class PreflightTests(unittest.TestCase):
 
     def test_confirmed_plugin_refusal_includes_exact_artifact_after_cleanup(self):
         self.engine.probe_status, self.engine.probe_output = 44, b""
-        self.assertEqual(self.refused("build-plugin").proof, PROOF)
+        with self.details() as (reports, unavailable):
+            self.assertEqual(self.refused("build-plugin").proof, PROOF)
+        unavailable.assert_not_called()
+        rows = self.detail_rows(reports)
+        self.assertIn(("probe", "offline-build", "failure"), rows)
+        self.assertIn(("probe", "native-process-cleanup", "success"), rows)
         self.assertFalse(self.scratch.exists())
         self.assertFalse(self.engine.objects)
+
+    def test_native_teardown_failure_does_not_claim_build_or_scratch_failure(self):
+        self.engine.probe_status, self.engine.probe_output = 45, b""
+        with self.details() as (reports, unavailable):
+            self.assertIsNone(self.refused("cleanup").proof)
+        unavailable.assert_not_called()
+        rows = self.detail_rows(reports)
+        self.assertIn(("probe", "offline-build", "unavailable"), rows)
+        self.assertNotIn(("probe", "offline-build", "success"), rows)
+        self.assertIn(("probe", "native-process-cleanup", "failure"), rows)
+        self.assertIn(("cleanup", "scratch-directory-cleanup", "success"), rows)
 
     def test_generic_readiness_and_fingerprint_drift_are_never_confirmed(self):
         self.engine.probe_status, self.engine.probe_output = 46, b""
@@ -558,6 +717,60 @@ class EmbeddedCodeTests(unittest.TestCase):
                 [entry.name for entry in target.iterdir()], ["package.json"]
             )
             self.assertEqual((target / "package.json").read_bytes(), b"{}")
+
+    def test_stage_helper_classifies_mocked_sdk_ci_timeout_only_when_enabled(self):
+        exits = {value: key for key, value in preflight._STAGE_DETAIL_EXITS.items()}
+        for enabled, expected in ((False, 42), (True, 68)):
+            with (
+                self.subTest(enabled=enabled),
+                tempfile.TemporaryDirectory() as working,
+            ):
+                root = Path(working)
+                (root / "tmp").mkdir()
+                (root / "scratch").mkdir()
+                scope = {"__name__": "fixture"}
+                if enabled:
+                    scope["_STAGE_DETAIL_EXITS"] = exits
+                exec(preflight._STAGE, scope)
+
+                def npm(argv, **kwargs):
+                    if "ci" in argv:
+                        raise subprocess.TimeoutExpired("synthetic-npm", 160)
+
+                with patch.dict(
+                    scope,
+                    {
+                        "Path": lambda path: root / path.removeprefix("/"),
+                        "os": Mock(environ={}),
+                        "resource": Mock(),
+                        "threading": Mock(),
+                        "subprocess": Mock(
+                            run=npm,
+                            DEVNULL=subprocess.DEVNULL,
+                            TimeoutExpired=subprocess.TimeoutExpired,
+                        ),
+                        "RegistryProxy": lambda *_: contextlib.nullcontext(
+                            Mock(server_address=("127.0.0.1", 1))
+                        ),
+                        "stage_cli": Mock(),
+                        "shutil": Mock(copyfile=lambda _, path: path.touch()),
+                        "artifact": {
+                            "_EXE": "native/bin/opencode.exe",
+                            "platform_package": lambda: "@opencode/cli-linux-x64",
+                            "materialize": lambda *_: PROOF,
+                            "fingerprint": lambda *_: PROOF,
+                        },
+                        "sdk": {
+                            "V2_PLUGIN_PACKAGE": "@opencode/plugin",
+                            "sdk_security_overrides": lambda *_: {},
+                            "runtime_manifest": lambda *_: {},
+                        },
+                        "canonical_lock": lambda *_: True,
+                    },
+                ):
+                    with self.assertRaises(SystemExit) as caught:
+                        scope["fetch"](VERSION)
+                self.assertEqual(caught.exception.code, expected)
 
     def test_registry_tunnel_never_dials_arbitrary_endpoint(self):
         scope = {"__name__": "fixture"}

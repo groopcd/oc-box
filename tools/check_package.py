@@ -253,6 +253,7 @@ def check_archives(directory):
             "journal_output.py",
             "log_config.py",
             "lifecycle_output.py",
+            "preparation_capture.py",
             "logs_cli.py",
             "tui.py",
             "tui_app.py",

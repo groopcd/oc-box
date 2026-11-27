@@ -121,6 +121,7 @@ class LogConfigTests(unittest.TestCase):
                 "log_dir": None,
                 "journald": None,
                 "lifecycle_diagnostics": False,
+                "capture_preparation": False,
                 "verbose": None,
             },
         )
@@ -132,6 +133,7 @@ class LogConfigTests(unittest.TestCase):
                         "~/log space",
                         "--journald",
                         "--lifecycle-diagnostics",
+                        "--capture-preparation",
                         "--verbose=ALL",
                     ]
                 )
@@ -140,6 +142,7 @@ class LogConfigTests(unittest.TestCase):
                 "log_dir": self.home / "log space",
                 "journald": True,
                 "lifecycle_diagnostics": True,
+                "capture_preparation": True,
                 "verbose": "all",
             },
         )

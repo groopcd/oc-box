@@ -130,6 +130,14 @@ their checkout ownership distinct from unrelated source and flat installations.
   outcomes before returning; do not move existing history/shutdown writes into
   lifecycle deadlines. Quiet setup discards selected installer streams; bare
   launcher `--verbose` or `--verbose=ALL` restores them on the console only.
+  `--capture-preparation` opts in to a third, private detail ring on
+  start/reset/sync/web. Keep it fixed-category and non-mirrored. Classify
+  only explicitly selected quiet npm streams; native preflight can report
+  fixed substeps without opening its private transport. Unknown formats,
+  excess output and unavailable logging must be reported without affecting
+  native-version eligibility, timeouts, process exits, or lifecycle cleanup.
+  `logs --tail --details` reads both preparation sources without changing
+  ordinary readers or launchers.
   Never widen capture to native clients, config/auth/history protocols, or
   interactive prompts; reading logs does not change a running launch.
   Dashboard external-log redaction remains best-effort, not a guarantee of

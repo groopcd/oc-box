@@ -107,6 +107,7 @@ _OPTION_GROUPS = {
         "Lifecycle logging",
         ("log_dir", "journald", "lifecycle_diagnostics", "verbose"),
     ),
+    "preparation": ("Preparation diagnostics", ("capture_preparation",)),
     "terminal": ("Terminal mode", ("maintenance",)),
     "private-home": ("Private home", ("repair_private_home",)),
     "status": ("Output", ("json", "table")),
@@ -126,12 +127,20 @@ _OPTION_GROUPS = {
     "help": ("Help", ("-h",)),
 }
 
-_LAUNCH_GROUPS = ("workspace", "session", "container", "native", "vault", "logging")
+_LAUNCH_GROUPS = (
+    "workspace",
+    "session",
+    "container",
+    "native",
+    "vault",
+    "logging",
+    "preparation",
+)
 _COMMAND_SCOPES = {
     "start": (*_LAUNCH_GROUPS, "runtime-guard"),
     "reset": _LAUNCH_GROUPS,
     "stop": ("workspace", "logging"),
-    "sync": ("workspace", "sync-mode", "sync-resources", "logging"),
+    "sync": ("workspace", "sync-mode", "sync-resources", "logging", "preparation"),
     "terminal": ("workspace", "terminal", "logging"),
     "repair": ("workspace", "private-home"),
     "purge": ("workspace", "purge"),

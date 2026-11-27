@@ -33,6 +33,32 @@ def _event(duration=1, **fields):
     }
 
 
+def _preparation_summary(timestamp):
+    return {
+        "event": "preparation.started",
+        "command": "start",
+        "stage": "native-cli-install",
+        "timestamp": timestamp,
+        "level": "debug",
+    }
+
+
+def _preparation_detail(timestamp, *, code="output-limit", workspace=None):
+    record = {
+        "event": "preparation.detail",
+        "command": "start",
+        "stage": "plugin-dependencies",
+        "step": "npm-install",
+        "source": "stderr",
+        "timestamp": timestamp,
+        "code": code,
+        "count": 1,
+    }
+    if workspace is not None:
+        record["workspace"] = workspace
+    return record
+
+
 def _write_events(path, *records):
     path.write_text("".join(json.dumps(record) + "\n" for record in records))
     path.chmod(0o600)
@@ -115,7 +141,10 @@ class LogsCliTests(unittest.TestCase):
         self.assertFalse(self.root.exists())
 
     def test_tail_unavailable_is_read_only_and_refuses_other_sources(self):
-        self.assertEqual(self.run_cli("--tail"), (0, ""))
+        with patch.object(logs_cli.activity_log, "read_preparation_details") as details:
+            self.assertEqual(self.run_cli("--tail"), (0, ""))
+        details.assert_not_called()
+        self.assertEqual(self.run_cli("--tail", "--details", "--json"), (0, ""))
         for choice in ("--journald", "--path"):
             with (
                 contextlib.redirect_stderr(io.StringIO()),
@@ -123,6 +152,147 @@ class LogsCliTests(unittest.TestCase):
             ):
                 self.run_cli("--tail", choice)
         self.assertFalse(self.root.exists())
+
+    def test_details_requires_tail_and_the_private_source(self):
+        with (
+            patch.object(logs_cli.activity_log, "read_events") as summary,
+            patch.object(logs_cli.activity_log, "read_preparation_details") as details,
+        ):
+            for args, message in (
+                ((), "--details requires --tail"),
+                (
+                    ("--tail", "--journald"),
+                    "--details cannot be combined with --journald",
+                ),
+                (("--tail", "--path"), "--details cannot be combined with --path"),
+            ):
+                with (
+                    self.subTest(args=args),
+                    contextlib.redirect_stderr(io.StringIO()) as stderr,
+                    self.assertRaises(SystemExit) as result,
+                ):
+                    self.run_cli("--details", *args)
+                self.assertEqual(result.exception.code, 2)
+                self.assertIn(message, stderr.getvalue())
+        summary.assert_not_called()
+        details.assert_not_called()
+        self.assertFalse(self.root.exists())
+
+    def test_details_combines_initial_limit_with_selectors_and_formats(self):
+        project, _ = self.registration()
+        custom = self.base / "custom logs"
+        custom.mkdir(mode=0o700)
+
+        def summary_at(milliseconds):
+            return {
+                **_preparation_summary(f"2026-01-01T10:00:00.{milliseconds:03}Z"),
+                "workspace": _ID,
+                "event": "preparation.finished",
+                "outcome": "failure",
+                "level": "error",
+            }
+
+        latest_summary = summary_at(500)
+        latest_detail = _preparation_detail("2026-01-01T10:00:00.300Z", workspace=_ID)
+        files = []
+        for directory, records in (
+            ("preparation", [summary_at(200), latest_summary]),
+            (
+                "preparation-details",
+                [
+                    latest_detail,
+                    _preparation_detail("2026-01-01T10:00:00.600Z", workspace="b" * 32),
+                    _preparation_detail(
+                        "2026-01-01T10:00:00.700Z", code="omitted", workspace=_ID
+                    ),
+                ],
+            ),
+        ):
+            ring = custom / directory
+            ring.mkdir(mode=0o700)
+            (ring / "activity.lock").touch(mode=0o600)
+            active = ring / "activity.jsonl"
+            _write_events(active, *records)
+            files.append(active)
+        before = [file.read_bytes() for file in files]
+        options = (
+            "--tail",
+            "--details",
+            "--log-dir",
+            str(custom),
+            "--project",
+            str(project),
+            "--level",
+            "warn",
+            "--limit",
+            "2",
+        )
+        code, jsonl = self.run_cli(*options, "--json")
+        self.assertEqual(code, 0)
+        self.assertEqual(
+            [json.loads(line) for line in jsonl.splitlines()],
+            [{**latest_detail, "level": "warn"}, latest_summary],
+        )
+        code, table = self.run_cli(*options, "--table")
+        self.assertEqual(code, 0)
+        self.assertIn("ACTIVITY", table)
+        self.assertIn("Installing npm dependencies", table)
+        self.assertIn("Installing the matching OpenCode CLI", table)
+        self.assertEqual([file.read_bytes() for file in files], before)
+        self.assertFalse((custom / "activity.jsonl").exists())
+
+    def test_details_follow_diffs_rings_independently_before_ordering(self):
+        def summary_at(milliseconds):
+            return _preparation_summary(f"2026-01-01T10:00:00.{milliseconds:03}Z")
+
+        def detail_at(milliseconds):
+            return {
+                **_preparation_detail(f"2026-01-01T10:00:00.{milliseconds:03}Z"),
+                "level": "warn",
+            }
+
+        summary_first, summary_new, summary_rotated = map(summary_at, (200, 500, 800))
+        detail_first, detail_late, detail_rotated = map(detail_at, (100, 300, 700))
+        with (
+            patch.object(
+                logs_cli.activity_log,
+                "read_events",
+                side_effect=[
+                    [summary_first],
+                    [summary_first, summary_new],
+                    [],
+                    [summary_new, summary_rotated],
+                ],
+            ) as summary,
+            patch.object(
+                logs_cli.activity_log,
+                "read_preparation_details",
+                side_effect=[
+                    [detail_first],
+                    [],
+                    [detail_first, detail_late],
+                    [detail_late, detail_rotated],
+                ],
+            ) as details,
+            patch.object(
+                logs_cli.time,
+                "sleep",
+                side_effect=[None, None, None, KeyboardInterrupt],
+            ),
+        ):
+            code, output = self.run_cli(
+                "--tail", "--details", "-f", "--json", "--limit", "1"
+            )
+        self.assertEqual(code, 130)
+        self.assertEqual(
+            [json.loads(line) for line in output.splitlines()],
+            [summary_first, summary_new, detail_late, detail_rotated, summary_rotated],
+        )
+        options = dict(limit=10000, level=None, workspace=None, strict_snapshot=True)
+        self.assertEqual(
+            summary.call_args_list, [call(None, preparation_only=True, **options)] * 4
+        )
+        self.assertEqual(details.call_args_list, [call(None, **options)] * 4)
 
     def test_tail_follow_prints_live_preparation_only_without_replay(self):
         def append(event, **fields):

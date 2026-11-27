@@ -31,6 +31,7 @@ _oc_box()
     local commands='start stop sync reset repair terminal web tui share attach preferences upgrade secrets credentials backup backup-info restore purge list distros status logs doctor runtime-check completion addon'
     local selectors='--project --workspace'
     local launch_logs='--journald --no-journald --log-dir --lifecycle-diagnostics --verbose'
+    local preparation='--capture-preparation'
     local launch='--distro --new --resume --import-session --model --cpus --memory --pids-limit --device --podman-arg --clear-devices --clear-podman-args --no-vault --image-preview --no-image-preview --host-file-open --no-host-file-open --host-drop --no-host-drop --host-clipboard --no-host-clipboard --host-clipboard-symlinks --no-host-clipboard-symlinks'
     local help='-h --help' options
     COMPREPLY=()
@@ -127,20 +128,20 @@ _oc_box()
     fi
 
     case $command in
-        start) options="$help $selectors $launch $launch_logs --runtime-guard --convert-legacy-container --rebuild-legacy-container" ;;
-        reset) options="$help $selectors $launch_logs --distro --new --resume --model --cpus --memory --pids-limit --device --podman-arg --clear-devices --clear-podman-args --no-vault --image-preview --no-image-preview --host-file-open --no-host-file-open --host-drop --no-host-drop --host-clipboard --no-host-clipboard --host-clipboard-symlinks --no-host-clipboard-symlinks" ;;
-        sync) options="$help $selectors $launch_logs --persisted --cpus --memory --pids-limit" ;;
+        start) options="$help $selectors $launch $launch_logs $preparation --runtime-guard --convert-legacy-container --rebuild-legacy-container" ;;
+        reset) options="$help $selectors $launch_logs $preparation --distro --new --resume --model --cpus --memory --pids-limit --device --podman-arg --clear-devices --clear-podman-args --no-vault --image-preview --no-image-preview --host-file-open --no-host-file-open --host-drop --no-host-drop --host-clipboard --no-host-clipboard --host-clipboard-symlinks --no-host-clipboard-symlinks" ;;
+        sync) options="$help $selectors $launch_logs $preparation --persisted --cpus --memory --pids-limit" ;;
         stop) options="$help $selectors $launch_logs" ;;
         repair) options="$help $selectors --private-home" ;;
         terminal) options="$help $selectors $launch_logs --maintenance" ;;
-        web) options="$help $selectors $launch_logs --session --port --no-open --no-vault --attachments --workspace-layout" ;;
+        web) options="$help $selectors $launch_logs $preparation --session --port --no-open --no-vault --attachments --workspace-layout" ;;
         tui) options="$help $selectors --read-only --demo" ;;
         share) options="$help $selectors --acknowledge-risk" ;;
         attach)
             options="$help $selectors --session --broker"
             (( broker )) || options+=' --text --send --acknowledge-risk' ;;
         status) options="$help $selectors --json --table" ;;
-        logs) options="$help $selectors --level --verbose --limit -f --follow --tail --json --table --journald --log-dir --path" ;;
+        logs) options="$help $selectors --level --verbose --limit -f --follow --tail --details --json --table --journald --log-dir --path" ;;
         purge) options="$help $selectors --delete-sessions --all -y --yes --discard-guarded --cleanup" ;;
         credentials) options="$help $selectors --credential-mode --env-secret --vault-secret --clear-credentials" ;;
         preferences) options="$help $selectors --host-drop --host-clipboard --host-clipboard-symlinks --host-file-open --image-preview --startup-logo --json --table" ;;
@@ -164,7 +165,7 @@ _oc_box()
             (( positional == 0 )) && options+=' activity-timeline inline-timestamps'
             (( positional == 1 )) && options+=' on off' ;;
         list|distros|runtime-check) options=$help ;;
-        *) options="$commands $help $selectors $launch $launch_logs --runtime-guard --convert-legacy-container --rebuild-legacy-container --persisted --status --about --version --json --table --check --force --stable --devel --vault --tui --auto-update --credential-mode --env-secret --vault-secret --clear-credentials --delete-sessions --all -y --yes --discard-guarded --cleanup --maintenance --private-home" ;;
+        *) options="$commands $help $selectors $launch $launch_logs $preparation --runtime-guard --convert-legacy-container --rebuild-legacy-container --persisted --status --about --version --json --table --check --force --stable --devel --vault --tui --auto-update --credential-mode --env-secret --vault-secret --clear-credentials --delete-sessions --all -y --yes --discard-guarded --cleanup --maintenance --private-home" ;;
     esac
     if (( ! ended )); then
         _oc_box_words "$options"

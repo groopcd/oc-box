@@ -7,10 +7,10 @@ oc-box - persistent rootless Podman environments for mainline OpenCode.
 ## Synopsis
 
 ```text
-oc-box [start] [--project PATH | --workspace ID] [START-OPTIONS] [LIFECYCLE-LOG-OPTIONS]
+oc-box [start] [--project PATH | --workspace ID] [START-OPTIONS] [LIFECYCLE-LOG-OPTIONS] [--capture-preparation]
 oc-box stop [--project PATH | --workspace ID] [LIFECYCLE-LOG-OPTIONS]
-oc-box sync [--project PATH | --workspace ID] [--persisted | [--cpus N] [--memory SIZE] [--pids-limit N]] [LIFECYCLE-LOG-OPTIONS]
-oc-box reset [--project PATH | --workspace ID] [RESET-OPTIONS] [LIFECYCLE-LOG-OPTIONS]
+oc-box sync [--project PATH | --workspace ID] [--persisted | [--cpus N] [--memory SIZE] [--pids-limit N]] [LIFECYCLE-LOG-OPTIONS] [--capture-preparation]
+oc-box reset [--project PATH | --workspace ID] [RESET-OPTIONS] [LIFECYCLE-LOG-OPTIONS] [--capture-preparation]
 oc-box repair [--project PATH | --workspace ID]
 oc-box repair --workspace ID --private-home
 oc-box terminal [--project PATH | --workspace ID] [--maintenance] [LIFECYCLE-LOG-OPTIONS]
@@ -25,10 +25,11 @@ oc-box doctor [--json | --table] [--feature FEATURE]...
 oc-box runtime-check VERSION
 oc-box completion bash
 oc-box addon [NAME [on|off]] [--project PATH | --workspace ID]
-oc-box web [--project PATH | --workspace ID] [--session ID] [--port N] [--no-open] [--no-vault] [--attachments] [--workspace-layout] [LIFECYCLE-LOG-OPTIONS]
+oc-box web [--project PATH | --workspace ID] [--session ID] [--port N] [--no-open] [--no-vault] [--attachments] [--workspace-layout] [LIFECYCLE-LOG-OPTIONS] [--capture-preparation]
 oc-box --status [--project PATH | --workspace ID] [--json | --table]
 oc-box status [--project PATH | --workspace ID] [--json | --table]
-oc-box logs [--journald | --log-dir PATH] [--project PATH | --workspace ID] [--level LEVEL | --verbose[=LEVEL]] [--limit N] [--tail] [-f | --follow] [--json | --table]
+oc-box logs [--log-dir PATH] [--project PATH | --workspace ID] [--level LEVEL | --verbose[=LEVEL]] [--limit N] [--tail [--details]] [-f | --follow] [--json | --table]
+oc-box logs --journald [--project PATH | --workspace ID] [--level LEVEL | --verbose[=LEVEL]] [--limit N] [-f | --follow] [--json | --table]
 oc-box logs [--log-dir PATH] --path
 oc-box tui [--project PATH | --workspace ID] [--read-only] [--demo]
 oc-box upgrade [--check | --force] [--stable | --devel] [--vault] [--tui]
@@ -113,7 +114,9 @@ the native terminal and browser UIs are not changed. During a cold start or
 reset, image fetching and package installation show one short line for each
 task instead of printing the installers' output. Use `oc-box logs --tail`
 to see which tasks started, their results, and how long they took, or use
-`oc-box logs --tail -f` to watch from another terminal. If you used a one-time
+`oc-box logs --tail -f` to watch from another terminal. To save extra structured
+preparation diagnostics on a specific launch, use `--capture-preparation` and
+read them with `oc-box logs --tail --details`. If you used a one-time
 `--log-dir`, use that same directory when reading the log. Native host drops and
 clipboard importing print one short line each when enabled. Use
 `oc-box start --verbose` for the full behavior, limits and clipboard symlink policy.
@@ -2025,6 +2028,18 @@ keeps the ordinary activity log compatible with older launchers. Preparation
 records are not mirrored to the system journal. `--tail` cannot be combined
 with `--journald` or `--path`.
 
+Add `--details` to `--tail` to include retained records written by invocations
+that used `--capture-preparation`. These records use their own bounded private
+ring at `preparation-details/activity.jsonl` under the selected log directory
+and are never mirrored. npm codes and omission counts are published when the
+installer exits; native check outcomes appear when they can be verified.
+Detail JSON lines use the `preparation.detail` event and add fixed `step`,
+`source`, and `code` fields, with numerical counts, duration, or exit status
+where available. Severity and workspace filters apply to both rings, and
+`--limit` caps the combined initial output. With `-f`, newly observed entries
+are ordered by timestamp within each poll. A record written late can appear
+after a previously displayed record with a later timestamp.
+
 By default, show the latest 100 retained entries at `info` or above.
 `--level debug` includes lower-severity stage detail; `--level warn` or
 `--level error` narrows the output. Alternatively use `--verbose=LEVEL`. Bare
@@ -2064,6 +2079,7 @@ oc-box logs
 oc-box logs --verbose=ALL
 oc-box logs --tail
 oc-box logs --tail -f
+oc-box logs --tail --details -f --project ~/devel/demo --table
 oc-box logs --path
 oc-box logs --log-dir ~/.local/state/oc-box-diagnostics --path
 oc-box logs --project ~/devel/demo --level debug --limit 50
@@ -2967,6 +2983,13 @@ activity, then exit. Add `-f` (or `--follow`) to watch new preparation records
 live. This is read-only, uses a separate ring under the same private log directory
 (including any `--log-dir` override), and does not show raw installer streams.
 
+### --details
+
+For private `logs --tail`, include fixed-category records saved with
+`--capture-preparation` alongside the task summaries. It supports the same
+selectors, severity filters, output formats, and follow mode as `--tail`.
+It requires `--tail` and cannot be combined with `--journald` or `--path`.
+
 ### --journald
 
 For `start` (including when the command is omitted), `reset`, `stop`, `sync`,
@@ -3003,6 +3026,23 @@ invocation of `start` (including when the command is omitted), `reset`,
 no saved diagnostic setting. This option does not change native OpenCode output,
 journaling or lifecycle results. See [Launcher diagnostics](#launcher-diagnostics).
 
+### --capture-preparation
+
+For `start` (including when omitted), `reset`, `sync` and `web`, save extra
+structured diagnostics from the preparation tasks that run during this
+invocation. Capture is off by default. It records allowlisted npm error codes
+from selected quiet npm installers and explicit results from instrumented
+native preparation checks. Unrecognized npm lines can contribute to
+aggregate omission counts. The detail journal stores structured fields
+rather than raw output or redacted copies of installer lines.
+
+Bare `--verbose` and `--verbose=ALL` keep the original live installer streams
+on the console. With `--capture-preparation`, the launcher skips npm stream
+classification in this mode and warns when that preparation runs; structured
+check records can still be saved. If capture is unavailable, the launcher
+warns and continues the original preparation. Read retained details with
+`oc-box logs --tail --details`.
+
 ### --verbose[=LEVEL]
 
 For `start` (including when omitted), `reset`, `stop`, `sync`, `terminal` and
@@ -3030,7 +3070,7 @@ It never changes the verbosity of an owning launcher; put `--verbose` on
 For `logs`, display the effective private `activity.jsonl` pathname without
 reading or creating the journal. Use `oc-box logs --path` alone or with
 `--log-dir PATH`, not with `--journald`, workspace filters, `-f`/`--follow`,
-`--tail`, `--verbose`, `--json`, or `--table`. `--level` and `--limit` have no effect
+`--tail`, `--details`, `--verbose`, `--json`, or `--table`. `--level` and `--limit` have no effect
 when showing a path.
 
 ### --about
@@ -4753,6 +4793,13 @@ oc-box sync --project ~/devel/demo --verbose=warn
 Use `oc-box logs --tail -f` in a second terminal to watch preparation
 tasks and their outcomes. The launch form `--verbose=ALL` also shows live
 installer streams; the `logs` form does not change a running launcher.
+For retained, structured preparation diagnostics:
+
+```sh
+oc-box start --project ~/devel/demo --capture-preparation
+oc-box logs --tail --details -f --project ~/devel/demo
+```
+
 From a source checkout, run `python3 tools/demo_preparation_logs.py` to see
 both modes with synthetic subprocesses and a disposable private journal, with
 no Podman, real workspaces or OpenCode sessions involved.

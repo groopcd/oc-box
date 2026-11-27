@@ -36,6 +36,40 @@ PREPARATION_TASKS = {
 }
 PREPARATION_EVENTS = frozenset({"preparation.started", "preparation.finished"})
 PREPARATION_COMMANDS = ("start", "reset", "sync", "web", "runtime-check")
+PREPARATION_DETAIL_EVENT = "preparation.detail"
+_DETAIL_STEPS = {
+    "native-cli-install": {"npm-cli-install": "Installing the matching CLI with npm"},
+    "plugin-dependencies": {
+        "npm-lock": "Resolving the npm lock",
+        "npm-install": "Installing npm dependencies",
+        "sdk-lock-check": "Checking the SDK lock",
+        "sdk-installed-check": "Checking the installed SDK",
+    },
+    "native-preflight-stage": {
+        "stage-helper": "Running isolated staging",
+        "cli-package-staging": "Staging the native CLI package",
+        "cli-artifact-verification": "Verifying the native CLI artifact",
+        "sdk-lock-generation": "Resolving the isolated SDK lock",
+        "sdk-lock-verification": "Verifying the isolated SDK lock",
+        "sdk-materialization": "Installing the isolated SDK",
+        "sdk-installed-tree-verification": "Verifying the installed SDK",
+    },
+    "native-preflight-probe": {
+        "probe-helper": "Running the isolated probe",
+        "cli-artifact-verification": "Rechecking the native CLI artifact",
+        "sdk-installed-tree-verification": "Rechecking the installed SDK",
+        "offline-build": "Checking Build offline",
+        "native-process-cleanup": "Checking native process cleanup",
+    },
+    "native-preflight-cleanup": {
+        "stage-container-cleanup": "Checking staging container cleanup",
+        "probe-container-cleanup": "Checking probe container cleanup",
+        "scratch-directory-cleanup": "Checking isolated scratch cleanup",
+    },
+}
+_DETAIL_CODES = frozenset({"started", "success", "failure", "timeout", "unavailable"})
+_DETAIL_STREAM = frozenset({"stdout", "stderr"})
+_DETAIL_STREAM_CODES = frozenset({"omitted", "output-limit"})
 
 EVENTS = frozenset(
     {
@@ -179,6 +213,7 @@ _FILE = "activity.jsonl"
 _LOCK = "activity.lock"
 _PRUNE = ".activity.prune"
 _PREPARATION_DIRECTORY = "preparation"
+_PREPARATION_DETAIL_DIRECTORY = "preparation-details"
 _MAX_FILE_BYTES = 256 * 1024
 _BACKUP_COUNT = 3
 # Safety bounds are independent of the current write/retention policy.
@@ -198,6 +233,10 @@ _DISPLAY_FIELDS = (
     "duration_ms",
 )
 _FIELDS = frozenset({"timestamp", "event", "level", "metrics", *_DISPLAY_FIELDS})
+_DETAIL_REQUIRED = frozenset(
+    {"timestamp", "event", "command", "stage", "step", "source", "code"}
+)
+_DETAIL_FIELDS = _DETAIL_REQUIRED | {"workspace", "count", "exit_code", "duration_ms"}
 _WORKSPACE = re.compile(r"[0-9a-f]{32}\Z")
 _TIMESTAMP = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z\Z")
 
@@ -299,17 +338,25 @@ def _log_directory(root, *, create, policy=None):
 
 
 @contextmanager
-def _preparation_directory(root, *, create, policy):
-    # Keep the preparation schema out of the legacy activity ring. Older
-    # launchers can still append to a shared custom directory during upgrade.
+def _journal_directory(root, *, create, policy, ring):
     with _log_directory(root, create=create, policy=policy) as parent:
+        if ring == "activity":
+            yield parent
+            return
+        # Older launchers can append to either existing ring during an
+        # upgrade. Never mix detailed or preparation rows into those files.
+        name = (
+            _PREPARATION_DETAIL_DIRECTORY
+            if ring == "detail"
+            else _PREPARATION_DIRECTORY
+        )
         if create:
             try:
-                os.mkdir(_PREPARATION_DIRECTORY, 0o700, dir_fd=parent)
+                os.mkdir(name, 0o700, dir_fd=parent)
             except FileExistsError:
                 pass
         flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
-        child = os.open(_PREPARATION_DIRECTORY, flags, dir_fd=parent)
+        child = os.open(name, flags, dir_fd=parent)
         try:
             _private_directory(child)
             yield child
@@ -409,10 +456,51 @@ def _workspace_id(value):
     return isinstance(value, str) and _WORKSPACE.fullmatch(value) is not None
 
 
+def _event_ring(event):
+    if event == PREPARATION_DETAIL_EVENT:
+        return "detail"
+    if event in PREPARATION_EVENTS:
+        return "preparation"
+    return "activity"
+
+
+def _valid_detail(record):
+    stage, step, source, code = (
+        record[name] for name in ("stage", "step", "source", "code")
+    )
+    if (
+        not _choice(stage, _DETAIL_STEPS)
+        or not _choice(step, _DETAIL_STEPS[stage])
+        or not _choice(record["command"], ("start", "reset", "sync", "web"))
+    ):
+        return False
+    if source == "launcher":
+        return "count" not in record and _choice(code, _DETAIL_CODES)
+    if (
+        not _choice(source, _DETAIL_STREAM)
+        or not step.startswith("npm-")
+        or not _integer(record.get("count"), 1, MAX_METRIC_VALUE)
+        or "exit_code" in record
+        or "duration_ms" in record
+    ):
+        return False
+    if __package__:
+        from .preparation_capture import NPM_CODES
+    else:
+        from preparation_capture import NPM_CODES
+    return _choice(code, _DETAIL_STREAM_CODES) or _choice(code, NPM_CODES)
+
+
 def _sanitize(record):
-    if not isinstance(record, dict) or set(record) - _FIELDS:
+    if not isinstance(record, dict):
         return None
-    if not _choice(record.get("event"), EVENTS):
+    event = record.get("event")
+    if event == PREPARATION_DETAIL_EVENT:
+        if not _DETAIL_REQUIRED <= record.keys() <= _DETAIL_FIELDS or not _valid_detail(
+            record
+        ):
+            return None
+    elif set(record) - _FIELDS or not _choice(event, EVENTS):
         return None
     timestamp = record.get("timestamp")
     if not isinstance(timestamp, str) or not _TIMESTAMP.fullmatch(timestamp):
@@ -476,6 +564,13 @@ def event_level(record) -> str:
     if _choice(level, LEVELS):
         return level
     event = record.get("event")
+    if event == PREPARATION_DETAIL_EVENT:
+        code = record.get("code")
+        if code in ("unavailable", "output-limit"):
+            return "warn"
+        if code in ("started", "success", "omitted"):
+            return "debug"
+        return "error"
     if event == "command.failed" or record.get("outcome") in (
         "failure",
         "refused",
@@ -505,6 +600,32 @@ def format_event(record) -> str:
         f"{name}={value}" for name, value in sorted(record.get("metrics", {}).items())
     )
     return " ".join(parts)
+
+
+def format_preparation_detail(record) -> str:
+    """Render safe fields, never an installer line."""
+    record = _sanitize(record)
+    if record is None or record["event"] != PREPARATION_DETAIL_EVENT:
+        return ""
+    label = _DETAIL_STEPS[record["stage"]][record["step"]]
+    source, code = record["source"], record["code"]
+    if code == "omitted":
+        message = f"omitted {record['count']} unrecognized output line(s)"
+    elif code == "output-limit":
+        message = "output limit reached; remaining detail omitted"
+    elif code == "unavailable":
+        message = "diagnostic detail unavailable"
+    else:
+        message = f"npm reported {code}" if source != "launcher" else code
+        if record.get("count", 1) > 1:
+            message += f" ({record['count']} occurrences)"
+    if source != "launcher":
+        label += f" · {source}"
+    if record.get("exit_code"):
+        message += f" (exit {record['exit_code']})"
+    if "duration_ms" in record:
+        message += f" ({record['duration_ms'] / 1000:.1f}s)"
+    return f"{record['command']}: {label} — {message}"
 
 
 def _filename(index):
@@ -609,7 +730,7 @@ def _custom_inventory(directory):
     return files
 
 
-def _custom_records(directory, index, info, *, preparation_only=False):
+def _custom_records(directory, index, info, *, ring="activity"):
     # An empty lock has no binding to an empty active inode. In particular,
     # a failed bootstrap must never turn a late empty file into managed data.
     # Only the empty active fd exclusively created by this append is writable.
@@ -622,10 +743,7 @@ def _custom_records(directory, index, info, *, preparation_only=False):
         first = None
         for line in _read_file(fd, info):
             record = _parse_record(line, strict=True)
-            if (
-                record is None
-                or (record["event"] in PREPARATION_EVENTS) != preparation_only
-            ):
+            if record is None or _event_ring(record["event"]) != ring:
                 raise ValueError("Unrecognized activity record")
             if first is None:
                 first = record
@@ -637,12 +755,10 @@ def _custom_records(directory, index, info, *, preparation_only=False):
     return first, b"" if line.endswith(b"\n") else b"\n"
 
 
-def _verify_custom_candidates(directory, files, candidates, *, preparation_only=False):
+def _verify_custom_candidates(directory, files, candidates, *, ring="activity"):
     """Prove every candidate has managed content before any ring changes."""
     for index in candidates:
-        _custom_records(
-            directory, index, files[index], preparation_only=preparation_only
-        )
+        _custom_records(directory, index, files[index], ring=ring)
     for index in candidates:
         _check_snapshot(_activity_stat(directory, _filename(index)), files[index])
 
@@ -663,15 +779,13 @@ def validate_custom_directory(path):
             _verify_custom_candidates(directory, files, files)
 
 
-def _inspect_custom_files(directory, policy, now, *, preparation_only=False):
+def _inspect_custom_files(directory, policy, now, *, ring="activity"):
     files = _custom_inventory(directory)
     active = files.get(0)
     if active is None:
         return files, b"", False
 
-    record, prefix = _custom_records(
-        directory, 0, active, preparation_only=preparation_only
-    )
+    record, prefix = _custom_records(directory, 0, active, ring=ring)
 
     aged = False
     if policy.max_file_sec:
@@ -831,7 +945,7 @@ def _prepare_append(
     final_size,
     append_size,
     *,
-    preparation_only=False,
+    ring="activity",
 ):
     """Make room and report whether to drop the outgoing active after a sync."""
     archives = sorted(index for index in files if index)
@@ -853,7 +967,7 @@ def _prepare_append(
     available = _available_bytes(directory, required) if policy.keep_free else None
     kept_archives = [index for index in keep if index]
     discarded = set(archives) - set(kept_archives)
-    custom = preparation_only or policy.directory is not None
+    custom = ring != "activity" or policy.directory is not None
     if custom:
         if rotate:
             affected = archives
@@ -870,10 +984,10 @@ def _prepare_append(
                     if source != target
                 }
             )
-        if preparation_only:
-            _verify_custom_candidates(directory, files, affected, preparation_only=True)
-        else:
+        if ring == "activity":
             _verify_custom_candidates(directory, files, affected)
+        else:
+            _verify_custom_candidates(directory, files, affected, ring=ring)
         if 0 in files:
             _check_snapshot(_activity_stat(directory, _FILE), files[0])
     for index in reversed(archives):
@@ -919,6 +1033,11 @@ def record_event(
     stage=None,
     reason=None,
     metrics=None,
+    step=None,
+    source=None,
+    code=None,
+    count=None,
+    timestamp=None,
     root=None,
 ) -> bool:
     """Append allowlisted metadata; return False silently on invalid/unsafe I/O.
@@ -931,8 +1050,11 @@ def record_event(
     No exception text or arbitrary caller field is ever written.
     """
     try:
+        if timestamp is not None and event != PREPARATION_DETAIL_EVENT:
+            return False
         record = make_record(
             event,
+            timestamp=timestamp,
             command=command,
             workspace=workspace,
             outcome=outcome,
@@ -942,6 +1064,10 @@ def record_event(
             stage=stage,
             reason=reason,
             metrics=metrics,
+            step=step,
+            source=source,
+            code=code,
+            count=count,
         )
         if record is None:
             return False
@@ -949,19 +1075,20 @@ def record_event(
             json.dumps(record, separators=(",", ":"), ensure_ascii=True) + "\n"
         ).encode("ascii")
         policy = _policy()
-        preparation_only = event in PREPARATION_EVENTS
-        custom = preparation_only or policy.directory is not None
-        open_directory = _preparation_directory if preparation_only else _log_directory
+        ring = _event_ring(event)
+        custom = ring != "activity" or policy.directory is not None
         if len(payload) > min(_MAX_RECORD_BYTES, policy.max_file_size, policy.max_use):
             return False
         with (
-            open_directory(root, create=True, policy=policy) as directory,
+            _journal_directory(
+                root, create=True, policy=policy, ring=ring
+            ) as directory,
             _locked(directory, write=True, custom=custom),
         ):
             now = time.time()
             if custom:
                 files, prefix, aged = _inspect_custom_files(
-                    directory, policy, now, preparation_only=preparation_only
+                    directory, policy, now, ring=ring
                 )
             else:
                 files, prefix, aged = _inspect_files(directory, policy, now)
@@ -982,7 +1109,7 @@ def record_event(
                 rotate,
                 final_size,
                 len(pending),
-                preparation_only=preparation_only,
+                ring=ring,
             )
 
             active = files.get(0)
@@ -1023,7 +1150,7 @@ def record_event(
             if discard_outgoing:
                 _discard_archive(directory, files, 1, custom=custom)
         if (
-            not preparation_only
+            ring == "activity"
             and policy.journald
             and os.environ.get("OC_BOX_CONTAINER") != "1"
         ):
@@ -1069,7 +1196,21 @@ def read_events(
         level=level,
         workspace=workspace,
         strict_snapshot=strict_snapshot,
-        preparation_only=preparation_only,
+        ring="preparation" if preparation_only else "activity",
+    )
+
+
+def read_preparation_details(
+    root=None, *, limit=1000, level=None, workspace=None, strict_snapshot=False
+) -> list[dict]:
+    """Read the optional detail ring; missing or unsafe input fails closed."""
+    return _read_events(
+        root,
+        limit=limit,
+        level=level,
+        workspace=workspace,
+        strict_snapshot=strict_snapshot,
+        ring="detail",
     )
 
 
@@ -1092,7 +1233,7 @@ def _read_events(
     level=None,
     workspace=None,
     strict_snapshot=False,
-    preparation_only=False,
+    ring="activity",
     policy=None,
 ):
     if (
@@ -1107,9 +1248,10 @@ def _read_events(
     try:
         if policy is None:
             policy = _policy()
-        open_directory = _preparation_directory if preparation_only else _log_directory
         with (
-            open_directory(root, create=False, policy=policy) as directory,
+            _journal_directory(
+                root, create=False, policy=policy, ring=ring
+            ) as directory,
             _locked(directory, write=False),
         ):
             missing_newer = False
@@ -1147,8 +1289,7 @@ def _read_events(
                                 minimum is None
                                 or LEVELS.index(event_level(record)) >= minimum
                             )
-                            and (record["event"] in PREPARATION_EVENTS)
-                            == preparation_only
+                            and _event_ring(record["event"]) == ring
                         ):
                             file_records.append(record)
                     records.extendleft(reversed(file_records))

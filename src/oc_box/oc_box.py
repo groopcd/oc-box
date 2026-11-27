@@ -1014,7 +1014,72 @@ def check_private_output():
         raise BoxError(private_memory.error_message()) from exc
 
 
-def run(argv, *, capture=False, check=True, private=False, preparation=None, **kwargs):
+def _run_npm_with_details(invoke, command, options, stage, step, *, live):
+    """Keep the original invocation and its exit authoritative."""
+    activity = lifecycle_output.preparation_detail
+    observe = None
+    stack = contextlib.ExitStack()
+    activity(stage, step, "launcher", "started")
+    try:
+        if not live:
+            try:
+                if __package__:
+                    from . import preparation_capture
+                else:
+                    import preparation_capture
+                observe = stack.enter_context(preparation_capture.capture_npm())
+                if observe is not None:
+                    stdout, stderr = observe.outputs
+                    options = {**options, "stdout": stdout, "stderr": stderr}
+            except Exception:
+                # Set up diagnostics, or use the original quiet execution once.
+                observe = None
+        if observe is None:
+            activity(stage, step, "launcher", "unavailable")
+            lifecycle_output.preparation_diagnostics_unavailable()
+        started = time.monotonic()
+        try:
+            result = invoke(command, text=True, **options)
+            duration_ms = int((time.monotonic() - started) * 1000)
+        except subprocess.TimeoutExpired:
+            activity(stage, step, "launcher", "timeout")
+            raise
+        except OSError:
+            activity(stage, step, "launcher", "failure")
+            raise
+    finally:
+        try:
+            stack.close()
+            if observe is not None:
+                for source, code, count in observe.records:
+                    activity(stage, step, source, code, count=count)
+                if observe.unavailable:
+                    activity(stage, step, "launcher", "unavailable")
+                    lifecycle_output.preparation_diagnostics_unavailable()
+        except (Exception, KeyboardInterrupt):
+            with contextlib.suppress(KeyboardInterrupt):
+                lifecycle_output.preparation_diagnostics_unavailable()
+    activity(
+        stage,
+        step,
+        "launcher",
+        "failure" if result.returncode else "success",
+        exit_code=result.returncode if -255 <= result.returncode <= 255 else None,
+        duration_ms=duration_ms,
+    )
+    return result
+
+
+def run(
+    argv,
+    *,
+    capture=False,
+    check=True,
+    private=False,
+    preparation=None,
+    detail_step=None,
+    **kwargs,
+):
     remaining = history_recovery.remaining()
     if remaining is not None:
         requested = kwargs.get("timeout")
@@ -1133,7 +1198,17 @@ def run(argv, *, capture=False, check=True, private=False, preparation=None, **k
                 _startup_tool_output() if live else contextlib.nullcontext(),
             ):
                 try:
-                    result = invoke(command, text=True, **kwargs)
+                    if (
+                        preparation in ("plugin-dependencies", "native-cli-install")
+                        and detail_step
+                        in ("npm-cli-install", "npm-lock", "npm-install")
+                        and lifecycle_output.details_enabled()
+                    ):
+                        result = _run_npm_with_details(
+                            invoke, command, kwargs, preparation, detail_step, live=live
+                        )
+                    else:
+                        result = invoke(command, text=True, **kwargs)
                 except subprocess.TimeoutExpired:
                     details["reason"] = "timeout"
                     raise
@@ -2997,6 +3072,7 @@ def ensure_opencode_version(data, version):
                 ),
                 timeout=600,
                 preparation="native-cli-install",
+                detail_step="npm-cli-install",
             )
     if install or guarded:
         installed = run(
@@ -3142,6 +3218,7 @@ def prepare_runtime(
                     ),
                     timeout=600,
                     preparation="plugin-dependencies",
+                    detail_step="npm-lock",
                 )
                 checked = run(
                     exec_command(
@@ -3151,6 +3228,15 @@ def prepare_runtime(
                     capture=True,
                     private=True,
                     timeout=30,
+                )
+                lifecycle_output.preparation_detail(
+                    "plugin-dependencies",
+                    "sdk-lock-check",
+                    "launcher",
+                    "failure" if checked.returncode else "success",
+                    exit_code=checked.returncode
+                    if -255 <= checked.returncode <= 255
+                    else None,
                 )
                 if checked.returncode:
                     raise BoxError(
@@ -3165,6 +3251,7 @@ def prepare_runtime(
                 ),
                 timeout=600,
                 preparation="plugin-dependencies",
+                detail_step="npm-install",
             )
             if managed:
                 cached = run(
@@ -3175,6 +3262,15 @@ def prepare_runtime(
                     capture=True,
                     private=True,
                     timeout=30,
+                )
+                lifecycle_output.preparation_detail(
+                    "plugin-dependencies",
+                    "sdk-installed-check",
+                    "launcher",
+                    "failure" if cached.returncode else "success",
+                    exit_code=cached.returncode
+                    if -255 <= cached.returncode <= 255
+                    else None,
                 )
                 if cached.returncode:
                     raise BoxError(
@@ -6389,6 +6485,7 @@ _LOGGING_FLAGS = (
     "--journald",
     "--no-journald",
     "--lifecycle-diagnostics",
+    "--capture-preparation",
     "--verbose",
 )
 _LOGGING_SCOPE_ERROR = "Launcher logging options apply only to start, reset, stop, sync, terminal, and web."
@@ -6402,6 +6499,7 @@ def _logging_options_requested(args):
         args.journald is not None
         or args.log_dir is not None
         or args.lifecycle_diagnostics
+        or getattr(args, "capture_preparation", False)
         or args.verbose is not None
     )
 
@@ -6446,6 +6544,13 @@ def _validate_table_options(args):
 
 
 def _validate_logging_options(args):
+    if getattr(args, "capture_preparation", False) and (
+        args.command not in ("start", "reset", "sync", "web")
+        or _informational_request(args)
+    ):
+        raise BoxError(
+            "--capture-preparation applies only to start, reset, sync, and web."
+        )
     if _logging_options_requested(args) and (
         args.command not in _LOGGING_COMMANDS or _informational_request(args)
     ):
@@ -6551,6 +6656,7 @@ def main(argv=None):
         args.log_dir = web.log_dir
         args.journald = web.journald
         args.lifecycle_diagnostics = web.lifecycle_diagnostics
+        args.capture_preparation = web.capture_preparation
         args.verbose = web.verbose
         workspace_service.preflight_port(web.port)
     else:
@@ -6566,6 +6672,7 @@ def main(argv=None):
                     args.command,
                     verbose=args.lifecycle_diagnostics,
                     console_level=args.verbose,
+                    capture_preparation=args.capture_preparation,
                 ),
             ):
                 return _main_command(args, argv)
@@ -7768,6 +7875,7 @@ def entrypoint():
             command,
             verbose=launch_options.lifecycle_diagnostics,
             console_level=launch_options.verbose,
+            capture_preparation=launch_options.capture_preparation,
         )
         if journaled and command in _LOGGING_COMMANDS
         else contextlib.nullcontext()

@@ -8,6 +8,8 @@ import stat
 import sys
 import time
 from contextlib import ExitStack
+from itertools import chain
+from operator import itemgetter
 from pathlib import Path
 
 if __package__:
@@ -76,6 +78,11 @@ def parser():
         "--tail",
         action="store_true",
         help="show recent environment preparation tasks and results (add -f to watch live)",
+    )
+    result.add_argument(
+        "--details",
+        action="store_true",
+        help="include retained preparation details; requires --tail",
     )
     formats = result.add_mutually_exclusive_group()
     formats.add_argument(
@@ -265,6 +272,8 @@ def _new_records(previous, current):
 
 
 def _preparation_text(record):
+    if record["event"] == activity_log.PREPARATION_DETAIL_EVENT:
+        return activity_log.format_preparation_detail(record)
     task = activity_log.PREPARATION_TASKS[record["stage"]]
     metrics = record.get("metrics", {})
     version_fields = ("opencode_major", "opencode_minor", "opencode_patch")
@@ -371,6 +380,14 @@ def _configured_path(box, root=None):
         ) from None
 
 
+def _ordered_records(snapshots, *, details):
+    if not details:
+        return snapshots[0]
+    # Each ring supplies append order but there is no shared sequence. The
+    # timestamp sort is stable for rows sharing a timestamp in the same ring.
+    return sorted(chain.from_iterable(snapshots), key=itemgetter("timestamp"))
+
+
 def cli(box, arguments):
     try:
         try:
@@ -378,6 +395,12 @@ def cli(box, arguments):
             args = options.parse_args(arguments)
             if args.journald and args.log_dir is not None:
                 options.error("--log-dir cannot be combined with --journald")
+            if args.details:
+                if args.journald or args.path:
+                    source = "--journald" if args.journald else "--path"
+                    options.error(f"--details cannot be combined with {source}")
+                if not args.tail:
+                    options.error("--details requires --tail")
             if args.tail and (args.journald or args.path):
                 options.error("--tail cannot be combined with --journald or --path")
         except SystemExit as error:
@@ -420,24 +443,44 @@ def cli(box, arguments):
                 selectors["preparation_only"] = True
             elif selectors["level"] is None and not all_levels:
                 selectors["level"] = "info"
-            limit = _MAX_LIMIT if args.follow else initial_limit
-            previous = _read_events(box, root, limit=limit, **selectors)
+            limit = _MAX_LIMIT if args.follow or args.details else initial_limit
+
+            def read_snapshots():
+                yield _read_events(box, root, limit=limit, **selectors)
+                if args.details:
+                    yield activity_log.read_preparation_details(
+                        root,
+                        limit=limit,
+                        level=selectors["level"],
+                        workspace=workspace,
+                        strict_snapshot=args.follow,
+                    )
+
+            previous = list(read_snapshots())
             display = dict(
                 json_lines=args.json, table=args.table, preparation_only=args.tail
             )
-            _emit(previous[-initial_limit:], **display)
-            heading = not previous
+            initial = _ordered_records(previous, details=args.details)[-initial_limit:]
+            _emit(initial, **display)
+            heading = not initial
             while args.follow:
                 time.sleep(_POLL_SECONDS)
-                current = _read_events(box, root, limit=limit, **selectors)
-                if not current:
-                    # A busy or incomplete snapshot is not a new follow baseline.
-                    continue
-                new = _new_records(previous, current)
-                if new:
-                    _emit(new, heading=heading, **display)
+                changes = []
+                for index, current in enumerate(read_snapshots()):
+                    if not current:
+                        # A busy or incomplete snapshot is not a new baseline.
+                        continue
+                    new = _new_records(previous[index], current)
+                    if new:
+                        changes.append(new)
+                        previous[index] = current
+                if changes:
+                    _emit(
+                        _ordered_records(changes, details=args.details),
+                        heading=heading,
+                        **display,
+                    )
                     heading = False
-                    previous = current
             return 0
     except KeyboardInterrupt:
         return 130

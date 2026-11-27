@@ -330,6 +330,11 @@ def add_launch_arguments(parser: argparse.ArgumentParser) -> None:
         action="store_true",
         help="show expanded launcher lifecycle diagnostics",
     )
+    parser.add_argument(
+        "--capture-preparation",
+        action="store_true",
+        help="record extra fixed-category environment preparation diagnostics",
+    )
     add_verbosity(
         parser,
         help_text=(
