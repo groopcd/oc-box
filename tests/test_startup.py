@@ -64,15 +64,17 @@ class ConfigCacheTests(unittest.TestCase):
             (config / glob).rmdir()
             self.assertTrue(sync.sdk_modules_match(config, "2.4.2"))
 
-    def test_sdk_remediation_scopes_affected_ranges_to_the_selected_v2_sdk(self):
+    def test_sdk_remediation_includes_each_fixed_endpoint_only_in_the_selected_v2_sdk(
+        self,
+    ):
         for release in ("2.0.0", "2.4.2", "2.58.9"):
             with self.subTest(release=release):
                 self.assertEqual(
                     sync.sdk_security_overrides(release),
                     {
                         f"@opencode/plugin@{release}": {
-                            "glob@>=9.0.0 <14.0.2": "14.0.2",
-                            "minimatch@>=7.0.0 <11.0.1": "11.0.1",
+                            "glob@>=9.0.0 <=14.0.2": "14.0.2",
+                            "minimatch@>=7.0.0 <=11.0.1": "11.0.1",
                         }
                     },
                 )
