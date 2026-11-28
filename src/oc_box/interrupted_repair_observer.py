@@ -527,6 +527,13 @@ def _authorizer(sqlite):
     def authorize(action, target, arg, database, trigger):
         allowed = trigger is None and (
             action == sqlite.SQLITE_SELECT
+            or (action == sqlite.SQLITE_TRANSACTION and target == "ROLLBACK")
+            or (
+                action == sqlite.SQLITE_PRAGMA
+                and target == "data_version"
+                and arg is None
+                and database == "main"
+            )
             or (
                 action == sqlite.SQLITE_READ
                 and database == "main"
@@ -846,7 +853,8 @@ def _snapshot(sqlite, source, directory, targets, deadline):
             connection.set_authorizer(_authorizer(sqlite))
             rows = _rows(connection, directory, targets)
         finally:
-            connection.set_authorizer(None)
+            # Keep the query fence in place through retirement. Python 3.10
+            # does not support disabling an authorizer with None.
             connection.execute("ROLLBACK")
         source.recheck()
         _require(

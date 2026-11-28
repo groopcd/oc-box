@@ -93,7 +93,7 @@ class GuidedRepairTest(unittest.TestCase):
                 try:
                     return observer._rows(db, Path("/demo"), targets)
                 finally:
-                    db.set_authorizer(None)
+                    db.set_authorizer(lambda *_: sqlite3.SQLITE_OK)
 
             self.assertTrue(repair._candidate(rows(None)[0]))
             db.execute(
@@ -125,6 +125,21 @@ class GuidedRepairTest(unittest.TestCase):
             )
             self.assertTrue(after["original_completed"])
             self.assertFalse(after["claim"])
+
+    def test_metadata_authorizer_stays_read_only_through_transaction_retirement(self):
+        with contextlib.closing(
+            sqlite3.connect(":memory:", isolation_level=None)
+        ) as db:
+            db.execute("BEGIN")
+            db.set_authorizer(observer._authorizer(sqlite3))
+            db.execute("ROLLBACK")
+            self.assertIsInstance(
+                db.execute("PRAGMA main.data_version").fetchone()[0], int
+            )
+            with self.assertRaises(sqlite3.DatabaseError):
+                db.execute("PRAGMA main.user_version = 1")
+            with self.assertRaises(sqlite3.DatabaseError):
+                db.execute("BEGIN")
 
     def test_bad_flag_is_refused_before_journal_or_dispatch(self):
         for command in ("purge", "credentials", "tui"):
