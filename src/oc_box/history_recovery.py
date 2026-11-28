@@ -110,6 +110,7 @@ class Report:
     manual: bool = False
     pending_sessions: int = 0
     pending_reasons: dict[str, int] | None = None
+    review_interrupted: bool = False
     updated_sessions: int = 0
     unchanged_sessions: int = 0
     phase: str | None = None

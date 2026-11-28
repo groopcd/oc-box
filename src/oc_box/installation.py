@@ -130,6 +130,8 @@ RUNTIME_FILES = (
     "history_recovery.py",
     "history_volume_scratch.py",
     "history_write_intent.py",
+    "interrupted_repair.py",
+    "interrupted_repair_observer.py",
     "native_tabs.py",
     "ui_state.py",
     "ui_state_server.js",

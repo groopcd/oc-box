@@ -4457,8 +4457,19 @@ def _sync_sessions(path, data, started, source_mode, counts, first_overlap, stac
         except HistoryPending as exc:
             # Keep this session's last good archives and continue with the rest.
             pending.append(str(exc))
+            reason = getattr(exc, "history_pending_reason", None)
+            if (
+                reason == "assistant-tail"
+                and data.get("opencode_version") == "2.4.2"
+                and data.get("ready") is True
+                and not (data.get("devices") or data.get("podman_args"))
+                and report is not None
+                and report.manual
+                and not report.recovery_attempted
+                and runtime_safeguard.current() is None
+            ):
+                report.review_interrupted = True
             if pending_reasons is not None:
-                reason = getattr(exc, "history_pending_reason", None)
                 if (
                     type(reason) is not str
                     or reason not in opencode_v2_io.PENDING_REASONS
@@ -4739,6 +4750,11 @@ def _report_history_result(report, *, recovered, error):
                         for key, count in sorted(report.pending_reasons.items())
                     )
                     pending_guidance = f"Pending reasons: {details}. {pending_guidance}"
+                if report.review_interrupted:
+                    pending_guidance += (
+                        " To review interrupted subagent runs, reopen this workspace and run "
+                        "'oc-box sync --repair-interrupted' in a second host terminal."
+                    )
             message = (
                 f"{status}: {detail}.{guidance} "
                 f"Newly verified: {report.updated_sessions}; "
@@ -4973,6 +4989,21 @@ def _quiet_sync_mounts(data, info):
         ):
             return data["project"], project, source, data["home"]
     return None
+
+
+def _interrupted_repair_hint_stopped(data, initial_info):
+    ident = initial_info.get("Id") if isinstance(initial_info, dict) else None
+    if not isinstance(ident, str) or re.fullmatch(r"[a-f0-9]{64}", ident) is None:
+        return False
+    try:
+        final = _inspect_sync_container(data, ident)
+        return (
+            history_recovery.verified_container_state(final, running=False)
+            and final["Id"] == ident
+            and _quiet_sync_mounts(data, final) is not None
+        )
+    except (BoxError, OSError, ValueError, KeyError):
+        return False
 
 
 def _capture_quiet_sync_binding(data):
@@ -5499,6 +5530,13 @@ def launch_environment(
                                 )
                         else:
                             stop_container(cleanup_data)
+                            if report.review_interrupted:
+                                report.review_interrupted = (
+                                    report.reason == "pending"
+                                    and _interrupted_repair_hint_stopped(
+                                        cleanup_data, initial_info
+                                    )
+                                )
                 except BaseException as exc:
                     preserve = (
                         _first_history is not None
@@ -6161,6 +6199,11 @@ def parser():
         help="with sync, use only a guarded snapshot of an existing stopped workspace",
     )
     result.add_argument(
+        "--repair-interrupted",
+        action="store_true",
+        help="with sync, guide repair of interrupted subagents on an existing live owner",
+    )
+    result.add_argument(
         "--distro",
         help="distribution for a new environment; use 'reset --distro NAME' to switch",
     )
@@ -6600,6 +6643,18 @@ def _validate_logging_options(args):
         raise BoxError(_LOGGING_SCOPE_ERROR)
 
 
+def _validate_interrupted_repair_options(args):
+    baseline = vars(parser().parse_args(["sync"]))
+    accepted = {"command", "project", "workspace", "repair_interrupted"}
+    if args.command != "sync" or any(
+        name not in accepted and value != baseline.get(name)
+        for name, value in vars(args).items()
+    ):
+        raise BoxError(
+            "--repair-interrupted applies only to sync with optional workspace selectors."
+        )
+
+
 def _has_launcher_logging_flag(arguments):
     """Identify otherwise unsupported flags before journaling another command."""
     for argument in arguments:
@@ -6852,6 +6907,13 @@ def _stop_v2(path, data):
 
 
 def _main_command(args, argv):
+    if getattr(args, "repair_interrupted", False):
+        _validate_interrupted_repair_options(args)
+        if __package__:
+            from . import interrupted_repair
+        else:
+            import interrupted_repair
+        return interrupted_repair.guide(sys.modules[__name__], args)
     if getattr(args, "repair_private_home", False) and (
         args.command != "repair" or not args.workspace or args.project is not None
     ):
@@ -7867,6 +7929,19 @@ def entrypoint():
                 flag = argument.partition("=")[0]
                 if flag.startswith("--ta") and "--table".startswith(flag):
                     raise BoxError(_STATUS_TABLE_ERROR)
+        if (
+            launch_options is None
+            and command in _JOURNALED_COMMANDS
+            and not informational
+        ):
+            for argument in arguments[1:]:
+                if argument == "--":
+                    break
+                flag = argument.partition("=")[0]
+                if flag.startswith("--rep") and "--repair-interrupted".startswith(flag):
+                    raise BoxError(
+                        "--repair-interrupted applies only to sync with optional workspace selectors."
+                    )
         if command == "tui" and not informational:
             if __package__:
                 from .tui import parser as dashboard_parser
@@ -7878,6 +7953,9 @@ def entrypoint():
         if launch_options is not None:
             _validate_logging_options(launch_options)
             _validate_table_options(launch_options)
+            if getattr(launch_options, "repair_interrupted", False):
+                _validate_interrupted_repair_options(launch_options)
+                informational = True
             # Argparse accepts abbreviations such as --statu. The parsed
             # request, not the spelling in argv, determines read-only behavior.
             informational = informational or _informational_request(launch_options)

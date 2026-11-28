@@ -572,6 +572,150 @@ def _quiet_export_wire(request, ident):
     return json.dumps({"data": checked}, separators=(",", ":")).encode("utf-8")
 
 
+def interrupted_repair_probe(settings):
+    """Inspect one attached owner and optionally check one exact transcript."""
+    if not isinstance(settings, dict) or set(settings) != {
+        "endpoint",
+        "directory",
+        "target",
+        "expect",
+    }:
+        raise FixedError(HISTORY)
+    endpoint = settings["endpoint"]
+    directory = settings["directory"]
+    target, expect = settings["target"], settings["expect"]
+    if (
+        not isinstance(directory, str)
+        or directory != os.getcwd()
+        or not isinstance(endpoint, dict)
+        or set(endpoint) != {"url", "password"}
+        or expect not in (None, "tail", "settled")
+        or (target is None and expect is not None)
+    ):
+        raise FixedError(HISTORY)
+    read = endpoint_request(endpoint, no_redirect=True)
+    deadline = time.monotonic() + 16
+    reads = 0
+
+    def request(method, route):
+        nonlocal reads
+        reads += 1
+        if reads > 40 or method != "GET":
+            raise FixedError(HISTORY)
+        return read(
+            method,
+            route,
+            deadline=deadline,
+            max_body=16 * 1024 * 1024 if route.endswith("/export") else 2 * 1024 * 1024,
+        )
+
+    def identity():
+        info = request("GET", "/api/info")
+        url = f"http://127.0.0.1:{named_native_port(endpoint['url'])}"
+        if (
+            not isinstance(info, dict)
+            or info.get("version") != "2.4.2"
+            or type(info.get("pid")) is not int
+            or info["pid"] <= 1
+            or info.get("urls") != [url]
+        ):
+            raise FixedError(READINESS)
+        return info["pid"]
+
+    def active():
+        value = request("GET", "/api/session/active")
+        if not isinstance(value, dict) or not isinstance(value.get("data"), dict):
+            raise FixedError(ACTIVITY)
+        items = value["data"]
+        if len(items) > 1024 or any(
+            re.fullmatch(r"ses[A-Za-z0-9_-]{1,125}", key) is None
+            or not isinstance(item, dict)
+            or item.get("type") != "running"
+            for key, item in items.items()
+        ):
+            raise FixedError(ACTIVITY)
+        return set(items)
+
+    pid = identity()
+    observed = active()
+    if target is not None:
+        if (
+            not isinstance(target, dict)
+            or set(target) != {"session", "parent", "agent", "message"}
+            or any(
+                not isinstance(target[key], str)
+                or re.fullmatch(r"ses[A-Za-z0-9_-]{1,125}", target[key]) is None
+                for key in ("session", "parent")
+            )
+            or target["session"] == target["parent"]
+            or not isinstance(target["agent"], str)
+            or not isinstance(target["message"], str)
+            or re.fullmatch(r"msg[A-Za-z0-9_-]{1,125}", target["message"]) is None
+        ):
+            raise FixedError(HISTORY)
+        subjects = (target["session"], target["parent"])
+        if observed.intersection(subjects):
+            return {"pid": pid, "active": sorted(observed), "check": "active"}
+        for key in ("session", "parent"):
+            response = request("GET", "/api/session/" + target[key])
+            if not isinstance(response, dict):
+                raise FixedError(INVENTORY_ENTRY)
+            info = web_session_info(response.get("data"))
+            if (
+                info["id"] != target[key]
+                or info["location"]["directory"] != directory
+                or info["time"].get("archived") is not None
+                or info.get("revert") is not None
+                or info.get("parentID")
+                != (target["parent"] if key == "session" else None)
+                or (key == "session" and info.get("agent") != target["agent"])
+            ):
+                raise FixedError(INVENTORY_INCONSISTENT)
+        if expect is not None:
+            tail = None
+            message_route = f"/api/session/{target['session']}/message?"
+
+            def transcript(method, route):
+                nonlocal tail
+                value = request(method, route)
+                if route.startswith(message_route) and isinstance(value, dict):
+                    page = value.get("data")
+                    if isinstance(page, list) and page and isinstance(page[-1], dict):
+                        tail = page[-1].get("id")
+                return value
+
+            try:
+                exported = checked_export(transcript, target["session"])
+            except UnsettledExport as error:
+                if (
+                    expect != "tail"
+                    or error.reason != "assistant-tail"
+                    or tail != target["message"]
+                ):
+                    raise
+            else:
+                if (
+                    expect != "settled"
+                    or not isinstance(exported.get("info"), dict)
+                    or exported["info"].get("id") != target["session"]
+                    or exported["info"].get("location", {}).get("directory")
+                    != directory
+                    or not any(
+                        message["id"] == target["message"]
+                        and message.get("type") == "assistant"
+                        and message.get("time", {}).get("completed") is not None
+                        for message in exported["messages"]
+                    )
+                ):
+                    raise FixedError(CHANGED)
+        observed |= active()
+        if observed.intersection(subjects):
+            return {"pid": pid, "active": sorted(observed), "check": "active"}
+        if identity() != pid:
+            raise FixedError(READINESS)
+    return {"pid": pid, "active": sorted(observed), "check": "verified"}
+
+
 def _wait_exact_child(child, timeout):
     deadline = time.monotonic() + timeout
     while True:
@@ -1797,6 +1941,8 @@ def main(argv):
             endpoint_request(settings["endpoint"]), settings["members"]
         )
         print(json.dumps(value), flush=True)
+    elif action == "interrupted-repair-probe":
+        print(json.dumps(interrupted_repair_probe(json.load(sys.stdin))), flush=True)
     elif action in ("lease", "named-lease", "guest-proof-lease"):
         descriptor = require_control_pipe()
         # Leave time for the owner-side control wait and service teardown.

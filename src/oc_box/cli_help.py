@@ -87,7 +87,7 @@ _OPTION_GROUPS = {
         ),
     ),
     "sync-resources": ("Container resource limits", _RESOURCE_KEYS),
-    "sync-mode": ("History source", ("persisted",)),
+    "sync-mode": ("History and guided repair", ("persisted", "repair_interrupted")),
     "native": (
         "Native terminal UI",
         (

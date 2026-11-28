@@ -2024,7 +2024,7 @@ class AttachedControl:
 
 
 @contextlib.contextmanager
-def _attach_control(box, path, data, *, named=None):
+def _attach_control(box, path, data, *, named=None, create_runtime=True):
     """Hold the original connected stream, never acquire a second lease.
 
     Borrowers must not close it, read additional replies, or treat a same-user
@@ -2045,7 +2045,11 @@ def _attach_control(box, path, data, *, named=None):
     try:
         stream.settimeout(5)
         stream.connect(
-            str(socket_path(box, data) if named is None else named.owner.address)
+            str(
+                socket_path(box, data, **({} if create_runtime else {"create": False}))
+                if named is None
+                else named.owner.address
+            )
         )
         peer_pid, uid, _ = struct.unpack(
             "3i", stream.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12)
@@ -2379,11 +2383,11 @@ class Gateway:
         safeguard = getattr(box, "runtime_safeguard", None)
         guarded = safeguard.current() if safeguard and container is not None else None
         environment = getattr(guarded, "engine_env", None)
+        if environment is None:
+            environment = _borrowed_device_engine(data, container)
         if container is not None and (
             environment is not None or (isinstance(data, dict) and data.get("devices"))
         ):
-            if environment is None:
-                environment = _borrowed_device_engine(data, container)
             if environment is None:
                 raise box.BoxError(
                     "Private workspace relay lost its local engine binding."
@@ -2591,7 +2595,8 @@ class Gateway:
                 child.wait(timeout=3)
 
 
-def web_session(box, data, connection, args):
+@contextlib.contextmanager
+def open_web_session(box, data, connection, args):
     live = live_connection()
     if connection.get("web_mode") == _NAMED_ONLY or (
         live is not None
@@ -2672,6 +2677,11 @@ def web_session(box, data, connection, args):
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
+        yield gateway
+
+
+def web_session(box, data, connection, args):
+    with open_web_session(box, data, connection, args) as gateway:
         try:
             opener = build_opener(ProxyHandler({}))
             authorization = (

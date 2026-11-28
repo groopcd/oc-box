@@ -47,6 +47,7 @@ oc-box - persistent rootless Podman environments for mainline OpenCode.
 oc-box [start] [--project PATH | --workspace ID] [START-OPTIONS] [LIFECYCLE-LOG-OPTIONS] [--capture-preparation]
 oc-box stop [--project PATH | --workspace ID] [LIFECYCLE-LOG-OPTIONS]
 oc-box sync [--project PATH | --workspace ID] [--persisted | [--cpus N] [--memory SIZE] [--pids-limit N]] [LIFECYCLE-LOG-OPTIONS] [--capture-preparation]
+oc-box sync --repair-interrupted [--project PATH | --workspace ID]
 oc-box reset [--project PATH | --workspace ID] [RESET-OPTIONS] [LIFECYCLE-LOG-OPTIONS] [--capture-preparation]
 oc-box repair [--project PATH | --workspace ID]
 oc-box repair --workspace ID --private-home
@@ -321,7 +322,7 @@ The foreground broker holds an explicit existing-workspace client lease. Ctrl-C,
 
 @section sync
 
-Refresh host conversation archives without opening the TUI. Requires an existing workspace and an intact project directory. It starts or recreates the container if needed, prepares its runtime/configuration, discovers saved sessions, exports them, and imports separate namespaced archive copies into the host database. It stops the container afterward, even if it had been running.
+Ordinary @code{sync} refreshes host conversation archives without opening the TUI. It requires an existing workspace and an intact project directory. It starts or recreates the container if needed, prepares its runtime/configuration, discovers saved sessions, exports them, and imports separate namespaced archive copies into the host database. It stops the container afterward, even if it had been running.
 
 When recreating a missing container for a registered workspace, @code{sync} can save and apply @code{--cpus}, @code{--memory}, and @code{--pids-limit} overrides. It refuses explicit limit changes if an owned container already exists, even when stopped; use @code{reset} for that case.
 
@@ -333,7 +334,7 @@ On V2, discovery reads every native API page at the workspace's internal project
 
 V2 archives remain independent top-level host conversations. Parent and fork provenance is retained in versioned @code{info.metadata["oc-box.archive"]} annotations, with workspace-namespaced session and fork-boundary message IDs. These annotations are informational, not authority to restore permissions, select projects, or delete conversations. Other metadata is preserved; an existing value at this reserved key is retained under the annotation's @code{sourceMetadata} field. Native parent links, fork state, permissions, and revert controls are not reactivated. Replacing an archive refuses observed native host child links, because native deletion would recursively remove those conversations. Successful V2 imports are re-exported to verify transcript and metadata before marking them synchronized. Treat generated host conversations as archive mirrors, not bidirectional working copies. Do not edit them or create native children while sync runs: the child preflight and replacement are not an atomic transaction with unrelated host clients.
 
-An active oc-box launcher holds a workspace lock, so exit it before syncing. Use this after an OpenCode crash, missed exit-time sync, or host restart. Sync failure preserves container data; retry after resolving the error. For a quiet native 2.3.0 source, manual sync can reuse one private, unregistered source runtime for the pass instead of starting one for every export. Read-only preflight excludes durable jobs of every status, schedules, queued input and execution claims; execution-denial configuration and fresh discovery roots prevent integrations from being used by this optimization. Known pre-start incompatibilities keep the existing slower per-session path. Unsafe stores, unexpected startup/activity or unverified cleanup remain failures, not permission to replay an uncertain pass. The optimized source has a ten-minute active-lease budget with separate bounded startup/cleanup; verified per-session progress is retained if a later operation fails.
+An active oc-box launcher holds a workspace lock, so exit it before ordinary @code{sync}. Use this after an OpenCode crash, missed exit-time sync, or host restart. Sync failure preserves container data; retry after resolving the error. For a quiet native 2.3.0 source, manual sync can reuse one private, unregistered source runtime for the pass instead of starting one for every export. Read-only preflight excludes durable jobs of every status, schedules, queued input and execution claims; execution-denial configuration and fresh discovery roots prevent integrations from being used by this optimization. Known pre-start incompatibilities keep the existing slower per-session path. Unsafe stores, unexpected startup/activity or unverified cleanup remain failures, not permission to replay an uncertain pass. The optimized source has a ten-minute active-lease budget with separate bounded startup/cleanup; verified per-session progress is retained if a later operation fails.
 
 On stock native 2.4.0 and 2.4.1, the reusable source requires a previously ready workspace whose original container was positively observed stopped before this invocation started it. The launcher binds the same immutable container ID and local engine before startup and keeps that binding through preparation, every source read and final stop verification. The lease checks the exact native process. Positively identified pre-start ineligibility can keep the previous ordinary path after clean helper exit; an unverified store, native startup or cleanup failure cannot. Runtime-guarded workspaces do not use this optimization. This does not bypass ordinary preparation for @code{sync} without @code{--persisted}.
 
@@ -341,13 +342,36 @@ This optimization does not apply to existing owners or post-stop recovery reader
 
 The [final history result](#lifecycle-output) distinguishes partial or unverified work from success. Detailed sync diagnostics use aggregate session, exported, unchanged, updated and pending counts, elapsed time, phase timings and a fixed source mode (@code{post-stop-reader}, @code{private-endpoint} or @code{standalone}), not session IDs, titles, commands/argv, environment values, native errors or model values. Repeated passes still check every source transcript. A matching checkpoint avoids destination work and does not rewrite a byte-identical verified private copy; a missing or corrupted private copy is repaired. A pending manual sync reports newly verified, already checkpointed and pending counts separately. To inspect previously recorded aggregate results without starting another pass, use @code{oc-box logs --project ~/devel/demo --level debug --limit 40}.
 
-V2 exports are checked against the paginated projected transcript. An unfinished tail assistant, running user shell/compaction, or changing transcript leaves that session pending, while other sessions can still synchronize. In an inactive session, an unfinished assistant followed by settled messages is superseded: sync mirrors native's export and annotates the omitted count. The exception is refused while that session is active. See the Sessions and recovery section. History archives are not full backups of pending input, execution state, or persistent shell terminals; use encrypted workspace backup for full private state.
+V2 exports are checked against the paginated projected transcript. An unfinished tail assistant, running user shell/compaction, or changing transcript leaves that session pending, while other sessions can still synchronize. On a supported ordinary pass, recognized unfinished-assistant-tail reasons can prompt a suggestion to review @code{oc-box sync --repair-interrupted} after cleanup is verified. The suggestion does not establish that the workspace or session qualifies for repair.
+
+In an inactive session, an unfinished assistant followed by settled messages is superseded: sync mirrors native's export and annotates the omitted count. The exception is refused while that session is active. See the Sessions and recovery section. History archives are not full backups of pending input, execution state, or persistent shell terminals; use encrypted workspace backup for full private state.
 
 @example
 oc-box sync --project ~/devel/demo
 oc-box sync --workspace WORKSPACE_ID
 oc-box sync --persisted --project ~/devel/demo
 @end example
+
+@section Guided repair of an interrupted subagent
+
+Run @code{oc-box sync --repair-interrupted} from an interactive host terminal while the selected workspace already has a verified ordinary private OpenCode **2.4.2** owner running. The guide accepts only the usual workspace selectors. It attaches to that owner without starting or preparing the workspace, refreshing configuration or credentials, or unlocking the vault. If ordinary @code{sync} has stopped the workspace, the guide cannot attach. The guide does not scan the full history or touch the archives.
+
+@example
+oc-box sync --repair-interrupted --project ~/devel/demo
+@end example
+
+@itemize @bullet
+@item
+The guide uses job and session metadata and a targeted checked export to verify exactly one saved subagent job still marked running. Its session must have an unfinished assistant tail and be a direct child of an editable root at the exact internal workspace directory. The guide refuses activity in the child or parent, queued input, further descendants, revert state, shell work or compaction.
+@item
+Confirm the exact target in the terminal. The guide then opens the existing parent conversation through the local native browser flow. In the parent, use the scoped native Full Code Mode interrupt shown by the guide, then use native @code{subagent} with the exact child session ID and agent shown, so the request goes to the same child. Review and submit these actions yourself. The guide does not change configuration, schedule actions, cancel native work or submit prompts.
+@item
+If Full Code Mode is unavailable, the guide gives separate instructions for enabling it for this workspace only with your explicit approval. Restore the previous setting afterward if you enable it. The guide never enables it for you.
+@item
+After your actions, the guide checks that the original assistant reply is still present and complete, that the child is idle with no remaining jobs, execution claims or inbox items, and that a fresh checked export succeeds. Changed or uncertain state leaves the repair pending; the guide never replays the actions automatically.
+@end itemize
+
+Wait for the guide to close its browser relay and release its client lease before using normal Quit in the owner. The normal owner exit handles archival. The guide shows a command for one ordinary @code{oc-box sync} if exit-time sync does not finish. Run it only after the owner has exited.
 
 @section web — browser interface
 
@@ -1408,6 +1432,10 @@ Restore/backup-info only, repeatable. Read a native age X25519 private identity 
 @section --persisted
 
 With @code{sync} only, attempt a guarded snapshot from an existing, verified stopped workspace. The Reader uses the original container and checks final stop; ordinary preparation, resource changes and native execution are not admitted. This option does not fall back to ordinary @code{sync} if the snapshot is refused. It cannot declare earlier unfinished work complete.
+
+@section --repair-interrupted
+
+With @code{sync} only, review one interrupted subagent through an already-running verified ordinary private OpenCode 2.4.2 owner. Requires an interactive host terminal. Only @code{--project PATH} or @code{--workspace ID} may accompany the option; it cannot be combined with @code{--persisted} or other sync options. See [Guided repair of an interrupted subagent](#guided-repair-of-an-interrupted-subagent).
 
 @section --cpus NUMBER
 

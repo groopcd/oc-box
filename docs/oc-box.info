@@ -52,6 +52,7 @@ File: oc-box.info,  Node: Synopsis,  Next: Description,  Prev: Name,  Up: Top
      oc-box [start] [--project PATH | --workspace ID] [START-OPTIONS] [LIFECYCLE-LOG-OPTIONS] [--capture-preparation]
      oc-box stop [--project PATH | --workspace ID] [LIFECYCLE-LOG-OPTIONS]
      oc-box sync [--project PATH | --workspace ID] [--persisted | [--cpus N] [--memory SIZE] [--pids-limit N]] [LIFECYCLE-LOG-OPTIONS] [--capture-preparation]
+     oc-box sync --repair-interrupted [--project PATH | --workspace ID]
      oc-box reset [--project PATH | --workspace ID] [RESET-OPTIONS] [LIFECYCLE-LOG-OPTIONS] [--capture-preparation]
      oc-box repair [--project PATH | --workspace ID]
      oc-box repair --workspace ID --private-home
@@ -860,12 +861,12 @@ attachment feature.
 4.10 sync
 =========
 
-Refresh host conversation archives without opening the TUI. Requires an
-existing workspace and an intact project directory.  It starts or
-recreates the container if needed, prepares its runtime/configuration,
-discovers saved sessions, exports them, and imports separate namespaced
-archive copies into the host database.  It stops the container
-afterward, even if it had been running.
+Ordinary ‘sync’ refreshes host conversation archives without opening the
+TUI. It requires an existing workspace and an intact project directory.
+It starts or recreates the container if needed, prepares its
+runtime/configuration, discovers saved sessions, exports them, and
+imports separate namespaced archive copies into the host database.  It
+stops the container afterward, even if it had been running.
 
 When recreating a missing container for a registered workspace, ‘sync’
 can save and apply ‘--cpus’, ‘--memory’, and ‘--pids-limit’ overrides.
@@ -922,11 +923,11 @@ runs: the child preflight and replacement are not an atomic transaction
 with unrelated host clients.
 
 An active oc-box launcher holds a workspace lock, so exit it before
-syncing.  Use this after an OpenCode crash, missed exit-time sync, or
-host restart.  Sync failure preserves container data; retry after
-resolving the error.  For a quiet native 2.3.0 source, manual sync can
-reuse one private, unregistered source runtime for the pass instead of
-starting one for every export.  Read-only preflight excludes durable
+ordinary ‘sync’.  Use this after an OpenCode crash, missed exit-time
+sync, or host restart.  Sync failure preserves container data; retry
+after resolving the error.  For a quiet native 2.3.0 source, manual sync
+can reuse one private, unregistered source runtime for the pass instead
+of starting one for every export.  Read-only preflight excludes durable
 jobs of every status, schedules, queued input and execution claims;
 execution-denial configuration and fresh discovery roots prevent
 integrations from being used by this optimization.  Known pre-start
@@ -973,19 +974,69 @@ results without starting another pass, use ‘oc-box logs --project
 V2 exports are checked against the paginated projected transcript.  An
 unfinished tail assistant, running user shell/compaction, or changing
 transcript leaves that session pending, while other sessions can still
-synchronize.  In an inactive session, an unfinished assistant followed
-by settled messages is superseded: sync mirrors native's export and
-annotates the omitted count.  The exception is refused while that
-session is active.  See the Sessions and recovery section.  History
-archives are not full backups of pending input, execution state, or
-persistent shell terminals; use encrypted workspace backup for full
-private state.
+synchronize.  On a supported ordinary pass, recognized
+unfinished-assistant-tail reasons can prompt a suggestion to review
+‘oc-box sync --repair-interrupted’ after cleanup is verified.  The
+suggestion does not establish that the workspace or session qualifies
+for repair.
+
+In an inactive session, an unfinished assistant followed by settled
+messages is superseded: sync mirrors native's export and annotates the
+omitted count.  The exception is refused while that session is active.
+See the Sessions and recovery section.  History archives are not full
+backups of pending input, execution state, or persistent shell
+terminals; use encrypted workspace backup for full private state.
 
      oc-box sync --project ~/devel/demo
      oc-box sync --workspace WORKSPACE_ID
      oc-box sync --persisted --project ~/devel/demo
 
-4.11 web — browser interface
+4.11 Guided repair of an interrupted subagent
+=============================================
+
+Run ‘oc-box sync --repair-interrupted’ from an interactive host terminal
+while the selected workspace already has a verified ordinary private
+OpenCode **2.4.2** owner running.  The guide accepts only the usual
+workspace selectors.  It attaches to that owner without starting or
+preparing the workspace, refreshing configuration or credentials, or
+unlocking the vault.  If ordinary ‘sync’ has stopped the workspace, the
+guide cannot attach.  The guide does not scan the full history or touch
+the archives.
+
+     oc-box sync --repair-interrupted --project ~/devel/demo
+
+   • The guide uses job and session metadata and a targeted checked
+     export to verify exactly one saved subagent job still marked
+     running.  Its session must have an unfinished assistant tail and be
+     a direct child of an editable root at the exact internal workspace
+     directory.  The guide refuses activity in the child or parent,
+     queued input, further descendants, revert state, shell work or
+     compaction.
+   • Confirm the exact target in the terminal.  The guide then opens the
+     existing parent conversation through the local native browser flow.
+     In the parent, use the scoped native Full Code Mode interrupt shown
+     by the guide, then use native ‘subagent’ with the exact child
+     session ID and agent shown, so the request goes to the same child.
+     Review and submit these actions yourself.  The guide does not
+     change configuration, schedule actions, cancel native work or
+     submit prompts.
+   • If Full Code Mode is unavailable, the guide gives separate
+     instructions for enabling it for this workspace only with your
+     explicit approval.  Restore the previous setting afterward if you
+     enable it.  The guide never enables it for you.
+   • After your actions, the guide checks that the original assistant
+     reply is still present and complete, that the child is idle with no
+     remaining jobs, execution claims or inbox items, and that a fresh
+     checked export succeeds.  Changed or uncertain state leaves the
+     repair pending; the guide never replays the actions automatically.
+
+Wait for the guide to close its browser relay and release its client
+lease before using normal Quit in the owner.  The normal owner exit
+handles archival.  The guide shows a command for one ordinary ‘oc-box
+sync’ if exit-time sync does not finish.  Run it only after the owner
+has exited.
+
+4.12 web — browser interface
 ============================
 
 Open Studio around the native OpenCode 2.x browser UI for a workspace.
@@ -1511,7 +1562,7 @@ strategy](testing.md#reviewed-focused-recovery-host-acceptance).
 attached web client rejects it and never changes the owner's credential
 snapshot.
 
-4.12 tui — experimental workspace manager
+4.13 tui — experimental workspace manager
 =========================================
 
 Open the optional Textual workspace dashboard, separate from the native
@@ -1888,7 +1939,7 @@ disable search.  See ‘docs/tui.md’ for design, installation and safety
 boundaries.  Demo/headless/native offline checks are not host
 acceptance.
 
-4.13 terminal
+4.14 terminal
 =============
 
 On V2, the default connects to the active session's native persistent
@@ -1973,7 +2024,7 @@ For example, after mapping an NPU in an earlier reset:
      xrt-smi examine
      exit
 
-4.14 reset
+4.15 reset
 ==========
 
 Recreate the environment's container OS, then launch OpenCode and resume
@@ -1999,7 +2050,7 @@ distributions, especially to/from Alpine.
      oc-box reset --project ~/devel/demo --distro ubuntu
      oc-box reset --project ~/devel/demo --device /dev/accel/accel0
 
-4.15 repair
+4.16 repair
 ===========
 
 Explicitly accept the current directory identity for an existing
@@ -2053,7 +2104,7 @@ identity or an unfinished transition cannot be repaired this way.  When
 already recorded, a matching persistent identity allows ordinary device
 renumbering without another repair.
 
-4.16 purge
+4.17 purge
 ==========
 
 Remove this workspace's labeled containers, owned volumes, owned
@@ -2173,7 +2224,7 @@ apply only to purge.
      oc-box purge --project ~/devel/disposable --all
      oc-box purge --workspace WORKSPACE_ID --all --yes
 
-4.17 list
+4.18 list
 =========
 
 List all registered workspaces with aligned headers: WORKSPACE ID,
@@ -2200,7 +2251,7 @@ machine-readable output.
 
      oc-box list
 
-4.18 distros
+4.19 distros
 ============
 
 List supported distro names, image references, and the detected host
@@ -2211,7 +2262,7 @@ workspace.
      oc-box distros
      oc-box --project ~/devel/demo --distro fedora
 
-4.19 status
+4.20 status
 ===========
 
 Alias of ‘--status’.  Report all registered environments unless
@@ -2230,7 +2281,7 @@ See Resource reports for metric interpretation.
      oc-box --status --json
      oc-box status --project ~/devel/demo --table
 
-4.20 logs
+4.21 logs
 =========
 
 Read the [oc-box activity
@@ -2320,7 +2371,7 @@ journal](#dashboard-state-and-activity-journal).
      oc-box logs --journald --level warn --follow --json
      oc-box logs --table --level warn --follow
 
-4.21 upgrade
+4.22 upgrade
 ============
 
 Update the installed launcher/modules and prebuilt manuals from a
@@ -2450,7 +2501,7 @@ for a reviewed alternate deployment.  Updates inside a container are
 refused because its private HOME is not the host installation.  Git is
 required for public updates; build tools are not.
 
-4.22 uninstall
+4.23 uninstall
 ==============
 
 Run ‘oc-box --uninstall’ as the regular host user from the verified
@@ -2493,7 +2544,7 @@ ownership checks and typed confirmation still apply.  For a
 Python-package installation, use the package manager that owns it
 instead.  Neither option completes Podman cleanup.
 
-4.23 secrets
+4.24 secrets
 ============
 
 Manage an optional encrypted credential vault on the host.  This command
@@ -2658,7 +2709,7 @@ This is not a general redaction filter for OpenCode, provider logs, tool
 output, or session archives: an agent can still print, save, or transmit
 a credential it has received.
 
-4.24 credentials
+4.25 credentials
 ================
 
 View or change **names-only** forwarding policy for an existing
@@ -2751,7 +2802,7 @@ container data.  Selection is reduced forwarding, not an isolation
 boundary from secrets already inside the container.  Delivered keys
 remain readable by the agent/tools with normal container permissions.
 
-4.25 backup
+4.26 backup
 ===========
 
 Create one encrypted ‘.ocbox’ file for an existing workspace (available
@@ -2831,7 +2882,7 @@ file may remain: inspect it with ‘backup-info’ before retrying.  The
 source remains stopped, not reset/deleted.  The temporary capture image
 is removed by its unique tag; shared base images remain.
 
-4.26 Include host settings for migration
+4.27 Include host settings for migration
 ========================================
 
 On supporting stable and development releases, ‘backup --host --output
@@ -2870,7 +2921,7 @@ Treat this archive and its age identity/passphrase as sensitive.  The
 vault remains separately encrypted with its original passphrase.  This
 is neither a whole-machine backup nor a credential revocation mechanism.
 
-4.27 backup-info
+4.28 backup-info
 ================
 
 Decrypt/verify a backup's manifest and ciphertext checksums without
@@ -2900,7 +2951,7 @@ authentication chunk.  Wrong keys, corruption, missing/extra components,
 unsupported versions, or unsafe outer envelope paths are rejected before
 restore activation.
 
-4.28 restore
+4.29 restore
 ============
 
 Streaming failures identify the producer/consumer exit code and a fixed
@@ -3001,7 +3052,7 @@ incomplete restores), and retry to a new destination.  Orphan staging
 directories may need manual host removal after inspection; the launcher
 never deletes a caller-supplied tree on marker alone.
 
-4.29 Restore host settings on a new machine
+4.30 Restore host settings on a new machine
 ===========================================
 
 Install oc-box, age and the required OpenCode version on the destination
@@ -4300,7 +4351,17 @@ are not admitted.  This option does not fall back to ordinary ‘sync’ if
 the snapshot is refused.  It cannot declare earlier unfinished work
 complete.
 
-5.76 -cpus NUMBER
+5.76 -repair-interrupted
+========================
+
+With ‘sync’ only, review one interrupted subagent through an
+already-running verified ordinary private OpenCode 2.4.2 owner.
+Requires an interactive host terminal.  Only ‘--project PATH’ or
+‘--workspace ID’ may accompany the option; it cannot be combined with
+‘--persisted’ or other sync options.  See [Guided repair of an
+interrupted subagent](#guided-repair-of-an-interrupted-subagent).
+
+5.77 -cpus NUMBER
 =================
 
 Set the CPU quota in core units; fractions such as ‘2.5’ are accepted by
@@ -4312,7 +4373,7 @@ missing container for a registered workspace.
 
      oc-box reset --project ~/devel/demo --cpus 8
 
-5.77 -memory SIZE
+5.78 -memory SIZE
 =================
 
 Set the memory limit using Podman size syntax, such as ‘512m’, ‘8g’, or
@@ -4325,7 +4386,7 @@ a missing container for a registered workspace.
 
      oc-box reset --project ~/devel/demo --memory 16g
 
-5.78 -pids-limit NUMBER
+5.79 -pids-limit NUMBER
 =======================
 
 Set the container's process limit; default ‘2048’.  oc-box requires at
@@ -4334,7 +4395,7 @@ requires reset.  ‘sync’ can save a new value when recreating a missing
 container for a registered workspace.  Example: ‘oc-box reset --project
 ~/devel/demo --pids-limit 4096’.
 
-5.79 -device MAPPING
+5.80 -device MAPPING
 ====================
 
 Add a persistent Podman mapping, repeatable.  Supports
@@ -4348,7 +4409,7 @@ install an NPU/GPU SDK.
      oc-box reset --project ~/devel/demo --device /dev/accel/accel0
      oc-box --project ~/devel/gpu --device /dev/dri/renderD128:rw
 
-5.80 -podman-arg=-OPTION[=VALUE]
+5.81 -podman-arg=-OPTION[=VALUE]
 ================================
 
 Append one literal long-option token to the Podman create command before
@@ -4375,7 +4436,7 @@ options extend the default boundary as requested by the host operator.
 Podman and the host's rootless permissions determine which settings are
 available.
 
-5.81 -clear-devices
+5.82 -clear-devices
 ===================
 
 Clear all saved ‘--device’ mappings before adding any new ones on this
@@ -4386,7 +4447,7 @@ for that list.
      oc-box reset --project ~/devel/demo --clear-devices
      oc-box reset --project ~/devel/demo --clear-devices --device /dev/accel/accel1
 
-5.82 -clear-podman-args
+5.83 -clear-podman-args
 =======================
 
 Clear saved additional Podman options before appending replacements.
@@ -4396,7 +4457,7 @@ device list unchanged.
      oc-box reset --project ~/devel/demo --clear-podman-args \
        --podman-arg=--shm-size=2g
 
-5.83 -delete-sessions
+5.84 -delete-sessions
 =====================
 
 Purge-only.  Delete recorded host archive session copies as well as
@@ -4405,7 +4466,7 @@ never deletes an original host source conversation merely because that
 conversation was imported into this workspace.  Example: ‘oc-box purge
 --workspace WORKSPACE_ID --delete-sessions’.
 
-5.84 -all
+5.85 -all
 =========
 
 Purge-only.  Remove environment resources, recorded host session
@@ -4413,14 +4474,14 @@ archives, metadata, and the entire original project directory, including
 untracked files.  The directory identity and marker must still match.
 Example: ‘oc-box purge --project ~/devel/disposable --all’.
 
-5.85 -y, -yes
+5.86 -y, -yes
 =============
 
 Skip purge's ID-prefix confirmation.  Purge-only; it does not answer
 OpenCode questions or bypass permissions on other commands.  Example:
 ‘oc-box purge --workspace WORKSPACE_ID --all --yes’.
 
-5.86 -discard-guarded
+5.87 -discard-guarded
 =====================
 
 Purge-only.  With ‘--workspace WORKSPACE_ID’ and no other options,
@@ -4431,7 +4492,7 @@ may contain unsynced conversations; the project, host archives,
 registration and original fence are preserved.  See [purge](#purge) for
 the supported host profile and refusal conditions.
 
-5.87 -cleanup
+5.88 -cleanup
 =============
 
 Purge-only.  Review all registered workspaces with missing project
@@ -5803,22 +5864,22 @@ Tag Table:
 Node: Top210
 Node: Name769
 Node: Synopsis930
-Node: Description5671
-Node: Commands11651
-Node: Options174015
-Node: Lifecycle and persistence242900
-Node: Distribution images245200
-Node: Sessions and recovery250277
-Node: Devices and host permissions256963
-Node: Resource reports259309
-Node: Configuration and environment261420
-Node: Files272801
-Node: Exit status283711
-Node: Examples285119
-Node: Troubleshooting287258
-Node: Installation and manuals299925
-Node: Authors and license310115
-Node: See also310722
+Node: Description5743
+Node: Commands11723
+Node: Options176917
+Node: Lifecycle and persistence246259
+Node: Distribution images248559
+Node: Sessions and recovery253636
+Node: Devices and host permissions260322
+Node: Resource reports262668
+Node: Configuration and environment264779
+Node: Files276160
+Node: Exit status287070
+Node: Examples288478
+Node: Troubleshooting290617
+Node: Installation and manuals303284
+Node: Authors and license313474
+Node: See also314081
 
 End Tag Table
 

@@ -10,6 +10,7 @@ oc-box - persistent rootless Podman environments for mainline OpenCode.
 oc-box [start] [--project PATH | --workspace ID] [START-OPTIONS] [LIFECYCLE-LOG-OPTIONS] [--capture-preparation]
 oc-box stop [--project PATH | --workspace ID] [LIFECYCLE-LOG-OPTIONS]
 oc-box sync [--project PATH | --workspace ID] [--persisted | [--cpus N] [--memory SIZE] [--pids-limit N]] [LIFECYCLE-LOG-OPTIONS] [--capture-preparation]
+oc-box sync --repair-interrupted [--project PATH | --workspace ID]
 oc-box reset [--project PATH | --workspace ID] [RESET-OPTIONS] [LIFECYCLE-LOG-OPTIONS] [--capture-preparation]
 oc-box repair [--project PATH | --workspace ID]
 oc-box repair --workspace ID --private-home
@@ -749,11 +750,12 @@ this attachment feature.
 
 ### sync
 
-Refresh host conversation archives without opening the TUI. Requires an
-existing workspace and an intact project directory. It starts or recreates the
-container if needed, prepares its runtime/configuration, discovers saved
-sessions, exports them, and imports separate namespaced archive copies into the
-host database. It stops the container afterward, even if it had been running.
+Ordinary `sync` refreshes host conversation archives without opening the TUI.
+It requires an existing workspace and an intact project directory. It starts or
+recreates the container if needed, prepares its runtime/configuration,
+discovers saved sessions, exports them, and imports separate namespaced
+archive copies into the host database. It stops the container afterward, even
+if it had been running.
 
 When recreating a missing container for a registered workspace, `sync` can save
 and apply `--cpus`, `--memory`, and `--pids-limit` overrides. It refuses explicit
@@ -801,7 +803,7 @@ Treat generated host conversations as archive mirrors, not bidirectional working
 copies. Do not edit them or create native children while sync runs: the child
 preflight and replacement are not an atomic transaction with unrelated host clients.
 
-An active oc-box launcher holds a workspace lock, so exit it before syncing.
+An active oc-box launcher holds a workspace lock, so exit it before ordinary `sync`.
 Use this after an OpenCode crash, missed exit-time sync, or host restart.
 Sync failure preserves container data; retry after resolving the error.
 For a quiet native 2.3.0 source, manual sync can reuse one private, unregistered
@@ -846,10 +848,15 @@ use `oc-box logs --project ~/devel/demo --level debug --limit 40`.
 
 V2 exports are checked against the paginated projected transcript. An unfinished
 tail assistant, running user shell/compaction, or changing transcript leaves that
-session pending, while other sessions can still synchronize. In an inactive
-session, an unfinished assistant followed by settled messages is superseded:
-sync mirrors native's export and annotates the omitted count. The exception is
-refused while that session is active. See the Sessions and recovery section.
+session pending, while other sessions can still synchronize. On a supported
+ordinary pass, recognized unfinished-assistant-tail reasons can prompt a
+suggestion to review `oc-box sync --repair-interrupted` after cleanup is
+verified. The suggestion does not establish that the workspace or session
+qualifies for repair.
+
+In an inactive session, an unfinished assistant followed by settled messages is
+superseded: sync mirrors native's export and annotates the omitted count. The
+exception is refused while that session is active. See the Sessions and recovery section.
 History archives are not full backups of pending input, execution state, or
 persistent shell terminals; use encrypted workspace backup for full private state.
 
@@ -858,6 +865,48 @@ oc-box sync --project ~/devel/demo
 oc-box sync --workspace WORKSPACE_ID
 oc-box sync --persisted --project ~/devel/demo
 ```
+
+### Guided repair of an interrupted subagent
+
+Run `oc-box sync --repair-interrupted` from an interactive host terminal while
+the selected workspace already has a verified ordinary private OpenCode
+**2.4.2** owner running. The guide accepts only the usual workspace selectors.
+It attaches to that owner without starting or preparing the workspace,
+refreshing configuration or credentials, or unlocking the vault. If ordinary
+`sync` has stopped the workspace, the guide cannot attach. The guide does not
+scan the full history or touch the archives.
+
+```sh
+oc-box sync --repair-interrupted --project ~/devel/demo
+```
+
+* The guide uses job and session metadata and a targeted checked export to
+  verify exactly one saved subagent job still marked running. Its session must
+  have an unfinished assistant tail and be a direct child of an editable root
+  at the exact internal workspace directory. The guide refuses activity in
+  the child or parent, queued input, further descendants, revert state, shell
+  work or compaction.
+* Confirm the exact target in the terminal. The guide then opens the existing
+  parent conversation through the local native browser flow. In the parent, use
+  the scoped native Full Code Mode interrupt shown by the guide, then use
+  native `subagent` with the exact child session ID and agent shown, so the
+  request goes to the same child. Review and submit these actions yourself.
+  The guide does not change configuration, schedule actions, cancel native
+  work or submit prompts.
+* If Full Code Mode is unavailable, the guide gives separate instructions for
+  enabling it for this workspace only with your explicit approval. Restore
+  the previous setting afterward if you enable it. The guide never enables
+  it for you.
+* After your actions, the guide checks that the original assistant reply is still
+  present and complete, that the child is idle with no remaining jobs,
+  execution claims or inbox items, and that a fresh checked export succeeds.
+  Changed or uncertain state leaves the repair pending; the guide never
+  replays the actions automatically.
+
+Wait for the guide to close its browser relay and release its client lease
+before using normal Quit in the owner. The normal owner exit handles archival.
+The guide shows a command for one ordinary `oc-box sync` if exit-time sync
+does not finish. Run it only after the owner has exited.
 
 ### web — browser interface
 
@@ -3862,6 +3911,14 @@ workspace. The Reader uses the original container and checks final stop;
 ordinary preparation, resource changes and native execution are not admitted.
 This option does not fall back to ordinary `sync` if the snapshot is refused.
 It cannot declare earlier unfinished work complete.
+
+### --repair-interrupted
+
+With `sync` only, review one interrupted subagent through an already-running
+verified ordinary private OpenCode 2.4.2 owner. Requires an interactive host
+terminal. Only `--project PATH` or `--workspace ID` may accompany the option;
+it cannot be combined with `--persisted` or other sync options. See
+[Guided repair of an interrupted subagent](#guided-repair-of-an-interrupted-subagent).
 
 ### --cpus NUMBER
 
