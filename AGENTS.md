@@ -11,6 +11,17 @@ small or tightly coupled tasks directly when delegation would add more overhead
 than value. Keep one primary agent responsible for scope, integration, reviewing
 subagent results, and final verification.
 
+For substantial work, split the job into numbered phases with a milestone,
+an owner, and completion criteria for each. Appoint one coordinating agent
+to track assignments and dependencies across phases. Use as many agents,
+parallel tasks, and authorized disposable VMs as the work requires. Assign
+newly unblocked independent tasks promptly so useful work continues while
+other tasks run. Avoid duplicate work and unnecessary guest runs.
+
+Report after each milestone: what was completed, how it was verified, and
+what comes next. If a milestone cannot be completed, report the concrete
+blocker rather than treating partial work as complete.
+
 Give each subagent a bounded objective, the necessary context, and explicit
 read-only or editing responsibilities. Avoid overlapping edits; use separate Git
 worktrees when parallel edits require isolation. Respect read-only and
