@@ -4434,7 +4434,14 @@ def _sync_sessions(path, data, started, source_mode, counts, first_overlap, stac
         ):
             raise history_overlap_order.OverlapRefusal("unverified-private-destination")
     pending = []
-    pending_reasons = {}
+    pending_reasons = (
+        {}
+        if detailed
+        and report is not None
+        and report.manual
+        and not report.recovery_attempted
+        else None
+    )
     for ident in state.get("sessions", []):
         if not valid_session_id(ident):
             raise BoxError("Invalid stored session ID")
@@ -4450,7 +4457,7 @@ def _sync_sessions(path, data, started, source_mode, counts, first_overlap, stac
         except HistoryPending as exc:
             # Keep this session's last good archives and continue with the rest.
             pending.append(str(exc))
-            if detailed:
+            if pending_reasons is not None:
                 reason = getattr(exc, "history_pending_reason", None)
                 if (
                     type(reason) is not str
@@ -4587,13 +4594,7 @@ def _sync_sessions(path, data, started, source_mode, counts, first_overlap, stac
         )
     if pending:
         if pending_reasons:
-            details = "; ".join(
-                f"{opencode_v2_io.PENDING_REASONS[reason]}: {count}"
-                for reason, count in sorted(pending_reasons.items())
-            )
-            startup_output.line(
-                f"oc-box: History pending reasons: {details}.", flush=True
-            )
+            report.pending_reasons = pending_reasons
         raise HistoryPending(
             f"{len(pending)} session(s) not settled yet: "
             + "; ".join(dict.fromkeys(pending))
@@ -4722,21 +4723,29 @@ def _report_history_result(report, *, recovered, error):
                 "For a compatible stopped workspace, use 'oc-box sync --persisted'."
             )
         elif reason == "pending" and report.manual:
-            diagnostics = (
-                "oc-box sync --persisted --lifecycle-diagnostics"
-                if report.recovery_attempted
-                else "oc-box sync --lifecycle-diagnostics"
-            )
+            if report.recovery_attempted:
+                pending_guidance = (
+                    "Repeating an unchanged sync cannot settle unfinished native history. "
+                    "Use 'oc-box sync --persisted --lifecycle-diagnostics' "
+                    "for the fixed source reason and timings."
+                )
+            else:
+                pending_guidance = "Sync does not settle unfinished work. Resolve it in OpenCode before syncing again."
+                if concise:
+                    pending_guidance += " Use 'oc-box sync --lifecycle-diagnostics' for pending reasons and timings."
+                elif report.pending_reasons:
+                    details = "; ".join(
+                        f"{opencode_v2_io.PENDING_REASONS[key]}: {count}"
+                        for key, count in sorted(report.pending_reasons.items())
+                    )
+                    pending_guidance = f"Pending reasons: {details}. {pending_guidance}"
             message = (
                 f"{status}: {detail}.{guidance} "
                 f"Newly verified: {report.updated_sessions}; "
                 f"already checkpointed: {report.unchanged_sessions}; "
                 f"pending: {report.pending_sessions}. "
-                "Container data and prior archives retained. Sync does not settle "
-                "unfinished work. Resolve it in OpenCode before syncing again."
+                f"Container data and prior archives retained. {pending_guidance}"
             )
-            if concise:
-                message += f" Use '{diagnostics}' for pending reasons and timings."
         elif report.manual and report.recovery_attempted:
             message = (
                 f"{status}: {detail}.{guidance} "
@@ -5528,7 +5537,7 @@ def launch_environment(
                         startup_output.line(
                             "oc-box: Shutdown could not be verified. "
                             "Inspect the workspace before any retry."
-                            if _first_history is not None
+                            if _first_history is not None or report.manual
                             else "oc-box: Container data retained. Retry with 'oc-box sync'.",
                             file=sys.stderr,
                         )

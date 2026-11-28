@@ -109,6 +109,7 @@ class Report:
     reason: str | None = None
     manual: bool = False
     pending_sessions: int = 0
+    pending_reasons: dict[str, int] | None = None
     updated_sessions: int = 0
     unchanged_sessions: int = 0
     phase: str | None = None

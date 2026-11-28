@@ -230,6 +230,11 @@ class SessionSyncTests(unittest.TestCase):
                 "History not synced: some sessions were still unsettled.",
                 box.HistoryPending,
             ),
+            "pending-stop": (
+                "sync",
+                "History sync cleanup could not be verified.",
+                box.BoxError,
+            ),
             "unverified": (
                 "sync",
                 "History not synced: verification did not finish.",
@@ -267,6 +272,7 @@ class SessionSyncTests(unittest.TestCase):
                 "live-omissions",
                 "partial",
                 "unsettled",
+                "pending-stop",
                 "owner-close",
                 "owner-exit",
                 "final-stop",
@@ -289,7 +295,7 @@ class SessionSyncTests(unittest.TestCase):
                 omitted = case.endswith("-omissions")
                 pending = self.session("ses_pending_private")
                 infos = [] if case == "empty" else [good]
-                if case == "partial":
+                if case in ("partial", "pending-stop"):
                     infos.insert(0, pending)
                 elif case == "unsettled":
                     infos = [pending]
@@ -345,9 +351,10 @@ class SessionSyncTests(unittest.TestCase):
                     self.assertIsNone(workspace_service.live_connection())
                     self.assertFalse(stdout.getvalue().startswith("History synced."))
                     self.assertNotIn(legacy_success, stdout.getvalue())
+                    self.assertNotIn("Pending reasons:", stderr.getvalue())
                     if not verbose:
                         self.assertEqual(stderr.getvalue(), "")
-                    if case == "final-stop":
+                    if case in ("final-stop", "pending-stop"):
                         raise box.BoxError("private-stop-error")
 
                 def record(event, **details):
@@ -400,6 +407,10 @@ class SessionSyncTests(unittest.TestCase):
                             ),
                             not verbose or case in ("partial", "unsettled"),
                         )
+                        if case == "pending-stop":
+                            self.assertEqual(
+                                str(raised.exception), "private-stop-error"
+                            )
                 if verbose:
                     self.assertIn("oc-box: History sync summary:", stdout.getvalue())
                     self.assertEqual(
@@ -410,11 +421,17 @@ class SessionSyncTests(unittest.TestCase):
                         self.assertIn("omits from its export", stdout.getvalue())
                     if case in ("partial", "unsettled"):
                         self.assertIn(
-                            "History pending reasons: unfinished assistant message "
+                            "Pending reasons: unfinished assistant message "
                             "at the end of the session: 1.",
-                            stdout.getvalue(),
+                            stderr.getvalue(),
                         )
-                        self.assertNotIn(pending["id"], stdout.getvalue())
+                        self.assertNotIn(pending["id"], stderr.getvalue())
+                    elif case == "pending-stop":
+                        self.assertIn(
+                            "Inspect the workspace before any retry.", stderr.getvalue()
+                        )
+                        self.assertNotIn("Retry with 'oc-box sync'", stderr.getvalue())
+                        self.assertNotIn("Pending reasons:", stderr.getvalue())
                 else:
                     lines = [
                         line
