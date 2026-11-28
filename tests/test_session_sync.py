@@ -263,7 +263,14 @@ class SessionSyncTests(unittest.TestCase):
         }
         matrix = [(case, False) for case in cases] + [
             (case, True)
-            for case in ("live-omissions", "owner-close", "owner-exit", "final-stop")
+            for case in (
+                "live-omissions",
+                "partial",
+                "unsettled",
+                "owner-close",
+                "owner-exit",
+                "final-stop",
+            )
         ]
         legacy_success = "Session history synced to your normal host OpenCode database."
         for case, verbose in matrix:
@@ -307,7 +314,9 @@ class SessionSyncTests(unittest.TestCase):
 
                 def export(_data, ident):
                     if ident == pending["id"]:
-                        raise box.HistoryPending("private-pending-error")
+                        error = box.HistoryPending("private-pending-error")
+                        error.history_pending_reason = "assistant-tail"
+                        raise error
                     result = {"info": copy.deepcopy(good), "messages": []}
                     if omitted:
                         result[v2.INTERRUPTED] = {"assistant": 2}
@@ -389,7 +398,7 @@ class SessionSyncTests(unittest.TestCase):
                             getattr(
                                 raised.exception, "history_outcome_reported", False
                             ),
-                            not verbose,
+                            not verbose or case in ("partial", "unsettled"),
                         )
                 if verbose:
                     self.assertIn("oc-box: History sync summary:", stdout.getvalue())
@@ -399,6 +408,13 @@ class SessionSyncTests(unittest.TestCase):
                     )
                     if omitted:
                         self.assertIn("omits from its export", stdout.getvalue())
+                    if case in ("partial", "unsettled"):
+                        self.assertIn(
+                            "History pending reasons: unfinished assistant message "
+                            "at the end of the session: 1.",
+                            stdout.getvalue(),
+                        )
+                        self.assertNotIn(pending["id"], stdout.getvalue())
                 else:
                     lines = [
                         line
@@ -409,6 +425,17 @@ class SessionSyncTests(unittest.TestCase):
                     self.assertTrue(lines[0].startswith(message), lines)
                     self.assertNotIn("private-", lines[0])
                     self.assertNotIn("Interrupted work may be incomplete", lines[0])
+                if case in ("partial", "unsettled"):
+                    self.assertEqual(stderr.getvalue().count(message), 1)
+                    self.assertIn("pending: 1.", stderr.getvalue())
+                    self.assertIn(
+                        "Sync does not settle unfinished work.", stderr.getvalue()
+                    )
+                    self.assertNotIn("Retry with 'oc-box sync'", stderr.getvalue())
+                    self.assertNotIn("private-pending-error", stderr.getvalue())
+                    self.assertEqual(
+                        "--lifecycle-diagnostics" in stderr.getvalue(), not verbose
+                    )
                 self.assertEqual(
                     events[-3:], ["lease closed", "final stop", "history.result"]
                 )
@@ -1251,6 +1278,22 @@ class SessionSyncTests(unittest.TestCase):
             self.assertEqual(result.returncode, code)
             self.assertEqual(v2.fixed_message(result.stderr), marker)
             self.assertNotIn("Traceback", result.stderr)
+
+    def test_pending_reason_is_closed_and_paired_with_the_latest_fixed_error(self):
+        fixed = v2.MARKER + v2.UNSETTLED + "\n"
+        detail = v2.PENDING_REASON_MARKER + "assistant-tail\n"
+        changed = v2.MARKER + v2.CHANGED + "\n"
+        self.assertEqual(v2.pending_reason(fixed + detail), "assistant-tail")
+        self.assertEqual(v2.pending_reason(fixed + detail + changed), "source-changed")
+        for stderr in (
+            fixed,
+            detail,
+            fixed + v2.PENDING_REASON_MARKER + "private-native-text",
+            fixed + "other diagnostic\n" + detail,
+            detail + fixed,
+        ):
+            with self.subTest(stderr=stderr):
+                self.assertEqual(v2.pending_reason(stderr), "unavailable")
 
     def test_history_failures_show_fixed_reasons_never_private_output(self):
         def failed(stderr, code=1):

@@ -3400,7 +3400,9 @@ def run_v2_history(data, action, **settings):
     def failed(result, fallback):
         message = opencode_v2_io.fixed_message(result.stderr)
         if message in opencode_v2_io.PENDING_MESSAGES:
-            raise HistoryPending(message)
+            error = HistoryPending(message)
+            error.history_pending_reason = opencode_v2_io.pending_reason(result.stderr)
+            raise error
         error = BoxError(message or fallback)
         if message is not None and message != opencode_v2_io.NOT_READY:
             error.history_contract_refusal = True
@@ -4432,6 +4434,7 @@ def _sync_sessions(path, data, started, source_mode, counts, first_overlap, stac
         ):
             raise history_overlap_order.OverlapRefusal("unverified-private-destination")
     pending = []
+    pending_reasons = {}
     for ident in state.get("sessions", []):
         if not valid_session_id(ident):
             raise BoxError("Invalid stored session ID")
@@ -4447,6 +4450,14 @@ def _sync_sessions(path, data, started, source_mode, counts, first_overlap, stac
         except HistoryPending as exc:
             # Keep this session's last good archives and continue with the rest.
             pending.append(str(exc))
+            if detailed:
+                reason = getattr(exc, "history_pending_reason", None)
+                if (
+                    type(reason) is not str
+                    or reason not in opencode_v2_io.PENDING_REASONS
+                ):
+                    reason = "unavailable"
+                pending_reasons[reason] = pending_reasons.get(reason, 0) + 1
             counts["pending"] += 1
             continue
         finally:
@@ -4575,6 +4586,14 @@ def _sync_sessions(path, data, started, source_mode, counts, first_overlap, stac
             flush=True,
         )
     if pending:
+        if pending_reasons:
+            details = "; ".join(
+                f"{opencode_v2_io.PENDING_REASONS[reason]}: {count}"
+                for reason, count in sorted(pending_reasons.items())
+            )
+            startup_output.line(
+                f"oc-box: History pending reasons: {details}.", flush=True
+            )
         raise HistoryPending(
             f"{len(pending)} session(s) not settled yet: "
             + "; ".join(dict.fromkeys(pending))
@@ -4643,7 +4662,8 @@ _HISTORY_PHASES = frozenset(
 
 
 def _report_history_result(report, *, recovered, error):
-    """Emit the only concise archive outcome, after required cleanup."""
+    """Emit the final archive outcome after required cleanup."""
+    concise = lifecycle_output.concise()
     reason = report.reason
     interruption = " Interrupted work may be incomplete." if report.interrupted else ""
     if reason == "cleanup-unverified":
@@ -4712,10 +4732,11 @@ def _report_history_result(report, *, recovered, error):
                 f"Newly verified: {report.updated_sessions}; "
                 f"already checkpointed: {report.unchanged_sessions}; "
                 f"pending: {report.pending_sessions}. "
-                "Container data and prior archives retained. Repeating an unchanged "
-                "sync cannot settle unfinished native history. Use "
-                f"'{diagnostics}' for the fixed source reason and timings."
+                "Container data and prior archives retained. Sync does not settle "
+                "unfinished work. Resolve it in OpenCode before syncing again."
             )
+            if concise:
+                message += f" Use '{diagnostics}' for pending reasons and timings."
         elif report.manual and report.recovery_attempted:
             message = (
                 f"{status}: {detail}.{guidance} "
@@ -4741,7 +4762,9 @@ def _report_history_result(report, *, recovered, error):
         reason=reason,
         outcome=outcome,
     )
-    if lifecycle_output.concise():
+    if concise or (
+        report.manual and not report.recovery_attempted and reason == "pending"
+    ):
         if error is not None:
             error.history_outcome_reported = True
         try:
@@ -5436,7 +5459,12 @@ def launch_environment(
                 report.reason = "cleanup-unverified"
             elif report.reason != "cleanup-unverified":
                 report.reason = _history_failure_reason(exc)
-        if history_started and not concise and _first_history is None:
+        if (
+            history_started
+            and not concise
+            and _first_history is None
+            and not (report.manual and report.reason == "pending")
+        ):
             startup_output.line(
                 "oc-box: Container data retained. Retry with 'oc-box sync'.",
                 file=sys.stderr,

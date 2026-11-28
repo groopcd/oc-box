@@ -191,6 +191,30 @@ class HistoryExportsTests(unittest.TestCase):
             timeout=10,
         )
 
+    def test_bridge_emits_only_fixed_pending_reason_for_unfinished_tail(self):
+        ident = "ses_quiet"
+        self.server.sessions[ident] = self.export(ident)
+        self.server.sessions[ident]["messages"].append(
+            {
+                "id": "msg_synthetic_unfinished",
+                "type": "assistant",
+                "time": {"created": 1},
+                "text": "synthetic-message-must-not-be-exposed",
+            }
+        )
+        source = (box.PACKAGE / "opencode_v2_io.py").read_text()
+        endpoint = {key: self.connection[key] for key in ("url", "password")}
+        result = self.quiet_client(source, endpoint, "export", ident)
+        self.assertEqual(result.returncode, 2)
+        self.assertFalse(result.stdout)
+        self.assertEqual(
+            opencode_v2_io.fixed_message(result.stderr), opencode_v2_io.UNSETTLED
+        )
+        self.assertEqual(opencode_v2_io.pending_reason(result.stderr), "assistant-tail")
+        self.assertNotIn(ident, result.stderr)
+        self.assertNotIn("synthetic-message-must-not-be-exposed", result.stderr)
+        self.assertFalse(any("/export" in call for call in self.server.calls))
+
     def test_quiet_redirect_retains_verified_checkpoint_without_replaying(self):
         sessions = {
             ident: self.export(ident)

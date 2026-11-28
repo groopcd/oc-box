@@ -4119,11 +4119,12 @@ can still be lost. Retry missed archival with `oc-box sync`.
 
 OpenCode 2.x history exports are checked for unsettled messages. A running direct
 shell or compaction and an unfinished assistant message at the end of a session
-are refused with a fixed reason
-(`OpenCode 2.x history is unsettled; retry sync after completion.`); that session
-keeps its last good archives, every other session is still synchronized, and
-`sync` returns nonzero with the number of pending sessions. Retry after the work
-finishes. An unfinished assistant message that the session has already moved past
+are refused; that session keeps its last good archives, every other session is
+still synchronized, and `sync` returns nonzero with the number of pending
+sessions. `sync --lifecycle-diagnostics` reports counts by fixed pending reason
+when the bridge can provide one, with no titles, IDs, or content. Sync does not
+settle unfinished work. Resolve it in OpenCode before syncing again. An
+unfinished assistant message that the session has already moved past
 (settled messages follow it in an idle session) never settles on its own, and
 native OpenCode omits it from its export. This is typical of history migrated
 from OpenCode 1.x after an interrupted or killed turn; 2.x itself settles an

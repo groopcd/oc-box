@@ -125,6 +125,18 @@ FIXED_MESSAGES = frozenset(
 PENDING_MESSAGES = frozenset((UNSETTLED, CHANGED))
 INTERRUPTED = "ocBoxInterrupted"
 MARKER = "oc-box-fixed: "
+PENDING_REASON_MARKER = "oc-box-history-pending: "
+UNSETTLED_REASONS = {
+    "assistant-tail": "unfinished assistant message at the end of the session",
+    "running-shell": "direct shell still marked running",
+    "running-compaction": "compaction still marked running",
+    "active-session": "session still active with unfinished assistant history",
+}
+PENDING_REASONS = {
+    **UNSETTLED_REASONS,
+    "source-changed": "source changed during export",
+    "unavailable": "reason unavailable",
+}
 
 
 class FixedError(ValueError):
@@ -135,12 +147,40 @@ class FixedError(ValueError):
         super().__init__(message)
 
 
+class UnsettledExport(FixedError):
+    """Keep the original fixed refusal and an allowlisted diagnostic reason."""
+
+    def __init__(self, reason):
+        assert reason in UNSETTLED_REASONS
+        super().__init__(UNSETTLED)
+        self.reason = reason
+
+
 def fixed_message(stderr):
     """Return the whitelisted explanation from a failed bridge, else None."""
     for line in reversed((stderr or "").splitlines()):
         if line.startswith(MARKER) and line[len(MARKER) :] in FIXED_MESSAGES:
             return line[len(MARKER) :]
     return None
+
+
+def pending_reason(stderr):
+    """Read an allowlisted detail paired with the latest fixed refusal."""
+    lines = (stderr or "").splitlines()
+    for index in range(len(lines) - 1, -1, -1):
+        line = lines[index]
+        if not line.startswith(MARKER) or line[len(MARKER) :] not in FIXED_MESSAGES:
+            continue
+        if line == MARKER + CHANGED:
+            return "source-changed"
+        if line == MARKER + UNSETTLED and index + 1 < len(lines):
+            detail = lines[index + 1]
+            if detail.startswith(PENDING_REASON_MARKER):
+                reason = detail[len(PENDING_REASON_MARKER) :]
+                if reason in UNSETTLED_REASONS:
+                    return reason
+        break
+    return "unavailable"
 
 
 def _deadline_timeout(deadline, maximum=60):
@@ -471,13 +511,13 @@ def checked_export(request, ident, *, export_request=None):
                 raise FixedError(HISTORY_MESSAGE)
             if message["id"] in identities:
                 raise FixedError(HISTORY_INCONSISTENT)
-            if message.get("type") in ("shell", "compaction") and (
-                message.get("status") == "running"
-            ):
-                raise FixedError(UNSETTLED)
+            kind = message.get("type")
+            if kind in ("shell", "compaction") and message.get("status") == "running":
+                raise UnsettledExport(
+                    "running-shell" if kind == "shell" else "running-compaction"
+                )
             trailing_unfinished = (
-                message.get("type") == "assistant"
-                and message.get("time", {}).get("completed") is None
+                kind == "assistant" and message.get("time", {}).get("completed") is None
             )
             identities.add(message["id"])
             if trailing_unfinished:
@@ -493,7 +533,7 @@ def checked_export(request, ident, *, export_request=None):
             raise FixedError(HISTORY_CURSOR)
         cursors.add(cursor)
     if trailing_unfinished:
-        raise FixedError(UNSETTLED)
+        raise UnsettledExport("assistant-tail")
     response = (request if export_request is None else export_request)(
         "GET", "/api/experimental/session/" + quote(ident, safe="") + "/export"
     )
@@ -508,7 +548,7 @@ def checked_export(request, ident, *, export_request=None):
         if not isinstance(activity, dict) or not isinstance(activity.get("data"), dict):
             raise FixedError(ACTIVITY)
         if ident in activity["data"]:
-            raise FixedError(UNSETTLED)
+            raise UnsettledExport("active-session")
         exported = {**exported, INTERRUPTED: {"assistant": omitted}}
     return exported
 
@@ -1847,6 +1887,8 @@ if __name__ == "__main__":
     except FixedError as error:
         # One of FIXED_MESSAGES only; the host re-checks it against the whitelist.
         print(MARKER + str(error), file=sys.stderr)
+        if isinstance(error, UnsettledExport):
+            print(PENDING_REASON_MARKER + error.reason, file=sys.stderr)
         sys.exit(2)
     except Exception:
         # Native errors can contain credential-bearing request/response data.

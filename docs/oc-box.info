@@ -4594,19 +4594,21 @@ Retry missed archival with ‘oc-box sync’.
 
 OpenCode 2.x history exports are checked for unsettled messages.  A
 running direct shell or compaction and an unfinished assistant message
-at the end of a session are refused with a fixed reason (‘OpenCode 2.x
-history is unsettled; retry sync after completion.’); that session keeps
-its last good archives, every other session is still synchronized, and
-‘sync’ returns nonzero with the number of pending sessions.  Retry after
-the work finishes.  An unfinished assistant message that the session has
-already moved past (settled messages follow it in an idle session) never
-settles on its own, and native OpenCode omits it from its export.  This
-is typical of history migrated from OpenCode 1.x after an interrupted or
-killed turn; 2.x itself settles an older unfinished assistant when the
-next turn starts.  The superseded-assistant exception also refuses a
-session that is currently active.  An inactive session is archived as
-that native export; the archive annotation records the omitted count and
-‘sync’ prints a notice with the number of affected sessions, never their
+at the end of a session are refused; that session keeps its last good
+archives, every other session is still synchronized, and ‘sync’ returns
+nonzero with the number of pending sessions.  ‘sync
+--lifecycle-diagnostics’ reports counts by fixed pending reason when the
+bridge can provide one, with no titles, IDs, or content.  Sync does not
+settle unfinished work.  Resolve it in OpenCode before syncing again.
+An unfinished assistant message that the session has already moved past
+(settled messages follow it in an idle session) never settles on its
+own, and native OpenCode omits it from its export.  This is typical of
+history migrated from OpenCode 1.x after an interrupted or killed turn;
+2.x itself settles an older unfinished assistant when the next turn
+starts.  The superseded-assistant exception also refuses a session that
+is currently active.  An inactive session is archived as that native
+export; the archive annotation records the omitted count and ‘sync’
+prints a notice with the number of affected sessions, never their
 titles, IDs or content.  Other failures show a fixed explanation when
 the private history bridge can name one, otherwise only ‘podman failed
 (exit N)’; native error text and private data are never printed.
@@ -5807,16 +5809,16 @@ Node: Options174015
 Node: Lifecycle and persistence242900
 Node: Distribution images245200
 Node: Sessions and recovery250277
-Node: Devices and host permissions256862
-Node: Resource reports259208
-Node: Configuration and environment261319
-Node: Files272700
-Node: Exit status283610
-Node: Examples285018
-Node: Troubleshooting287157
-Node: Installation and manuals299824
-Node: Authors and license310014
-Node: See also310621
+Node: Devices and host permissions256963
+Node: Resource reports259309
+Node: Configuration and environment261420
+Node: Files272801
+Node: Exit status283711
+Node: Examples285119
+Node: Troubleshooting287258
+Node: Installation and manuals299925
+Node: Authors and license310115
+Node: See also310722
 
 End Tag Table
 
