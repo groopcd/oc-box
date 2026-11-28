@@ -81,7 +81,7 @@ class GuidedRepairTest(unittest.TestCase):
                             "kind": "subagent",
                             "parentSessionID": parent,
                             "childSessionID": child,
-                            "agent": "general",
+                            "agent": "General",
                         }
                     ),
                 ),
@@ -95,6 +95,14 @@ class GuidedRepairTest(unittest.TestCase):
                 finally:
                     db.set_authorizer(None)
 
+            self.assertTrue(repair._candidate(rows(None)[0]))
+            db.execute(
+                "UPDATE job SET recovery = json_set(recovery, '$.agent', 'Explore')"
+            )
+            self.assertFalse(rows(None))
+            self.assertEqual(rows(selection)[0]["job_count"], 1)
+            self.assertIsNone(rows(selection)[0]["job"])
+            db.execute("UPDATE session_v2 SET agent = 'explore' WHERE id = ?", (child,))
             self.assertTrue(repair._candidate(rows(None)[0]))
             db.execute("DELETE FROM job")
             self.assertFalse(rows(None))

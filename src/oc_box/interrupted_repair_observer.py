@@ -42,7 +42,9 @@ _DB = "oc-box-v2.db"
 _FILES = (_DB, _DB + "-wal", _DB + "-shm")
 _SESSION_ID = re.compile(r"ses_[0-9a-f]{12}[0-9A-Za-z]{14}")
 _MESSAGE_ID = re.compile(r"msg_[0-9a-f]{12}[0-9A-Za-z]{14}")
-_AGENTS = ("general", "explore")
+# Native stores the agent ID on the session, but the display name on jobs
+# made by the subagent tool. Accept only the known built-in pairs.
+_AGENT_LABELS = {"general": "General", "explore": "Explore"}
 _JOB_STATUSES = ("running", "completed", "error", "cancelled")
 _KINDS = (
     "assistant",
@@ -653,7 +655,7 @@ SELECT CASE WHEN j.kind = 'subagent' AND j.session_id = :parent
         AND json_extract(j.recovery, '$.kind') = 'subagent'
         AND json_extract(j.recovery, '$.childSessionID') = j.child_session_id
         AND json_extract(j.recovery, '$.parentSessionID') = j.session_id
-        AND json_extract(j.recovery, '$.agent') = :agent
+        AND json_extract(j.recovery, '$.agent') IN (:agent, :agent_label)
         AND (
           json_type(j.recovery, '$.outstanding') IS NULL
           OR (json_type(j.recovery, '$.outstanding') = 'array'
@@ -690,7 +692,7 @@ def _row(connection, directory, session, original):
     sequence, last_id, last_kind, last_completed = tail[0]
     _require(
         _id(_SESSION_ID, parent)
-        and agent in _AGENTS
+        and agent in _AGENT_LABELS
         and _id(_MESSAGE_ID, last_id)
         and last_kind in _KINDS
         and type(sequence) is int
@@ -716,7 +718,13 @@ def _row(connection, directory, session, original):
     _count(work_count)
     running_work = _boolean(work) if work_count else False
     jobs = connection.execute(
-        _JOBS_SQL, {"parent": parent, "child": session, "agent": agent}
+        _JOBS_SQL,
+        {
+            "parent": parent,
+            "child": session,
+            "agent": agent,
+            "agent_label": _AGENT_LABELS[agent],
+        },
     ).fetchall()
     job_count = _count(len(jobs))
     job = job_status = job_kind = None
