@@ -5534,13 +5534,19 @@ def launch_environment(
                                 file=sys.stderr,
                             )
                     elif not concise:
-                        startup_output.line(
-                            "oc-box: Shutdown could not be verified. "
-                            "Inspect the workspace before any retry."
-                            if _first_history is not None or report.manual
-                            else "oc-box: Container data retained. Retry with 'oc-box sync'.",
-                            file=sys.stderr,
-                        )
+                        if _first_history is not None or report.manual:
+                            retry = (
+                                "before any retry."
+                                if _first_history is not None
+                                else "before retrying with 'oc-box sync'."
+                            )
+                            message = (
+                                "oc-box: Shutdown could not be verified. "
+                                f"Inspect the workspace {retry}"
+                            )
+                        else:
+                            message = "oc-box: Container data retained. Retry with 'oc-box sync'."
+                        startup_output.line(message, file=sys.stderr)
                     if not preserve:
                         raise
             elif cleanup_data is not data:

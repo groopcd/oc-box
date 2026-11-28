@@ -428,7 +428,8 @@ class SessionSyncTests(unittest.TestCase):
                         self.assertNotIn(pending["id"], stderr.getvalue())
                     elif case == "pending-stop":
                         self.assertIn(
-                            "Inspect the workspace before any retry.", stderr.getvalue()
+                            "Inspect the workspace before retrying with 'oc-box sync'.",
+                            stderr.getvalue(),
                         )
                         self.assertNotIn("Retry with 'oc-box sync'", stderr.getvalue())
                         self.assertNotIn("Pending reasons:", stderr.getvalue())
